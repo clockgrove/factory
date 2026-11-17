@@ -1,9 +1,9 @@
-// An Objective's harness and models (#224). The workflow's FACTORY_HARNESS, FACTORY_MODEL, FACTORY_SUBAGENT_MODEL and
-// FACTORY_REVIEWER_MODEL are the repository's defaults; a label on the issue overrides the matching one for that
+// An Objective's harness and models (#224). The workflow's PENDULUM_HARNESS, PENDULUM_MODEL, PENDULUM_SUBAGENT_MODEL and
+// PENDULUM_REVIEWER_MODEL are the repository's defaults; a label on the issue overrides the matching one for that
 // Objective only, and an issue with none runs on the defaults. Labels, not the body: who applied each one is on the
 // issue's timeline (objective-trust.mjs choiceTrusted), and the plan's record covers them (objective-trust.mjs
 // objectiveSha), so one added, removed or changed after the plan stops the Objective like an edit.
-// A `factory:host:<host>` label (#278) opens one more network host to that Objective's sandboxes alone, under the same
+// A `pendulum:host:<host>` label (#278) opens one more network host to that Objective's sandboxes alone, under the same
 // rule: it counts once a person who can push applied it, and the plan's record covers it.
 import { DEFAULTS, resolveInputs } from "./inputs.mjs";
 import { CODEX_PRICES, bareModel, codexRate } from "./usage.mjs";
@@ -11,7 +11,7 @@ import { isSandboxHost, wildcardRefusal } from "./local.mjs";
 
 export const HARNESSES = ["claude", "codex", "copilot"];
 /** Each choice's label prefix, keyed by the input it overrides; the rest of the name is the harness or the model id. */
-export const CHOICE_PREFIXES = Object.freeze({ harness: "factory:harness:", model: "factory:model:", subagent_model: "factory:subagent-model:", reviewer_model: "factory:reviewer-model:" });
+export const CHOICE_PREFIXES = Object.freeze({ harness: "pendulum:harness:", model: "pendulum:model:", subagent_model: "pendulum:subagent-model:", reviewer_model: "pendulum:reviewer-model:" });
 /**
  * GitHub's limit on a label name's length, which it enforces itself when the label is made: an id fits in 50 less its
  * prefix (34 for a harness, 36 for a worker model, 27 for a sub-agent or reviewer model). USAGE.md says so.
@@ -23,7 +23,7 @@ export const LABEL_MAX = 50;
  * Trusted as the choice labels are (objective-trust.mjs choiceTrusted); not in the plan's record, since it changes only
  * the review, which reads it when it starts.
  */
-export const FOUNDATION_LABEL = "factory:foundation";
+export const FOUNDATION_LABEL = "pendulum:foundation";
 /** The foundation label's own name among `names` (names, or GitHub's label objects), or null. */
 export const foundationLabel = (names = []) => (names || []).map((n) => (typeof n === "string" ? n : n?.name)).find((n) => typeof n === "string" && n.trim().toLowerCase() === FOUNDATION_LABEL) ?? null;
 
@@ -32,10 +32,10 @@ const WHAT = { harness: "harness", model: "worker model", subagent_model: "sub-a
 const tick = (s) => `\`${s}\``;
 
 /**
- * The prefix of a host label: `factory:host:huggingface.co` lets this Objective's sandboxes reach huggingface.co, and
- * `factory:host:*.hf.co` its subdomains. A host fits in LABEL_MAX less the prefix (37 characters).
+ * The prefix of a host label: `pendulum:host:huggingface.co` lets this Objective's sandboxes reach huggingface.co, and
+ * `pendulum:host:*.hf.co` its subdomains. A host fits in LABEL_MAX less the prefix (37 characters).
  */
-export const HOST_PREFIX = "factory:host:";
+export const HOST_PREFIX = "pendulum:host:";
 const kindOf = (name) => Object.entries(CHOICE_PREFIXES).find(([, p]) => String(name ?? "").toLowerCase().startsWith(p))?.[0] ?? null;
 const isHostLabel = (name) => String(name ?? "").toLowerCase().startsWith(HOST_PREFIX);
 /** Whether a label name is one of the four choice labels or a host label: what the plan's record and the trust check cover. */
@@ -46,7 +46,7 @@ export const choiceLabels = (names = []) => [...new Set((names || []).map((n) =>
 /**
  * The choice the issue's labels make: {ok: true, choice, labels}, `choice` holding `harness`, `model`, `subagent_model` and
  * `reviewer_model` as the labels set them (an input name each, as a flag sets it), or {ok: false, labels, reason, fix} for
- * two labels of one kind, a harness Factory does not run, or a label naming nothing. Decided on the names alone.
+ * two labels of one kind, a harness Pendulum does not run, or a label naming nothing. Decided on the names alone.
  */
 export function choiceOf(names = []) {
   const labels = choiceLabels(names);
@@ -56,12 +56,12 @@ export function choiceOf(names = []) {
   for (const kind of Object.keys(CHOICE_PREFIXES)) {
     const list = by[kind];
     if (!list) continue;
-    if (list.length > 1) return { ok: false, labels, reason: `the issue has ${list.length} ${WHAT[kind]} labels (${list.map(tick).join(", ")}), so Factory cannot tell which one this Objective runs on`, fix: "Keep one of them, then re-apply `factory:objective`." };
+    if (list.length > 1) return { ok: false, labels, reason: `the issue has ${list.length} ${WHAT[kind]} labels (${list.map(tick).join(", ")}), so Pendulum cannot tell which one this Objective runs on`, fix: "Keep one of them, then re-apply `pendulum:objective`." };
     const value = list[0].slice(CHOICE_PREFIXES[kind].length).trim();
-    if (!value) return { ok: false, labels, reason: `${tick(list[0])} names no ${WHAT[kind]}`, fix: `Name one after the prefix (${tick(`${CHOICE_PREFIXES[kind]}<${kind === "harness" ? "name" : "id"}>`)}) or remove the label, then re-apply \`factory:objective\`.` };
+    if (!value) return { ok: false, labels, reason: `${tick(list[0])} names no ${WHAT[kind]}`, fix: `Name one after the prefix (${tick(`${CHOICE_PREFIXES[kind]}<${kind === "harness" ? "name" : "id"}>`)}) or remove the label, then re-apply \`pendulum:objective\`.` };
     if (kind === "harness") {
       const h = value.toLowerCase();
-      if (!HARNESSES.includes(h)) return { ok: false, labels, reason: `${tick(list[0])} names no harness Factory runs (${HARNESSES.join(", ")})`, fix: `Use \`factory:harness:claude\`, \`factory:harness:codex\` or \`factory:harness:copilot\`, then re-apply \`factory:objective\`.` };
+      if (!HARNESSES.includes(h)) return { ok: false, labels, reason: `${tick(list[0])} names no harness Pendulum runs (${HARNESSES.join(", ")})`, fix: `Use \`pendulum:harness:claude\`, \`pendulum:harness:codex\` or \`pendulum:harness:copilot\`, then re-apply \`pendulum:objective\`.` };
       choice.harness = h;
     } else choice[kind] = value;
   }
@@ -80,32 +80,32 @@ export function hostsOf(names = []) {
   for (const l of labels) {
     const host = l.slice(HOST_PREFIX.length).trim().toLowerCase();
     const refusal = host.startsWith("*.") && isSandboxHost(host.slice(2)) ? wildcardRefusal(host.slice(2)) : null;
-    if (refusal) return { ok: false, labels, reason: `${tick(l)} opens every site under \`${host.slice(2)}\`, and the Public Suffix List names \`${refusal.rule}\` there a public suffix anyone can register a name under`, fix: `Name each host it needs, as \`factory:host:app.${host.slice(2)}\`, or remove the label, then re-apply \`factory:objective\`.` };
-    if (!isSandboxHost(host)) return { ok: false, labels, reason: `${tick(l)} names no host Factory's sandboxes can allow`, fix: `Name one host after the prefix, as \`factory:host:example.com\` or \`factory:host:*.example.com\` (no scheme, port, path, IP address or localhost), or remove the label, then re-apply \`factory:objective\`.` };
+    if (refusal) return { ok: false, labels, reason: `${tick(l)} opens every site under \`${host.slice(2)}\`, and the Public Suffix List names \`${refusal.rule}\` there a public suffix anyone can register a name under`, fix: `Name each host it needs, as \`pendulum:host:app.${host.slice(2)}\`, or remove the label, then re-apply \`pendulum:objective\`.` };
+    if (!isSandboxHost(host)) return { ok: false, labels, reason: `${tick(l)} names no host Pendulum's sandboxes can allow`, fix: `Name one host after the prefix, as \`pendulum:host:example.com\` or \`pendulum:host:*.example.com\` (no scheme, port, path, IP address or localhost), or remove the label, then re-apply \`pendulum:objective\`.` };
     hosts.add(host);
   }
   return { ok: true, hosts: [...hosts].sort(), labels };
 }
 
 /**
- * Why `harness` cannot run `model` within Factory's caps, {reason, fix}, or null when it can: decided before any spend.
+ * Why `harness` cannot run `model` within Pendulum's caps, {reason, fix}, or null when it can: decided before any spend.
  * Claude Code takes any id and reports its dollars itself: whether its login serves the model is the API's answer. For the
  * worker and reviewer model that is a refusal before any token is billed, which the stage Blocks on (usage.mjs
  * providerRefusal); for a sub-agent's, the sub-agent's refusal, at which the stage stops the run and Blocks naming the
- * label (usage.mjs subAgentRefusal). Codex runs a model Factory
+ * label (usage.mjs subAgentRefusal). Codex runs a model Pendulum
  * prices (codex-prices.json): with no price row max_usd could not stop its runs; a provider prefix (`openai/`) is the
  * AI Gateway's form only. Copilot takes its own catalog's names,
- * which vary by account and which Factory cannot read before a run: only the form is checked here (no provider prefix or spaces).
+ * which vary by account and which Pendulum cannot read before a run: only the form is checked here (no provider prefix or spaces).
  */
 export function modelProblem(harness, model, { gateway = false } = {}) {
   const m = String(model ?? "").trim();
-  const other = (h) => HARNESSES.filter((x) => x !== h).map((x) => tick(`factory:harness:${x}`)).join(" or ");
+  const other = (h) => HARNESSES.filter((x) => x !== h).map((x) => tick(`pendulum:harness:${x}`)).join(" or ");
   if (harness === "claude") return null;
   if (harness === "codex") {
     if (m.includes("/") && !gateway) return { reason: `${tick(m)} has a provider prefix, which only the AI Gateway takes, and this repository runs Codex on CODEX_API_KEY`, fix: `Name the model without its prefix (${tick(bareModel(m))}).` };
     if (codexRate(CODEX_PRICES, m)) return null;
     const some = Object.keys(CODEX_PRICES.perMillion).slice(0, 3).map(tick).join(", ");
-    return { reason: `${tick(bareModel(m))} has no row in Factory's Codex price table, so max_usd could not stop its runs`, fix: `Name a model the table prices (${some}, …: plugin/scripts/lib/codex-prices.json), or choose the harness that runs ${tick(m)} with ${other("codex")}.` };
+    return { reason: `${tick(bareModel(m))} has no row in Pendulum's Codex price table, so max_usd could not stop its runs`, fix: `Name a model the table prices (${some}, …: plugin/scripts/lib/codex-prices.json), or choose the harness that runs ${tick(m)} with ${other("codex")}.` };
   }
   if (harness === "copilot") {
     if (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(m)) return null;
@@ -125,7 +125,7 @@ const FIELD = { model: "model", subagent_model: "subagentModel", reviewer_model:
  * The harness and models this Objective runs on: the repository's defaults (`env`, the workflow's env block; `args`, a
  * stage's flags) with the labels' `choice` as the strongest input. A harness label naming another harness than the run's
  * takes that harness's own defaults for the models and efforts no label names, whatever a flag, `with:` or the env block
- * set for the run's; one naming the workflow's own harness (FACTORY_HARNESS) keeps the env block's. Returns {ok, inputs} (the CHOSEN_FIELDS only), or {ok: false, reason, fix} naming the label,
+ * set for the run's; one naming the workflow's own harness (PENDULUM_HARNESS) keeps the env block's. Returns {ok, inputs} (the CHOSEN_FIELDS only), or {ok: false, reason, fix} naming the label,
  * or the harness label whose defaults these are, when the harness cannot run a model (modelProblem). `gateway`: whether
  * Codex has the AI Gateway key, when `env` no longer holds it (the launcher).
  */
@@ -134,9 +134,9 @@ export function chosenInputs({ args = {}, env = process.env, choice = {}, gatewa
   const switched = !!choice.harness && choice.harness !== base.harness;
   // The run's harness's models and efforts are not the chosen harness's: a run's own (a flag, `with:`) always go; the
   // workflow's env block's go unless the label names the workflow's own harness (a manual run that overrode it).
-  const workflowHarness = String(env.FACTORY_HARNESS || DEFAULTS.harness).trim().toLowerCase();
+  const workflowHarness = String(env.PENDULUM_HARNESS || DEFAULTS.harness).trim().toLowerCase();
   const keepWorkflow = choice.harness === workflowHarness;
-  const bound = (name) => switched && HARNESS_BOUND.some((n) => name === n || name === `FACTORY_INPUT_${n.toUpperCase()}` || (!keepWorkflow && name === `FACTORY_${n.toUpperCase()}`));
+  const bound = (name) => switched && HARNESS_BOUND.some((n) => name === n || name === `PENDULUM_INPUT_${n.toUpperCase()}` || (!keepWorkflow && name === `PENDULUM_${n.toUpperCase()}`));
   const keep = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => !bound(k)));
   const r = resolveInputs({ args: { ...keep(args), ...choice }, env: keep(env) });
   const viaGateway = gateway ?? !!r.codexGatewayKey;
@@ -145,7 +145,7 @@ export function chosenInputs({ args = {}, env = process.env, choice = {}, gatewa
     if (!m) continue;
     const p = modelProblem(r.harness, m, { gateway: viaGateway });
     const label = choice[kind] ? `${CHOICE_PREFIXES[kind]}${m}` : `${CHOICE_PREFIXES.harness}${choice.harness}`;
-    if (p) return { ok: false, reason: `${tick(label)} asks ${r.harness} for a model it cannot run here${choice[kind] ? "" : ` (its ${WHAT[kind]}, ${tick(m)})`}: ${p.reason}`, fix: `${p.fix} Then re-apply \`factory:objective\`.` };
+    if (p) return { ok: false, reason: `${tick(label)} asks ${r.harness} for a model it cannot run here${choice[kind] ? "" : ` (its ${WHAT[kind]}, ${tick(m)})`}: ${p.reason}`, fix: `${p.fix} Then re-apply \`pendulum:objective\`.` };
   }
   return { ok: true, inputs: Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, r[k]])) };
 }
@@ -158,18 +158,18 @@ export function chosenInputs({ args = {}, env = process.env, choice = {}, gatewa
 export const harnessVersionFor = (harness, defaultHarness, version) => (harness === defaultHarness && version ? version : "latest");
 
 /**
- * Why a stage cannot run on `harness` where its route prepared another (`prepared`: FACTORY_STAGE_HARNESS, the harness the
+ * Why a stage cannot run on `harness` where its route prepared another (`prepared`: PENDULUM_STAGE_HARNESS, the harness the
  * Action installed, the launcher gave the sandbox the credential of, or the local loop set the sandbox up for), or null.
  */
 export function routeProblem(prepared, harness) {
   const p = String(prepared ?? "").trim().toLowerCase();
   if (!p || p === harness) return null;
-  return { reason: `this stage was prepared for ${p} (its CLI, credential and sandbox) but the Objective now runs on ${harness}: its harness label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage is prepared for the harness the labels name." };
+  return { reason: `this stage was prepared for ${p} (its CLI, credential and sandbox) but the Objective now runs on ${harness}: its harness label changed while the stage started`, fix: "Re-apply `pendulum:objective`: the next stage is prepared for the harness the labels name." };
 }
 
 /**
  * What a stage records of the harness and models it ran and the hosts its labels opened (the usage record's `ran`, the
- * progress comment's harness line), and in local mode the account it ran on (`account`: FACTORY_STAGE_ACCOUNT,
+ * progress comment's harness line), and in local mode the account it ran on (`account`: PENDULUM_STAGE_ACCOUNT,
  * accounts.mjs), by name only.
  */
 export const ranWith = (inputs, labels = [], account = null) => {
@@ -177,16 +177,16 @@ export const ranWith = (inputs, labels = [], account = null) => {
   return { harness: inputs.harness, worker: inputs.model || null, subagent: inputs.subagentModel || null, reviewer: inputs.reviewerModel || null, labels: choiceLabels(labels), hosts: h.ok ? h.hosts : [], ...(stageAccountName(account) ? { account } : {}) };
 };
 /** An account name as accounts.mjs allows one (a harness's own name included), else null: nothing else is recorded. */
-export const stageAccountName = (name) => (typeof name === "string" && name.length <= LABEL_MAX - "factory:account:".length && /^[a-z0-9][a-z0-9-]*$/.test(name) ? name : null);
+export const stageAccountName = (name) => (typeof name === "string" && name.length <= LABEL_MAX - "pendulum:account:".length && /^[a-z0-9][a-z0-9-]*$/.test(name) ? name : null);
 
 /**
  * Why a stage cannot run with the hosts its labels now open where its route prepared its sandboxes for others
- * (`prepared`: FACTORY_STAGE_HOSTS, the hosts local mode's loop opened for this stage, comma separated; undefined on a
+ * (`prepared`: PENDULUM_STAGE_HOSTS, the hosts local mode's loop opened for this stage, comma separated; undefined on a
  * route whose stage opens its own), or null. A host label added or removed while the stage started.
  */
 export function hostsProblem(prepared, hosts = []) {
   if (prepared === undefined || prepared === null) return null;
   const was = [...new Set(String(prepared).split(",").map((h) => h.trim()).filter(Boolean))].sort();
   if (was.join(",") === [...hosts].sort().join(",")) return null;
-  return { reason: `this stage's sandboxes were set up for the hosts ${was.length ? was.map(tick).join(", ") : "of no host label"} but the Objective's host labels now name ${hosts.length ? hosts.map(tick).join(", ") : "none"}: a \`factory:host:\` label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage's sandboxes are set up for the hosts the labels name." };
+  return { reason: `this stage's sandboxes were set up for the hosts ${was.length ? was.map(tick).join(", ") : "of no host label"} but the Objective's host labels now name ${hosts.length ? hosts.map(tick).join(", ") : "none"}: a \`pendulum:host:\` label changed while the stage started`, fix: "Re-apply `pendulum:objective`: the next stage's sandboxes are set up for the hosts the labels name." };
 }

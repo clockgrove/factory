@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Factory dispatcher: the one piece of scheduling logic.
+// Pendulum dispatcher: the one piece of scheduling logic.
 //   node scripts/dispatch.mjs --repo OWNER/NAME [--issue N] [--json] [--dry-run]
-// With the App token (FACTORY_APP_TOKEN, or app_id + app_private_key to mint one):
-// list open issues labelled factory:objective; drop those blocked by an open issue
+// With the App token (PENDULUM_APP_TOKEN, or app_id + app_private_key to mint one):
+// list open issues labelled pendulum:objective; drop those blocked by an open issue
 // (GitHub's blocked-by relations via REST when the endpoint answers, else
 // "Blocked by #N" lines in the body); drop Running, Blocked, Question and In review
-// (Project card Status, falling back to the factory:* labels the worker also sets);
+// (Project card Status, falling back to the pendulum:* labels the worker also sets);
 // order P0, P1, P2, then number; cap at max_concurrent minus running; start
 // nothing when today's spend (usage artifacts uploaded today) has reached
 // daily_usd. A PR whose hand-off to review waits for a sibling it conflicts with
@@ -15,7 +15,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activePendulumJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
@@ -46,7 +46,7 @@ export async function appToken(inputs) {
   const repo = repoOf(inputs.repo);
   const minted = await mintInstallationToken({ appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name });
   mask(minted.token);
-  // Factory's own login is the App's bot, from the App's own record (logic.mjs isSelf).
+  // Pendulum's own login is the App's bot, from the App's own record (logic.mjs isSelf).
   if (minted.appSlug) setSelf(`${minted.appSlug}[bot]`);
   return minted.token;
 }
@@ -55,22 +55,22 @@ export async function appToken(inputs) {
 const RELATION_READS = 6;
 
 /**
- * How long a factory:local Objective may stay Running with no claim comment at all before a local loop puts it back to
+ * How long a pendulum:local Objective may stay Running with no claim comment at all before a local loop puts it back to
  * Queued: a start writes its claim within seconds of the Running label, and a live stage keeps it (HEARTBEAT_MS).
  */
 const UNCLAIMED_MS = 5 * 60_000;
 /** A long-lived loop's memory of what its sweep last said of an issue it left alone (said once while it stays so). */
 const UNCLAIMED_SAID = new Map();
 
-/** What a person does about a factory:local Objective no loop came back to for the claim pause (claim_pause_hours). */
-const SERVE_FIX = "start `factory serve` on the machine that runs it, then re-apply the label";
+/** What a person does about a pendulum:local Objective no loop came back to for the claim pause (claim_pause_hours). */
+const SERVE_FIX = "start `pendulum serve` on the machine that runs it, then re-apply the label";
 
 /**
  * Today's spend (UTC day) against daily_usd: the usage artifacts of Actions runs plus the spend lines local runs and
  * cloud sandbox stages write in their progress comments. Reading artifacts needs `actions: read`, which the job token
  * has (workflow-template.yml) and the App does not; the App stays at its four permissions. A failed read counts as the
- * cap reached (Infinity), so nothing starts on a sum Factory could not make.
- * With a cloud sandbox (FACTORY_SANDBOX) no artifact is downloaded: every stage's artifact is marked `spendInProgress`
+ * cap reached (Infinity), so nothing starts on a sum Pendulum could not make.
+ * With a cloud sandbox (PENDULUM_SANDBOX) no artifact is downloaded: every stage's artifact is marked `spendInProgress`
  * and its dollars are its spend line, so the sum is one paged comment read whatever the day's artifact count. Runner
  * jobs' artifacts from earlier on the day a repository switched to the sandbox are not counted.
  */
@@ -103,12 +103,12 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 /** Whether an Objective carries two account labels on GitHub Actions or the cloud sandbox with accounts declared (#267). */
-const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.FACTORY_ACCOUNTS).declared && !!accountPin(issue.labels).two;
+const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.PENDULUM_ACCOUNTS).declared && !!accountPin(issue.labels).two;
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
 
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
-  // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
+  // Whether this dispatcher is the sandbox route's: a cloud sandbox set (PENDULUM_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
   // entry or lock, and a lost launch never counts against one of them (#235). It reads a record only to see a live lease
   // (stageHolds), so it neither restarts nor Blocks a stage the sandbox still runs. The repository's spend is read as
@@ -158,7 +158,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
    * backstop). Any other read that fails says nothing of the launch: in flight, read again on a retry, up to the
    * unread-claim bound (claim_pause_hours from the marker, claimPause). Past it, a
    * read that still fails (not rate limited) returns `unread` too, `{run, read, code}`, the read named: the caller Blocks
-   * the Objective with cause `factory`, its notice naming that read.
+   * the Objective with cause `pendulum`, its notice naming that read.
    */
   const settleMarkers = async (n, record, since) => {
     let rec = record;
@@ -217,16 +217,16 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
     return { record: rec, flight, unread };
   };
-  // The Block for a launch whose dispatcher run stayed unreadable past the bound (settleMarkers `unread`): Factory
+  // The Block for a launch whose dispatcher run stayed unreadable past the bound (settleMarkers `unread`): Pendulum
   // cannot tell whether it started, so the Objective stops with one notice naming the read, never a silent wait.
   const blockUnreadLaunch = async (issue, { run, read, code }, stage) => {
     const n = issue.number;
     vanished.push(n);
     statuses[n] = "Blocked";
-    const from = stage === "review" ? "factory:in-review" : "factory:running";
-    issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== from), { name: "factory:blocked" }];
+    const from = stage === "review" ? "pendulum:in-review" : "pendulum:running";
+    issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== from), { name: "pendulum:blocked" }];
     log(`  #${n}: its ${stage} launch (dispatcher run ${run}) unread for over a day (${read}: ${code}); Blocked`);
-    if (!dryRun) await blockLocalWait(n, null, `its ${stage} launch, named by dispatcher run ${run}, has been unknown for over a day: ${read} could not be read (${code}), so Factory cannot tell whether it started; re-apply the label once GitHub answers that read`, "factory");
+    if (!dryRun) await blockLocalWait(n, null, `its ${stage} launch, named by dispatcher run ${run}, has been unknown for over a day: ${read} could not be read (${code}), so Pendulum cannot tell whether it started; re-apply the label once GitHub answers that read`, "pendulum");
   };
   // A launch grace for the Objective whose launch job just failed (its tick names it): the grace's end is a wake of
   // its own, not a wait for the cron, since that launch will not come.
@@ -248,23 +248,23 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // Whose label counts as a person's go (stop.mjs labelTrust): a restart's, and the Objective label re-applied. One check
   // per tick, so each login's permission is read at most once.
   const mayGo = labelTrust(repo, opts);
-  // Factory's note that a go was not taken (stop.mjs refusedMarker), once per go: one already on the timeline read here
+  // Pendulum's note that a go was not taken (stop.mjs refusedMarker), once per go: one already on the timeline read here
   // costs no call. `stays`: the state the Objective keeps.
   const refuseGo = async (n, events, r, stays) => {
     if (dryRun || goNoted(events, n, r.at)) return;
     const who = r.actor?.login || "someone";
     const what = r.draft ? `\`${DRAFT_LABEL}\` taken off` : `\`${inputs.objectiveLabel}\` ${stays === "Queued" ? "applied" : "re-applied"}`;
     log(`  #${n}: ${what} by ${who}, who cannot push and is no maintainer the workflow names: not taken`);
-    await upsertComment(repo, n, refusedMarker(n, r.at), `Factory: ${what} by ${who} was not taken, so the Objective stays ${stays}${stays === "Queued" ? " and does not run" : ""}: only someone who can push to this repository, or a maintainer the workflow names, can run it by applying \`${inputs.objectiveLabel}\`.`, opts).catch((e) => log(`  #${n}: refusal note: ${String(e?.message || e).slice(0, 120)}`));
+    await upsertComment(repo, n, refusedMarker(n, r.at), `Pendulum: ${what} by ${who} was not taken, so the Objective stays ${stays}${stays === "Queued" ? " and does not run" : ""}: only someone who can push to this repository, or a maintainer the workflow names, can run it by applying \`${inputs.objectiveLabel}\`.`, opts).catch((e) => log(`  #${n}: refusal note: ${String(e?.message || e).slice(0, 120)}`));
   };
   // The Action's live jobs (work and review, by Objective), read at most once a tick for the restart and recovery passes;
   // a read that fails is `{failed}`.
   let liveJobsRead = null;
-  const liveJobs = () => (liveJobsRead ??= activeFactoryJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true })));
+  const liveJobs = () => (liveJobsRead ??= activePendulumJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true })));
   const listed = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
   // An open Objective blocks the ones that name it, a draft among them: it is not done.
   const openNumbers = new Set(listed.map((i) => i.number));
-  // A draft (factory:draft, lib/stop.mjs) is never run, its Objective label on or not: no pass below sees it. A Running
+  // A draft (pendulum:draft, lib/stop.mjs) is never run, its Objective label on or not: no pass below sees it. A Running
   // or In-review one (a person made a running Objective a draft) is stopped: the stopped pass tidies it.
   const drafts = listed.filter((i) => stopCause(i, inputs.objectiveLabel) === "draft").map((i) => i.number);
   const issues = listed.filter((i) => !drafts.includes(i.number));
@@ -273,9 +273,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   watch.mark("issues");
 
   // One explicit issue (workflow_dispatch) still obeys the state and blocking rules, not the caps.
-  // Routing first: factory:local Objectives are a local loop's, the rest the Action's (lib/local.mjs). `adopt`: a local
-  // loop where no Action runs (local.mjs actionState) also takes the Queued ones without factory:local, each labelled
-  // factory:local just before it is marked Running, so every later pass routes it by its label (#455).
+  // Routing first: pendulum:local Objectives are a local loop's, the rest the Action's (lib/local.mjs). `adopt`: a local
+  // loop where no Action runs (local.mjs actionState) also takes the Queued ones without pendulum:local, each labelled
+  // pendulum:local just before it is marked Running, so every later pass routes it by its label (#455).
   const adoptable = (i) => adopt && !inputs.issue && !hasLocalLabel(i) && stateOf(i, null) === "Queued";
   const wanted = (inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues).filter((i) => backend().trigger.routes(i) || adoptable(i));
   if (inputs.issue && drafts.includes(inputs.issue)) {
@@ -318,14 +318,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   if (project) statuses = await projectStatuses(project, repo, issues.map((i) => i.number), opts);
   watch.mark("board");
 
-  // Restart (`factory:restart`, lib/stop.mjs): an Objective a person asked to restart from its issue's current text, in
+  // Restart (`pendulum:restart`, lib/stop.mjs): an Objective a person asked to restart from its issue's current text, in
   // any state. Only someone who can push (or a maintainer the workflow names) restarts one: anyone else's label comes off
   // with a comment. A stage of it that may still run (an Actions job, a sandbox lease, a local loop's live claim, in any
   // state: a review's answer pass runs on a Question too) stops itself first (its watch on the issue sees the label);
   // until then the Objective is held, never picked, and no merge or send-back touches it. A stage that has not stopped
   // STOP_GRACE_MS after the label is taken for gone. Then the earlier run's PR is closed, its branch deleted and its plan
   // retired, and it is Queued again, picked like any other below. A branch GitHub keeps (a ruleset) Blocks it with the
-  // fix. One on a stopped Objective (no factory:objective) waits for the label.
+  // fix. One on a stopped Objective (no pendulum:objective) waits for the label.
   const restarted = [];
   const restarting = {};
   const restarts = wanted.filter((i) => stopCause(i, inputs.objectiveLabel) === "restart");
@@ -338,7 +338,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (jobs.failed || jobs.work.has(n) || jobs.review.has(n)) return true;
       }
       // A sandbox lease (any route's, when the repository has a sandbox): a local loop sees one left from before the
-      // Objective was relabelled factory:local, and waits for it like a job.
+      // Objective was relabelled pendulum:local, and waits for it like a job.
       if (inputs.sandbox) {
         const comments = await listComments(repo, n, opts).catch(() => null);
         if (!comments || stageHolds(sandboxRecord(comments, n), Date.now(), inputs.timeoutMinutes * 60_000)) return true;
@@ -366,7 +366,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (!allowed) {
         const who = ev?.actor?.login || "someone";
         log(`  #${n}: ${RESTART_LABEL} by ${who}, who cannot push and is no maintainer the workflow names: ignored, the label taken off`);
-        await upsertComment(repo, n, marker(n, "restart-refused", String(ev?.at || "").replace(/[^0-9TZ]/g, "")), `Factory: \`${RESTART_LABEL}\` applied by ${who} was ignored: only someone who can push to this repository, or a maintainer the workflow names, can restart an Objective.`, opts).catch((e) => log(`  #${n}: restart refusal note: ${String(e?.message || e).slice(0, 120)}`));
+        await upsertComment(repo, n, marker(n, "restart-refused", String(ev?.at || "").replace(/[^0-9TZ]/g, "")), `Pendulum: \`${RESTART_LABEL}\` applied by ${who} was ignored: only someone who can push to this repository, or a maintainer the workflow names, can restart an Objective.`, opts).catch((e) => log(`  #${n}: restart refusal note: ${String(e?.message || e).slice(0, 120)}`));
         await removeLabel(repo, n, RESTART_LABEL, opts).catch((e) => log(`  #${n}: ${RESTART_LABEL}: ${String(e?.message || e).slice(0, 120)}`));
         issue.labels = (issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== RESTART_LABEL);
         continue;
@@ -386,15 +386,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         restarted.push(n);
         statuses[n] = "Queued";
-        issue.labels = (issue.labels || []).filter((l) => !/^factory:(running|blocked|question|in-review|restart)$/.test(typeof l === "string" ? l : l.name));
-        log(`  #${n}: restarted from its current text${r.pr ? `; PR #${r.pr} closed` : ""}${r.head ? `; factory/${n} deleted at ${r.head.slice(0, 7)}` : ""}`);
+        issue.labels = (issue.labels || []).filter((l) => !/^pendulum:(running|blocked|question|in-review|restart)$/.test(typeof l === "string" ? l : l.name));
+        log(`  #${n}: restarted from its current text${r.pr ? `; PR #${r.pr} closed` : ""}${r.head ? `; pendulum/${n} deleted at ${r.head.slice(0, 7)}` : ""}`);
       } catch (e) {
         if (e?.code === "restart-refused") {
           // The branch stays: a Block with the fix, and the label off, so the person re-applies it once fixed.
           restarting[n] = "Blocked: its restart could not delete its branch";
           statuses[n] = "Blocked";
           log(`  #${n}: ${e.message}`);
-          const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
+          const pr = await findPr(repo, `pendulum/${n}`, opts).catch(() => null);
           await applyExit(repo, { issue: n, pr, exit: "blocked", reason: e.message, fix: e.fix, cause: "setup", next: "restart", notify: inputs.notify, stage: "restart" }, opts).catch((x) => log(`  #${n}: the Block could not be written (${String(x?.message || x).slice(0, 120)})`));
           await removeLabel(repo, n, RESTART_LABEL, opts).catch(() => {});
           continue;
@@ -408,7 +408,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   watch.mark("restart");
 
   // Recovery: a Blocked, Question or In-review issue (a PR closed unmerged by a human)
-  // whose factory:objective label was re-applied after it stopped is Queued again (the
+  // whose pendulum:objective label was re-applied after it stopped is Queued again (the
   // plan's "re-apply the label"). An explicit --issue from workflow_dispatch is the same
   // human intent. Only a person who can push, or a pinned maintainer, gives that go (requeuedIn, mayGo): anyone else's
   // re-apply changes nothing, and one comment on the issue says so. On the Action's route a Question's review job still
@@ -460,7 +460,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
     }
     reset.push(issue.number);
-    issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
+    issue.labels = (issue.labels || []).filter((l) => !/^pendulum:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
     statuses[issue.number] = "Queued";
     if (!dryRun) {
       await setStateLabel(repo, issue.number, null, opts);
@@ -469,11 +469,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
 
   // A maintainer's answer to a Question (missedAnswer: a person with write access, after the Question was asked;
-  // Factory's own marked comments are none, so a local loop's, posted as the person's login, never answer) requeues it.
+  // Pendulum's own marked comments are none, so a local loop's, posted as the person's login, never answer) requeues it.
   // With a cloud sandbox the launcher does that on the comment's event (launch.mjs): this pass takes an answer whose
   // launch was lost (an event GitHub dropped, a pending launcher a newer one replaced), past a grace for that launch.
   // On every other route (Actions without a sandbox, a local loop) nothing launches on a comment: this pass is the
-  // answer's cue, at the next tick, for a Question asked on the issue: no open PR, or Factory's notice since the
+  // answer's cue, at the next tick, for a Question asked on the issue: no open PR, or Pendulum's notice since the
   // Question names it asked on the issue (logic.mjs questionFormOf; the plan-time Question). A Question its PR asks
   // waits for the PR's ready mark (review.mjs readyMark): a comment there starts no work beside that mark's review.
   // Only a Question's issue is read here, with conditional reads (`readCache`; GitHub counts no 304).
@@ -488,11 +488,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (stateOf(issue, statuses[issue.number] ?? null) !== "Question") continue;
     // A stage of it this local loop runs (a review of its PR marked ready): that stage's end decides.
     if (localHeld?.[issue.number]) continue;
-    const asked = await objectiveLabeledAt(repo, issue.number, "factory:question", cached).catch(() => null);
+    const asked = await objectiveLabeledAt(repo, issue.number, "pendulum:question", cached).catch(() => null);
     if (!asked) continue;
     // A PR read that failed is no PR on the sandbox route (as before), and unread on the others: a Question its PR
     // asks must not go back to work on a comment alone.
-    const pr = await findPr(repo, `factory/${issue.number}`, cached).catch(() => (sandbox ? null : undefined));
+    const pr = await findPr(repo, `pendulum/${issue.number}`, cached).catch(() => (sandbox ? null : undefined));
     if (pr === undefined) {
       retry(`#${issue.number}'s PR`);
       continue;
@@ -520,14 +520,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       continue;
     }
     answerCheck ??= openAnswerCheck({ inputs });
-    const screen = await screenAnswer({ check: answerCheck, repo, issue: issue.number, since: asked, comments, decisions, label: inputs.objectiveLabel, appId: inputs.appId || process.env.FACTORY_LOCAL_APP_ID || null, opts, dryRun });
+    const screen = await screenAnswer({ check: answerCheck, repo, issue: issue.number, since: asked, comments, decisions, label: inputs.objectiveLabel, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, opts, dryRun });
     if (!screen.requeue) {
       // Said when it is judged; a comment judged at an earlier tick keeps it open quietly.
       if (!screen.judged) log(`  #${issue.number}: the Question stays open: ${screen.why}`);
       continue;
     }
     answered.push(issue.number);
-    issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
+    issue.labels = (issue.labels || []).filter((l) => !/^pendulum:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
     statuses[issue.number] = "Queued";
     if (!dryRun) {
       await setStateLabel(repo, issue.number, null, opts);
@@ -542,7 +542,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   let checkNames = null;
   const checksFinished = async (n, record) => {
     if (record?.waiting !== "checks" || !record.head) return false;
-    const head = await rest(`repos/${repo.full}/git/ref/heads/factory/${n}`, opts).then((r) => r?.object?.sha ?? null, () => null);
+    const head = await rest(`repos/${repo.full}/git/ref/heads/pendulum/${n}`, opts).then((r) => r?.object?.sha ?? null, () => null);
     if (head !== record.head) return false;
     checkNames ??= inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, opts).catch(() => []);
     if (!checkNames.length) return false;
@@ -564,7 +564,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const vanished = [];
   const paused = [];
   const unclaimed = [];
-  // With a cloud sandbox (FACTORY_SANDBOX) no work job holds an Objective: its sandbox record does (launch.mjs). A
+  // With a cloud sandbox (PENDULUM_SANDBOX) no work job holds an Objective: its sandbox record does (launch.mjs). A
   // Running Objective with no work start since it became Running lost its launch (an event GitHub dropped, a pending
   // launcher a newer one replaced): past a grace for the launch job to start, the sweep names it again.
   const relaunch = [];
@@ -581,7 +581,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // The Block for an Objective no loop came back to: an expired claim names its holder and goes with the Block, so the
   // next stint starts clean.
   const blockLocalWait = async (n, hold, noClaim, cause) => {
-    const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
+    const pr = await findPr(repo, `pendulum/${n}`, opts).catch(() => null);
     const reason = hold ? `the local loop holding it (${hold.holder}) has been away over ${pauseText}; ${SERVE_FIX}` : noClaim;
     // A Block that cannot be written (the reads behind an unread claim failing too) is tried again next tick.
     const written = await applyExit(repo, { issue: n, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "dispatch" }, opts).then(
@@ -592,18 +592,18 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   };
   // An unread claim has a deadline too: past the claim pause (claim_pause_hours) from `since` (when the Objective began waiting), and with the newest
   // marked comment read (its author unchecked) also older than that, no loop can be holding it. Only a read that keeps
-  // failing gets here, and its Block names that read (cause `factory`), never a machine.
-  // A live local stage keeps writing as Factory (its claim's heartbeat, its progress comment), so a Block also needs the
-  // issue to show none of that for the day: no comment created or updated by Factory's login, or carrying a Factory
+  // failing gets here, and its Block names that read (cause `pendulum`), never a machine.
+  // A live local stage keeps writing as Pendulum (its claim's heartbeat, its progress comment), so a Block also needs the
+  // issue to show none of that for the day: no comment created or updated by Pendulum's login, or carrying a Pendulum
   // marker by a person GitHub shows with push access (a local loop writes as its developer, not as the Action's App),
-  // and no label event by Factory's login. Taken from the issue's timeline; a timeline or a login Factory cannot read is
+  // and no label event by Pendulum's login. Taken from the issue's timeline; a timeline or a login Pendulum cannot read is
   // no evidence, so it waits.
   const unreadLapsed = async (n, hold, since) => {
     if (!since || Date.now() - Date.parse(since) <= claimPause) return false;
     if (hold.updatedAt && Date.now() - Date.parse(hold.updatedAt) <= claimPause) return false;
-    return factoryQuiet(n);
+    return pendulumQuiet(n);
   };
-  const factoryQuiet = async (n) => {
+  const pendulumQuiet = async (n) => {
     if (!selfLogin()) return false;
     const events = await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true }).catch(() => null);
     if (!Array.isArray(events)) return false;
@@ -611,19 +611,19 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     const recent = (...ts) => ts.some((t) => Date.parse(t) > after);
     return !events.some((e) =>
       e.event === "commented"
-        ? (isSelf({ user: e.user ?? e.actor }) || ((e.body || "").startsWith("<!-- factory:") && trustedAuthor({ ...e, user: e.user ?? e.actor }))) && recent(e.created_at, e.updated_at)
+        ? (isSelf({ user: e.user ?? e.actor }) || ((e.body || "").startsWith("<!-- pendulum:") && trustedAuthor({ ...e, user: e.user ?? e.actor }))) && recent(e.created_at, e.updated_at)
         : (e.event === "labeled" || e.event === "unlabeled") && isSelf({ user: e.actor }) && recent(e.created_at),
     );
   };
   const unreadReason = (hold, what) => `${what} for over ${pauseText} and its local claim cannot be read or checked (${hold.reason}); re-apply the label once GitHub answers that read`;
-  // In review with its review owed (an open PR, not a draft, labelled factory:review, or unlabelled with a third-party
+  // In review with its review owed (an open PR, not a draft, labelled pendulum:review, or unlabelled with a third-party
   // wait record no review has taken up since: third-party-review.mjs): only a local loop runs that review, so it waits
-  // as a Running one does, counted from the later of its entering In review and the PR's last factory:review label (a
+  // as a Running one does, counted from the later of its entering In review and the PR's last pendulum:review label (a
   // re-review owes a new one) or the wait record's last write. The issue's own time is read first, so an Objective
   // inside its day costs one read a tick. True when Blocked.
   const reviewLapsed = async (issue) => {
     const n = issue.number;
-    const entered = await objectiveLabeledAt(repo, n, "factory:in-review", opts).then((at) => ({ at }), () => null);
+    const entered = await objectiveLabeledAt(repo, n, "pendulum:in-review", opts).then((at) => ({ at }), () => null);
     if (!entered) {
       log(`  #${n}: In-review time unread; left alone this tick`);
       retry(`#${n}'s In-review time`);
@@ -646,7 +646,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       retry(`#${n}'s local claim`);
       return false;
     }
-    const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
+    const pr = await findPr(repo, `pendulum/${n}`, opts).catch(() => null);
     if (!pr || pr.draft) return false;
     // Unlabelled: owed only when its review stage ended waiting for a third-party reviewer (a loop stopped meanwhile).
     let waited = null;
@@ -675,7 +675,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     vanished.push(n);
     statuses[n] = "Blocked";
     if (dryRun) return true;
-    if (hold?.state === "unread") await blockLocalWait(n, null, unreadReason(hold, "In review"), "factory");
+    if (hold?.state === "unread") await blockLocalWait(n, null, unreadReason(hold, "In review"), "pendulum");
     else await blockLocalWait(n, hold, `in review with no local loop running its review for over ${pauseText} (no claim); ${SERVE_FIX}`, "setup");
     return true;
   };
@@ -721,7 +721,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     relaunch.push(n);
     relaunchStage[n] = "work";
     statuses[n] = "Running";
-    issue.labels = [...(issue.labels || []).filter((l) => !/^factory:(running|blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name)), { name: "factory:running" }];
+    issue.labels = [...(issue.labels || []).filter((l) => !/^pendulum:(running|blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name)), { name: "pendulum:running" }];
     log(`  #${n}: its stage was lost (${lost === "outage" ? "it ended on its network" : "it vanished with no exit"}); relaunched, ${d.tries} of ${RELAUNCH_MAX}`);
     return true;
   };
@@ -751,11 +751,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (await relaunchLost(issue, d, "outage")) busy += 1;
         continue;
       }
-      const why = `the stage was lost to its network again after Factory relaunched it ${d.tries} times since the Objective was last started (the outage notice above names the host and since when)`;
+      const why = `the stage was lost to its network again after Pendulum relaunched it ${d.tries} times since the Objective was last started (the outage notice above names the host and since when)`;
       relaunchesUsed.push(n);
       if (dryRun) continue;
-      const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
-      await applyExit(repo, { issue: n, pr, exit: "blocked", reason: why, fix: "Re-apply `factory:objective` once the runner's or the sandbox's network is back; the relaunch count starts over.", cause: "outage", notify: inputs.notify, stage: "relaunch" }, opts).catch((e) => {
+      const pr = await findPr(repo, `pendulum/${n}`, opts).catch(() => null);
+      await applyExit(repo, { issue: n, pr, exit: "blocked", reason: why, fix: "Re-apply `pendulum:objective` once the runner's or the sandbox's network is back; the relaunch count starts over.", cause: "outage", notify: inputs.notify, stage: "relaunch" }, opts).catch((e) => {
         log(`  #${n}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`);
         retry(`#${n}'s Block`);
       });
@@ -779,7 +779,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const timeline = async () => (events === undefined ? (events = await timelineOf(repo, issue.number, opts).catch(() => null)) : events);
         let boxRecord = null;
         // A local loop on a repository with a sandbox: a live lease holds the Objective (one serve --all routes, or one
-        // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own. An
+        // relabelled pendulum:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own. An
         // unread record may hold a live lease, so nothing is decided on the Objective this tick (#430).
         if (!sandbox && inputs.sandbox) {
           const read = await recordRead(issue.number);
@@ -834,7 +834,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             continue;
           }
         }
-        // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh, paused while the machine
+        // A local loop (pendulum run / serve) holds it: alive while its heartbeat is fresh, paused while the machine
         // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for the claim pause. A read that
         // failed (the timeline, the claim or its author's check) is no answer: nothing rests on it, the next tick reads again.
         const read = (await timeline()) ? { at: lastRunningAt(events) } : null;
@@ -848,8 +848,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (hold?.state === "unread") {
           vanished.push(issue.number);
           statuses[issue.number] = "Blocked";
-          issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
-          if (!dryRun) await blockLocalWait(issue.number, null, unreadReason(hold, "Running"), "factory");
+          issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "pendulum:running"), { name: "pendulum:blocked" }];
+          if (!dryRun) await blockLocalWait(issue.number, null, unreadReason(hold, "Running"), "pendulum");
           continue;
         }
         // Only the Objectives this process tends, or one a local loop claimed this stint: a local loop leaves another
@@ -863,29 +863,29 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         const local = hasLocalLabel(issue);
         // A local loop's own pass (serve, which says whether a stage of it runs on its machine: localLive): a
-        // factory:local Objective Running for UNCLAIMED_MS on GitHub's clock with no claim comment at all, no stage of it
+        // pendulum:local Objective Running for UNCLAIMED_MS on GitHub's clock with no claim comment at all, no stage of it
         // here and none this loop is starting (localHeld) is a start that never wrote its claim (its loop stopped or died
         // between the Running label and the claim). Every stage runs under a claim, so no machine works it: back to
         // Queued for the next pick, rather than a day's wait. The listing may be older than GitHub, so it must read so
         // again: the timeline with no removal of the label since that stint began, and a fresh read of the issue open,
-        // Running and in no other state. Only factory:running comes off; a label that cannot be removed is tried again
+        // Running and in no other state. Only pendulum:running comes off; a label that cannot be removed is tried again
         // next tick.
         if (localLive && local && !hold && !claimed.has(issue.number) && since && githubNow() - Date.parse(since) >= UNCLAIMED_MS && !localHeld?.[issue.number] && !localLive(issue.number)) {
           const n = issue.number;
           const stint = runningStint(events);
           const fresh = stint.running && stint.at === since ? await getIssue(repo, n, opts).catch(() => null) : null;
           const shown = (fresh?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
-          const others = shown.filter((l) => /^factory:(blocked|question|in-review)$/.test(l));
-          if (fresh?.state !== "open" || !shown.includes("factory:running") || others.length) {
+          const others = shown.filter((l) => /^pendulum:(blocked|question|in-review)$/.test(l));
+          if (fresh?.state !== "open" || !shown.includes("pendulum:running") || others.length) {
             // Running beside another state stays so until someone changes it: said once per such state, not every tick.
-            const why = others.length && shown.includes("factory:running") ? `labelled factory:running and ${others.join(", ")} at once with no claim; left alone` : "Running with no claim in the listing, but GitHub no longer shows that stint; left alone this tick";
+            const why = others.length && shown.includes("pendulum:running") ? `labelled pendulum:running and ${others.join(", ")} at once with no claim; left alone` : "Running with no claim in the listing, but GitHub no longer shows that stint; left alone this tick";
             if (!others.length || UNCLAIMED_SAID.get(n) !== why) log(`  #${n}: ${why}`);
             if (others.length) UNCLAIMED_SAID.set(n, why);
             continue;
           }
           UNCLAIMED_SAID.delete(n);
           if (!dryRun) {
-            const off = await removeLabel(repo, n, "factory:running", opts).then(
+            const off = await removeLabel(repo, n, "pendulum:running", opts).then(
               () => true,
               (e) => (log(`  #${n}: Running with no claim, but its label could not be removed (${String(e?.message || e).slice(0, 120)}); next tick tries again`), retry(`#${n}'s Running label`), false),
             );
@@ -894,11 +894,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
           unclaimed.push(n);
           statuses[n] = "Queued";
-          issue.labels = (issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running");
+          issue.labels = (issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "pendulum:running");
           log(`  #${n}: Running since ${since} with no claim and no stage on any machine (a start that never wrote its claim); back to Queued`);
           continue;
         }
-        // No claim: a runner job gets 15 minutes to show up. Any other factory:local Objective waits for a loop on its
+        // No claim: a runner job gets 15 minutes to show up. Any other pendulum:local Objective waits for a loop on its
         // machine, so it gets the day a claim gets.
         if (!hold && since && Date.now() - Date.parse(since) < (local ? claimPause : 15 * 60_000)) {
           if (local) due(issue.number, "local-pause", Date.parse(since) + claimPause);
@@ -906,20 +906,20 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         // A runner job or sandbox stage gone with no exit (its runner or sandbox could not report): relaunched first,
         // unless it left a sign its network was not what ended it (relaunch.mjs endedNotLost: a cancelled job, a step
-        // that failed before Factory's own, a sandbox stage that recorded its end).
+        // that failed before Pendulum's own, a sandbox stage that recorded its end).
         // The decision and the day's cap come first, so a held one costs no Actions reads (the job token's hourly budget).
         let note = "";
         let notLost = null;
         if (relaunches && !hold && !local && !restarting[issue.number]) {
           const n = issue.number;
           const d = await decideLost(n, events, { lost: "vanished", key: stintKey(since) });
-          if (d.block) note = `; Factory relaunched its stage ${d.tries} times since the Objective was last started`;
+          if (d.block) note = `; Pendulum relaunched its stage ${d.tries} times since the Objective was last started`;
           else if (capHold(n)) continue;
           else {
             const job = sandbox ? null : await stintWorkJob(repo, n, since, readToken, { run: relaunchRun(relaunchRecordOf(commentsOf(events), n)) }).catch(() => null);
-            // A failed step after GitHub's set-up is placed against Factory's own step in the workflow file at the job's commit.
+            // A failed step after GitHub's set-up is placed against Pendulum's own step in the workflow file at the job's commit.
             const workStep = needsWorkStep(job) ? await stintWorkStep(repo, job, opts) : null;
-            if (needsWorkStep(job) && workStep === null) log(`  #${n}: its work job failed at step "${String(job.steps?.find((x) => x?.conclusion === "failure")?.name ?? "").slice(0, 120)}", but its workflow file at ${String(job.head_sha ?? "its commit").slice(0, 12)} could not be read or names no Factory work step, so that step cannot be placed: taken as lost`);
+            if (needsWorkStep(job) && workStep === null) log(`  #${n}: its work job failed at step "${String(job.steps?.find((x) => x?.conclusion === "failure")?.name ?? "").slice(0, 120)}", but its workflow file at ${String(job.head_sha ?? "its commit").slice(0, 12)} could not be read or names no Pendulum work step, so that step cannot be placed: taken as lost`);
             notLost = endedNotLost({ record: boxRecord, job, workStep });
             // One set-up failure may pass (a 5xx on the checkout, a runner not acquired): relaunched once, its step on the
             // record; the same step failing again on the relaunch's job is a set-up that fails every time, and Blocks.
@@ -938,8 +938,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         vanished.push(issue.number);
         statuses[issue.number] = "Blocked";
-        issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
-        // A machine not running `factory serve` is a setup gap; a runner job that vanished is Factory's own.
+        issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "pendulum:running"), { name: "pendulum:blocked" }];
+        // A machine not running `pendulum serve` is a setup gap; a runner job that vanished is Pendulum's own.
         const lostEnd = notLostBlock(notLost, note);
         if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over ${pauseText} (no claim); ${SERVE_FIX}` : lostEnd.reason, hold || local ? "setup" : lostEnd.cause);
       }
@@ -951,7 +951,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // conflicting; without one, a PR that fell behind or conflicts after other PRs merged, which strict required checks
   // refuse and nothing updates. The worker rebases, revalidates and pushes, and records the rebased head as the one to
   // merge. Each new base is a new send-back; it Blocks only when rebasing cannot progress or at the bound
-  // (logic.mjs staleDecision); when Factory merges, conflicting PRs go back in the release order, each once no sibling
+  // (logic.mjs staleDecision); when Pendulum merges, conflicting PRs go back in the release order, each once no sibling
   // ahead of it would make it conflict again (overlap.mjs sendBackOrder). Every other In-review PR gets the merge pass.
   const sentBack = [];
   const updated = [];
@@ -985,11 +985,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const holdReleased = new Set();
   const holdDeferred = new Set();
   // On GitHub Actions and the cloud sandbox with accounts declared (#267, #268): whether an Objective's stages wait on the
-  // usage-limit holds Factory keeps there (route-holds.mjs), its pinned account held, or, with no pin, every account
+  // usage-limit holds Pendulum keeps there (route-holds.mjs), its pinned account held, or, with no pin, every account
   // automatic choice picks among. The holds are read once a tick, when a send-back first asks; a failed read holds none.
   let routeStore;
   const routeHeld = async (issue) => {
-    if (backend().name === "local" || !routeAccounts(process.env.FACTORY_ACCOUNTS).declared) return false;
+    if (backend().name === "local" || !routeAccounts(process.env.PENDULUM_ACCOUNTS).declared) return false;
     routeStore ??= readHolds(repo, opts).then(
       (h) => h.store,
       (e) => {
@@ -1029,15 +1029,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // One Objective whose read or decision throws is said and read again next tick; the rest of the tick goes on.
       try {
         const kept = waitsLast.get(issue.number);
-        // A factory:local Objective in review whose review a local loop owes gets a Running one's day, on any route's tick.
+        // A pendulum:local Objective in review whose review a local loop owes gets a Running one's day, on any route's tick.
         if (!kept && hasLocalLabel(issue) && !localHeld?.[issue.number] && stateOf(issue, statuses[issue.number] ?? null) === "In review" && (await reviewLapsed(issue))) continue;
-        // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
+        // Send-backs follow routing too: a pendulum:local PR is its local loop's to rebase, the rest the Action's.
         if (!backend().trigger.routes(issue)) continue;
         // A restart waiting for its stage to stop: nothing merges, updates or sends it back meanwhile.
         if (restarting[issue.number]) continue;
         if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
         let prRead = true;
-        const open = kept ? kept.open : await findPr(repo, `factory/${issue.number}`, opts).catch(() => ((prRead = false), null));
+        const open = kept ? kept.open : await findPr(repo, `pendulum/${issue.number}`, opts).catch(() => ((prRead = false), null));
         // Read once this tick: the sibling ordering below takes it rather than read it again (overlap.mjs prFinder).
         if (prRead) prsSeen[issue.number] = open;
         if (!open) {
@@ -1049,7 +1049,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           });
           if (next === "next") {
             nextParts.push(issue.number);
-            issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
+            issue.labels = (issue.labels || []).filter((l) => !/^pendulum:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
             statuses[issue.number] = "Queued";
             await setStateLabel(repo, issue.number, null, opts);
             await moveCard(project, repo, issue.number, "Queued", opts).catch(() => {});
@@ -1063,7 +1063,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const pr = kept && kept.landed === landed.length ? kept.pr : await getPrSettled(repo, open.number, opts).catch(() => null);
         // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
         // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
-        // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
+        // A human recovery (re-applying pendulum:objective) starts the count over (session.mjs rebaseMarkers).
         const marks = kept ? kept.marks : await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
         const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait, rebaseWait } = marks;
         const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
@@ -1157,7 +1157,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
           if (how === "released") {
             reviewResumed.push(issue.number);
-            log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= siblingWait ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
+            log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= siblingWait ? " (or it waited the longest Pendulum holds one)" : ""}; the review goes on`);
             continue;
           }
           if (how === "rebase") log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over and it conflicts; it rebases before its review`);
@@ -1211,7 +1211,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         // Only a conflicting PR under review needs the live jobs read (once per tick).
         // A failed read counts as "a review may be running" for every PR this tick: a later tick sends it back.
         if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) {
-          liveJobs = await activeFactoryJobs(repo, readToken, { strict: true }).catch((e) => ({ failed: e }));
+          liveJobs = await activePendulumJobs(repo, readToken, { strict: true }).catch((e) => ({ failed: e }));
           if (liveJobs.failed) retry("live jobs");
         }
         const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
@@ -1252,7 +1252,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
                 if (instead === "rebase") {
                   log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
                   sentBack.push(issue.number);
-                  if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it (rebase ${recent + 1} of at most ${inputs.rebaseLimit ?? REBASE_LIMIT} in 24 h).`, opts);
+                  if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nPendulum: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it (rebase ${recent + 1} of at most ${inputs.rebaseLimit ?? REBASE_LIMIT} in 24 h).`, opts);
                 } else {
                   statuses[issue.number] = "Blocked";
                   await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: instead, record: stuck || record, since, notify: inputs.notify, stage: "dispatch", limit: inputs.rebaseLimit }), opts);
@@ -1261,7 +1261,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             }
           }
         } else if (decision === "rebase") {
-          // When Factory merges, the send-backs go in the release order once every PR is read (below); else each goes now.
+          // When Pendulum merges, the send-backs go in the release order once every PR is read (below); else each goes now.
           if (inputs.autoMerge) dirty.push({ issue, pr, open, recent, already, reviewWait, rebaseWait });
           else {
             sentBack.push(issue.number);
@@ -1407,7 +1407,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
     const start = startsOf(events, inputs.objectiveLabel)[0];
     if (!start) return null;
-    // A restart since (Factory's record of a person's restart, logic.mjs restartedAt) is the newer start, as personStart reads.
+    // A restart since (Pendulum's record of a person's restart, logic.mjs restartedAt) is the newer start, as personStart reads.
     const restart = restartedAt(commentsOf(events));
     if (restart && Date.parse(restart) >= Date.parse(start.created_at)) return null;
     const ok = await goTrust(events, n, mayGo)(start.actor ?? null, start);
@@ -1490,7 +1490,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // any is labelled, and answers how many it got (fewer when another loop on the machine took the last ones meanwhile).
   if (Number.isFinite(localSlots) && picked.ready.length > localSlots) {
     picked.ready = picked.ready.slice(0, Math.max(0, localSlots));
-    picked.reason = picked.reason || localFull || `this box is full (FACTORY_LOCAL_MAX_CONCURRENT)`;
+    picked.reason = picked.reason || localFull || `this box is full (PENDULUM_LOCAL_MAX_CONCURRENT)`;
   }
   if (localTake && picked.ready.length) {
     const taken = localTake(picked.ready.length);
@@ -1501,14 +1501,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
   // Done: an issue closed by any route (the merged PR's "Closes #N", or a human) loses its
   // state label and its card moves to Done. No job runs on merge, so the cron does it. A local loop does it only for
-  // the Objectives it routes, and records its removals as Factory's first (#2668).
+  // the Objectives it routes, and records its removals as Pendulum's first (#2668).
   const done = [];
   if (!dryRun) {
     const recent = await recentlyClosedByLabel(repo, inputs.objectiveLabel, 48, opts).catch(() => []);
     // Every closed one's card in one read, not one read each.
     const cards = project && recent.length ? await projectStatuses(project, repo, recent.map((c) => c.number), opts) : {};
     for (const { number, labels } of doneTidies(recent, { cards, project: !!project, tends: (i) => backend().trigger.tends(i) })) {
-      // Under a person's login, the removal is recorded as Factory's before it is made, or waits for the next tick.
+      // Under a person's login, the removal is recorded as Pendulum's before it is made, or waits for the next tick.
       if (labels.length && backend().trigger.asPerson) {
         const recorded = await upsertComment(repo, number, marker(number, "done"), doneRecord(labels), opts).then(
           () => true,
@@ -1530,7 +1530,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
 
   watch.mark("done");
   // Stopped: an open issue still marked Running or In review whose Objective label a person removed, or that a person made
-  // a draft (`factory:draft`, stop.mjs). Its PR goes back to a draft without the review label (no review starts, the
+  // a draft (`pendulum:draft`, stop.mjs). Its PR goes back to a draft without the review label (no review starts, the
   // merge queue drops it), its state label comes off and its card goes back to Queued, so re-applying the label (or
   // starting the draft) starts it again. A running stage stops itself (its watch on the issue) and tidies the same way; a
   // Running one is tidied here only STOP_GRACE_MS after its stop (the label's removal, the draft label's application),
@@ -1538,7 +1538,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const stopped = [];
   if (!dryRun) {
     const seen = new Set();
-    for (const label of ["factory:in-review", "factory:running"]) {
+    for (const label of ["pendulum:in-review", "pendulum:running"]) {
       const list = await listIssuesByLabel(repo, label, opts).catch((e) => {
         retry(`the ${label} issues (${String(e.message).slice(0, 80)})`);
         return [];
@@ -1547,7 +1547,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const cause = stopCause(issue, inputs.objectiveLabel);
         if (seen.has(issue.number) || (cause !== "unlabeled" && cause !== "draft") || !backend().trigger.tends(issue)) continue;
         seen.add(issue.number);
-        if (label === "factory:running") {
+        if (label === "pendulum:running") {
           const off = await (cause === "draft" ? labeledBy(repo, issue.number, DRAFT_LABEL, opts).then((e) => e?.at ?? null) : labelRemovedAt(repo, issue.number, inputs.objectiveLabel, opts)).catch(() => undefined);
           if (off === undefined) {
             retry(`#${issue.number}'s stop time`);
@@ -1581,7 +1581,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // A local loop told to stop (localStopping) marks no more: its picks from there on stay Queued, and it returns only
   // the ones it marked. It is told each one before its write (localMarked), so a dispatch that throws midway still
   // leaves it the list to put back to Queued (local.mjs serve).
-  // Picks labelled factory:local here (adopt) whose mark of that label could not be written yet (lib/local.mjs adoptLocal).
+  // Picks labelled pendulum:local here (adopt) whose mark of that label could not be written yet (lib/local.mjs adoptLocal).
   const unmarked = [];
   if (!dryRun) {
     const unlabelled = new Set();
@@ -1590,11 +1590,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         picked.ready = picked.ready.slice(0, i);
         break;
       }
-      // A pick without factory:local where no Action runs gets the label first: one that cannot be labelled is not started.
+      // A pick without pendulum:local where no Action runs gets the label first: one that cannot be labelled is not started.
       const issue = issues.find((x) => x.number === n);
       if (issue && adoptable(issue)) {
         // Read again just before: one that left Queued or the Objectives meanwhile (the Action, turned on mid-tick, took
-        // it) is not started; one a person labelled factory:local meanwhile is this loop's without a label of its own.
+        // it) is not started; one a person labelled pendulum:local meanwhile is this loop's without a label of its own.
         const fresh = await getIssue(repo, n, opts).catch(() => null);
         const still = !!fresh && !stopCause(fresh, inputs.objectiveLabel) && stateOf(fresh, null) === "Queued";
         if (!still) {
@@ -1603,14 +1603,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           continue;
         }
         if (!hasLocalLabel(fresh)) {
-          // Factory's mark names the exact label event, so the scorer counts it as Factory's (adoptLocal).
+          // Pendulum's mark names the exact label event, so the scorer counts it as Pendulum's (adoptLocal).
           const adopted = await adoptLocal(repo, n, opts).catch((e) => log(`#${n}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); not started, next tick`));
           if (!adopted) {
             unlabelled.add(n);
             continue;
           }
           if (!adopted.marked) unmarked.push(n);
-          log(`#${n}: no Action runs Objectives here, so this loop takes it and labels it ${LOCAL_LABEL}${adopted.marked ? "" : `; Factory's mark of that label is not written yet (${adopted.why}), so a later tick of the loop that holds it writes it`}`);
+          log(`#${n}: no Action runs Objectives here, so this loop takes it and labels it ${LOCAL_LABEL}${adopted.marked ? "" : `; Pendulum's mark of that label is not written yet (${adopted.why}), so a later tick of the loop that holds it writes it`}`);
         }
       }
       // Named before the write: a write whose answer is lost may still have landed.
@@ -1742,7 +1742,7 @@ export async function armWake(repo, deadlines, { now = Date.now(), firedBy = nul
 export async function armSweepWake(job, deadlines, { repo, payload, eventName, token, now = Date.now() }) {
   let wake = null;
   try {
-    if ((deadlines || []).length) wake = await armWake(repo, deadlines, { now, firedBy: firedByWake(eventName, payload), kinds: SWEEP_WAKE_KINDS, runs: SWEEP_WAKE_KINDS, readJobs: () => activeFactoryJobs(repo, { token }, { strict: true }) });
+    if ((deadlines || []).length) wake = await armWake(repo, deadlines, { now, firedBy: firedByWake(eventName, payload), kinds: SWEEP_WAKE_KINDS, runs: SWEEP_WAKE_KINDS, readJobs: () => activePendulumJobs(repo, { token }, { strict: true }) });
   } catch (e) {
     log(`${job}: no wake armed (${String(e.message).slice(0, 120)}); events and the cron run the sweep next`);
   }
@@ -1882,7 +1882,7 @@ async function main() {
     const firedBy = firedByWake(eventName, payload);
     const isPublic = await repoIsPublic(payload, waits, () => getRepo(repoOf(inputs.repo), { token }));
     kinds = wakeKinds(isPublic);
-    wake = await armWake(repoOf(inputs.repo), waits, { firedBy, isPublic, readJobs: () => activeFactoryJobs(repoOf(inputs.repo), { token: inputs.githubToken || token }, { strict: true }) });
+    wake = await armWake(repoOf(inputs.repo), waits, { firedBy, isPublic, readJobs: () => activePendulumJobs(repoOf(inputs.repo), { token: inputs.githubToken || token }, { strict: true }) });
   }
   // Every wait, and whose it is: a wake's, its owner's (an event, a local loop), or on a private repository the cron's.
   const whose = (d) => (WAKE_OWNED.has(d.kind) ? " (its owner's; the cron is the backstop)" : kinds && !kinds.includes(d.kind) ? " (a long wait on a private repository: events and the cron)" : "");
@@ -1904,7 +1904,7 @@ async function main() {
   setOutput("image_owed", owed ? "true" : "");
   if (process.env.GITHUB_STEP_SUMMARY) {
     const { appendFileSync } = await import("node:fs");
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: $${summary.spent_today_usd} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: $${summary.spent_today_usd} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);
   }
 }
 
@@ -1919,7 +1919,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       for (const [k, v] of picksWritten ? wake : [["issues", []], ["count", "0"], ["reason", rateLimitLine(e.resetAt)], ["queue_watch", ""], ...wake, ["image_owed", ""]]) setOutput(k, v);
       return;
     }
-    process.stderr.write(`[factory] dispatch failed: ${e.message}\n`);
+    process.stderr.write(`[pendulum] dispatch failed: ${e.message}\n`);
     process.exit(1);
   });
 }

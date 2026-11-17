@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const out = join(here, "..", "..", "plugin", "vendor");
-/** Per library: the published paths Factory imports (an ES module tree), its licence and its package.json. */
+/** Per library: the published paths Pendulum imports (an ES module tree), its licence and its package.json. */
 export const VENDORED = {
   "@actions/expressions": (p) => p === "LICENSE" || p === "package.json" || /^dist\/.+\.js$/.test(p),
   yaml: (p) => p === "LICENSE" || p === "package.json" || p.startsWith("browser/"),

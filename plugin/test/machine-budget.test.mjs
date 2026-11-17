@@ -19,8 +19,8 @@ const GB = 2 ** 30;
 const home = (stages = null) => {
   const dir = mkdtempSync(join(tmpdir(), "home-"));
   if (stages !== null) {
-    mkdirSync(join(dir, ".cache", "factory"), { recursive: true });
-    writeFileSync(join(dir, ".cache", "factory", "machine.json"), JSON.stringify({ stages }));
+    mkdirSync(join(dir, ".cache", "pendulum"), { recursive: true });
+    writeFileSync(join(dir, ".cache", "pendulum", "machine.json"), JSON.stringify({ stages }));
   }
   return dir;
 };
@@ -38,7 +38,7 @@ test("machineBudget: the machine's own setting, else a quarter of its threads an
     assert.deepEqual([b.stages, b.from], [5, "default"], String(bad));
     assert.match(b.problem, /"stages" is not a positive whole number/);
   }
-  // FACTORY_LOCAL_MAX_CONCURRENT is a per-loop cap below the budget, never above it (machineRoom).
+  // PENDULUM_LOCAL_MAX_CONCURRENT is a per-loop cap below the budget, never above it (machineRoom).
   assert.equal(loopCap("2", 5), 2);
   assert.equal(loopCap(undefined, 5), 5);
   assert.equal(loopCap("nope", 5), 5);
@@ -300,7 +300,7 @@ test("slots: a record from another boot, or a pid now running another process, h
  */
 async function fakeGitHub(issues, { onList = () => {} } = {}) {
   const labels = new Map();
-  for (const [repo, ns] of Object.entries(issues)) for (const n of ns) labels.set(`${repo}#${n}`, new Set(["factory:objective"]));
+  for (const [repo, ns] of Object.entries(issues)) for (const n of ns) labels.set(`${repo}#${n}`, new Set(["pendulum:objective"]));
   const issue = (repo, n) => ({ number: n, title: "t", body: "", state: "open", labels: [...labels.get(`${repo}#${n}`)].map((name) => ({ name })), updated_at: new Date().toISOString() });
   const server = createServer((req, res) => {
     let raw = "";
@@ -313,7 +313,7 @@ async function fakeGitHub(issues, { onList = () => {} } = {}) {
       const repo = m?.[1];
       if (m && !m[2] && req.method === "GET") {
         const want = url.searchParams.get("labels");
-        if (want === "factory:objective") onList();
+        if (want === "pendulum:objective") onList();
         return send(200, (issues[repo] || []).map((n) => issue(repo, n)).filter((i) => !want || i.labels.some((l) => l.name === want)));
       }
       const set = m?.[2] ? labels.get(`${repo}#${m[2]}`) : null;
@@ -336,7 +336,7 @@ async function fakeGitHub(issues, { onList = () => {} } = {}) {
  * the test's `signal` ends the test; never on a clock of its own: a loaded machine only makes the loop slower (#411).
  */
 function loopProcess({ repo, homeDir, procDir, api, cap = "", signal }) {
-  const child = spawn(process.execPath, [join(here, "fixtures", "budget-loop.mjs")], { env: { ...process.env, HOME: homeDir, LOOP_REPO: repo, LOOP_PROC: procDir, GITHUB_API_URL: api, FACTORY_LOCAL_MAX_CONCURRENT: cap }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [join(here, "fixtures", "budget-loop.mjs")], { env: { ...process.env, HOME: homeDir, LOOP_REPO: repo, LOOP_PROC: procDir, GITHUB_API_URL: api, PENDULUM_LOCAL_MAX_CONCURRENT: cap }, stdio: ["ignore", "pipe", "pipe"] });
   const lines = [];
   const waiters = new Set();
   const wake = () => {
@@ -377,7 +377,7 @@ test("serve: two loops of two repositories share one machine budget; a killed lo
   let b = null;
   try {
     await a.until(() => a.started() === 2, "o/a to start both its Objectives");
-    assert.ok(a.lines.some((l) => /this loop: at most 3, the budget \(FACTORY_LOCAL_MAX_CONCURRENT 8 is above it\)/.test(l)), "the start line states the cap the loop runs at");
+    assert.ok(a.lines.some((l) => /this loop: at most 3, the budget \(PENDULUM_LOCAL_MAX_CONCURRENT 8 is above it\)/.test(l)), "the start line states the cap the loop runs at");
     b = loopProcess({ repo: "o/b", homeDir, procDir, api: gh.url, signal: t.signal });
     await b.until(() => b.started() === 1, "o/b to start one");
     const from = b.ticks();
@@ -419,8 +419,8 @@ test("serve: a saturated machine holds new starts, said in the tick line, but a 
 test("#402: the machine's limits are machine.json's beside stages: when it counts as saturated and the no-reset guess; each one unset or unusable is the default, named", () => {
   const withFile = (data) => {
     const dir = home();
-    mkdirSync(join(dir, ".cache", "factory"), { recursive: true });
-    writeFileSync(join(dir, ".cache", "factory", "machine.json"), typeof data === "string" ? data : JSON.stringify(data));
+    mkdirSync(join(dir, ".cache", "pendulum"), { recursive: true });
+    writeFileSync(join(dir, ".cache", "pendulum", "machine.json"), typeof data === "string" ? data : JSON.stringify(data));
     return dir;
   };
   const none = machineLimits({ home: home() });
@@ -447,30 +447,30 @@ test("#402: a loop holds new starts by the machine's own pressure limits, and do
   const dflt = home(4);
   assert.equal(loopAt(dflt).machineBox(1).room, 0, "CPU pressure 20% is saturated at the default 15%");
   const relaxed = home();
-  mkdirSync(join(relaxed, ".cache", "factory"), { recursive: true });
-  writeFileSync(join(relaxed, ".cache", "factory", "machine.json"), JSON.stringify({ stages: 4, pressure: { cpu_psi: 30, available_gb: 8 }, guess_hours: [2, 8] }));
+  mkdirSync(join(relaxed, ".cache", "pendulum"), { recursive: true });
+  writeFileSync(join(relaxed, ".cache", "pendulum", "machine.json"), JSON.stringify({ stages: 4, pressure: { cpu_psi: 30, available_gb: 8 }, guess_hours: [2, 8] }));
   const box = loopAt(relaxed).machineBox(1);
   assert.deepEqual([box.room, box.why], [3, null], "not at the machine's own 30%");
   const by = (rows) => Object.fromEntries(rows.map((r) => [r.name, r]));
   const rows = by(machineChecks({ env: {}, local: true, home: relaxed, proc: busy }));
   assert.equal(rows["machine limits"].status, "PASS");
-  assert.equal(rows["machine limits"].detail, `saturated at CPU pressure 30% over a minute (without PSI, a load of 0.9 per CPU thread), memory pressure 10%, or under 8.0 GB memory available; a usage limit with no reset passes its account over for 2 h, 8 h by how many in a row; the pressure limits from ${join(relaxed, ".cache", "factory", "machine.json")}, the guess from ${join(relaxed, ".cache", "factory", "machine.json")}`);
+  assert.equal(rows["machine limits"].detail, `saturated at CPU pressure 30% over a minute (without PSI, a load of 0.9 per CPU thread), memory pressure 10%, or under 8.0 GB memory available; a usage limit with no reset passes its account over for 2 h, 8 h by how many in a row; the pressure limits from ${join(relaxed, ".cache", "pendulum", "machine.json")}, the guess from ${join(relaxed, ".cache", "pendulum", "machine.json")}`);
   assert.equal(rows["machine load"].status, "PASS", "doctor judges the load by the same limits");
   const dfltRows = by(machineChecks({ env: {}, local: true, home: dflt, proc: busy }));
-  assert.match(dfltRows["machine limits"].detail, /^saturated at CPU pressure 15% over a minute .*under 4\.0 GB memory available; .* for 1 h, 4 h, 24 h by how many in a row; the pressure limits from Factory's defaults \(set them in .*\), the guess from Factory's default$/);
+  assert.match(dfltRows["machine limits"].detail, /^saturated at CPU pressure 15% over a minute .*under 4\.0 GB memory available; .* for 1 h, 4 h, 24 h by how many in a row; the pressure limits from Pendulum's defaults \(set them in .*\), the guess from Pendulum's default$/);
   // Without machine.json's guess_hours, the repository's setting is the one in force.
-  const repoRows = by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, local: true, home: dflt, proc: busy }));
-  assert.match(repoRows["machine limits"].detail, /for 3 h, 9 h by how many in a row; .* the guess from the repository's FACTORY_GUESS_HOURS$/);
-  assert.match(by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, local: true, home: relaxed, proc: busy }))["machine limits"].detail, /for 2 h, 8 h by how many in a row/, "machine.json's wins on this machine");
+  const repoRows = by(machineChecks({ env: { PENDULUM_GUESS_HOURS: "3, 9" }, local: true, home: dflt, proc: busy }));
+  assert.match(repoRows["machine limits"].detail, /for 3 h, 9 h by how many in a row; .* the guess from the repository's PENDULUM_GUESS_HOURS$/);
+  assert.match(by(machineChecks({ env: { PENDULUM_GUESS_HOURS: "3, 9" }, local: true, home: relaxed, proc: busy }))["machine limits"].detail, /for 2 h, 8 h by how many in a row/, "machine.json's wins on this machine");
   // The source is what a stage reads (serve's baseEnv): a value in this shell alone is no repository's.
-  assert.match(by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, settings: {}, local: true, home: dflt, proc: busy }))["machine limits"].detail, /for 1 h, 4 h, 24 h by how many in a row; .* the guess from Factory's default$/);
+  assert.match(by(machineChecks({ env: { PENDULUM_GUESS_HOURS: "3, 9" }, settings: {}, local: true, home: dflt, proc: busy }))["machine limits"].detail, /for 1 h, 4 h, 24 h by how many in a row; .* the guess from Pendulum's default$/);
   assert.equal(dfltRows["machine load"].status, "WARN");
   const wrong = home();
-  mkdirSync(join(wrong, ".cache", "factory"), { recursive: true });
-  writeFileSync(join(wrong, ".cache", "factory", "machine.json"), JSON.stringify({ pressure: { cpu_psi: "high" } }));
+  mkdirSync(join(wrong, ".cache", "pendulum"), { recursive: true });
+  writeFileSync(join(wrong, ".cache", "pendulum", "machine.json"), JSON.stringify({ pressure: { cpu_psi: "high" } }));
   const warn = by(machineChecks({ env: {}, local: true, home: wrong, proc: busy }))["machine limits"];
   assert.equal(warn.status, "WARN");
-  assert.match(warn.detail, /"pressure\.cpu_psi" is not a number above 0, so Factory's defaults stand for those; in force: saturated at CPU pressure 15%/);
+  assert.match(warn.detail, /"pressure\.cpu_psi" is not a number above 0, so Pendulum's defaults stand for those; in force: saturated at CPU pressure 15%/);
 });
 
 test("run and review hold one slot of the machine's budget for each stage while it runs, whatever the machine holds, and none after it (#309)", async () => {
@@ -509,8 +509,8 @@ test("serve: a review starts as soon as its slot is taken, never held idle throu
   let reviewing = false;
   let seenAtList = null;
   const gh = await fakeGitHub({ "o/r": [1] }, { onList: () => (seenAtList ??= reviewing) });
-  const saved = { GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL, FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL };
-  Object.assign(process.env, { GITHUB_API_URL: gh.url, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" });
+  const saved = { GITHUB_API_URL: process.env.GITHUB_API_URL, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL, PENDULUM_LOCAL_ALL: process.env.PENDULUM_LOCAL_ALL };
+  Object.assign(process.env, { GITHUB_API_URL: gh.url, PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" });
   try {
     const loop = Object.assign(Object.create(Local.prototype), {
       repo: { owner: "o", name: "r", full: "o/r" },
@@ -521,7 +521,7 @@ test("serve: a review starts as soon as its slot is taken, never held idle throu
       opts: { token: "t" },
       children: new Set(),
       machine: { home: homeDir, proc: proc({}) },
-      baseEnv: () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_INPUT_MAX_CONCURRENT: "9" }),
+      baseEnv: () => ({ PENDULUM_LOCAL_ALL: "1", PENDULUM_INPUT_MAX_CONCURRENT: "9" }),
       cleanup: async () => {},
       pausedHere: async () => [],
       pendingReviews: async () => [{ issue: 5, pr: 9, labels: [] }],
@@ -547,17 +547,17 @@ test("doctor --local: the machine's budget, who holds its slots, and its load (#
     const rows = machineChecks({ env: {}, local: true, home: homeDir, proc: proc({ cpu: 30, availGb: 12 }) });
     const by = Object.fromEntries(rows.map((r) => [r.name, r]));
     assert.equal(by["machine budget"].status, "PASS");
-    assert.match(by["machine budget"].detail, /^4 stage\(s\) at once on this machine, shared by every Factory loop here \(.*machine\.json\)$/);
+    assert.match(by["machine budget"].detail, /^4 stage\(s\) at once on this machine, shared by every Pendulum loop here \(.*machine\.json\)$/);
     assert.equal(by["machine slots"].detail, `1 of 4 held: pid ${h.child.pid} o/a #7 work`);
     assert.equal(by["machine load"].status, "WARN");
     assert.match(by["machine load"].detail, /^CPU pressure 30% over a minute, memory pressure 0%, 12\.0 GB memory available: saturated/);
-    assert.equal(by.FACTORY_LOCAL_MAX_CONCURRENT, undefined, "no cap set: no warning");
-    const over = machineChecks({ env: { FACTORY_LOCAL_MAX_CONCURRENT: "8" }, local: true, home: homeDir, proc: proc({}) });
-    const warn = over.find((r) => r.name === "FACTORY_LOCAL_MAX_CONCURRENT");
+    assert.equal(by.PENDULUM_LOCAL_MAX_CONCURRENT, undefined, "no cap set: no warning");
+    const over = machineChecks({ env: { PENDULUM_LOCAL_MAX_CONCURRENT: "8" }, local: true, home: homeDir, proc: proc({}) });
+    const warn = over.find((r) => r.name === "PENDULUM_LOCAL_MAX_CONCURRENT");
     assert.equal(warn?.status, "WARN", "a loop cap above the budget is named");
     assert.match(warn.detail, /^8 is above this machine's stage budget of 4/);
-    assert.ok(warn.fix.includes(join(homeDir, ".cache", "factory", "machine.json")), "the fix names machine.json");
-    assert.equal(machineChecks({ env: { FACTORY_LOCAL_MAX_CONCURRENT: "4" }, local: true, home: homeDir, proc: proc({}) }).some((r) => r.name === "FACTORY_LOCAL_MAX_CONCURRENT"), false);
+    assert.ok(warn.fix.includes(join(homeDir, ".cache", "pendulum", "machine.json")), "the fix names machine.json");
+    assert.equal(machineChecks({ env: { PENDULUM_LOCAL_MAX_CONCURRENT: "4" }, local: true, home: homeDir, proc: proc({}) }).some((r) => r.name === "PENDULUM_LOCAL_MAX_CONCURRENT"), false);
     assert.deepEqual(machineChecks({ env: { GITHUB_ACTIONS: "true" }, local: true, home: homeDir }), [], "not inside a job");
     const bad = machineChecks({ env: {}, local: true, home: home("x"), proc: proc({}) });
     assert.equal(bad[0].status, "WARN");

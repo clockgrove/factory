@@ -137,7 +137,7 @@ test("the archive is read as a stream: a file larger than one read lands whole",
   assert.ok(readFileSync(join(to, "ab", "cd", "oid")).equals(big));
 });
 
-test("Factory's packer: GNU tar and the unpacker read it; nested and long names; links left out; names refused", async () => {
+test("Pendulum's packer: GNU tar and the unpacker read it; nested and long names; links left out; names refused", async () => {
   const { TARPACK, tarAsAgent } = await import("../scripts/lib/untar.mjs");
   assert.ok(!TARPACK.includes("${"));
   const root = mkdtempSync(join(tmpdir(), "tarpack-"));

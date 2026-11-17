@@ -1,6 +1,6 @@
 // Usage-limit holds per account (#264): a provider's usage limit holds only the account that met it (lib/accounts.mjs:
 // a declared one by its name; with none declared, by its login: local.mjs holdOf), and every `serve` on the machine, in any
-// repository and after a restart, reads the same holds from ~/.cache/factory/holds, so none spends a call to find a
+// repository and after a restart, reads the same holds from ~/.cache/pendulum/holds, so none spends a call to find a
 // limit another already met. Each limit met is one file of its own, written whole under a dot-name and renamed into
 // place, never rewritten: writers at the same time each add theirs and lose none, with no lock. A hold is the latest
 // reset any file names for the account; its back-off streak is the newest file's. The record holds no secret: a
@@ -12,7 +12,7 @@
 // replaced whole at each stage end that reported one, which automatic choice ranks the accounts by. The folder is outside
 // every directory a sandbox may write, and the outer sandbox denies writing it (lib/local.mjs harnessOuterSettings). A
 // file a sandbox or another user could have made (a link, another owner, group or world write bits) is not read. A
-// person lifts an account's hold with `factory hold release` (#376): one more file, a release record, that ends every
+// person lifts an account's hold with `pendulum hold release` (#376): one more file, a release record, that ends every
 // record made on the account before it, for every serve, and resets its back-off count; no file need be removed.
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
@@ -48,8 +48,8 @@ export const SPENT_GUESS_MS = [1, 4, 24].map((h) => h * 60 * 60_000);
 /** A stage-start record (accountHolds.started) of an account no stage started on this long is removed. */
 export const START_FORGET_MS = HOLD_MAX_MS;
 
-/** The machine's holds: under Factory's cache folder, never ~/.config/factory (no secret is in them). */
-export const holdsDir = (home = homedir()) => join(home, ".cache", "factory", "holds");
+/** The machine's holds: under Pendulum's cache folder, never ~/.config/pendulum (no secret is in them). */
+export const holdsDir = (home = homedir()) => join(home, ".cache", "pendulum", "holds");
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,49}$/;
 /** A hold's key: a declared account's name, or a harness's login (`<harness>@<12 hex>`, or `@env` for a token in serve's env). */
@@ -323,10 +323,10 @@ function replaceFile(dir, account, name, value, uid) {
  *   or a hand-made file) counts as long ago, as a hold record's does.
  * - `list(now)`: every account the records remember a hold or a guess of, by key: {account, harness, until (the hold's
  *   end, past or ahead; null with only guesses), window, streak (the back-off count), guess ({until, streak}, or null)}.
- * - `release({account, now})`: a person lifts the account's holds and guesses (`factory hold release`, #376): one record
+ * - `release({account, now})`: a person lifts the account's holds and guesses (`pendulum hold release`, #376): one record
  *   that ends every record of the account made before it (standing), for every serve here, so its hold, its guess and
  *   its back-off count are gone, and a later limit counts from one. It is a served pass's record too, so a serve on an
- *   older Factory, which knows no release, at least ends the guess and the count. Returns what it ended (`list`'s entry),
+ *   older Pendulum, which knows no release, at least ends the guess and the count. Returns what it ended (`list`'s entry),
  *   or null when the records remember nothing of the account, and writes nothing then.
  * - `releasedAt(account, now)`: when the account was last released (ms), while that record is kept; else null.
  * `account` is the hold's key: a declared account's name, or a login's (local.mjs holdOf).

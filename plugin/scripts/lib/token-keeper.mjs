@@ -1,5 +1,5 @@
 // Keep the App's installation token fresh for the length of a job, in memory only. An installation token lives one
-// hour; a worker job may run six. The keeper re-mints before expiry; github.mjs reads it through `getter` and Factory's
+// hour; a worker job may run six. The keeper re-mints before expiry; github.mjs reads it through `getter` and Pendulum's
 // own git through outbox.mjs, each per call, and a call GitHub refuses with 401 has it re-minted once (#405). No file
 // and no environment variable holds it. Beside it the keeper mints a read-only token (a permissions subset of the same
 // installation) for the agent uid on Actions; `onRefresh` hands each fresh one over (agent.mjs writes it into the
@@ -42,7 +42,7 @@ export class TokenKeeper {
       if (this.readToken && this.onRefresh) await this.onRefresh(this);
       if (typeof process.send === "function") {
         process.on("message", (m) => {
-          if (m?.type !== "factory-tokens" || typeof m.write !== "string" || !m.write) return;
+          if (m?.type !== "pendulum-tokens" || typeof m.write !== "string" || !m.write) return;
           this.token = m.write;
           this.issued.push(m.write);
           mask(m.write);
@@ -51,7 +51,7 @@ export class TokenKeeper {
             this.issued.push(m.read);
             mask(m.read);
           }
-          if (this.onRefresh) Promise.resolve().then(() => this.onRefresh(this)).catch((e) => process.stderr.write(`[factory] token hand-over failed: ${e.message}\n`));
+          if (this.onRefresh) Promise.resolve().then(() => this.onRefresh(this)).catch((e) => process.stderr.write(`[pendulum] token hand-over failed: ${e.message}\n`));
         });
         // The channel keeps no process alive on its own: the stage's work does.
         process.channel?.unref?.();
@@ -59,7 +59,7 @@ export class TokenKeeper {
     }
     if (!this.fixed) {
       await this.refresh();
-      this.timer = setInterval(() => this.refresh().catch((e) => process.stderr.write(`[factory] token refresh failed: ${e.message}\n`)), this.refreshMs);
+      this.timer = setInterval(() => this.refresh().catch((e) => process.stderr.write(`[pendulum] token refresh failed: ${e.message}\n`)), this.refreshMs);
       this.timer.unref();
     }
     return this;
@@ -85,7 +85,7 @@ export class TokenKeeper {
     this.expiresAt = Number.isFinite(expires) ? expires : null;
     this.issued.push(minted.token);
     this.app = minted;
-    // Factory writes as the App's bot: only its own markers, and people who can push, are trusted (logic.mjs isSelf).
+    // Pendulum writes as the App's bot: only its own markers, and people who can push, are trusted (logic.mjs isSelf).
     if (minted.appSlug) setSelf(`${minted.appSlug}[bot]`);
     mask(this.token);
     if (this.wantRead) {

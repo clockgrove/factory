@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Factory worker job: one Objective, one branch, one PR.
+// Pendulum worker job: one Objective, one branch, one PR.
 //   node scripts/worker.mjs --repo OWNER/NAME --issue N [--checkout DIR] [--usage-dir DIR]
-// Steps: doctor's job checks; checkout factory/<issue> from the default branch;
+// Steps: doctor's job checks; checkout pendulum/<issue> from the default branch;
 // write the plugin's skills and agent definitions into the checkout (git-excluded);
-// setup and the lockfile's install; render the task card and $FACTORY_IN, and launch the
-// harness headless under a wall clock; read what it left in $FACTORY_OUT (lib/handoff.mjs),
+// setup and the lockfile's install; render the task card and $PENDULUM_IN, and launch the
+// harness headless under a wall clock; read what it left in $PENDULUM_OUT (lib/handoff.mjs),
 // push its commits and open or update the PR from pr.md, the plan comment from plan.md;
-// run the repository's validation as Factory's own pass (two at most, failures sent
+// run the repository's validation as Pendulum's own pass (two at most, failures sent
 // back to the same harness); decide the exit (delivered, question, blocked); move the
 // card, set the label, draft/comment/request as the exit says; write usage/events.jsonl
 // and usage/result.json for the artifact. The harness writes nothing to GitHub.
@@ -56,8 +56,8 @@ import { openEditCheck } from "./lib/edit-check.mjs";
  * merging (a send-back), or the default branch changing a workflow file during the run (outbox.mjs catchUp).
  */
 export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "after a sibling merged" }) {
-  const here = `Your branch ${branch} fell behind ${defaultBranch} ${cause}, and \`git rebase origin/${defaultBranch}\` conflicts. Rebase it onto origin/${defaultBranch} (Factory has fetched it; never fetch or pull), resolve each conflict keeping both the default branch's change and this Objective's intent.`;
-  return `${prompt.trimEnd()}\n\n---\n\n${here} Run the validation commands, commit, and stop: Factory pushes the branch. Do not ask questions.`;
+  const here = `Your branch ${branch} fell behind ${defaultBranch} ${cause}, and \`git rebase origin/${defaultBranch}\` conflicts. Rebase it onto origin/${defaultBranch} (Pendulum has fetched it; never fetch or pull), resolve each conflict keeping both the default branch's change and this Objective's intent.`;
+  return `${prompt.trimEnd()}\n\n---\n\n${here} Run the validation commands, commit, and stop: Pendulum pushes the branch. Do not ask questions.`;
 }
 
 /**
@@ -93,14 +93,14 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
   if (!left) return "";
   // Local mode keeps what the pass left in the Objective's clone (outbox.mjs setAside), and the Block says how to deliver it.
   const kept = await Promise.resolve(outbox.setAside?.()).catch(() => null);
-  const clone = issue ? `the Objective's local clone (\`.factory/${issue}/repo\`)` : "the Objective's local clone";
+  const clone = issue ? `the Objective's local clone (\`.pendulum/${issue}/repo\`)` : "the Objective's local clone";
   const resume = !kept
     ? ""
     : kept.removed
       ? `; this pass left nothing to keep, so the result of an earlier one kept on the branch \`${kept.name}\` of ${clone} was removed`
       : kept.failed
         ? `; its result could not be kept on a branch of ${clone} (the local loop's log says why)`
-        : `; the conflict pass's result is kept as ${kept.sha} on the branch \`${kept.name}\` of ${clone}. To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Factory's push checks did not run on it), then run \`git push --force-with-lease origin ${kept.name}:${kept.branch}\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`;
+        : `; the conflict pass's result is kept as ${kept.sha} on the branch \`${kept.name}\` of ${clone}. To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Pendulum's push checks did not run on it), then run \`git push --force-with-lease origin ${kept.name}:${kept.branch}\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`;
   const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed${resume}`;
   outbox.block(why);
   log(why);
@@ -140,7 +140,7 @@ export async function answerGuard({ repo, issue, check, decisions, label, appId 
     const code = Number.isInteger(e?.status) ? `HTTP ${e.status}` : String(e?.message || e).slice(0, 120);
     const reason = `the comments since the Question give no decision on it, but its notice could not be written on the issue (${code}), so no comment would resume it`;
     log(reason);
-    await applyExitNow(repo, { issue, pr: null, exit: "blocked", reason, cause: "factory", notify, stage: "work" }, opts).catch((x) => log(`exit: ${String(x?.message || x).slice(0, 120)}`));
+    await applyExitNow(repo, { issue, pr: null, exit: "blocked", reason, cause: "pendulum", notify, stage: "work" }, opts).catch((x) => log(`exit: ${String(x?.message || x).slice(0, 120)}`));
     await finish("blocked", reason);
     return true;
   }
@@ -150,7 +150,7 @@ export async function answerGuard({ repo, issue, check, decisions, label, appId 
 
 async function main() {
   const jobStartMs = Date.now();
-  // Factory's own temp directory, 700 and out of the agent's reach; the harness and its commands keep the stage's TMPDIR.
+  // Pendulum's own temp directory, 700 and out of the agent's reach; the harness and its commands keep the stage's TMPDIR.
   const tmp = privateTmp();
   const args = parseArgs(process.argv.slice(2));
   // On an account (#267) its credential is the step's own input alone, never a job-level variable (accounts.mjs routeInputs).
@@ -160,17 +160,17 @@ async function main() {
   const repo = repoOf(inputs.repo);
   const issue = inputs.issue;
   let checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
-  const usageDir = resolve(args.usage_dir || process.env.FACTORY_USAGE_DIR || join(checkout, "..", `factory-usage-${issue}`));
+  const usageDir = resolve(args.usage_dir || process.env.PENDULUM_USAGE_DIR || join(checkout, "..", `pendulum-usage-${issue}`));
   mkdirSync(usageDir, { recursive: true });
   const eventsFile = join(usageDir, "events.jsonl");
   const deadlineAt = deadline(jobStartMs, inputs.timeoutMinutes);
   // This machine's network (lib/network.mjs): a GitHub call, a git command or a harness pass that cannot leave it waits
-  // in place for its host to answer, up to FACTORY_LOCAL_WAIT_MINUTES (fifteen by default) on the local route (then the stage ends paused, for serve to
+  // in place for its host to answer, up to PENDULUM_LOCAL_WAIT_MINUTES (fifteen by default) on the local route (then the stage ends paused, for serve to
   // resume) and up to the work's deadline elsewhere, where the dispatcher relaunches a stage the network ended. GitHub's
   // primary rate limit spent is the same wait, to its reset: one past that bound ends the stage at once (paused locally,
   // Blocked elsewhere).
   const local = backend().name === "local";
-  // The repository's usage-limit waits and, locally, the in-place bound (FACTORY_LOCAL_WAIT_MINUTES).
+  // The repository's usage-limit waits and, locally, the in-place bound (PENDULUM_LOCAL_WAIT_MINUTES).
   stageLimits(inputs, { local });
   waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
   const protectedList = protectedPaths(inputs.protectedAdditions);
@@ -190,10 +190,10 @@ async function main() {
   // job (an installation token lives an hour; a job may run six) and the children
   // read it from a file, so a six-hour harness session never holds a stale token.
   // The write token in memory; on Actions the agent uid, its read-only token and its own clone (session.mjs openAccess).
-  const factoryTree = checkout;
+  const pendulumTree = checkout;
   let access;
   try {
-    access = await openAccess({ inputs, repo, args, given: factoryTree });
+    access = await openAccess({ inputs, repo, args, given: pendulumTree });
   } catch (e) {
     // Its token's mint could not reach GitHub (lib/app-token.mjs): the outage's end, before any other.
     if (!unreachable(e)) throw e;
@@ -221,7 +221,7 @@ async function main() {
   // A send-back's rebase stage ({conflict}): its end writes the rebase line and this Objective's rebases so far (#277).
   let rebaseStage = null;
   // Automatic account choice on GitHub Actions and the cloud sandbox (lib/route-holds.mjs routeLimits, #268): a usage
-  // limit holds this stage's account in Factory's records on GitHub, and the Objective goes on on a free one.
+  // limit holds this stage's account in Pendulum's records on GitHub, and the Objective goes on on a free one.
   let limits = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
   const finish = async (exit, reason, outage = null, usageLimit = null) => {
@@ -244,10 +244,10 @@ async function main() {
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, usageLimit, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, usageLimit, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
-      // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
-      dropOwned(tmp.factory);
+      // Only now, and whatever happened: the transcript's archive above is made in Pendulum's temp directory (its TMPDIR).
+      dropOwned(tmp.pendulum);
     }
     log(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}; basis ${usage.basis}`);
     // Blocked on its account's usage limit with no reset reported: automatic account choice passes the account over a while.
@@ -280,7 +280,7 @@ async function main() {
     setOutput("usd", usage.usd === null ? "" : String(usage.usd));
     if (process.env.GITHUB_STEP_SUMMARY) {
       const { appendFileSync } = await import("node:fs");
-      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory #${issue}: ${exit}\n\n${redactSecrets(reason || "")}\n\nPR: ${pr ? `#${pr.number}` : "none"} · USD: ${usage.usd ?? "unmetered"} (${usage.basis}) · passes: ${passes}\n`);
+      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum #${issue}: ${exit}\n\n${redactSecrets(reason || "")}\n\nPR: ${pr ? `#${pr.number}` : "none"} · USD: ${usage.usd ?? "unmetered"} (${usage.basis}) · passes: ${passes}\n`);
     }
   };
 
@@ -289,7 +289,7 @@ async function main() {
   try {
     await run();
   } catch (e) {
-    // A harness start Factory refused (local mode: the clone's git): Blocked with a fixed reason, the detail in the log.
+    // A harness start Pendulum refused (local mode: the clone's git): Blocked with a fixed reason, the detail in the log.
     const refused = refusalExit(e, { stage: "work", issue });
     if (refused) {
       log(e.message.slice(0, 300));
@@ -314,7 +314,7 @@ async function main() {
     log(`worker crashed: ${e.message.slice(0, 300)}`);
     // A system error by its code and call alone: its message names a path on this machine (postedError).
     const reason = `worker crashed: ${postedError(e, { log: "the stage's log" }).slice(0, 200)}`;
-    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "pendulum", notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
     await finish("blocked", reason);
     throw e;
   }
@@ -329,9 +329,9 @@ async function main() {
   // 1. The issue.
   let issueData = await getIssue(repo, issue, token);
   const labels = (issueData.labels || []).map((l) => l.name);
-  // A draft (factory:draft) never runs, its Objective label on or not (lib/stop.mjs stopCause): nothing is claimed or spent.
+  // A draft (pendulum:draft) never runs, its Objective label on or not (lib/stop.mjs stopCause): nothing is claimed or spent.
   if (stopCause(issueData, inputs.objectiveLabel) === "draft") {
-    log(`#${issue} is a draft (${DRAFT_LABEL}); Factory never runs a draft; nothing to do`);
+    log(`#${issue} is a draft (${DRAFT_LABEL}); Pendulum never runs a draft; nothing to do`);
     await finish("skipped", `a draft (${DRAFT_LABEL})`);
     return;
   }
@@ -341,14 +341,14 @@ async function main() {
     return;
   }
 
-  // A restart is pending (factory:restart): the dispatcher restarts it from its current text first.
+  // A restart is pending (pendulum:restart): the dispatcher restarts it from its current text first.
   if (stopCause(issueData, inputs.objectiveLabel) === "restart") {
     log(`#${issue} has ${RESTART_LABEL}: the dispatcher restarts it first; nothing to do here`);
     await finish("skipped", `a restart is pending (${RESTART_LABEL})`);
     return;
   }
 
-  // A local loop holds this Objective (factory run / serve on a developer box): the Actions job steps aside.
+  // A local loop holds this Objective (pendulum run / serve on a developer box): the Actions job steps aside.
   if (await backend().trigger.stepsAside(repo, issue, token, issueData)) {
     log(`#${issue} is held by a local loop; nothing to do here`);
     await finish("skipped", "held by a local loop");
@@ -364,7 +364,7 @@ async function main() {
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
     if (rebaseStage) stoppedRebase(progress, rebaseStage.conflict, recs);
-    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records: recs, passes, exit: "stopped", reason: why, credentialBasis: credentialBasis, reentry, workerKey: relay ? relay.totals() : null });
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records: recs, passes, exit: "stopped", reason: why, credentialBasis: credentialBasis, reentry, workerKey: relay ? relay.totals() : null });
     progress.flushNow();
   };
   const stopNow = async (cause) => {
@@ -397,7 +397,7 @@ async function main() {
     return;
   }
   issueData = trusted.issueData;
-  const prNow = await findPr(repo, `factory/${issue}`, token).catch(() => null);
+  const prNow = await findPr(repo, `pendulum/${issue}`, token).catch(() => null);
 
   // The harness and models this Objective runs on (objective-trust.mjs choiceGate): its harness and model labels, read
   // with the text, over the repository's defaults; a label no writer applied, two of one kind, a model the harness cannot
@@ -410,9 +410,9 @@ async function main() {
   }
   Object.assign(inputs, chosen.inputs);
   chosenLabels = chosen.labels;
-  // A foundation Objective (`factory:foundation`): its rebased PR keeps its review only when that covers the foundation pass.
+  // A foundation Objective (`pendulum:foundation`): its rebased PR keeps its review only when that covers the foundation pass.
   const foundation = !!chosen.foundation;
-  // The hosts its approved `factory:host:` labels open, for this stage's sandboxes alone (local.mjs openStageHosts).
+  // The hosts its approved `pendulum:host:` labels open, for this stage's sandboxes alone (local.mjs openStageHosts).
   openStageHosts(chosen.hosts);
   if (chosen.hosts.length) log(`this Objective's host labels open ${chosen.hosts.join(", ")} to its sandboxes`);
   // The account it runs on off local mode (objective-trust.mjs accountGate, #267): the one its labels pick, when the
@@ -428,7 +428,7 @@ async function main() {
     await finish("blocked", acct.reason);
     return;
   }
-  progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
+  progress.ran(ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT));
   limits = local || !acct.account ? null : routeLimits({ repo, issue, stage: "work", harness: inputs.harness, account: acct.account, pinned: acct.pinned, opts: token });
   if (limits) LIMIT.elsewhere = limits.elsewhere;
   if (limits) LIMIT.hold = limits.hold;
@@ -439,7 +439,7 @@ async function main() {
   if (chosen.labels.length) log(`this Objective's labels choose ${chosen.labels.join(", ")}: ${inputs.harness}${inputs.model ? ` ${inputs.model}` : ""}`);
 
   // 2. Doctor's job checks, for the harness this Objective runs on: a misconfigured repository Blocks with one line, not a run.
-  const checks = await jobChecks({ inputs, repo, token: keeper.token, app, checkout: factoryTree, notice: !!access.notice });
+  const checks = await jobChecks({ inputs, repo, token: keeper.token, app, checkout: pendulumTree, notice: !!access.notice });
   const failed = checks.filter((c) => c.status === "FAIL");
   for (const c of checks) log(`${c.status} ${c.name}${c.detail ? `: ${c.detail}` : ""}${c.fix && c.status !== "PASS" ? ` — fix: ${c.fix}` : ""}`);
   if (failed.length) {
@@ -496,7 +496,7 @@ async function main() {
   const named = declaredQuestion(issueData.body, { source: repo, label: inputs.objectiveLabel });
   if (named) {
     log(`plan-time Question: ${named}`);
-    const asking = await findPr(repo, `factory/${issue}`, token).catch(() => null);
+    const asking = await findPr(repo, `pendulum/${issue}`, token).catch(() => null);
     await applyExit(repo, { issue, pr: asking, exit: "question", reason: named, notify: inputs.notify, stage: "work", askOnIssue: true }, token);
     await finish("question", named);
     return;
@@ -517,26 +517,26 @@ async function main() {
     }
   };
   const decisionsNow = () => objectiveDecisions(repo, { issue, prNumber: prNow?.number ?? null }, token);
-  if (await answerGuard({ repo, issue, check: answerCheck, decisions: decisionsNow, label: inputs.objectiveLabel, appId: inputs.appId || process.env.FACTORY_NOTICE_APP_ID || null, opts: token, prepare: readyDecisions, notify: inputs.notify, finish })) return;
+  if (await answerGuard({ repo, issue, check: answerCheck, decisions: decisionsNow, label: inputs.objectiveLabel, appId: inputs.appId || process.env.PENDULUM_NOTICE_APP_ID || null, opts: token, prepare: readyDecisions, notify: inputs.notify, finish })) return;
 
-  // A workflow change the Objective names (handover.mjs): Factory never pushes one, so the issue says so now, before any
+  // A workflow change the Objective names (handover.mjs): Pendulum never pushes one, so the issue says so now, before any
   // harness runs, and how it goes instead (the hand-over). Most needs show only in the plan or the work: the plan's
   // Needs-Workflow line is said as the harness writes it, and the PR's hand-over carries any found later.
   const namedWorkflows = workflowPathsNamed(`${issueData.title || ""}\n${issueData.body || ""}`);
   if (await handoverUpFront(repo, issue, { named: namedWorkflows }, token).catch((e) => log(`hand-over notice: ${e.message.slice(0, 120)}`))) log(`the issue names ${namedWorkflows.join(", ")}: the workflow hand-over notice is on the issue`);
 
-  // 3. Branch, plugin, git identity. Factory's git runs only in its own mirror (lib/outbox.mjs); what the agent's
-  // checkout needs (the default branch, the Objective's branch, Factory's rebase) reaches it as a bundle, and every git
+  // 3. Branch, plugin, git identity. Pendulum's git runs only in its own mirror (lib/outbox.mjs); what the agent's
+  // checkout needs (the default branch, the Objective's branch, Pendulum's rebase) reaches it as a bundle, and every git
   // command there runs in the agent's sandbox (backend.mjs sandbox.git).
   const repoData = await getRepo(repo, token);
   const defaultBranch = repoData.default_branch || "main";
-  const branch = `factory/${issue}`;
+  const branch = `pendulum/${issue}`;
   // The env every child starts from, sandbox settings included. No GitHub token reaches a child: on Actions the agent
   // reads with its own read-only token; locally nothing.
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
   let outbox;
   try {
-    outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), toolchainPaths: inputs.toolchainPaths, setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.factory });
+    outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), toolchainPaths: inputs.toolchainPaths, setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.pendulum });
     // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
     outbox.beforePush = () => beforeExit?.();
   } catch (e) {
@@ -548,7 +548,7 @@ async function main() {
   }
   const { base, resumed } = outbox;
   const identity = await gitIdentity(app, keeper.getter);
-  // Factory's own commits (its rebases, its merge of a default branch that changed a workflow file) carry its identity.
+  // Pendulum's own commits (its rebases, its merge of a default branch that changed a workflow file) carry its identity.
   const botWho = commitAuthor(identity);
   outbox.author = botWho;
   await configureGit(checkout, { ...identity, protectedList, credentialHelper: access.readHelper || null, env: childBase });
@@ -575,7 +575,7 @@ async function main() {
       ? await enterStage({
           ws: join(usageDir, ".."),
           own: usageDir,
-          now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("factory:running") ? await runningSince(repo, issue, token) : null, text: planText, harness: inputs.harness, login: loginOf(inputs.harness) }),
+          now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("pendulum:running") ? await runningSince(repo, issue, token) : null, text: planText, harness: inputs.harness, login: loginOf(inputs.harness) }),
           holds: (pause) => checkoutHolds((args) => outbox.agentGit(args), branch, pause),
           putOn,
           clean,
@@ -595,7 +595,7 @@ async function main() {
   log(`branch ${branch} from ${defaultBranch}@${base.slice(0, 7)}${resumed ? " (existing branch resumed)" : ""}`);
   // Git LFS before any harness: filters set up in the checkout, the branch's objects handed over (outbox.mjs lfsSetup).
   const lfs = await outbox.lfsSetup(resumed ? outbox.expected() : base, { timeoutMs: remainingMs(deadlineAt) });
-  // Factory's own git work on the checkout is done: locally its git state is recorded, and checked before each harness start.
+  // Pendulum's own git work on the checkout is done: locally its git state is recorded, and checked before each harness start.
   backend(childBase).sandbox.pinGitState(childBase);
   // A runner's harness: the same state, put back before each start (lib/claude-runner.mjs), since the repository's
   // install and validation run as the agent outside the harness's sandbox.
@@ -608,7 +608,7 @@ async function main() {
   }
   const openPr = resumed ? await findPr(repo, branch, token).catch(() => null) : null;
   // Rebase mode: the dispatcher sent an In-review PR back because its branch fell behind the default
-  // branch (no merge queue). Factory rebases in its own mirror, with no model; only a conflict goes to the harness.
+  // branch (no merge queue). Pendulum rebases in its own mirror, with no model; only a conflict goes to the harness.
   let rebaseMode = false;
   let rebaseConflict = false;
   let rebasedTo = null;
@@ -616,9 +616,9 @@ async function main() {
   let rebaseOnto = null;
   // Only the dispatcher's send-back (its rebase marker on the PR) means "rebase and nothing else";
   // a relabel after a Question or Blocked exit brings new decisions and runs the harness.
-  // Factory's own marker only (isSelf): a writer's pasted one is no send-back.
+  // Pendulum's own marker only (isSelf): a writer's pasted one is no send-back.
   if (openPr) await progress.self();
-  // Read once: the covered record on it says what Factory's review covers (session.mjs coveredHead).
+  // Read once: the covered record on it says what Pendulum's review covers (session.mjs coveredHead).
   const prComments = openPr ? await listComments(repo, openPr.number, token).catch(() => []) : [];
   const sentBack = prComments.some((c) => isSelf(c) && (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, "")));
   // A plan made again needs the harness: no rebase-only stage for it. A continued pause was no send-back: it goes on.
@@ -630,16 +630,16 @@ async function main() {
       rebaseConflict = !rebasedTo;
       rebaseStage = { conflict: rebaseConflict };
       if (rebasedTo) {
-        // Exactly the commit Factory's own rebase made is pushed (with its merge of a default branch that changed a
+        // Exactly the commit Pendulum's own rebase made is pushed (with its merge of a default branch that changed a
         // workflow file meanwhile, if any), and the checkout is put on it for validation.
         await outbox.push({ sha: rebasedTo });
-        if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} after the rebase: Factory merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing`);
+        if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} after the rebase: Pendulum merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing`);
         // Pointer files for its Git LFS media first, then the media handed over (outbox.mjs putOnRebased).
         const moved = await outbox.putOnRebased(outbox.head || rebasedTo);
         if (moved.code !== 0) throw commandFailed(`the checkout could not be put on the rebased ${branch}`, { code: moved.code, stderr: moved.error });
         if (moved.warning) log(`warning: ${moved.warning}`);
       }
-      log(`rebase mode: ${behind} commit(s) behind ${defaultBranch}; ${rebaseConflict ? "conflicts, the harness resolves them" : `rebased cleanly to ${rebasedTo.slice(0, 7)} in Factory's mirror, no harness run`}`);
+      log(`rebase mode: ${behind} commit(s) behind ${defaultBranch}; ${rebaseConflict ? "conflicts, the harness resolves them" : `rebased cleanly to ${rebasedTo.slice(0, 7)} in Pendulum's mirror, no harness run`}`);
       if (rebaseConflict) {
         // The record of this rebase on the PR (logic.mjs ontoRecord): once this pass pushes, the dispatcher reads the
         // same conflict on the same base as no progress, and a new base as a new send-back.
@@ -656,7 +656,7 @@ async function main() {
   // 4. setup and the lockfile's install (checkout.mjs installCommand): the model secrets never reach these.
   // A local Objective's first stage on a machine: a fresh clone and a cold install, reported apart from the run's own
   // setup so the bench does not count a one-time cost against every run (bench/lib/phases.mjs: firstSetup).
-  const firstMs = Number(process.env.FACTORY_LOCAL_FIRST_SETUP_MS);
+  const firstMs = Number(process.env.PENDULUM_LOCAL_FIRST_SETUP_MS);
   const first = Number.isFinite(firstMs) && firstMs >= 0;
   if (first) await progress(`first-time setup: cloned in ${Math.round(firstMs / 1000)} s`);
   // What already listens on loopback is no service of the setup's: Claude Code's commands reach only what it starts.
@@ -667,7 +667,7 @@ async function main() {
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
     // One that fails while this machine's network is down runs once more after it is back (checkout.mjs runSetup).
     const tree = access.agent ? await outbox.defaultTree() : checkout;
-    const s = await runSetup({ tree, command: inputs.setup, env: access.agent ? { ...childBase, TMPDIR: tmp.factory } : childBase, asRunner: !!access.agent, deadlineAt, head: "setup failed:" });
+    const s = await runSetup({ tree, command: inputs.setup, env: access.agent ? { ...childBase, TMPDIR: tmp.pendulum } : childBase, asRunner: !!access.agent, deadlineAt, head: "setup failed:" });
     if (!s.ok) {
       const reason = s.reason;
       await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "setup" }, token);
@@ -678,8 +678,8 @@ async function main() {
     Object.assign(childBase, wrote);
     allowAgentEnv(Object.keys(wrote));
   }
-  // Which install runs is read from Factory's own checkout when the agent has a clone of its own.
-  const installTree = access.agent ? factoryTree : checkout;
+  // Which install runs is read from Pendulum's own checkout when the agent has a clone of its own.
+  const installTree = access.agent ? pendulumTree : checkout;
   const install = installCommand(installTree, inputs.install);
   // A continued stage's install that failed on its kept checkout: the pass is told, and finishes it (continue.mjs installEnd).
   let installNote = "";
@@ -707,11 +707,11 @@ async function main() {
   const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
   credentialBasis = cred.basis;
-  // $FACTORY_IN and $FACTORY_OUT: fresh for this stage, so no record from an earlier attempt speaks for this one.
+  // $PENDULUM_IN and $PENDULUM_OUT: fresh for this stage, so no record from an earlier attempt speaks for this one.
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.
   // An opted-in AI Gateway key stays in this process behind the relay; the shell gets its token (lib/worker-relay.mjs).
-  const opened = await openWorkerRelay({ inputs, shell: openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) }), usageDir });
+  const opened = await openWorkerRelay({ inputs, shell: openWorkerSecrets(inputs, { pendulumKey: () => triageKey({ inputs }) }), usageDir });
   relay = opened.relay;
   const shellSecrets = opened.shell;
   // The token, the other values, and the key itself (which the shell no longer holds): masked in what the stage saves.
@@ -721,7 +721,7 @@ async function main() {
     await finish("blocked", opened.blocked);
     return;
   }
-  const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
+  const harnessEnv = { ...childBase, ...cred.env, ...io.env, PENDULUM_ISSUE: String(issue), PENDULUM_BRANCH: branch, ...(inputs.compactionWindow ? { PENDULUM_COMPACTION_WINDOW: inputs.compactionWindow } : {}), PENDULUM_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
   // The decision calls' env from here on: the harness's own (decisionStage, above).
   decisionEnv = harnessEnv;
   // The drift advisory (lib/drift.mjs): a line on the progress comment, never an action.
@@ -733,7 +733,7 @@ async function main() {
   if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
   io.set({ decisions, prNumber: openPr?.number ?? null });
   // The plan-time Question (lib/one-repo.mjs): a repository other than this one that the plan needs, unless a maintainer
-  // has answered about it since a run asked (Factory's own record of the ask, in its progress comments), as the
+  // has answered about it since a run asked (Pendulum's own record of the ask, in its progress comments), as the
   // plan-answer check judges the comments since (lib/plan-answer.mjs). A rebase send-back changes no plan.
   const askedAt = rebaseMode ? {} : planAskedOf(await listComments(repo, issue, token).catch(() => []), { issue, self: await progress.self() });
   const answered = await judgedAnswers(askedAt, decisions, { source: repo, label: inputs.objectiveLabel, check: openPlanAnswerCheck({ inputs, stage: decisionStage }) });
@@ -835,7 +835,7 @@ async function main() {
     const full = !(attempt === 1 && restored?.id) && (attempt === 1 || !session.id);
     // Recorded before the run: a comment posted while it works is unread, and the review's answer pass applies it.
     // Only the decisions that fit the card are recorded; those cut for length stay unread.
-    // A continued session's resumed pass reads them all again from $FACTORY_IN/decisions.md (continue.mjs decisionsFed).
+    // A continued session's resumed pass reads them all again from $PENDULUM_IN/decisions.md (continue.mjs decisionsFed).
     const fed = fedDecisions ? null : decisionsFed({ decisions, full, continued: !!continued, rebaseConflict });
     if (fed) {
       await progress.decisionsRead(decisionsRead(fed));
@@ -847,7 +847,7 @@ async function main() {
       harness: inputs.harness,
       model: inputs.model,
       effort: inputs.effort,
-      prompt: attempt === 1 && restored?.id ? resumedPrompt : full ? (rebaseConflict ? conflictPrompt : workPrompt) : "Your previous process died. Continue the Objective from where the branch and $FACTORY_OUT/plan.md stand; do not redo finished items.",
+      prompt: attempt === 1 && restored?.id ? resumedPrompt : full ? (rebaseConflict ? conflictPrompt : workPrompt) : "Your previous process died. Continue the Objective from where the branch and $PENDULUM_OUT/plan.md stand; do not redo finished items.",
       // A resume the provider refuses for the session alone runs fresh with the whole card (harness.mjs runHarness).
       freshPrompt: (attempt === 1 && restored?.id && !continued) || rebaseConflict ? conflictPrompt : workPrompt,
       maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
@@ -870,7 +870,7 @@ async function main() {
     // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it. A Copilot run that reported
     // no priced credits leaves the cap unenforceable, so nothing more runs.
     if (inputs.maxUsd > 0 && sumSpend(records) >= inputs.maxUsd) rec.budgetExceeded = true;
-    // A Copilot run Factory stopped at its plan writes no usage file: unmetered, but nothing more runs after it (the plan-time
+    // A Copilot run Pendulum stopped at its plan writes no usage file: unmetered, but nothing more runs after it (the plan-time
     // Question skips every later pass), so it is no cap reached and the exit stays the Question.
     if (inputs.maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, rec.stopped ? { unmetered: true } : { budgetExceeded: true, unmetered: true });
     if (rec.refusal) log(`harness ${inputs.harness} was refused by the provider (${rec.error}); not retried`);
@@ -890,12 +890,12 @@ async function main() {
   // Every pass after the work pass (a conflict, a validation fix, the exit record's ask) starts fresh after a pause.
   pauseNow = null;
 
-  // 6. What the run left behind: the hand-off files, commits, protected paths, the PR. Factory pushes and opens the PR;
+  // 6. What the run left behind: the hand-off files, commits, protected paths, the PR. Pendulum pushes and opens the PR;
   // pushes carry no model secret. A stopped Objective's stage goes no further: its stop writes the end.
   await holdIfStopped();
   await io.collect();
-  // A plan that needs a change in another repository (its Needs-Repository line, factory-objective-plan) is a Question at plan
-  // time (lib/one-repo.mjs): the harness stops after its plan, and Factory runs no validation, fix pass or exit-record
+  // A plan that needs a change in another repository (its Needs-Repository line, pendulum-objective-plan) is a Question at plan
+  // time (lib/one-repo.mjs): the harness stops after its plan, and Pendulum runs no validation, fix pass or exit-record
   // call for it. Whatever it committed anyway still goes up, as a draft. A rebase send-back changes no plan.
   const ignoredNeeds = plannedRepos(io.plan()).ignored;
   if (ignoredNeeds) log(`plan: ${ignoredNeeds} Needs-Repository line(s) name no OWNER/NAME (a placeholder): no need`);
@@ -903,7 +903,7 @@ async function main() {
   const needs = needsOf(io.plan()).reason || !stoppedPlan ? needsOf(io.plan()) : needsOf(stoppedPlan);
   const planNeeds = needs.reason || "";
   if (planNeeds) log(`plan-time Question: ${planNeeds}`);
-  // A send-back's conflict pass that left the checkout not the branch rebased onto the base Factory's rebase conflicted
+  // A send-back's conflict pass that left the checkout not the branch rebased onto the base Pendulum's rebase conflicted
   // on (outbox.mjs rebaseLeft: a rebase left in progress, the base not taken, a change of the branch missing from it):
   // nothing of it is pushed, whatever ended the pass. Blocked naming the files and the changes, with no validation run;
   // a cap, death or refusal that ended it stays the reason (decideExit puts those first). A file not exactly the
@@ -911,9 +911,9 @@ async function main() {
   const keptCheck = rebaseOnto ? openKeptCheck({ inputs, stage: decisionStage }) : null;
   const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress, limited: keptCheck?.limited ?? null, issue });
   let pushed = await outbox.push();
-  // The default branch changed a workflow file during the run and the new branch conflicts with Factory's merge of it
+  // The default branch changed a workflow file during the run and the new branch conflicts with Pendulum's merge of it
   // (outbox.mjs catchUp): GitHub would refuse the branch as it is, so the harness resolves the conflict once, as a
-  // send-back's conflict pass does, and Factory pushes again. A second conflict is refused there. A plan-time Question
+  // send-back's conflict pass does, and Pendulum pushes again. A second conflict is refused there. A plan-time Question
   // spends nothing on it: its draft just does not go up.
   const catchConflict = () => !pushed && !!outbox.conflict && !outbox.failed;
   if (catchConflict() && remainingMs(deadlineAt) <= 0) rec.timedOut = true;
@@ -943,18 +943,18 @@ async function main() {
     if (rec.timedOut || rec.budgetExceeded) log(`the conflict pass reached the ${rec.timedOut ? "time" : "dollar"} cap; ${branch} is not pushed`);
     else if (rec.refusal) log(`the conflict pass was refused by the provider (${pass.error}); ${branch} is not pushed`);
     else if (crashed(pass)) outbox.block(`the harness died resolving ${branch}'s conflict with ${defaultBranch} (exit ${pass.exitCode ?? "none"}${pass.signal ? `, ${pass.signal}` : ""}); nothing was pushed`);
-    else if (busy.code !== undefined) outbox.block(`after the conflict pass Factory could not check the checkout for a rebase or merge left in progress (exit ${busy.code}); ${branch} was not pushed`);
+    else if (busy.code !== undefined) outbox.block(`after the conflict pass Pendulum could not check the checkout for a rebase or merge left in progress (exit ${busy.code}); ${branch} was not pushed`);
     else if (busy.ops.length) outbox.block(`the conflict pass left a ${busy.ops.join(" and ")} in progress in the checkout; ${branch} was not pushed`);
     else pushed = await outbox.push();
   }
   // A conflict no pass resolved, and no cap or plan-time Question to name: Blocked with it, not as a run that left no commits.
   if (catchConflict() && !planNeeds && !rec.timedOut && !rec.budgetExceeded && !rec.refusal) outbox.block(outbox.error);
   if (!pushed) log(`push refused: ${outbox.error}${outbox.detail ? ` (GitHub: ${outbox.detail})` : ""}`);
-  else if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} since the branch's base: Factory merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing${outbox.synced ? "" : " (the checkout could not take the merge; the next push builds on it)"}${outbox.lfsWarning ? `; warning: ${outbox.lfsWarning}` : ""}`);
+  else if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} since the branch's base: Pendulum merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing${outbox.synced ? "" : " (the checkout could not take the merge; the next push builds on it)"}${outbox.lfsWarning ? `; warning: ${outbox.lfsWarning}` : ""}`);
   let { pr: found, delta } = await observe(repo, outbox, { branch }, token);
   const hits = protectedTouched(delta.files, protectedList);
   // A split part's PR says `Refs #N`, every other one `Closes #N`. The exit record's `part` decides when the pass wrote
-  // one; a pass that wrote none (a clean rebase, a conflict or fix pass) keeps the part Factory recorded.
+  // one; a pass that wrote none (a clean rebase, a conflict or fix pass) keeps the part Pendulum recorded.
   const priorParts = await partsRecord(repo, issue, token).catch(() => null);
   const partLeft = (record) => (record?.part ? record.part.remaining.length : (pr || found) && isSplitPart(priorParts, (pr || found).number) ? priorParts.remaining : 0);
   const splitNow = () => partLeft(exitFromOut(io.files())) > 0;
@@ -978,10 +978,10 @@ async function main() {
   if (pr?.html_url) progress.link(`PR #${pr.number}`, pr.html_url);
 
 
-  // 7. Factory's own validation passes, failures back to the harness while its fix passes make progress (validationLoop).
+  // 7. Pendulum's own validation passes, failures back to the harness while its fix passes make progress (validationLoop).
   let validation = null;
-  // Hard stops only; a harness that errored but left commits still gets Factory's validation pass.
-  const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, unmetered: rec.unmetered, refusal: rec.refusal }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, unresolved, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
+  // Hard stops only; a harness that errored but left commits still gets Pendulum's validation pass.
+  const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, unmetered: rec.unmetered, refusal: rec.refusal }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, unresolved, sessionCap: sessionCapNote(process.env.PENDULUM_STAGE_SESSION_CAP) });
   if (early.exit !== "blocked" && !planNeeds) {
     validation = await validationLoop({
       onPhase: progress,
@@ -1059,7 +1059,7 @@ async function main() {
     lfsRefused: outbox.lfsRefused,
     lfsQuota: outbox.errorKind === "lfs-quota",
     planNeeds,
-    sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP),
+    sessionCap: sessionCapNote(process.env.PENDULUM_STAGE_SESSION_CAP),
     handoverRefused: handover.refused(),
     handoverOnly: !pr && !delta.count && !!handoverLeft,
   });
@@ -1089,7 +1089,7 @@ async function main() {
     decision.reason = `PR #${pr.number} conflicts with ${defaultBranch} after a sibling merged; the dispatcher sends it back for a rebase`;
     log(decision.reason);
   } else if (decision.exit === "delivered" && pr) {
-    // Delivered means an open, non-draft PR (Factory opens it as a draft until its own validation is green);
+    // Delivered means an open, non-draft PR (Pendulum opens it as a draft until its own validation is green);
     // the review label goes on first, because the App applying it is what fires the review job.
     const head = (await observe(repo, outbox, { branch, prNumber: pr.number }, token)).pr.head.sha;
     // A head handed off with its checks running is not validated: the review stage waits for them (session.mjs
@@ -1098,10 +1098,10 @@ async function main() {
     else await postValidated(repo, pr.number, issue, head, token);
     pr = await markReady(repo, pr, token);
     // A conflicting PR gets no pull_request runs at all (GitHub cannot build its merge ref), so it may reach
-    // rebase mode without a review pass. Reviewed already: the rebased head Factory pushed is recorded as mergeable, and
+    // rebase mode without a review pass. Reviewed already: the rebased head Pendulum pushed is recorded as mergeable, and
     // it merges once its required checks are green (the dispatcher's next tick). Not yet reviewed: relabel (remove,
     // then add) so the review job fires now.
-    // Only Factory's own clean rebase keeps the review: a head the harness made (a conflict resolved, a validation fix)
+    // Only Pendulum's own clean rebase keeps the review: a head the harness made (a conflict resolved, a validation fix)
     // goes back to the reviewer, and nothing of it is recorded mergeable.
     // A foundation Objective's review covers the foundation pass too (handoff.mjs reviewsCover): one reviewed before the
     // label goes back to the review job, which runs that pass alone.
@@ -1113,7 +1113,7 @@ async function main() {
     if (reviewed) {
       const scope = await reviewScope(outbox.git, { reviews: prReviews, comments: prComments, issue, base: outbox.base, head: rebasedTo });
       if (!scope.covered) {
-        log(`PR #${pr.number}: commits since the head Factory's review covers (${String(scope.since || "").slice(0, 7) || "none"}) are more than this rebase; the review job reviews them`);
+        log(`PR #${pr.number}: commits since the head Pendulum's review covers (${String(scope.since || "").slice(0, 7) || "none"}) are more than this rebase; the review job reviews them`);
         reviewed = false;
       }
     }
@@ -1137,7 +1137,7 @@ async function main() {
     // Remove, then add: a label already present (a harness applied it early) fires no labeled event.
     if (decision.exit === "delivered") {
       if (!(rebaseMode && reviewed)) await removeLabel(repo, pr.number, REVIEW_LABEL, token).catch(() => {});
-      // A head no review has seen (the one Factory pushed) waits, unlabelled, while a sibling it conflicts with is ahead
+      // A head no review has seen (the one Pendulum pushed) waits, unlabelled, while a sibling it conflicts with is ahead
       // of it (overlap.mjs reviewHold): the dispatcher labels it once none is, after its one rebase if it conflicts by
       // then. The rebase that follows such a wait goes to review: it is next.
       const held = await reviewHold(repo, { issue, pr, head: outbox?.expected() || pr.head?.sha, autoMerge: inputs.autoMerge, hold: inputs.siblingHold, objectiveLabel: inputs.objectiveLabel, rebaseMode, reviewed, waitMaxMs: inputs.siblingWaitMs }, token, { log });
@@ -1155,7 +1155,7 @@ async function main() {
   const askedAtPlan = decision.exit === "question" && !!planNeeds;
   // Recorded with the ask, so the rerun knows which answer is to it (one-repo.mjs answeredRepos).
   if (askedAtPlan) await progress.planAsked(needs.repos);
-  // Hosts the worker's sandbox denied: the backend names the operator's fix (local mode: FACTORY_LOCAL_DOMAINS). Variables
+  // Hosts the worker's sandbox denied: the backend names the operator's fix (local mode: PENDULUM_LOCAL_DOMAINS). Variables
   // its shell lacked: the opt-in (worker_secrets) and where the value goes on this route.
   const fixes = decision.exit === "blocked" ? [decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null, decision.missingSecrets ? missingSecretsFix(decision.missingSecrets, inputs.workerSecrets, backend().name === "local" ? "local" : "runner") : null].filter(Boolean) : [];
   const fix = fixes.length ? fixes.join(" ") : null;
@@ -1169,7 +1169,7 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
-    process.stderr.write(`[factory] worker failed: ${e.message}\n`);
+    process.stderr.write(`[pendulum] worker failed: ${e.message}\n`);
     process.exit(1);
   });
 }

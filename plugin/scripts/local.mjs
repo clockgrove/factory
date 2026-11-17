@@ -1,26 +1,26 @@
 #!/usr/bin/env node
-// Factory local mode: the same worker and reviewer the Action runs, on a developer's own box.
+// Pendulum local mode: the same worker and reviewer the Action runs, on a developer's own box.
 //   node scripts/local.mjs run <issue> [--repo OWNER/NAME] [--checkout CLONE] [--wait]
-//   node scripts/local.mjs review <pr> [--wait]      (a review re-run, as re-applying factory:review does on Actions)
+//   node scripts/local.mjs review <pr> [--wait]      (a review re-run, as re-applying pendulum:review does on Actions)
 //   node scripts/local.mjs serve [--repo OWNER/NAME] [--checkout CLONE] [--once] [--all] [--interval SECONDS (30)]
 //   node scripts/local.mjs issue <issue> | deliver <issue> | post-review <pr> <findings.json>   (a session's route)
-//   node scripts/local.mjs handover <issue> [--push] [--app ID]   (a person applies Factory's workflow hand-over: read it, then --push)
+//   node scripts/local.mjs handover <issue> [--push] [--app ID]   (a person applies Pendulum's workflow hand-over: read it, then --push)
 //   node scripts/local.mjs wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--interval S] [--timeout S]   (an orchestrator waits on the queue)
 //   node scripts/local.mjs doctor [--json] [--probe] [--verbose] | token set | --version   (readiness check, saving the local token, the release)
 // Without --repo, the repository is the clone's origin remote (lib/local.mjs cloneRepo).
-// Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
-// serve takes only those unless --all (FACTORY_LOCAL_ALL=1). Where no Action runs (GitHub lists no active factory.yml
-// workflow), serve labels each Objective it picks factory:local first. A claim comment with a heartbeat marks one in flight.
+// Routing: an Objective labelled pendulum:local is the local loop's and the Actions path leaves it alone;
+// serve takes only those unless --all (PENDULUM_LOCAL_ALL=1). Where no Action runs (GitHub lists no active pendulum.yml
+// workflow), serve labels each Objective it picks pendulum:local first. A claim comment with a heartbeat marks one in flight.
 // Needs git, gh, the harness CLI (claude or codex logged in; copilot with a Copilot Requests token in
-// COPILOT_GITHUB_TOKEN or ~/.config/factory/copilot-token, plus slirp4netns and iptables on Linux), srt
+// COPILOT_GITHUB_TOKEN or ~/.config/pendulum/copilot-token, plus slirp4netns and iptables on Linux), srt
 // (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
-// fine-grained token for this one repository, in FACTORY_LOCAL_TOKEN or ~/.config/factory/tokens/<owner>/<name>
+// fine-grained token for this one repository, in PENDULUM_LOCAL_TOKEN or ~/.config/pendulum/tokens/<owner>/<name>
 // (contents, issues and pull requests read and write; actions and variables read). That token is all the GitHub reach the
-// model gets. No App needed (one in FACTORY_LOCAL_APP_ID posts the notices), no vendor, no API key; GitHub holds
-// every piece of state, and the box holds one clone per Objective under <clone>/.factory/<issue>/. Factory's own setup, install and validation commands run in the
+// model gets. No App needed (one in PENDULUM_LOCAL_APP_ID posts the notices), no vendor, no API key; GitHub holds
+// every piece of state, and the box holds one clone per Objective under <clone>/.pendulum/<issue>/. Pendulum's own setup, install and validation commands run in the
 // same sandbox as the harness, since they run on a tree the model edited. A sandbox has no route to the box's
-// services: with FACTORY_LOCAL_DB=1 every validation command runs through plugin/bin/factory-db, which starts a fresh
-// Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
+// services: with PENDULUM_LOCAL_DB=1 every validation command runs through plugin/bin/pendulum-db, which starts a fresh
+// Postgres inside the sandbox (init step: PENDULUM_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
@@ -38,7 +38,7 @@ const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { FACTORY_VERSION, LOCAL_BOUNDS, holdSecrets, input, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -59,7 +59,7 @@ import { bwrapShim, claudeEnvText, localTools, stageCommands } from "./lib/copil
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
-import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningFactory, runningName, startProblem } from "./lib/release.mjs";
+import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningPendulum, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
@@ -109,16 +109,16 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
   const named = windowOf(window);
   const moves = auto
     ? free.length
-      ? `Free now: ${free.map((n) => `\`${n}\``).join(", ")}. This machine chooses accounts by itself, so \`factory serve\` here resumes this Objective on a free one at its next tick, with no label; a \`factory:account:<name>\` label still pins it to one account.`
-      : `No other ${h} account on this machine is free now. This machine chooses accounts by itself, so \`factory serve\` here resumes this Objective on the first ${h} account that comes free.`
+      ? `Free now: ${free.map((n) => `\`${n}\``).join(", ")}. This machine chooses accounts by itself, so \`pendulum serve\` here resumes this Objective on a free one at its next tick, with no label; a \`pendulum:account:<name>\` label still pins it to one account.`
+      : `No other ${h} account on this machine is free now. This machine chooses accounts by itself, so \`pendulum serve\` here resumes this Objective on the first ${h} account that comes free.`
     : free.length
-      ? `Free now: ${free.map((n) => `\`${n}\` (apply \`factory:account:${n}\`)`).join(", ")}. Applying one moves this Objective to that account: \`factory serve\` on this machine starts its stage there at once, and every later stage runs there while the label stays.`
+      ? `Free now: ${free.map((n) => `\`${n}\` (apply \`pendulum:account:${n}\`)`).join(", ")}. Applying one moves this Objective to that account: \`pendulum serve\` on this machine starts its stage there at once, and every later stage runs there while the label stays.`
       : `No other ${h} account on this machine is free now.`;
   const head = guessed
     ? free.length
-      ? `Factory: the ${stage} stage paused on a usage limit. ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate.`
-      : `Factory: the ${stage} stage paused on a usage limit. Every ${h} account on this machine is held; ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate. Factory resumes this Objective on this machine then, or sooner on an account that comes free.`
-    : `Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Factory resumes this Objective on this machine after then.`;
+      ? `Pendulum: the ${stage} stage paused on a usage limit. ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate.`
+      : `Pendulum: the ${stage} stage paused on a usage limit. Every ${h} account on this machine is held; ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate. Pendulum resumes this Objective on this machine then, or sooner on an account that comes free.`
+    : `Pendulum: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Pendulum resumes this Objective on this machine after then.`;
   return [head, "", moves, ...(note ? ["", note] : [])].join("\n");
 }
 
@@ -132,7 +132,7 @@ export const PAUSED_BEAT_MS = 60 * 60_000;
 const twoPinsLine = (labels) => `${labels.map(pinLabelText).join(", ")}: more than one account label moves nothing, so the Objective waits, on no account, until one is left`;
 
 /** What a Blocked notice tells a person to do about an account label this machine cannot act on (#265). */
-const PIN_FIX = "Apply one `factory:account:<name>` naming an account of this Objective's harness that this machine declares (~/.config/factory/accounts.json; doctor.mjs --local lists them), as a person who can push, or remove the label to run on the harness's default account; then re-apply `factory:objective`.";
+const PIN_FIX = "Apply one `pendulum:account:<name>` naming an account of this Objective's harness that this machine declares (~/.config/pendulum/accounts.json; doctor.mjs --local lists them), as a person who can push, or remove the label to run on the harness's default account; then re-apply `pendulum:objective`.";
 /** Whether a stage's result.json shows a pass its provider served (output or credits), with no usage limit ending it. */
 /** A usage limit or quota that Blocked it with no reset reported (`limitRefused`) is a refusal too, never a served pass. */
 const servedPass = (r) => !r.usageLimit && !r.limitRefused && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
@@ -141,14 +141,14 @@ export const PIN_RETRY_MS = 10 * 60_000;
 /** The least time between two switches to a new pinned release (followPin), so a pin that keeps moving cannot hold the loop. */
 export const SWITCH_GAP_MS = 30 * 60_000;
 /** The env name a serve that started again on a new release (restartOn) learns when it last switched from. */
-const SWITCHED_ENV = "FACTORY_SERVE_SWITCHED_AT";
+const SWITCHED_ENV = "PENDULUM_SERVE_SWITCHED_AT";
 /** The env name that tells a serve started again on a new release where it came from, for a failure at its start (main). */
-const SWITCHED_FROM_ENV = "FACTORY_SERVE_SWITCHED_FROM";
+const SWITCHED_FROM_ENV = "PENDULUM_SERVE_SWITCHED_FROM";
 const SWITCHED_FROM = process.env[SWITCHED_FROM_ENV] || "";
 delete process.env[SWITCHED_FROM_ENV];
 /** The first wait before the start's read of the repository's variables is tried again (Local.startVariables). */
 export const START_VARIABLES_MS = 15_000;
-/** How many times backfillMark tries to write the mark of a factory:local label this process put on. */
+/** How many times backfillMark tries to write the mark of a pendulum:local label this process put on. */
 const MARK_TRIES = 5;
 /** How often a running serve fetches the default branch's workflow (refreshSettings); every tick uses the last read. */
 export const SETTINGS_EVERY_MS = 3 * 60_000;
@@ -170,7 +170,7 @@ const DISK_CODES = new Set(["ENOSPC", "EDQUOT"]);
 /**
  * A failed start's cause, on structure only. `kind`: the claim's read or write (`claim-read`, `claim`), else the step of
  * the stage's set-up that failed (`clone`, `prepare`: the clone's preparation in its sandbox, `setup`: any other).
- * `code`: a system or network code (ENOSPC, ECONNREFUSED), GitHub's HTTP status, a command's exit, or Factory's own
+ * `code`: a system or network code (ENOSPC, ECONNREFUSED), GitHub's HTTP status, a command's exit, or Pendulum's own
  * code; null when the error carries none, and such a failure is never put down to the machine.
  */
 export function startCause(e) {
@@ -189,7 +189,7 @@ const PROBE_FIX = {
   disk: "free disk space on this machine (the error above names the path)",
   clone: "check this machine's network to github.com, and that the local token still reads the repository",
   api: "check this machine's network to GitHub's API, GitHub's status, and that the local token still reads the repository",
-  sandbox: "make the sandbox start again (`factory doctor` names what fails)",
+  sandbox: "make the sandbox start again (`pendulum doctor` names what fails)",
   retry: "fix the error above",
 };
 const PROBE_WAIT = { disk: `${START_DISK_FLOOR / 1024 ** 3} GB free on its disk`, clone: "`git ls-remote` of the repository passing with the local token", api: "GitHub's API reading the repository with the local token", sandbox: "the sandbox starting", retry: "one start tried again after the backoff" };
@@ -203,11 +203,11 @@ const sandboxProblemsNow = async () => {
 };
 export const COPILOT_OUTER_OFF = "local mode runs Copilot only inside the outer sandbox, which does not start on this host";
 /** The Blocked reason when Copilot's outer sandbox stopped starting after serve began: fixed text, no probe output. */
-export const copilotOuterReason = "local mode: Copilot runs locally only inside the outer sandbox, which no longer starts on this machine (outer-sandbox); the local loop's log says why; run the Objective with FACTORY_HARNESS=claude or codex, or on the Action";
+export const copilotOuterReason = "local mode: Copilot runs locally only inside the outer sandbox, which no longer starts on this machine (outer-sandbox); the local loop's log says why; run the Objective with PENDULUM_HARNESS=claude or codex, or on the Action";
 /** The Blocked reason when the sandboxes' scan for protected paths fails its check at a stage's start (lib/local.mjs writeNestedGitScan). */
 export const loginLinkReason = "local mode: a login file of the harness login this stage runs on links into another harness login on this machine (login-link), which the stage's harness would then read; the local loop's log names the path; make that login's files its own";
-/** The Blocked reason when a harness-state path Factory makes before a stage leads where it may not make it (lib/local.mjs homePlaces). */
-export const homeLinkReason = "local mode: a path Factory makes in the harness's state folder before each stage leads, through a link, outside the folders this stage's login may write or into a login or credential store, passes a file or a loop of links, or is a file where the harness keeps a folder (home-link); the local loop's log names the path; create it yourself or remove the link";
+/** The Blocked reason when a harness-state path Pendulum makes before a stage leads where it may not make it (lib/local.mjs homePlaces). */
+export const homeLinkReason = "local mode: a path Pendulum makes in the harness's state folder before each stage leads, through a link, outside the folders this stage's login may write or into a login or credential store, passes a file or a loop of links, or is a file where the harness keeps a folder (home-link); the local loop's log names the path; create it yourself or remove the link";
 export const sandboxScanReason = "local mode: the sandboxes' scan for protected paths (ripgrep, sandbox-scan) failed its check on this machine; the local loop's log says why; check that `rg` on PATH runs";
 const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
 
@@ -218,20 +218,20 @@ const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
 const WHERE = { repo: { value: "OWNER/NAME" }, checkout: { value: "CLONE" } };
 export const COMMANDS = {
   run: { args: ["issue"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: "one Objective, from the stage its state calls for (with --wait, to merged)" },
-  serve: { args: [], flags: { ...WHERE, once: "bool", all: "bool", interval: { value: "SECONDS", number: true }, verbose: "bool" }, about: "a loop: the dispatcher's rules every --interval seconds (30); --verbose also names every setting left at Factory's defaults" },
+  serve: { args: [], flags: { ...WHERE, once: "bool", all: "bool", interval: { value: "SECONDS", number: true }, verbose: "bool" }, about: "a loop: the dispatcher's rules every --interval seconds (30); --verbose also names every setting left at Pendulum's defaults" },
   review: { args: ["pr"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: "a review re-run" },
   doctor: { args: [], flags: { ...WHERE, json: "bool", probe: "bool", "run-setup": "bool", verbose: "bool" }, about: "whether this clone, its repository and this machine are ready for local mode, each check PASS, WARN or FAIL with its fix (doctor.mjs --local); exits 1 on a FAIL" },
   token: {
     args: ["set"],
     flags: WHERE,
-    usage: "factory token set [--repo OWNER/NAME] [--checkout CLONE]",
+    usage: "pendulum token set [--repo OWNER/NAME] [--checkout CLONE]",
     check: (f) => (f._[1] !== "set" ? `token takes set, not ${JSON.stringify(f._[1])}` : null),
     about: "save the repository's local token where local mode reads it, owner-only: asked for without echo, or read from stdin; never printed",
   },
   issue: { args: ["issue"], flags: { ...WHERE, out: { value: "PATH" } }, about: "the issue as a session reads it" },
-  deliver: { args: ["issue"], flags: { ...WHERE, out: { value: "PATH" } }, about: "Factory's half of an Objective worked in a session" },
+  deliver: { args: ["issue"], flags: { ...WHERE, out: { value: "PATH" } }, about: "Pendulum's half of an Objective worked in a session" },
   "post-review": { args: ["pr", "findings.json"], flags: WHERE, about: "post a session's reviewer pass" },
-  handover: { args: ["issue"], flags: { ...WHERE, push: "bool", app: { value: "ID", number: true } }, about: "put Factory's workflow hand-over on a new branch and show it, then stop for you to read it (--push: commit, push and open its pull request)" },
+  handover: { args: ["issue"], flags: { ...WHERE, push: "bool", app: { value: "ID", number: true } }, about: "put Pendulum's workflow hand-over on a new branch and show it, then stop for you to read it (--push: commit, push and open its pull request)" },
   wait: {
     args: [],
     more: "issue",
@@ -243,7 +243,7 @@ export const COMMANDS = {
     args: ["list|release"],
     more: "account",
     flags: { repo: WHERE.repo },
-    usage: "factory hold list [--repo OWNER/NAME] | factory hold release <account> [--repo OWNER/NAME]",
+    usage: "pendulum hold list [--repo OWNER/NAME] | pendulum hold release <account> [--repo OWNER/NAME]",
     check: (f) => {
       const [, what, ...others] = f._;
       if (what !== "list" && what !== "release") return `hold takes list or release, not ${JSON.stringify(what)}`;
@@ -254,12 +254,12 @@ export const COMMANDS = {
     about: "the usage-limit holds of this machine's accounts (with --repo, of GitHub Actions and the cloud sandbox), or release one account's: every serve may start on it again at its next tick",
   },
 };
-const usageOf = (cmd) => COMMANDS[cmd].usage ?? `factory ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...(COMMANDS[cmd].more ? [`[<${COMMANDS[cmd].more}>...]`] : []), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
+const usageOf = (cmd) => COMMANDS[cmd].usage ?? `pendulum ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...(COMMANDS[cmd].more ? [`[<${COMMANDS[cmd].more}>...]`] : []), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
 /** The usage text: one command's, or every command's. */
 export const usage = (cmd = null) =>
   cmd
     ? `usage: ${usageOf(cmd)}\n  ${COMMANDS[cmd].about}\n`
-    : `usage:\n${Object.keys(COMMANDS).map((c) => `  ${usageOf(c)}\n      ${COMMANDS[c].about}\n`).join("")}  factory --version\n      this Factory release's version\nWithout --repo, the repository is the origin remote of the clone (--checkout, else here).\n`;
+    : `usage:\n${Object.keys(COMMANDS).map((c) => `  ${usageOf(c)}\n      ${COMMANDS[c].about}\n`).join("")}  pendulum --version\n      this Pendulum release's version\nWithout --repo, the repository is the origin remote of the clone (--checkout, else here).\n`;
 
 /**
  * The command line, checked before anything runs: {help, cmd} for --help or -h anywhere, else {cmd, flags, _}. Throws an
@@ -354,19 +354,19 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
  * machineSettings) keeps the shell's value whatever the repository says. What a stage may reach or receive, spend, protect or be set up with, and
  * the harness, are taken only when serve starts.
  */
-export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_SIBLING_HOLD", "FACTORY_REBASE_LIMIT", "FACTORY_GUESS_HOURS"];
+export const HOT_SETTINGS = ["PENDULUM_MAX_CONCURRENT", "PENDULUM_LOCAL_MAX_CONCURRENT", "PENDULUM_MODEL", "PENDULUM_SUBAGENT_MODEL", "PENDULUM_REVIEWER_MODEL", "PENDULUM_EFFORT", "PENDULUM_REVIEWER_EFFORT", "PENDULUM_VALIDATION", "PENDULUM_LOCAL_VALIDATION", "PENDULUM_RESUME_POLICY", "PENDULUM_PROMPT_CACHE_TTL", "PENDULUM_SIBLING_HOLD", "PENDULUM_REBASE_LIMIT", "PENDULUM_GUESS_HOURS"];
 
 /**
  * What changed between two sets of the repository's settings (settingLayers's values), one `NAME: old → new` each, in
  * name order, with the layer the new value comes from when `layers` (settingLayers's `from`) is given; one this shell
- * sets (inputs.mjs machineSettings: a FACTORY_LOCAL_* name, the harness, models and session settings) says that the
+ * sets (inputs.mjs machineSettings: a PENDULUM_LOCAL_* name, the harness, models and session settings) says that the
  * shell's value still wins, as in baseEnv. Values are the workflow's or a variable's own (no secret is ever one: `${{ }}`
  * values are not read), cut at 80 characters.
  */
 export function settingsChanges(before = {}, after = {}, env = process.env, layers = null) {
   const shell = machineSettings(env);
   const show = (v) => (v === undefined ? "unset" : JSON.stringify(v.length > 80 ? `${v.slice(0, 77)}...` : v));
-  const layer = (k) => (!layers ? "" : after[k] === undefined ? " (Factory's default)" : layers[k] === "variable" ? " (repository variable)" : " (workflow)");
+  const layer = (k) => (!layers ? "" : after[k] === undefined ? " (Pendulum's default)" : layers[k] === "variable" ? " (repository variable)" : " (workflow)");
   return [...new Set([...Object.keys(before), ...Object.keys(after)])]
     .filter((k) => before[k] !== after[k])
     .sort()
@@ -386,7 +386,7 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   const problems = [];
   if (!onPath("git")) problems.push("git is not on PATH; install git (https://git-scm.com/downloads)");
   if (!onPath("gh")) problems.push("gh is not on PATH; install the GitHub CLI (https://cli.github.com)");
-  if (!onPath("srt")) problems.push("srt is not on PATH; Factory's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime)");
+  if (!onPath("srt")) problems.push("srt is not on PATH; Pendulum's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime)");
   if (!onPath("rg")) problems.push("rg (ripgrep) is not on PATH; the sandbox needs it");
   if (platform() === "linux") for (const bin of ["bwrap", "socat"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; the sandbox needs it (sudo apt-get install -y bubblewrap socat)`);
   const startProblems = platform() === "linux" && onPath("srt") && onPath("bwrap") ? sandboxStartProblems() : [];
@@ -394,7 +394,7 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   if (platform() === "win32") problems.push("native Windows has no sandbox for the harness; run local mode inside WSL2");
   // macOS's sandbox has no network namespace of its own: a throwaway Postgres there would listen on the box's loopback.
   // Whichever source set it: the shell's value, else the workflow's (baseEnv), which every stage then runs with.
-  if (os === "darwin" && (env.FACTORY_LOCAL_DB ?? wf.FACTORY_LOCAL_DB ?? "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
+  if (os === "darwin" && (env.PENDULUM_LOCAL_DB ?? wf.PENDULUM_LOCAL_DB ?? "") === "1") problems.push("PENDULUM_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
   problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length, account, env: account ? accountEnv(env, account) : env }));
   if (!token) problems.push(noTokenLine(repoFull));
   return problems;
@@ -424,16 +424,16 @@ export function harnessProblems(harness, copilotToken, { outer = outerProbe, san
     if (platform() === "linux") for (const bin of ["slirp4netns", "iptables", "iptables-restore", "ip6tables", "ip6tables-restore"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; Copilot's sandbox needs it (sudo apt-get install -y slirp4netns iptables)`);
     // Probed only where it can start at all; off Linux outerProbe answers without starting anything.
     if (platform() !== "linux" || (["srt", "bwrap", "copilot"].every(onPath) && sandboxStarts)) {
-      // Without the developer's own COPILOT_HOME: the probe makes and seeds the home it is given, and Factory leaves theirs alone.
+      // Without the developer's own COPILOT_HOME: the probe makes and seeds the home it is given, and Pendulum leaves theirs alone.
       const { COPILOT_HOME: _own, ...env } = given;
       const o = outer("copilot", { env, account });
-      if (!o.on) problems.push(`${COPILOT_OUTER_OFF}: ${o.why}; use FACTORY_HARNESS=claude or codex locally, or run Copilot Objectives on the Action${o.cacheFile ? ` (a yes is kept in ${o.cacheFile})` : ""}`);
+      if (!o.on) problems.push(`${COPILOT_OUTER_OFF}: ${o.why}; use PENDULUM_HARNESS=claude or codex locally, or run Copilot Objectives on the Action${o.cacheFile ? ` (a yes is kept in ${o.cacheFile})` : ""}`);
     }
   }
   return problems;
 }
 
-export const copilotTokenFile = (home = homedir()) => join(home, ".config", "factory", "copilot-token");
+export const copilotTokenFile = (home = homedir()) => join(home, ".config", "pendulum", "copilot-token");
 function copilotToken() {
   if (process.env.COPILOT_GITHUB_TOKEN) return process.env.COPILOT_GITHUB_TOKEN.trim();
   const f = copilotTokenFile();
@@ -467,13 +467,13 @@ export function stageRelay({ logFile, prefix, write = (s) => process.stdout.writ
 }
 
 /** Local settings for this process only, never copied into a stage's env: the token, where the App's key is, and automatic account choice. */
-const HOST_ONLY = ["FACTORY_LOCAL_TOKEN", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", AUTO_ACCOUNT_ENV];
+const HOST_ONLY = ["PENDULUM_LOCAL_TOKEN", "PENDULUM_LOCAL_APP_ID", "PENDULUM_LOCAL_APP_KEY", AUTO_ACCOUNT_ENV];
 
 /** How often serve tries a refused local token again (a 401 GitHub gave for a moment); tests lower it. */
 export const REFUSED_PROBE = { ms: 60_000 };
 
 /** Where the local token comes from, to name in a log line: the variable or the file, never the value. */
-const tokenSource = (repoFull) => (process.env.FACTORY_LOCAL_TOKEN ? "FACTORY_LOCAL_TOKEN (then start serve again)" : tokenFile(repoFull));
+const tokenSource = (repoFull) => (process.env.PENDULUM_LOCAL_TOKEN ? "PENDULUM_LOCAL_TOKEN (then start serve again)" : tokenFile(repoFull));
 
 /** Whether a listed repository's `permissions` (its person's, as GitHub lists them) let that person push to it. */
 const personPushes = (p) => !!(p.push || p.maintain || p.admin);
@@ -487,11 +487,11 @@ const personPushes = (p) => !!(p.push || p.maintain || p.admin);
  * (push, maintain or admin), when this repository's owner owns it, or when it is listed with no permissions; others are
  * out of its write reach. A probe is an issue with no title, refused before anything is created, with 422 where the token
  * may write and 403 or 404 where it may not. A listing that fails, more than `max` repositories to probe
- * (FACTORY_LOCAL_TOKEN_PROBE_MAX), or a probe that gets any other answer refuses the token, since its reach is then
+ * (PENDULUM_LOCAL_TOKEN_PROBE_MAX), or a probe that gets any other answer refuses the token, since its reach is then
  * unknown; that error carries `again`, as a check worth making again later. GitHub's rate limit on a probe ends the
  * check there: one probe at a time, each thrown at once rather than waited out, and no probe after it.
  */
-export async function checkToken(repoFull, token, { max = LOCAL_BOUNDS.FACTORY_LOCAL_TOKEN_PROBE_MAX.fallback } = {}) {
+export async function checkToken(repoFull, token, { max = LOCAL_BOUNDS.PENDULUM_LOCAL_TOKEN_PROBE_MAX.fallback } = {}) {
   if (!token.startsWith("github_pat_")) throw new Error("the local token must be a fine-grained token limited to this repository; a classic token or a gh login reaches every repository you can");
   const unknownReach = (message) => Object.assign(new Error(message), { again: true });
   let reach;
@@ -506,7 +506,7 @@ export async function checkToken(repoFull, token, { max = LOCAL_BOUNDS.FACTORY_L
   const owner = repoFull.split("/")[0].toLowerCase();
   const sameOwner = (r) => String(r.full_name).split("/")[0].toLowerCase() === owner;
   const toProbe = others.filter((r) => !r.permissions || typeof r.permissions !== "object" || personPushes(r.permissions) || sameOwner(r)).map((r) => r.full_name);
-  if (toProbe.length > max) throw new Error(`the local token lists ${toProbe.length} other repositories it could write to, more than the ${max} Factory probes for write access (FACTORY_LOCAL_TOKEN_PROBE_MAX); make a token whose repository access is limited to ${repoFull}, or raise the setting`);
+  if (toProbe.length > max) throw new Error(`the local token lists ${toProbe.length} other repositories it could write to, more than the ${max} Pendulum probes for write access (PENDULUM_LOCAL_TOKEN_PROBE_MAX); make a token whose repository access is limited to ${repoFull}, or raise the setting`);
   const writable = [];
   const unknown = [];
   for (const name of toProbe) {
@@ -522,32 +522,32 @@ export async function checkToken(repoFull, token, { max = LOCAL_BOUNDS.FACTORY_L
   if (unknown.length) throw unknownReach(`the local token's write access to ${unknown.length} other repositor${unknown.length === 1 ? "y" : "ies"} could not be probed (${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ", ..." : ""}); try again`);
 }
 
-/** The issue a PR is a review trigger for: on factory/<issue>, labelled factory:review, not a draft; else 0. */
-export const reviewIssue = (pr) => (pr?.draft || !(pr?.labels || []).some((l) => l.name === REVIEW_LABEL) ? 0 : Number(/^factory\/(\d+)$/.exec(pr?.head?.ref || "")?.[1]) || 0);
+/** The issue a PR is a review trigger for: on pendulum/<issue>, labelled pendulum:review, not a draft; else 0. */
+export const reviewIssue = (pr) => (pr?.draft || !(pr?.labels || []).some((l) => l.name === REVIEW_LABEL) ? 0 : Number(/^pendulum\/(\d+)$/.exec(pr?.head?.ref || "")?.[1]) || 0);
 /**
- * The issue a PR may be an answered Question's review cue for (#339): on factory/<issue>, open, out of draft and not
+ * The issue a PR may be an answered Question's review cue for (#339): on pendulum/<issue>, open, out of draft and not
  * labelled for review (that is reviewIssue's); else 0. pendingReviews checks the issue is a Question and a ready mark.
  */
-export const readyIssue = (pr) => (!pr || pr.draft || pr.state === "closed" || labelled(pr, REVIEW_LABEL) ? 0 : Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]) || 0);
+export const readyIssue = (pr) => (!pr || pr.draft || pr.state === "closed" || labelled(pr, REVIEW_LABEL) ? 0 : Number(/^pendulum\/(\d+)$/.exec(pr.head?.ref || "")?.[1]) || 0);
 /**
- * Whether the PR was marked ready after the issue last became a Question (`askedAt`, its last factory:question label):
+ * Whether the PR was marked ready after the issue last became a Question (`askedAt`, its last pendulum:question label):
  * a Question's exit drafts the PR before it labels the issue, so a PR GitHub kept out of draft then has no mark after it.
  */
 export const readyAfter = (prEvents, askedAt) => !!askedAt && (prEvents || []).some((e) => e?.event === "ready_for_review" && Date.parse(e.created_at) > Date.parse(askedAt));
-/** An issue labelled factory:blocked. */
-export const isBlocked = (issue) => (issue?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:blocked");
+/** An issue labelled pendulum:blocked. */
+export const isBlocked = (issue) => (issue?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "pendulum:blocked");
 const labelled = (item, name) => (item?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === name);
 
 /**
- * The stage an Objective's state calls for when a loop takes it up (serve's resume, `factory run`): "review" for its open,
+ * The stage an Objective's state calls for when a loop takes it up (serve's resume, `pendulum run`): "review" for its open,
  * non-draft PR labelled for review; "work" while the issue is Running; "merge" while it is In review with an open,
- * non-draft PR (reviewed, waiting for its merge); else null. `pr` is the open PR on factory/<issue>, or null.
+ * non-draft PR (reviewed, waiting for its merge); else null. `pr` is the open PR on pendulum/<issue>, or null.
  */
 export function stageFor({ pr, issue }) {
   const open = pr && pr.state !== "closed" && !pr.draft;
   if (open && labelled(pr, REVIEW_LABEL)) return "review";
-  if (labelled(issue, "factory:running")) return "work";
-  if (open && labelled(issue, "factory:in-review")) return "merge";
+  if (labelled(issue, "pendulum:running")) return "work";
+  if (open && labelled(issue, "pendulum:in-review")) return "merge";
   return null;
 }
 
@@ -642,7 +642,7 @@ export function liveStage(ws) {
 export const liveStageLine = (issue, live) =>
   live.sure
     ? `#${issue}: a stage of this Objective is running on this machine (pid ${live.pid}); stop it (kill ${live.pid}, which pauses it) or let it end`
-    : `#${issue}: ${live.file} names pid ${live.pid} as a running stage of this Objective, and this machine cannot tell whether it still is; if pid ${live.pid} is no Factory worker, delete that file`;
+    : `#${issue}: ${live.file} names pid ${live.pid} as a running stage of this Objective, and this machine cannot tell whether it still is; if pid ${live.pid} is no Pendulum worker, delete that file`;
 
 /** A GitHub read, tried `tries` times with a growing wait; then an error that names it and says nothing was started. */
 async function retried(what, fn, { tries = 3, waitMs = 2_000 } = {}) {
@@ -657,7 +657,7 @@ async function retried(what, fn, { tries = 3, waitMs = 2_000 } = {}) {
 }
 
 /**
- * serve's line for the Queued Objectives it does not take because they lack factory:local (dispatch's `unrouted`): how
+ * serve's line for the Queued Objectives it does not take because they lack pendulum:local (dispatch's `unrouted`): how
  * many, which, and what to do. `action`: actionState's answer, "live" (the Action takes them) or null (unread).
  */
 export function unroutedLine(numbers, action) {
@@ -665,19 +665,19 @@ export function unroutedLine(numbers, action) {
   const shown = numbers.slice(0, 10).map((x) => `#${x}`).join(", ") + (n > 10 ? ` and ${n - 10} more` : "");
   const head = `${n} queued Objective${n === 1 ? "" : "s"} without ${LOCAL_LABEL} (${shown})`;
   if (action !== "live") return `${head}: this loop takes only Objectives labelled ${LOCAL_LABEL}, and whether an Action runs them could not be read; add ${LOCAL_LABEL} to one to run it on this machine`;
-  return `${head} ${n === 1 ? "is" : "are"} the Action's: its factory.yml workflow is active. To run one on this machine instead, add ${LOCAL_LABEL} to it. (serve --all is for a repository whose Action should not run Objectives: with the Action active, both would race for every Objective without ${LOCAL_LABEL})`;
+  return `${head} ${n === 1 ? "is" : "are"} the Action's: its pendulum.yml workflow is active. To run one on this machine instead, add ${LOCAL_LABEL} to it. (serve --all is for a repository whose Action should not run Objectives: with the Action active, both would race for every Objective without ${LOCAL_LABEL})`;
 }
 
 /**
  * Whether GitHub's Action runs Objectives in `repo` (#455), from the repository's workflow list (one read): "live" when
- * it lists .github/workflows/factory.yml as active, "none" when it lists it disabled or deleted, or answers with the
+ * it lists .github/workflows/pendulum.yml as active, "none" when it lists it disabled or deleted, or answers with the
  * whole list and no such workflow; null for anything else (a failed read, a 404 or 403 a token without Actions read
  * gets, a list cut short, an unknown state): unknown, which changes nothing.
  */
 export async function readActionState(repo, opts) {
   const list = await rest(`repos/${repo.full}/actions/workflows?per_page=100`, { ...opts, noRateWait: true }).catch(() => null);
   if (!list || !Array.isArray(list.workflows)) return null;
-  const w = list.workflows.find((x) => x?.path === ".github/workflows/factory.yml");
+  const w = list.workflows.find((x) => x?.path === ".github/workflows/pendulum.yml");
   if (!w) return Number(list.total_count) === list.workflows.length ? "none" : null;
   return w.state === "active" ? "live" : /^(disabled_\w+|deleted)$/.test(w.state ?? "") ? "none" : null;
 }
@@ -690,9 +690,9 @@ export function pluginLine(committed) {
 
 export class Local {
   constructor(flags) {
-    // This process is the local backend: the dispatcher it runs in-process routes factory:local Objectives here.
-    process.env.FACTORY_LOCAL = "1";
-    if (flags.all) process.env.FACTORY_LOCAL_ALL = "1";
+    // This process is the local backend: the dispatcher it runs in-process routes pendulum:local Objectives here.
+    process.env.PENDULUM_LOCAL = "1";
+    if (flags.all) process.env.PENDULUM_LOCAL_ALL = "1";
     // Canonical, so every sandbox path derived from it is real (lib/local.mjs refuses one that resolves elsewhere).
     this.dev = cloneTop(resolve(flags.checkout || process.cwd()));
     this.repoFull = cloneRepo(this.dev, flags.repo);
@@ -701,19 +701,19 @@ export class Local {
     // The workflow's settings as committed on the default branch (#122), never this working tree's, whatever branch is
     // checked out: as the Action runs the reviewed workflow. A working tree that differs is named (doctor too).
     const committed = committedWorkflowEnv(this.dev);
-    // serve reads the default branch's workflow again at each tick (refreshSettings), and follows its Factory pin (followPin).
+    // serve reads the default branch's workflow again at each tick (refreshSettings), and follows its Pendulum pin (followPin).
     this.settingsBranch = committed.branch;
     this.pins = committed.pins || [];
     // A workflow that does not parse holds settings no one can read (protected paths, maintainers, caps): nothing starts.
-    if (committed.parseError) throw new Error(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}; fix the file on ${committed.branch} and start again`);
-    if (committed.error) log(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`);
+    if (committed.parseError) throw new Error(`local mode reads its settings from the default branch's .github/workflows/pendulum.yml: ${committed.error}; fix the file on ${committed.branch} and start again`);
+    if (committed.error) log(`local mode reads its settings from the default branch's .github/workflows/pendulum.yml: ${committed.error}, so it uses none`);
     for (const line of workflowDriftLines(readWorkflowEnv(this.dev), committed)) log(line);
     const plugin = pluginLine(committed);
     if (plugin) log(plugin);
-    // The workflow file is repository content: only its settings reach a stage, never a name Factory reads as its own
-    // control (#119). Every other FACTORY_* name in it is dropped and named here (doctor warns too).
+    // The workflow file is repository content: only its settings reach a stage, never a name Pendulum reads as its own
+    // control (#119). Every other PENDULUM_* name in it is dropped and named here (doctor warns too).
     const wf = workflowSettings(committed.wf);
-    if (wf.dropped.length) log(`.github/workflows/factory.yml: ${wf.dropped.join(", ")} ${wf.dropped.length === 1 ? "is" : "are"} no Factory setting; left out of every stage`);
+    if (wf.dropped.length) log(`.github/workflows/pendulum.yml: ${wf.dropped.join(", ")} ${wf.dropped.length === 1 ? "is" : "are"} no Pendulum setting; left out of every stage`);
     this.workflowWf = wf.kept;
     this.wf = wf.kept;
     this.token = localToken(this.repoFull);
@@ -722,7 +722,7 @@ export class Local {
   /**
    * Whether the Action runs Objectives here (readActionState, for this loop's repository, --repo's when given), read at
    * most once per settings interval (SETTINGS_EVERY_MS) and kept across an unknown read. Said when it is first known and
-   * when it changes: with none, the Objectives this loop picks without factory:local get the label (dispatch `adopt`).
+   * when it changes: with none, the Objectives this loop picks without pendulum:local get the label (dispatch `adopt`).
    */
   async actionState() {
     const every = this.settingsEveryMs ?? SETTINGS_EVERY_MS;
@@ -730,23 +730,23 @@ export class Local {
     this.actionReadAt = Date.now();
     const now = await readActionState(this.repo, this.opts ?? { token: this.token });
     if (now === null) {
-      if (this.action === undefined && !this.actionUnreadSaid) log(`whether GitHub's Action runs Objectives in ${this.repoFull} could not be read (its factory.yml workflow): this loop takes only those labelled ${LOCAL_LABEL} until it can`);
+      if (this.action === undefined && !this.actionUnreadSaid) log(`whether GitHub's Action runs Objectives in ${this.repoFull} could not be read (its pendulum.yml workflow): this loop takes only those labelled ${LOCAL_LABEL} until it can`);
       this.actionUnreadSaid = true;
       return this.action ?? null;
     }
     if (now !== this.action) {
-      if (now === "none") log(`no Action runs Objectives in ${this.repoFull} (no active factory.yml workflow): this loop takes the Objectives without ${LOCAL_LABEL} too, and labels each ${LOCAL_LABEL} as it picks it`);
-      else if (this.action === "none") log(`GitHub's Action runs Objectives in ${this.repoFull} now (its factory.yml workflow is active): it takes the Objectives without ${LOCAL_LABEL}; those labelled ${LOCAL_LABEL} stay this machine's`);
+      if (now === "none") log(`no Action runs Objectives in ${this.repoFull} (no active pendulum.yml workflow): this loop takes the Objectives without ${LOCAL_LABEL} too, and labels each ${LOCAL_LABEL} as it picks it`);
+      else if (this.action === "none") log(`GitHub's Action runs Objectives in ${this.repoFull} now (its pendulum.yml workflow is active): it takes the Objectives without ${LOCAL_LABEL}; those labelled ${LOCAL_LABEL} stay this machine's`);
     }
     this.action = now;
     return now;
   }
 
   /**
-   * Factory's mark of the factory:local label this process itself put on `issue` (serve's pick or `factory run`, left in
+   * Pendulum's mark of the pendulum:local label this process itself put on `issue` (serve's pick or `pendulum run`, left in
    * `unmarked` when its own write could not be made: a failed post, a timeline that did not show the event yet), written
-   * at the claim's start and its heartbeats (lib/local.mjs markLocalRoute), so the scorer counts the label as Factory's.
-   * Only those: Factory posts as the developer here, so any other factory:local label of this login may be their own,
+   * at the claim's start and its heartbeats (lib/local.mjs markLocalRoute), so the scorer counts the label as Pendulum's.
+   * Only those: Pendulum posts as the developer here, so any other pendulum:local label of this login may be their own,
    * and stays a person's action. Ends when the mark is there, a person put the label on now, or after MARK_TRIES reads
    * that show no such label event; an adoption whose loop stopped first stays unmarked, a person's action in the score.
    */
@@ -758,19 +758,19 @@ export class Local {
     tries.set(issue, tried);
     if (r.marked || r.person || tried >= MARK_TRIES) {
       this.unmarked.delete(issue);
-      if (!r.marked && !r.person) log(`#${issue}: Factory's mark of its ${LOCAL_LABEL} label is still not written after ${tried} tries (${r.why}); the label counts as a person's action`);
+      if (!r.marked && !r.person) log(`#${issue}: Pendulum's mark of its ${LOCAL_LABEL} label is still not written after ${tried} tries (${r.why}); the label counts as a person's action`);
       return;
     }
-    if (tried === 1) log(`#${issue}: Factory's mark of its ${LOCAL_LABEL} label is not written yet (${r.why}); tried again at the next heartbeat, up to ${MARK_TRIES} times`);
+    if (tried === 1) log(`#${issue}: Pendulum's mark of its ${LOCAL_LABEL} label is not written yet (${r.why}); tried again at the next heartbeat, up to ${MARK_TRIES} times`);
   }
 
-  /** Labels `issue` factory:local, said once, when no Action runs here: `factory run` on it, as serve's pick does (#455). */
+  /** Labels `issue` pendulum:local, said once, when no Action runs here: `pendulum run` on it, as serve's pick does (#455). */
   async adoptForRun(issue, data) {
     if (hasLocalLabel(data) || (await this.actionState()) !== "none") return;
     await adoptLocal(this.repo, issue, this.opts ?? { token: this.token }).then(
       (m) => {
         if (!m.marked) (this.unmarked ??= new Set()).add(issue);
-        log(`#${issue}: labelled ${LOCAL_LABEL}, since no Action runs Objectives here: this machine's loop tends it${m.marked ? "" : `; Factory's mark of that label is not written yet (${m.why}), so a later tick of the loop that holds it writes it`}`);
+        log(`#${issue}: labelled ${LOCAL_LABEL}, since no Action runs Objectives here: this machine's loop tends it${m.marked ? "" : `; Pendulum's mark of that label is not written yet (${m.why}), so a later tick of the loop that holds it writes it`}`);
       },
       (e) => log(`#${issue}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); add it, or no loop tends this Objective's merge while none runs here`),
     );
@@ -783,7 +783,7 @@ export class Local {
    */
   takeSettings() {
     this.startSettings();
-    this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
+    this.harness = (process.env.PENDULUM_HARNESS || this.wf.PENDULUM_HARNESS || "claude").toLowerCase();
     // This machine's declared accounts (lib/accounts.mjs): the loop's harness starts on its default one, checked here as
     // every stage checks them again; a declaration that cannot be used starts nothing, naming the accounts only.
     const accounts = loadAccounts({ home: homedir(), env: process.env, roots: sandboxRoots(this.dev) });
@@ -794,9 +794,9 @@ export class Local {
     if (auto.problem) log(auto.problem);
     if (auto.on) log(`${AUTO_ACCOUNT_ENV}=1: a stage with no account label starts on a free account of its harness, the one limited least recently, then in turn`);
     this.copilotToken = this.harness === "copilot" ? copilotTokenOf(this.startAccount) : "";
-    const problems = accounts.ok ? [] : accounts.problems.map((p) => `account ${p.account} (~/.config/factory/accounts.json): ${p.why}`);
+    const problems = accounts.ok ? [] : accounts.problems.map((p) => `account ${p.account} (~/.config/pendulum/accounts.json): ${p.why}`);
     problems.push(...preflight(this.harness, this.repoFull, this.token, this.copilotToken, { wf: this.wf, account: this.startAccount }));
-    // The Factory App, when configured, posts the notices (#2522). Its key stays in this process: a stage asks for a
+    // The Pendulum App, when configured, posts the notices (#2522). Its key stays in this process: a stage asks for a
     // notice token over its IPC channel (stage()), and nothing else, env or file, carries the key or the token.
     const startEnv = accountEnv(process.env, this.startAccount);
     const { app, problem } = localApp(startEnv, homedir(), this.harness);
@@ -812,7 +812,7 @@ export class Local {
       token: this.token,
       notice: this.notice,
       get project() {
-        return settings().FACTORY_PROJECT || "";
+        return settings().PENDULUM_PROJECT || "";
       },
     };
     // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim. A serve
@@ -842,13 +842,13 @@ export class Local {
 
   /**
    * The start's settings, logged once nothing stops the start (takeSettings): each one set, named once with its layer,
-   * this machine's own included, and each variable ignored. Every setting left at Factory's default is named only with
+   * this machine's own included, and each variable ignored. Every setting left at Pendulum's default is named only with
    * --verbose (`verbose`); with none set and none ignored, nothing is said.
    */
   logSettings(verbose = this.verbose) {
     const lines = layerLines(settingLayers({ workflow: this.workflowWf, variables: this.variables || {}, machine: machineSettings(process.env) }), { defaults: !!verbose });
     if (!lines.length) return;
-    log(`settings, each over the one below (Factory's defaults, the workflow${this.settingsBranch ? ` on origin/${this.settingsBranch}` : ""}, the repository's variables, this machine)${verbose ? "" : "; --verbose names the ones left at Factory's defaults too"}:`);
+    log(`settings, each over the one below (Pendulum's defaults, the workflow${this.settingsBranch ? ` on origin/${this.settingsBranch}` : ""}, the repository's variables, this machine)${verbose ? "" : "; --verbose names the ones left at Pendulum's defaults too"}:`);
     for (const line of lines) log(`  ${line}`);
   }
 
@@ -886,19 +886,19 @@ export class Local {
   async init({ serve = false } = {}) {
     await this.startVariables({ serve });
     this.takeSettings();
-    await checkToken(this.repoFull, this.token, { max: this.bounded("FACTORY_LOCAL_TOKEN_PROBE_MAX") });
+    await checkToken(this.repoFull, this.token, { max: this.bounded("PENDULUM_LOCAL_TOKEN_PROBE_MAX") });
     if (this.notice) {
       const minted = await this.notice().catch((e) => {
-        throw new Error(`local mode cannot start: the Factory App (FACTORY_LOCAL_APP_ID ${process.env.FACTORY_LOCAL_APP_ID}) gave no token for ${this.repoFull}: ${e.message.slice(0, 200)}; check the id, the key, and that the App is installed on this repository`);
+        throw new Error(`local mode cannot start: the Pendulum App (PENDULUM_LOCAL_APP_ID ${process.env.PENDULUM_LOCAL_APP_ID}) gave no token for ${this.repoFull}: ${e.message.slice(0, 200)}; check the id, the key, and that the App is installed on this repository`);
       });
       log(`notices post as ${minted.appSlug}[bot]`);
       const c = noticeAppCheck(minted);
       log(`${c.status} ${c.name}: ${c.detail}`);
     }
-    // Before any run: a repository that uses Postgres needs FACTORY_LOCAL_DB=1 here, or its database commands fail (#2601).
+    // Before any run: a repository that uses Postgres needs PENDULUM_LOCAL_DB=1 here, or its database commands fail (#2601).
     for (const c of localDatabaseChecks({ checkout: this.dev, env: process.env, wf: this.wf })) log(`${c.status} ${c.name}: ${c.detail}${c.status !== "PASS" ? ` — fix: ${c.fix}` : ""}`);
     this.codexSelfTest(this.harness, accountEnv(process.env, this.startAccount));
-    await ensureLabel(this.repo, LOCAL_LABEL, "0e8a16", "Factory: run this Objective in a developer's local loop, not on Actions", this.opts).catch((e) => log(`label ${LOCAL_LABEL}: ${e.message.slice(0, 120)}`));
+    await ensureLabel(this.repo, LOCAL_LABEL, "0e8a16", "Pendulum: run this Objective in a developer's local loop, not on Actions", this.opts).catch((e) => log(`label ${LOCAL_LABEL}: ${e.message.slice(0, 120)}`));
     return this;
   }
 
@@ -908,7 +908,7 @@ export class Local {
    */
   codexSelfTest(harness = this.harness, env = process.env) {
     if (harness !== "codex") return;
-    const probe = 'f="$HOME/.factory-sandbox-check"; if touch "$f" 2>/dev/null; then rm -f "$f"; exit 9; fi';
+    const probe = 'f="$HOME/.pendulum-sandbox-check"; if touch "$f" 2>/dev/null; then rm -f "$f"; exit 9; fi';
     try {
       execFileSync("codex", ["sandbox", ...codexLocalConfig({ domains: this.domains(), clone: this.dev, env }), "--", "sh", "-c", probe], { cwd: this.dev, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
     } catch (e) {
@@ -922,7 +922,7 @@ export class Local {
    * over this loop's settings, read before the stage's sandbox is set up for it, and the hosts its approved host labels
    * open (`hosts`: stageEnv sets this stage's sandboxes up with them). Another harness than the loop's is checked on this
    * machine as the loop's own was at its start (harnessReady), on the account the stage runs on: the one its
-   * `factory:account:<name>` label pins it to (pinFor, #265; its labeler read afresh at each stage start), else its
+   * `pendulum:account:<name>` label pins it to (pinFor, #265; its labeler read afresh at each stage start), else its
    * harness's default (accountFor). A pin this machine cannot act on (an untrusted labeler, a name no account of its
    * harness has) Blocks; two pins start nothing ({ok: false, wait}: the Objective waits, never Blocked). With automatic
    * account choice on (#266) and no pin, the account is chosen (autoAccount, `auto`) among those ready here, preferring
@@ -952,10 +952,10 @@ export class Local {
         else unready = pick.unready;
       }
     } catch (e) {
-      // Only a declaration that cannot be used Blocks, with its fixed reason; any other failure is Factory's own.
+      // Only a declaration that cannot be used Blocks, with its fixed reason; any other failure is Pendulum's own.
       if (e?.code !== "account" || typeof e.reason !== "string") throw e;
       log(`#${issue}: refusing to run: ${e.message}`);
-      return { ok: false, reason: e.reason, fix: "Fix those accounts in ~/.config/factory/accounts.json on this machine (doctor.mjs --local names what is wrong with each), then re-apply `factory:objective`." };
+      return { ok: false, reason: e.reason, fix: "Fix those accounts in ~/.config/pendulum/accounts.json on this machine (doctor.mjs --local names what is wrong with each), then re-apply `pendulum:objective`." };
     }
     if (pin.problem) {
       // A Block: the kept labeler check goes with it, so whatever is applied next is read afresh.
@@ -969,14 +969,14 @@ export class Local {
       // Each account's problems are in this machine's log already (accountReady); GitHub gets the names alone.
       const h = HARNESS_NAMES[harness] || harness;
       log(`#${issue}: no ${h} account can run here: ${unready.map((u) => u.name).join(", ")}`);
-      return { ok: false, reason: `local mode on this machine cannot run ${h} on any of its accounts (${unready.map((u) => `\`${u.name}\``).join(", ")}); the loop's log names what is missing for each`, fix: "Set those accounts' logins up on this machine (doctor.mjs --local checks each), then re-apply `factory:objective`." };
+      return { ok: false, reason: `local mode on this machine cannot run ${h} on any of its accounts (${unready.map((u) => `\`${u.name}\``).join(", ")}); the loop's log names what is missing for each`, fix: "Set those accounts' logins up on this machine (doctor.mjs --local checks each), then re-apply `pendulum:objective`." };
     }
     if (pin.account) account = pin.account;
     const problems = this.harnessReady(harness, account);
     if (!problems.length) return { ok: true, harness, hosts: chosen.hosts, account, ...(pin.account ? { pinned: true, pin: pin.label } : {}), ...(auto ? { auto } : {}) };
     // What is missing stays in this machine's log: a path or a probe's output never reaches GitHub (block()).
     log(`#${issue}: ${harness} cannot run here: ${problems.join("; ")}`);
-    return { ok: false, reason: `local mode on this machine cannot run ${harness}, which this Objective's harness label asks for; the loop's log names what is missing`, fix: "Set that harness up on this machine (doctor.mjs --local with FACTORY_HARNESS set to it names what is missing) and re-apply `factory:objective`, or run the Objective where that harness is set up." };
+    return { ok: false, reason: `local mode on this machine cannot run ${harness}, which this Objective's harness label asks for; the loop's log names what is missing`, fix: "Set that harness up on this machine (doctor.mjs --local with PENDULUM_HARNESS set to it names what is missing) and re-apply `pendulum:objective`, or run the Objective where that harness is set up." };
   }
 
   /**
@@ -1089,7 +1089,7 @@ export class Local {
   /**
    * The name of the account the Objective's newest earlier stage on this machine ran on while that stage's prompt cache
    * is still warm (its `result.json` `cacheWarmUntil`, session.mjs cacheWarmUntil: its last pass's end plus the cache
-   * lifetime Factory sets), else null: automatic choice keeps the Objective there while it is free (#391).
+   * lifetime Pendulum sets), else null: automatic choice keeps the Objective there while it is free (#391).
    */
   warmOn(issue, own = null) {
     const r = lastStage(this.ws(issue), own)?.result;
@@ -1105,7 +1105,7 @@ export class Local {
   }
 
   /**
-   * The account an Objective's `factory:account:<name>` label pins its `harness` stages to (#265), from `names`, the
+   * The account an Objective's `pendulum:account:<name>` label pins its `harness` stages to (#265), from `names`, the
    * issue's labels as last read: {account} (null with no label: the harness's default), {account: null, two} (more than
    * one label: no move, the Objective waits) or {account: null, problem} (a fixed line naming the label: one whose latest
    * labeler cannot push, or a name that is no account of this harness on this machine). The labeler is read from the
@@ -1126,7 +1126,7 @@ export class Local {
   }
 
   /**
-   * Why Factory does not act on account label `label` on `issue` (objective-trust.mjs labelsVouched: its latest
+   * Why Pendulum does not act on account label `label` on `issue` (objective-trust.mjs labelsVouched: its latest
    * labeler, or with `event` "unlabeled" its latest remover, cannot push and is no pinned maintainer), or null. With `at`
    * (the issue's `updated_at` as a listing read it) the answer is kept for that label, event and `at`: any change to the
    * issue's labels moves `at`, so a label removed and applied again is read afresh. With no `at`, always read. A read
@@ -1136,7 +1136,7 @@ export class Local {
     const key = `${event}:${label}@${at}`;
     const seen = at ? this.pinTrusts?.get(issue) : null;
     if (seen?.key === key) return seen.refused;
-    const refused = await labelsVouched(this.repo, issue, [label], this.opts, {}, event === "labeled" ? "Factory does not move the Objective to that account" : "Factory does not move the Objective off that account", event);
+    const refused = await labelsVouched(this.repo, issue, [label], this.opts, {}, event === "labeled" ? "Pendulum does not move the Objective to that account" : "Pendulum does not move the Objective off that account", event);
     if (at) (this.pinTrusts ??= new Map()).set(issue, { key, label, event, refused });
     return refused;
   }
@@ -1182,7 +1182,7 @@ export class Local {
     if (pause) return this.pauseNotice(issue, { ...pause, note: line });
     if (!this.repo) return;
     this.pauseBodies?.delete(issue);
-    await upsertComment(this.repo, issue, marker(issue, "account-limit"), `Factory: ${line}.`, this.opts).catch((e) => log(`#${issue}: the account note could not be written (${String(e?.message || e).slice(0, 120)})`));
+    await upsertComment(this.repo, issue, marker(issue, "account-limit"), `Pendulum: ${line}.`, this.opts).catch((e) => log(`#${issue}: the account note could not be written (${String(e?.message || e).slice(0, 120)})`));
   }
 
   /**
@@ -1209,28 +1209,28 @@ export class Local {
     return problems;
   }
 
-  /** <clone>/.factory/ never shows up in the developer's git status. */
+  /** <clone>/.pendulum/ never shows up in the developer's git status. */
   excludeWorkspaces() {
     const file = resolve(this.dev, sh("git", ["-C", this.dev, "rev-parse", "--git-path", "info/exclude"]));
     const current = existsSync(file) ? readFileSync(file, "utf8") : "";
-    if (!current.split("\n").includes("/.factory/")) appendFileSync(file, `${current && !current.endsWith("\n") ? "\n" : ""}/.factory/\n`);
+    if (!current.split("\n").includes("/.pendulum/")) appendFileSync(file, `${current && !current.endsWith("\n") ? "\n" : ""}/.pendulum/\n`);
   }
 
   ws(issue) {
-    return join(this.dev, ".factory", String(issue));
+    return join(this.dev, ".pendulum", String(issue));
   }
 
-  /** The Objective label this repository's workflow names (factory:objective by default). */
+  /** The Objective label this repository's workflow names (pendulum:objective by default). */
   objectiveLabel() {
     return resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() }).objectiveLabel;
   }
 
   /**
-   * The hosts this machine's sandboxes allow: LOCAL_DOMAINS and FACTORY_LOCAL_DOMAINS for every Objective, plus `hosts`,
+   * The hosts this machine's sandboxes allow: LOCAL_DOMAINS and PENDULUM_LOCAL_DOMAINS for every Objective, plus `hosts`,
    * those one Objective's approved host labels open for its own stage (harnessFor), never another's.
    */
   domains(hosts = []) {
-    return [...new Set([...LOCAL_DOMAINS, ...list(process.env.FACTORY_LOCAL_DOMAINS || this.wf.FACTORY_LOCAL_DOMAINS), ...hosts.filter(isSandboxHost)])];
+    return [...new Set([...LOCAL_DOMAINS, ...list(process.env.PENDULUM_LOCAL_DOMAINS || this.wf.PENDULUM_LOCAL_DOMAINS), ...hosts.filter(isSandboxHost)])];
   }
 
   /** One clone per Objective, kept between stages so the dependencies and the transcript wait for the next one. Cloned without blocking heartbeats. */
@@ -1239,16 +1239,16 @@ export class Local {
     const pin = gitPinFile(this.ws(issue));
     if (existsSync(join(dir, ".git"))) {
       if (readGitPin(pin)) return dir;
-      // A clone made before Factory pinned its .git cannot be trusted to hold the .git it cloned: made afresh.
+      // A clone made before Pendulum pinned its .git cannot be trusted to hold the .git it cloned: made afresh.
       log(`#${issue}: the clone has no pinned .git identity; cloning it again`);
       rmSync(dir, { recursive: true, force: true });
     }
     mkdirSync(this.ws(issue), { recursive: true });
     const started = Date.now();
-    const helper = "!f() { echo username=x-access-token; echo \"password=$FACTORY_LOCAL_TOKEN\"; }; f";
+    const helper = "!f() { echo username=x-access-token; echo \"password=$PENDULUM_LOCAL_TOKEN\"; }; f";
     const code = await new Promise((done) => {
       // The token goes to https://github.com only (the empty entry clears every inherited helper, for any host).
-      const child = spawn("git", ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "clone", "-q", "--reference-if-able", this.dev, "--dissociate", `https://github.com/${this.repoFull}.git`, dir], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: this.token, ...SKIP_SMUDGE_ENV }, stdio: ["ignore", "inherit", "inherit"] });
+      const child = spawn("git", ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "clone", "-q", "--reference-if-able", this.dev, "--dissociate", `https://github.com/${this.repoFull}.git`, dir], { env: { ...localBaseEnv(process.env), PENDULUM_LOCAL_TOKEN: this.token, ...SKIP_SMUDGE_ENV }, stdio: ["ignore", "inherit", "inherit"] });
       child.on("close", done);
     });
     if (code !== 0) throw Object.assign(new Error(`git clone of ${this.repoFull} failed (exit ${code})`), { startStep: "clone", exitCode: code });
@@ -1258,26 +1258,26 @@ export class Local {
     return dir;
   }
 
-  /** The env every child starts from: an allow-list plus the repository's FACTORY_* settings, never the whole shell. */
+  /** The env every child starts from: an allow-list plus the repository's PENDULUM_* settings, never the whole shell. */
   baseEnv() {
     const wf = { ...this.wf };
     // Host-only settings stay out of a stage's env from the workflow too, not only from this shell.
     for (const k of HOST_ONLY) delete wf[k];
     // The workflow's models belong to its harness: a developer who picks another one locally gets that one's defaults.
-    if ((wf.FACTORY_HARNESS || "claude").toLowerCase() !== this.harness) for (const k of MODEL_SETTINGS) delete wf[k];
+    if ((wf.PENDULUM_HARNESS || "claude").toLowerCase() !== this.harness) for (const k of MODEL_SETTINGS) delete wf[k];
     // The developer's own harness, model and session settings win over the repository's (inputs.mjs MACHINE_SETTINGS).
-    for (const k of MACHINE_SETTINGS) if (k !== "FACTORY_HARNESS" && process.env[k]) wf[k] = process.env[k];
-    // A worker secret's NAME or SOURCE never joins every stage's env through FACTORY_LOCAL_ENV (lib/local.mjs localBaseEnv).
-    const env = { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV), { workerSecrets: wf.FACTORY_WORKER_SECRETS || "" }), ...wf };
-    // The developer's own FACTORY_LOCAL_* settings win over the workflow's.
-    for (const [k, v] of Object.entries(process.env)) if (k.startsWith("FACTORY_LOCAL_") && !HOST_ONLY.includes(k)) env[k] = v;
-    // The Factory App's id alone (never its key), so a stage knows the notices its App posted (answer-check.mjs factoryNotice).
-    const appId = String(process.env.FACTORY_LOCAL_APP_ID || "").trim();
-    return { ...env, ...(/^\d+$/.test(appId) ? { FACTORY_NOTICE_APP_ID: appId } : {}), FACTORY_HARNESS: this.harness, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL || "" };
+    for (const k of MACHINE_SETTINGS) if (k !== "PENDULUM_HARNESS" && process.env[k]) wf[k] = process.env[k];
+    // A worker secret's NAME or SOURCE never joins every stage's env through PENDULUM_LOCAL_ENV (lib/local.mjs localBaseEnv).
+    const env = { ...localBaseEnv(process.env, list(process.env.PENDULUM_LOCAL_ENV || this.wf.PENDULUM_LOCAL_ENV), { workerSecrets: wf.PENDULUM_WORKER_SECRETS || "" }), ...wf };
+    // The developer's own PENDULUM_LOCAL_* settings win over the workflow's.
+    for (const [k, v] of Object.entries(process.env)) if (k.startsWith("PENDULUM_LOCAL_") && !HOST_ONLY.includes(k)) env[k] = v;
+    // The Pendulum App's id alone (never its key), so a stage knows the notices its App posted (answer-check.mjs pendulumNotice).
+    const appId = String(process.env.PENDULUM_LOCAL_APP_ID || "").trim();
+    return { ...env, ...(/^\d+$/.test(appId) ? { PENDULUM_NOTICE_APP_ID: appId } : {}), PENDULUM_HARNESS: this.harness, PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: process.env.PENDULUM_LOCAL_ALL || "" };
   }
 
   /**
-   * One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in.
+   * One stage's env: the base, the scoped token, and the sandbox both the harness and Pendulum's own commands run in.
    * `stageTmp` is the stage's own temp directory (stage() makes it and removes it on every path). `script`: the stage's.
    * `account`: the one it runs on (harnessFor), else its harness's default (accountFor, which throws code `account`).
    */
@@ -1301,39 +1301,39 @@ export class Local {
     const pnpmStore = join(clone, "node_modules", ".pnpm-store");
     const bunCache = join(clone, "node_modules", ".bun-cache");
     const caches = [npmCache, yarnCache, corepackHome];
-    // The caches outside the clone are Factory's; the two inside it, and srt's protected paths, are made in the clone's
+    // The caches outside the clone are Pendulum's; the two inside it, and srt's protected paths, are made in the clone's
     // own sandbox before the stage starts (stage(): prepareClone), never by this process.
     for (const d of caches) mkdirSync(d, { recursive: true });
-    // The settings Factory's own commands run under sit outside every writable directory: in the usage directory
+    // The settings Pendulum's own commands run under sit outside every writable directory: in the usage directory
     // the model could loosen the sandbox its own validation runs in.
     const sandboxDir = join(ws, ".sandbox");
     mkdirSync(sandboxDir, { recursive: true });
     const srtFile = join(sandboxDir, `srt-${basename(usageDir)}.json`);
-    // The stage's usage directory is Factory's (its record, the event log, the transcript copy): every sandbox may read
-    // it (factory-db is in its bin), none may write it.
+    // The stage's usage directory is Pendulum's (its record, the event log, the transcript copy): every sandbox may read
+    // it (pendulum-db is in its bin), none may write it.
     // Linux: the ripgrep srt and Claude Code's sandbox scan with, which leaves a nested checkout's .git writable, so a resumed
     // stage can replace one (lib/local.mjs nestedGitScanScript). In the usage directory, which no sandbox may write: srt and
     // Claude Code run it outside their sandboxes. Checked as it is written; a failed check Blocks (sandboxScanReason).
     // An rg in or linked into a directory a sandbox may write is refused (the stage Blocks).
     const ripgrep = platform() === "linux" ? writeNestedGitScan(join(usageDir, "scan"), undefined, { writable: [clone, ...caches, stageTmp, join(usageDir, "harness")] }) : null;
     // Every harness login on this machine, the one this stage runs on denied by its login files only (lib/local.mjs
-    // credentialPaths): one list for Factory's commands and, through FACTORY_LOCAL_SANDBOX, the harness's own sandbox. A
-    // Copilot stage runs on a home Factory makes, which holds no login.
+    // credentialPaths): one list for Pendulum's commands and, through PENDULUM_LOCAL_SANDBOX, the harness's own sandbox. A
+    // Copilot stage runs on a home Pendulum makes, which holds no login.
     // A login file of the stage's own that really is another login's (a link planted in its folder) would be read by its
     // harness: the stage refuses, naming the path in this machine's log only.
     const linked = harness === "copilot" ? [] : ownLoginProblems(harness, host);
     if (linked.length) throw Object.assign(new Error(`the ${harness} login this stage runs on leads into another login: ${linked.map((l) => `${l.path} -> ${l.real}`).join(", ")}`), { code: "login-link" });
     const credentials = credentialPaths(homedir(), host, { own: harness === "copilot" ? null : stageLogin(harness, host) });
     writeFileSync(srtFile, JSON.stringify(srtSettings({ domains, writable: [clone, ...caches, stageTmp], clone, credentials, readOnly: [usageDir], ripgrep }), null, 2));
-    // Factory's own git work on the clone (backend.mjs sandbox.git): the clone writable, its .git included; no network.
+    // Pendulum's own git work on the clone (backend.mjs sandbox.git): the clone writable, its .git included; no network.
     const srtGitFile = join(sandboxDir, `srt-git-${basename(usageDir)}.json`);
     writeFileSync(srtGitFile, JSON.stringify(srtSettings({ domains: [], writable: [clone, stageTmp], credentials, readOnly: [usageDir] }), null, 2));
-    // Factory's helpers (factory-db) are copied into the stage's usage directory and lead PATH: Claude Code's sandbox
+    // Pendulum's helpers (pendulum-db) are copied into the stage's usage directory and lead PATH: Claude Code's sandbox
     // shows nothing under the home directory beyond the working and added directories, so plugin/bin is out of its sight.
     const binDir = join(usageDir, "bin");
     mkdirSync(binDir, { recursive: true });
-    // Only the sandbox's own helpers: the `factory` front end (local mode itself) has no business inside a stage.
-    for (const tool of readdirSync(join(PLUGIN_ROOT, "bin")).filter((t) => t !== "factory")) {
+    // Only the sandbox's own helpers: the `pendulum` front end (local mode itself) has no business inside a stage.
+    for (const tool of readdirSync(join(PLUGIN_ROOT, "bin")).filter((t) => t !== "pendulum")) {
       copyFileSync(join(PLUGIN_ROOT, "bin", tool), join(binDir, tool));
       chmodSync(join(binDir, tool), 0o755);
     }
@@ -1369,7 +1369,7 @@ export class Local {
     // home or a credential store. Codex's sandbox reads the whole system but the credential stores, so its commands find
     // them as the developer does. A command word not made visible is named once per loop.
     const commands = stageCommands(base);
-    const tools = localTools({ harness, clone, commands: { ...commands, install: installCommand(clone, commands.install) }, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
+    const tools = localTools({ harness, clone, commands: { ...commands, install: installCommand(clone, commands.install) }, path: base.PATH, off: [this.dev, join(this.dev, ".pendulum"), dirname(stageTmp)], usageDir });
     for (const u of tools.unresolved) {
       if (TOOLS_SAID.has(u.word)) continue;
       TOOLS_SAID.add(u.word);
@@ -1388,26 +1388,26 @@ export class Local {
     // Entries Codex's and Copilot's sandboxes cannot enforce as written (a loopback name, an IP address, host:port) are left
     // out of their policies (lib/local.mjs sandboxHosts: #106, #108).
     const dropped = ["codex", "copilot"].includes(harness) ? sandboxDroppedHosts(domains) : [];
-    if (dropped.length) log(`FACTORY_LOCAL_DOMAINS: ${dropped.map((d) => JSON.stringify(d)).join(", ")} left out of ${harness === "codex" ? "Codex's" : "Copilot's"} sandbox: not host names (a port or an address it cannot enforce as written)`);
+    if (dropped.length) log(`PENDULUM_LOCAL_DOMAINS: ${dropped.map((d) => JSON.stringify(d)).join(", ")} left out of ${harness === "codex" ? "Codex's" : "Copilot's"} sandbox: not host names (a port or an address it cannot enforce as written)`);
     // Copilot never runs without it (preflight refuses such a host): here it stopped starting after serve began, for
     // example a new Copilot, bubblewrap or slirp4netns version probed again. The stage refuses; stage() Blocks.
     if (!outerOn && harness === "copilot") throw Object.assign(new Error(`${COPILOT_OUTER_OFF}: ${outer.why}${outer.cacheFile ? ` (probe cache: ${outer.cacheFile})` : ""}`), { code: "outer-sandbox" });
     if (!outerOn && !OUTER_SAID.has(harness)) {
       OUTER_SAID.add(harness);
-      log(`local: ${harness} runs without the outer sandbox on this host: ${outer.why}. What it runs on the host itself relies on the file-level guards and Factory's git guard.`);
+      log(`local: ${harness} runs without the outer sandbox on this host: ${outer.why}. What it runs on the host itself relies on the file-level guards and Pendulum's git guard.`);
     }
     if (outerOn) {
       mkdirSync(join(usageDir, "harness"), { recursive: true });
       ensureHarnessHomes(harness, { ...host, ...extra });
       // Claude Code's projects are read-only in it; the clone's own project links to a directory of the Objective's.
       const projectDir = harness === "claude" ? claudeProjectLink(clone, join(ws, "claude-project"), { ...host, ...extra }) : null;
-      // Copilot's outer sandbox runs bwrap through Factory's wrapper (lib/local.mjs bwrapTunScript), in the usage directory,
+      // Copilot's outer sandbox runs bwrap through Pendulum's wrapper (lib/local.mjs bwrapTunScript), in the usage directory,
       // which no sandbox may write: srt runs it on the host.
       const bwrapPath = harness === "copilot" ? writeBwrapTun(join(usageDir, "outer")) : null;
       writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness, domains, writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...host, ...extra }, credentials, install: harnessInstall(whichSync(harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
     }
-    // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
-    // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
+    // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Pendulum's own unsandboxed calls;
+    // and neither sandbox may write it (PENDULUM_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
     base.PATH = `${base.PATH || ""}:${binDir}`;
     // The harness's own `git`, first on its PATH only (lib/harness.mjs): refused once the clone's .git was replaced.
     const gitBin = join(usageDir, "gitbin");
@@ -1415,14 +1415,14 @@ export class Local {
     writeFileSync(join(gitBin, "git"), gitGuardScript(realpathSync(whichSync("git"))), { mode: 0o755 });
     // Linux: Copilot's own `bwrap`, first on its PATH only (lib/harness.mjs): Copilot starts its sandbox's bubblewrap with
     // its whole environment, the token included, and bubblewrap stays as every command's pid 1, readable to each (#100).
-    // Factory's starts the real one with none (lib/copilot-runner.mjs bwrapShim). In the usage directory, which no
+    // Pendulum's starts the real one with none (lib/copilot-runner.mjs bwrapShim). In the usage directory, which no
     // sandbox may write; harness.mjs copilotLocalCheck proves it before every start.
     // It also gives each command the stage's temp directory as its TMPDIR: Copilot itself runs with its own
     // (lib/local.mjs copilotPrivateTmp), where it writes each command's network rules.
     const bwrapBin = outerOn && harness === "copilot" ? join(usageDir, "bwrapbin") : null;
     if (bwrapBin) {
       mkdirSync(bwrapBin, { recursive: true });
-      // Each command's PATH led by the stage's node where it is bound (after Factory's git): a version manager's shim
+      // Each command's PATH led by the stage's node where it is bound (after Pendulum's git): a version manager's shim
       // before it on PATH is outside the sandbox.
       writeFileSync(join(bwrapBin, "bwrap"), bwrapShim(realpathSync(whichSync("bwrap")), null, stageTmp, lead.length ? [gitBin, ...lead].join(":") : null, localCopilotRelayShim(localRelayDir(usageDir))), { mode: 0o755 });
     }
@@ -1432,17 +1432,17 @@ export class Local {
     if (claudeEnv) writeFileSync(claudeEnv, claudeEnvText([gitBin, ...lead]), { mode: 0o644 });
     return {
       ...base,
-      FACTORY_CREDENTIAL: "login",
+      PENDULUM_CREDENTIAL: "login",
       // The workflow's setup assumes a runner (sudo, a fresh VM); on a box the toolchain is the box's own.
-      FACTORY_SETUP: process.env.FACTORY_LOCAL_SETUP ?? this.wf.FACTORY_LOCAL_SETUP ?? "",
+      PENDULUM_SETUP: process.env.PENDULUM_LOCAL_SETUP ?? this.wf.PENDULUM_LOCAL_SETUP ?? "",
       // The commands that can run in this machine's sandboxes, when not all can (a suite that needs a unix socket):
       // the task card names these, and the repository's required checks on GitHub still run the full set.
-      ...((process.env.FACTORY_LOCAL_VALIDATION ?? this.wf.FACTORY_LOCAL_VALIDATION) ? { FACTORY_VALIDATION: process.env.FACTORY_LOCAL_VALIDATION ?? this.wf.FACTORY_LOCAL_VALIDATION } : {}),
-      FACTORY_PLUGIN_ROOT: PLUGIN_ROOT,
-      FACTORY_USAGE_DIR: usageDir,
-      // Factory's own temp directory (its mirror and bundles) under the Objective's directory, which no sandbox may write
+      ...((process.env.PENDULUM_LOCAL_VALIDATION ?? this.wf.PENDULUM_LOCAL_VALIDATION) ? { PENDULUM_VALIDATION: process.env.PENDULUM_LOCAL_VALIDATION ?? this.wf.PENDULUM_LOCAL_VALIDATION } : {}),
+      PENDULUM_PLUGIN_ROOT: PLUGIN_ROOT,
+      PENDULUM_USAGE_DIR: usageDir,
+      // Pendulum's own temp directory (its mirror and bundles) under the Objective's directory, which no sandbox may write
       // (fsafe.mjs privateTmp).
-      FACTORY_PRIVATE_DIR: join(ws, ".private"),
+      PENDULUM_PRIVATE_DIR: join(ws, ".private"),
       npm_config_cache: npmCache,
       // pnpm 12 reads pnpm_config_* (npm_config_store_dir would make npm warn on every command).
       pnpm_config_store_dir: pnpmStore,
@@ -1453,9 +1453,9 @@ export class Local {
       // The sandboxes reach the network only through their proxy; Node's own fetch (Corepack, scripts) ignores
       // HTTPS_PROXY unless told, and failed DNS. NO_PROXY still keeps loopback direct.
       NODE_USE_ENV_PROXY: "1",
-      FACTORY_LOCAL_SRT: srtFile,
-      FACTORY_LOCAL_SRT_GIT: srtGitFile,
-      ...(outerOn ? { FACTORY_LOCAL_SRT_HARNESS: outerFile } : {}),
+      PENDULUM_LOCAL_SRT: srtFile,
+      PENDULUM_LOCAL_SRT_GIT: srtGitFile,
+      ...(outerOn ? { PENDULUM_LOCAL_SRT_HARNESS: outerFile } : {}),
       // Writable beyond the clone: this stage's usage directory, the package caches and its temp directory (not the spend log).
       TMPDIR: stageTmp,
       // pnpm 12 locks its stores in $XDG_RUNTIME_DIR (else /tmp) and chmods that directory: both are read-only in the
@@ -1467,21 +1467,21 @@ export class Local {
       // no sandbox may write (checkout.mjs claudePlugin).
       // cacheDirs: writable to commands, but no harness's added directory (Claude Code would read a CLAUDE.md there,
       // Copilot .github/agents and skills).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv } : {}), ...(tools.readable.length ? { readable: tools.readable } : {}), ...(ripgrep ? { ripgrep } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains, clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude"), credentials }),
-      // Every git-lfs transfer of Factory's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
+      PENDULUM_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv } : {}), ...(tools.readable.length ? { readable: tools.readable } : {}), ...(ripgrep ? { ripgrep } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains, clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude"), credentials }),
+      // Every git-lfs transfer of Pendulum's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
       // own endpoint, whatever .lfsconfig the model wrote (env config outranks that file), over the real history (no
-      // refs/replace). scrubbedEnv drops both (with FACTORY_LFS_PIN) from every child: the harness and the repository's
+      // refs/replace). scrubbedEnv drops both (with PENDULUM_LFS_PIN) from every child: the harness and the repository's
       // commands never see them.
       ...lfsPinEnv(`https://github.com/${this.repoFull}.git`),
       GIT_NO_REPLACE_OBJECTS: "1",
-      FACTORY_LFS_PIN: "1",
+      PENDULUM_LFS_PIN: "1",
       // The harness this sandbox is set up for: a stage whose labels name another by the time it runs Blocks (choiceGate).
-      FACTORY_STAGE_HARNESS: harness,
+      PENDULUM_STAGE_HARNESS: harness,
       // The hosts this Objective's host labels opened in these sandboxes: a stage whose labels name others by the time it
       // runs Blocks (choiceGate).
-      FACTORY_STAGE_HOSTS: [...new Set(hosts.filter(isSandboxHost))].sort().join(","),
+      PENDULUM_STAGE_HOSTS: [...new Set(hosts.filter(isSandboxHost))].sort().join(","),
       // The account it runs on, by name only: its result.json, progress comment and the scorecard record it.
-      FACTORY_STAGE_ACCOUNT: account.name,
+      PENDULUM_STAGE_ACCOUNT: account.name,
       ...extra,
     };
   }
@@ -1493,7 +1493,7 @@ export class Local {
     // model must not loosen) and the sessions a later stage resumes.
     const home = join(this.ws(issue), ".sandbox", "copilot-home");
     mkdirSync(home, { recursive: true });
-    // Its policy, config and MCP servers, as Factory's own: whatever an earlier run left there (a link included) is replaced.
+    // Its policy, config and MCP servers, as Pendulum's own: whatever an earlier run left there (a link included) is replaced.
     // Linux: Copilot's own TMPDIR (its commands' network rules), denied to its commands.
     // The stage's node, package manager and repository tools (stageEnv) read-only, its global npmrc denied.
     const alsoDenied = platform() === "linux" ? [copilotPrivateTmp(usageDir), ...(tools?.denied || [])] : [];
@@ -1504,7 +1504,7 @@ export class Local {
       writeFileSync(join(home, f), text, { mode: 0o600, flag: "wx" });
     }
     // On macOS Copilot's sandbox cannot read ~/.gitconfig and git then refuses to run; the clone's own config carries
-    // Factory's identity and credential helper, so git skips the global file (which may hold credentials anyway).
+    // Pendulum's identity and credential helper, so git skips the global file (which may hold credentials anyway).
     // The stage's account's token, read now: a declared account's from its own file (none from serve's environment
     // then), the implicit one's from where it always came (never a declared account's token kept from serve's start).
     const token = account ? copilotTokenOf(account) : this.copilotToken || copilotToken();
@@ -1513,8 +1513,8 @@ export class Local {
 
   /**
    * Run worker.mjs or review.mjs as a child; its lines are echoed with the issue and stage. A failure before its process
-   * starts is marked as Factory's own set-up of stage `name` failing (`stageSetup`), which lapse names: never the work's,
-   * and never another stage's. Under `factory run` or `review` (`solo`: the command), the stage holds one slot of the
+   * starts is marked as Pendulum's own set-up of stage `name` failing (`stageSetup`), which lapse names: never the work's,
+   * and never another stage's. Under `pendulum run` or `review` (`solo`: the command), the stage holds one slot of the
    * machine's budget while it runs and none between stages, so following a PR to its merge holds none (serve's own
    * stages hold the slot serve took for them).
    */
@@ -1549,7 +1549,7 @@ export class Local {
     mkdirSync(usageDir, { recursive: true });
     const logFile = join(usageDir, "stage.log");
     const clone = await this.ensureClone(issue);
-    // Every stage: the clone's .git is the one Factory cloned, or nothing runs in it. The Objective is Blocked rather than
+    // Every stage: the clone's .git is the one Pendulum cloned, or nothing runs in it. The Objective is Blocked rather than
     // the stage failing, which serve would pick up again every tick.
     const pin = gitPinFile(this.ws(issue));
     const moved = gitDirChanged(clone, readGitPin(pin), pin);
@@ -1591,7 +1591,7 @@ export class Local {
     // start; one a killed loop left is cleared when the next stage on this machine makes its own (lib/local.mjs stageTemp).
     const stageTmp = stageTemp(`${issue}-`);
     // The gateway relay's socket directory, when stageEnv made one (handSocketDir's record): removed with the stage.
-    // Factory's teardown: a failure here is logged, never the stage's end.
+    // Pendulum's teardown: a failure here is logged, never the stage's end.
     const dropStage = () => {
       try {
         dropOwned(stageTmp);
@@ -1640,7 +1640,7 @@ export class Local {
     if (this.auto && runs.account) this.startedOn(runs.account);
     return new Promise((done) => {
       if (this.firstSetup.has(issue)) {
-        env.FACTORY_LOCAL_FIRST_SETUP_MS = String(this.firstSetup.get(issue));
+        env.PENDULUM_LOCAL_FIRST_SETUP_MS = String(this.firstSetup.get(issue));
         this.firstSetup.delete(issue);
       }
       // The token goes to the stage on a pipe (fd 3) that it reads once and closes: never in its env, where every process
@@ -1654,7 +1654,7 @@ export class Local {
       // This process posts what the stage leaves too: none of those values.
       holdSecrets([...parseSecretValues(values).values()]);
       const started = (this.clock ?? Date.now)();
-      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir, "--token-fd", "3", ...notice], { env: values ? { ...env, FACTORY_INPUT_WORKER_SECRET_VALUES: values } : env, stdio: ["ignore", "pipe", "pipe", "pipe", ...(this.notice ? ["ipc"] : [])] });
+      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir, "--token-fd", "3", ...notice], { env: values ? { ...env, PENDULUM_INPUT_WORKER_SECRET_VALUES: values } : env, stdio: ["ignore", "pipe", "pipe", "pipe", ...(this.notice ? ["ipc"] : [])] });
       // Its process started: a failure from here on is no failure of its set-up (stage(): `stageStarted`).
       try {
         // Named while it runs, so a later start on this machine never runs a second stage beside it (liveStage).
@@ -1714,7 +1714,7 @@ export class Local {
   }
 
   /**
-   * Block the Objective whose clone's .git is not the one Factory cloned: a fixed reason, no local path. A repeat on the
+   * Block the Objective whose clone's .git is not the one Pendulum cloned: a fixed reason, no local path. A repeat on the
    * same clone updates its Blocked comment rather than adding one. `gh`: the GitHub calls (a test's own).
    */
   async blockForClone(issue, name, gh = { findPr, removeLabel, applyExit }) {
@@ -1728,7 +1728,7 @@ export class Local {
    */
   async block(issue, name, reason, { key = null, cause = "setup", fix = null, gh = { findPr, removeLabel, applyExit } } = {}) {
     const inputs = resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() });
-    const pr = await gh.findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
+    const pr = await gh.findPr(this.repo, `pendulum/${issue}`, this.opts).catch(() => null);
     if (pr) await gh.removeLabel(this.repo, pr.number, REVIEW_LABEL, this.opts).catch((e) => log(`#${issue} review label: ${e.message.slice(0, 120)}`));
     await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, key, cause, ...(fix ? { fix } : {}), notify: inputs.notify, stage: name }, this.opts);
   }
@@ -1736,7 +1736,7 @@ export class Local {
   /**
    * SIGINT, SIGTERM or SIGHUP to `run`, `review` or `serve`: stop. Nothing new starts, every stage process gets SIGTERM
    * (it stops its harness's process group before it exits: proc.mjs stopGroups), and the claims stay, so the Objectives
-   * pause and this machine's next `factory run` or `factory serve` takes them up again. A start that has written no claim
+   * pause and this machine's next `pendulum run` or `pendulum serve` takes them up again. A start that has written no claim
    * yet writes none and puts its Objective back to Queued (withClaim's `onStop`, serve's unpick), so none is left Running
    * with no claim. Exits once `whenSettled()` resolves (the work in flight, wound down) or 30 s pass.
    */
@@ -1752,7 +1752,7 @@ export class Local {
       stoppedAt = Date.now();
       this.stopping = true;
       for (const wake of this.wakers || []) wake();
-      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after the claim pause away, claim_pause_hours, a day by default); a start with no claim yet goes back to Queued; signal again to exit at once`);
+      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next pendulum run or serve on this machine takes them up (the dispatcher Blocks one only after the claim pause away, claim_pause_hours, a day by default); a start with no claim yet goes back to Queued; signal again to exit at once`);
       for (const child of this.children) child.kill("SIGTERM");
       await Promise.race([Promise.resolve(whenSettled()).catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
       process.exit(code);
@@ -1881,7 +1881,7 @@ export class Local {
       return { exit: "skipped" };
     }
     this.ceded?.delete(issue);
-    // Factory's mark of the factory:local label this process put on it, when the pick could not write it (backfillMark).
+    // Pendulum's mark of the pendulum:local label this process put on it, when the pick could not write it (backfillMark).
     await this.backfillMark(issue).catch((e) => log(`#${issue}: local-route mark: ${String(e?.message || e).slice(0, 120)}`));
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
     // beats due meanwhile are skipped rather than queued behind it. Each reads who holds the claim first: a claim it
@@ -1974,19 +1974,19 @@ export class Local {
 
   /**
    * A stage that ended with no exit record under this loop (`result` its stage's end, or `failure` what threw): the claim
-   * stays and pausedHere resumes it, or it Blocks here (cause `factory`), naming the stage, its exit code or signal and
+   * stays and pausedHere resumes it, or it Blocks here (cause `pendulum`), naming the stage, its exit code or signal and
    * its log on this machine, so the cause reaches GitHub and nothing retries forever. Whether to start it again is the
    * lapse check's (lib/lapse-check.mjs, a decision call on the AI Gateway): given this end and the one before it, would
    * the same stage started again end the same way? `same_again` Blocks at once; `transient` resumes it, and the
-   * FACTORY_LOCAL_LAPSE_MAX-th lapse in a row (3 by default) Blocks. With no verdict (no key, no answer, a lower confidence) it is resumed
-   * once and a second lapse in a row Blocks. A throw names what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else
+   * PENDULUM_LOCAL_LAPSE_MAX-th lapse in a row (3 by default) Blocks. With no verdict (no key, no answer, a lower confidence) it is resumed
+   * once and a second lapse in a row Blocks. A throw names what threw: Pendulum's set-up of a stage (`stageSetup`, stage()), or else
    * the local loop itself; never the work; and the error as postedError has it. The count is this loop's memory:
    * another serve on the machine resumes the Objective afresh.
    */
   async lapse(issue, result, failure) {
     const stage = result?.stage || failure?.stageSetup || "local";
     // This machine's log gets the whole error; GitHub gets it as postedError has it.
-    const said = (error) => (!failure ? `the ${stage} stage ended with no exit record (${result?.signal ? `signal ${result.signal}` : `exit code ${result?.code ?? "none"}`})` : failure.stageSetup ? `Factory's set-up of the ${stage} stage failed (${error})` : `Factory's local loop threw (${error})`);
+    const said = (error) => (!failure ? `the ${stage} stage ended with no exit record (${result?.signal ? `signal ${result.signal}` : `exit code ${result?.code ?? "none"}`})` : failure.stageSetup ? `Pendulum's set-up of the ${stage} stage failed (${error})` : `Pendulum's local loop threw (${error})`);
     const what = said(String(failure?.message || failure).slice(0, 200));
     const where = result?.log ? `; its log on this machine: ${result.log}` : "";
     const lapsed = (this.lapsed ??= new Map());
@@ -2003,7 +2003,7 @@ export class Local {
     const verdict = await check.judge(lapseInput(facts, before?.facts ?? null)).catch(() => null);
     const count = (before?.count ?? 0) + 1;
     const judged = verdict ? `; the lapse check (${check.asked()?.model ?? "the AI Gateway"}) judged it ${verdict === "same_again" ? "likely to end the same way again" : "transient"}` : "";
-    const resume = verdict === "same_again" ? false : verdict === "transient" ? count < this.bounded("FACTORY_LOCAL_LAPSE_MAX") : count < 2;
+    const resume = verdict === "same_again" ? false : verdict === "transient" ? count < this.bounded("PENDULUM_LOCAL_LAPSE_MAX") : count < 2;
     if (resume) {
       lapsed.set(issue, { count, facts });
       log(`#${issue}: ${what}${judged}; the claim stays and this loop resumes it (lapse ${count} in a row)${where}`);
@@ -2013,7 +2013,7 @@ export class Local {
     const times = count === 1 ? "" : count === 2 ? " twice in a row" : ` ${count} times in a row`;
     log(`#${issue}: ${what}${times ? " again" : ""}${judged}; Blocking it${where}`);
     try {
-      await this.block(issue, stage, `${said(postedError(failure))}${times} on this machine${judged}${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
+      await this.block(issue, stage, `${said(postedError(failure))}${times} on this machine${judged}${where}`.replaceAll(homedir(), "~"), { cause: "pendulum", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `pendulum:objective`." } : {}) });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
@@ -2121,7 +2121,7 @@ export class Local {
     this.lapsed?.delete(issue);
     log(`#${issue}: Blocking it: ${reason}`);
     try {
-      await this.block(issue, result?.stage || "work", reason, { cause: "provider-quota", fix: `Re-apply \`factory:objective\` once a ${h} account is free again.` });
+      await this.block(issue, result?.stage || "work", reason, { cause: "provider-quota", fix: `Re-apply \`pendulum:objective\` once a ${h} account is free again.` });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
@@ -2178,7 +2178,7 @@ export class Local {
       return this.pauseNotice(issue, plain);
     }
     if (!this.repo) return;
-    await upsertComment(this.repo, issue, marker(issue, "account-limit"), "Factory: one account label or none is left, so the Objective goes on.", this.opts).catch((e) => log(`#${issue}: the account note could not be written (${String(e?.message || e).slice(0, 120)})`));
+    await upsertComment(this.repo, issue, marker(issue, "account-limit"), "Pendulum: one account label or none is left, so the Objective goes on.", this.opts).catch((e) => log(`#${issue}: the account note could not be written (${String(e?.message || e).slice(0, 120)})`));
   }
 
   /** A note write from a path that cannot wait on it (limitHold): kept in `notesInFlight` until it settles. */
@@ -2243,7 +2243,7 @@ export class Local {
   /**
    * Whether an Objective paused on a usage limit here (`off`, limitPaused) resumes before that limit's reset, on the
    * account its labels (`names`, the issue's as pausedHere's listing read them at `at`, its `updated_at`) now name
-   * (#265): the one its single `factory:account:` label pins, read through the kept labeler check (pinTrust); with none,
+   * (#265): the one its single `pendulum:account:` label pins, read through the kept labeler check (pinTrust); with none,
    * after a pin came off, its harness's default, but only when the person who removed it can push (a removal anyone
    * else made moves nothing). Yes when that account is another than the one it paused on and is not held; a pinned
    * account that is held waits for its own reset. A label this machine cannot act on (pinFor) keeps it paused, said once
@@ -2301,14 +2301,14 @@ export class Local {
   /**
    * Whether the account an Objective paused on (`off`, limitPaused) is no longer held before the reset the pause kept: its
    * hold and guess are read again from the store each tick (this machine's files, or this loop's memory for a hold kept
-   * there), so a person's release (`factory hold release`, holds.mjs release), the folder cleared by hand, or any other
+   * there), so a person's release (`pendulum hold release`, holds.mjs release), the folder cleared by hand, or any other
    * end of the hold resumes it at the next tick, on that account. Said once, as it resumes.
    */
   heldNoMore(issue, off, now) {
     const stores = [this.holdStore(), this.ownHolds].filter(Boolean);
     if (stores.some((st) => st.avoidUntil(off.hold, now) !== null)) return false;
     const at = this.holdStore().releasedAt?.(off.hold, now) ?? null;
-    const how = at !== null && at > off.since ? `was released (factory hold release) at ${new Date(at).toISOString()}` : "is no longer held on this machine";
+    const how = at !== null && at > off.since ? `was released (pendulum hold release) at ${new Date(at).toISOString()}` : "is no longer held on this machine";
     log(`#${issue}: ${limitName(off.harness, off.account)} ${how}; resuming it now, before the reset it paused for`);
     return true;
   }
@@ -2324,7 +2324,7 @@ export class Local {
   /**
    * The hold an account's usage limit is kept under, {key, shared}: a declared account's name; for the one a harness
    * has with none declared, its login, as `<harness>@<hash>` of the login's real path (CLAUDE_CONFIG_DIR else ~/.claude,
-   * CODEX_HOME else ~/.codex, ~/.config/factory/copilot-token), never of a secret: so two serves on two logins never
+   * CODEX_HOME else ~/.codex, ~/.config/pendulum/copilot-token), never of a secret: so two serves on two logins never
    * hold each other. A Copilot token from serve's environment (COPILOT_GITHUB_TOKEN) names no login: its hold stays in
    * this loop's memory (`shared` false).
    */
@@ -2355,7 +2355,7 @@ export class Local {
   /**
    * Why an Objective with these labels starts nothing now, or null: more than one account label (#265: it waits on no
    * account, said once), or the account it runs on (its harness, from its harness label, choice.mjs choiceOf, else the
-   * loop's; the account its one `factory:account:<name>` label names when its labeler is known to be trusted, else that
+   * loop's; the account its one `pendulum:account:<name>` label names when its labeler is known to be trusted, else that
    * harness's default, accountFor) has its usage limit spent (limitUntil). Read on labels the caller already holds (the
    * dispatcher's listing, pendingReviews' read; `issue` and `at`, its number and `updated_at` there), never a read in its
    * own path: an account label's labeler is the kept check (pinTrustKept), read in the background for the next tick, and
@@ -2430,7 +2430,7 @@ export class Local {
   async pausedHere(running) {
     const out = [];
     const issues = [];
-    for (const label of ["factory:running", "factory:in-review"]) issues.push(...(await listIssuesByLabel(this.repo, label, this.opts).catch(() => [])));
+    for (const label of ["pendulum:running", "pendulum:in-review"]) issues.push(...(await listIssuesByLabel(this.repo, label, this.opts).catch(() => [])));
     for (const issue of issues) {
       if (running.has(issue.number) || out.includes(issue.number)) continue;
       if (!BACKENDS.local.trigger.routes(issue, this.baseEnv())) continue;
@@ -2484,7 +2484,7 @@ export class Local {
    * stood. Not while running here, and never on a failed lookup.
    */
   async cleanup(running) {
-    const root = join(this.dev, ".factory");
+    const root = join(this.dev, ".pendulum");
     let names = [];
     try {
       names = readdirSync(root).filter((n) => /^\d+$/.test(n));
@@ -2503,12 +2503,12 @@ export class Local {
         log(`${liveStageLine(issue, live)}; the closed Objective's directory stays until then`);
         continue;
       }
-      // Of .factory only <issue>/claude-project is writable from a sandbox (claudeProjectLink); rmSync removes a link, never its target, so nothing planted there is followed.
+      // Of .pendulum only <issue>/claude-project is writable from a sandbox (claudeProjectLink); rmSync removes a link, never its target, so nothing planted there is followed.
       rmSync(join(root, name), { recursive: true, force: true });
       // And the link to its Claude Code project, if a stage made one (lib/local.mjs claudeProjectLink).
       // In every Claude Code folder on the machine: a stage may have run on any of them.
       for (const l of harnessLogins(homedir(), process.env).filter((x) => x.harness === "claude")) dropClaudeProjectLink(join(root, name, "repo"), { CLAUDE_CONFIG_DIR: l.dir });
-      log(`#${issue}: closed; removed its local directory .factory/${name}`);
+      log(`#${issue}: closed; removed its local directory .pendulum/${name}`);
     }
   }
 
@@ -2527,7 +2527,7 @@ export class Local {
     const parts = [...s.components.map((c) => `${c.name} ${c.status}`), ...s.incidents.map((n) => `incident "${n}"`), ...s.maintenances.map((n) => `maintenance "${n}" in progress`)].join(", ");
     const missing = /^missing /.test(s.error ?? "") ? s.error.slice("missing ".length) : null;
     const said = missing
-      ? `GitHub's status page no longer lists its "${missing}" component: Factory's contract with the page (lib/adapters/github-status.mjs) is broken`
+      ? `GitHub's status page no longer lists its "${missing}" component: Pendulum's contract with the page (lib/adapters/github-status.mjs) is broken`
       : s.state === null
         ? `GitHub's status page could not be read (${s.error})`
         : `GitHub's status page reported ${parts}`;
@@ -2554,7 +2554,7 @@ export class Local {
    * One paused on this machine's network for OUTAGE.blockMs or more is Blocked instead, with the External cause
    * `outage`, naming the host and since when; so is one paused on GitHub's 5xx for as long, naming the request and the
    * status. One paused on GitHub's 5xx while GitHub's status page reports its parts operational is Blocked naming the
-   * request after one more try (serverVerdict), with the cause `factory`: GitHub has no incident, so the request fails
+   * request after one more try (serverVerdict), with the cause `pendulum`: GitHub has no incident, so the request fails
    * on its own.
    */
   async resume(issue) {
@@ -2570,11 +2570,11 @@ export class Local {
       const reason = own
         ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.server.requestSince ?? off.since).toISOString()}; ${own}, before and after one more try, so the failure is this request's, not a GitHub incident. Re-apply the label to run it again once that request is fixed.`
         : serverDown(off.code)
-          ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, through ${pausesText(off.server?.pauses ?? 1)} over ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for ${off.host} failing. Re-apply the label to run it again once ${off.host} answers that request.`
-          : `${lostText(off.host, off.code)} from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
+          ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, through ${pausesText(off.server?.pauses ?? 1)} over ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for ${off.host} failing. Re-apply the label to run it again once ${off.host} answers that request.`
+          : `${lostText(off.host, off.code)} from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
       log(`#${issue}: ${reason}`);
       try {
-        await this.block(issue, off.stage || "work", reason, { cause: own ? "factory" : "outage" });
+        await this.block(issue, off.stage || "work", reason, { cause: own ? "pendulum" : "outage" });
         await dropClaim(this.repo, issue, this.holder, this.opts);
         this.offline.delete(issue);
         return { exit: "blocked" };
@@ -2597,7 +2597,7 @@ export class Local {
     let pr;
     let data;
     try {
-      pr = await findPr(this.repo, `factory/${issue}`, this.opts);
+      pr = await findPr(this.repo, `pendulum/${issue}`, this.opts);
       data = await getIssue(this.repo, issue, this.opts);
     } catch (e) {
       log(`#${issue}: its PR or issue could not be read (${String(e.message).slice(0, 120)}); the claim stays and the next tick tries again`);
@@ -2672,7 +2672,7 @@ export class Local {
   }
 
   /**
-   * One Objective, start to delivered review (and, with `wait`, to merged). `named`: a person named it (`factory run`),
+   * One Objective, start to delivered review (and, with `wait`, to merged). `named`: a person named it (`pendulum run`),
    * so its hand-off to review never waits for a sibling (work).
    */
   async runObjective(issue, { wait = false, named = false } = {}) {
@@ -2737,7 +2737,7 @@ export class Local {
     };
     try {
       const data = await getIssue(this.repo, issue, this.opts);
-      if (!(data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) {
+      if (!(data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "pendulum:running")) {
         // No longer Running (a person moved it): nothing of this loop's to undo or read again.
         failures.delete(issue);
       } else if (count >= START_FAILURES_BLOCK) {
@@ -2792,7 +2792,7 @@ export class Local {
     if (!others.length) return false;
     const probes = probesOf(cause);
     // The disk the start failed on: the path a system error names, else this repository's Objective directories.
-    const path = typeof e?.path === "string" && e.path.startsWith("/") ? e.path : join(this.dev, ".factory");
+    const path = typeof e?.path === "string" && e.path.startsWith("/") ? e.path : join(this.dev, ".pendulum");
     const issues = new Set([...others, issue]);
     // A clone's fault holds new work only: a resume or a review runs in the clone its work made.
     const all = cause.kind !== "clone";
@@ -2872,8 +2872,8 @@ export class Local {
 
   /** `git ls-remote` of this repository with the local token, as ensureClone clones it: its exit code. */
   async lsRemote() {
-    const helper = "!f() { echo username=x-access-token; echo \"password=$FACTORY_LOCAL_TOKEN\"; }; f";
-    const r = await exec("git", ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "ls-remote", "-q", `https://github.com/${this.repoFull}.git`, "HEAD"], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: this.token, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 60_000 }).catch(() => ({ code: null }));
+    const helper = "!f() { echo username=x-access-token; echo \"password=$PENDULUM_LOCAL_TOKEN\"; }; f";
+    const r = await exec("git", ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "ls-remote", "-q", `https://github.com/${this.repoFull}.git`, "HEAD"], { env: { ...localBaseEnv(process.env), PENDULUM_LOCAL_TOKEN: this.token, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 60_000 }).catch(() => ({ code: null }));
     return r.code;
   }
 
@@ -2885,9 +2885,9 @@ export class Local {
     await dropClaim(this.repo, issue, this.holder, this.opts);
   }
 
-  /** A pick this loop marked and never started, back to Queued: only factory:running comes off, and the card to Queued. */
+  /** A pick this loop marked and never started, back to Queued: only pendulum:running comes off, and the card to Queued. */
   async unpick(issue) {
-    await removeLabel(this.repo, issue, "factory:running", this.opts);
+    await removeLabel(this.repo, issue, "pendulum:running", this.opts);
     const project = await findProject(this.repo, this.opts).catch(() => null);
     if (project) await moveCard(project, this.repo, issue, "Queued", this.opts).catch(() => {});
   }
@@ -2898,7 +2898,7 @@ export class Local {
    */
   async unpickStopped(issue) {
     const data = await getIssue(this.repo, issue, this.opts);
-    if (!(data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) return;
+    if (!(data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "pendulum:running")) return;
     await this.unpick(issue);
     log(`#${issue}: stopping before its claim was written; back to Queued`);
   }
@@ -2927,7 +2927,7 @@ export class Local {
       f.recheck = false;
       try {
         const data = await getIssue(this.repo, n, this.opts);
-        if ((data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) {
+        if ((data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "pendulum:running")) {
           await this.requeue(n);
           log(`#${n}: its claim reads free now; back to Queued for the next pick`);
         }
@@ -2939,7 +2939,7 @@ export class Local {
   }
 
   /**
-   * `factory run <issue>`: the stage the Objective's state calls for (stageFor, as serve's resume): its review, its merge
+   * `pendulum run <issue>`: the stage the Objective's state calls for (stageFor, as serve's resume): its review, its merge
    * (followed with `wait`, else named), or else its work. Refused, with nothing started, for a closed issue, a stage of
    * it still running on this machine, or a GitHub read that keeps failing (retried first): never a work pass on a branch
    * whose state could not be read. `gh`: the GitHub reads, `waitMs` the retry wait (a test's own).
@@ -2954,7 +2954,7 @@ export class Local {
     // Before any claim: a draft is never run (lib/stop.mjs).
     if (isDraft(data)) throw draftRefusal(issue, "nothing to run");
     await this.adoptForRun(issue, data);
-    const pr = await retried(`reading the open PR of factory/${issue}`, () => gh.findPr(this.repo, `factory/${issue}`, this.opts), { waitMs });
+    const pr = await retried(`reading the open PR of pendulum/${issue}`, () => gh.findPr(this.repo, `pendulum/${issue}`, this.opts), { waitMs });
     const next = stageFor({ pr, issue: data }) ?? "work";
     if (next === "review") log(`#${issue}: PR #${pr.number} waits for its review; starting there`);
     if (next === "merge") log(`#${issue}: PR #${pr.number} has no review pending (reviewed, or waiting for its rebase); ${wait ? "following it to its merge" : "nothing to run here"}`);
@@ -2991,11 +2991,11 @@ export class Local {
    * local Objective, the fix. Null when its PR is merged or gone.
    */
   async pendingMergeLine(issue) {
-    const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
+    const pr = await findPr(this.repo, `pendulum/${issue}`, this.opts).catch(() => null);
     if (!pr) return null;
     const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
     const local = !data || BACKENDS.local.trigger.routes(data, this.baseEnv());
-    return `#${issue}: PR #${pr.number} is not merged yet; ${local ? `nothing tends a local Objective while no factory serve runs for this repository: start \`factory serve\` (or \`factory run ${issue} --wait\`) to merge it` : "the Action's dispatcher tends its merge"}`;
+    return `#${issue}: PR #${pr.number} is not merged yet; ${local ? `nothing tends a local Objective while no pendulum serve runs for this repository: start \`pendulum serve\` (or \`pendulum run ${issue} --wait\`) to merge it` : "the Action's dispatcher tends its merge"}`;
   }
 
   /**
@@ -3011,7 +3011,7 @@ export class Local {
     this.startFailures?.delete(issue);
     log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null ? `, $${work.usd.toFixed(2)}` : ""}`);
     if (work.exit !== "delivered") return work;
-    const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
+    const pr = await findPr(this.repo, `pendulum/${issue}`, this.opts).catch(() => null);
     if (pr && (pr.labels || []).some((l) => l.name === REVIEW_LABEL)) return this.review(issue, pr.number, { wait });
     // A delivered PR without the review label conflicts with the default branch, so the dispatcher's send-back takes it
     // (`unreviewed` tells sendBack it conflicts again after its rebase), or its review waits for a sibling on the same
@@ -3071,20 +3071,20 @@ export class Local {
     log(`#${issue} send-back: ${String(e?.message || e).slice(0, 160)}`);
     if (transientError(e)) return "retry";
     const reason = `the send-back of the conflicting PR for its rebase failed (${code}); the run log has GitHub's answer`;
-    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "merge" }, this.opts).catch((x) => log(`#${issue} Block: ${String(x?.message || x).slice(0, 160)}`));
+    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, cause: "pendulum", notify: inputs.notify, stage: "merge" }, this.opts).catch((x) => log(`#${issue} Block: ${String(x?.message || x).slice(0, 160)}`));
     return false;
   }
 
-  /** A review re-run on its own (a human re-applied factory:review), in the Objective's clone. */
+  /** A review re-run on its own (a human re-applied pendulum:review), in the Objective's clone. */
   async runReview(prNumber, { wait = false } = {}) {
     const pr = await getPr(this.repo, prNumber, this.opts);
-    const issue = Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
-    if (!issue) throw new Error(`PR #${prNumber} is not on a factory/<issue> branch`);
+    const issue = Number(/^pendulum\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
+    if (!issue) throw new Error(`PR #${prNumber} is not on a pendulum/<issue> branch`);
     return this.withClaim(issue, () => this.review(issue, prNumber, { wait }));
   }
 
   /**
-   * Open PRs labelled factory:review whose Objective is routed here and held by no loop: the label is the review trigger,
+   * Open PRs labelled pendulum:review whose Objective is routed here and held by no loop: the label is the review trigger,
    * as on Actions. Not a draft PR (a Question or a Block: the reviewer waits for a person) nor a Blocked Objective's.
    * A Question's PR a person marked ready (#339) is one too, as the Action's ready_for_review event makes it: out of
    * draft, its issue still a Question, marked ready after the Question was asked (readyAfter), and its Objective label
@@ -3095,7 +3095,7 @@ export class Local {
     const prs = (await rest(`repos/${this.repo.full}/pulls?state=open&per_page=100`, { ...this.opts, paginate: true }).catch(() => [])) || [];
     // Conditional reads (a 304 for an unchanged page is not counted): the Questions, only when a PR may be one's.
     const cached = { ...this.opts, cache: (this.timelines ??= new Map()) };
-    const questions = prs.some(readyIssue) ? new Map(((await listIssuesByLabel(this.repo, "factory:question", cached).catch(() => [])) || []).map((i) => [i.number, i])) : new Map();
+    const questions = prs.some(readyIssue) ? new Map(((await listIssuesByLabel(this.repo, "pendulum:question", cached).catch(() => [])) || []).map((i) => [i.number, i])) : new Map();
     const out = [];
     for (const pr of prs) {
       const asked = questions.get(readyIssue(pr)) ?? null;
@@ -3111,7 +3111,7 @@ export class Local {
         // no review. A re-apply whose actor is unread waits with the dispatcher; anyone else's changes nothing.
         const go = events ? await requeuedIn(events, this.objectiveLabel(), goTrust(events, issue, labelTrust(this.repo, this.opts))) : null;
         if (!go || go.requeued || go.unread) continue;
-        const askedAt = labeledAtIn(events, "factory:question");
+        const askedAt = labeledAtIn(events, "pendulum:question");
         if (!readyAfter(askedAt ? await timelineOf(this.repo, pr.number, cached).catch(() => []) : [], askedAt)) continue;
       }
       if ((await localClaim(this.repo, issue, this.opts).catch(() => null))?.fresh) continue;
@@ -3176,7 +3176,7 @@ export class Local {
           return false;
         }
         if (how === "held") {
-          log(`#${issue}: a person took PR #${prNumber} out of the merge queue; Factory leaves it to them`);
+          log(`#${issue}: a person took PR #${prNumber} out of the merge queue; Pendulum leaves it to them`);
           return false;
         }
         if (how === "re-review" || how === "unread" || how === "code-scanning" || how === "queue-red" || how === "text-edit") return this.review(issue, prNumber, { wait: true }).then((r) => (r.next ? "next" : r.exit === "delivered"));
@@ -3285,8 +3285,8 @@ export class Local {
    * again, every START_VARIABLES_MS doubling to five minutes, until a read gets through or GitHub says the token may not
    * read them (403, 404: the workflow's values, as readVariables says); a refused token (401) is named every third wait,
  * and one replaced in its source is taken at the next try; `run` and `review` try three times, then stop
-   * with nothing started. A read that gets through also names the organization FACTORY_* variables shared with the
-   * repository, which Factory does not take (inputs.mjs organizationVariablesLine).
+   * with nothing started. A read that gets through also names the organization PENDULUM_* variables shared with the
+   * repository, which Pendulum does not take (inputs.mjs organizationVariablesLine).
    */
   async startVariables({ serve = false } = {}) {
     if (serve) waitOutages();
@@ -3314,12 +3314,12 @@ export class Local {
    * that starts from then on, never to a stage in flight or being set up, and said once, by name, with the layer each
    * comes from when a variable is involved. Every other setting (what a stage may reach or receive, budgets, maintainers,
    * protected paths, the harness, setup) keeps its value from serve's start until serve starts again, said once. The
-   * read also brings the workflow's Factory pin (followPin).
+   * read also brings the workflow's Pendulum pin (followPin).
    */
   /**
    * Serve's own outage bounds as now set (localLimits over baseEnv, each its default when unset): how long an Objective
-   * stays paused on one outage before it Blocks (FACTORY_LOCAL_OUTAGE_HOURS, OUTAGE.blockMs), and the window in which a
-   * new outage after a resume is the same one (FACTORY_LOCAL_WAIT_MINUTES, OUTAGE.stageWaitMs). Taken each tick.
+   * stays paused on one outage before it Blocks (PENDULUM_LOCAL_OUTAGE_HOURS, OUTAGE.blockMs), and the window in which a
+   * new outage after a resume is the same one (PENDULUM_LOCAL_WAIT_MINUTES, OUTAGE.stageWaitMs). Taken each tick.
    */
   applyLocalLimits() {
     const { waitMs, outageMs } = localLimits(this.baseEnv());
@@ -3359,7 +3359,7 @@ export class Local {
     const hot = { ...this.wf };
     const hotFrom = { ...from };
     // The models and effort belong to their harness, which waits for a restart: a change of harness holds them too.
-    const harnessOf = (wf) => String(wf.FACTORY_HARNESS || "claude").trim().toLowerCase();
+    const harnessOf = (wf) => String(wf.PENDULUM_HARNESS || "claude").trim().toLowerCase();
     const live = harnessOf(next) === harnessOf(this.wf) ? HOT_SETTINGS : HOT_SETTINGS.filter((k) => !MODEL_SETTINGS.includes(k));
     for (const k of live) {
       if (next[k] === undefined) {
@@ -3394,8 +3394,8 @@ export class Local {
   }
 
   /**
-   * The workflow's Factory pin against the Factory this serve runs (#276), at each tick. A new release tag or commit
-   * SHA there is taken at a stage boundary: serve fetches it from Factory's own repository (lib/release.mjs), starts no
+   * The workflow's Pendulum pin against the Pendulum this serve runs (#276), at each tick. A new release tag or commit
+   * SHA there is taken at a stage boundary: serve fetches it from Pendulum's own repository (lib/release.mjs), starts no
    * new stage meanwhile, and once no stage runs here starts again on it in this same process (restartOn), which resumes
    * this loop's paused work. Only a serve that runs a release follows it (a checkout at its own release tag, or one serve
    * fetched): one started from any other checkout, a branch or a change of your own, keeps running what you started, and
@@ -3403,12 +3403,12 @@ export class Local {
    * SWITCH_GAP_MS. Said once per pin. Returns true while new stages wait for the switch.
    */
   async followPin(inFlight, { once = false } = {}) {
-    this.factory ??= runningFactory();
-    const name = runningName(this.factory);
-    const d = pinDecision(this.pins, this.factory);
+    this.pendulum ??= runningPendulum();
+    const name = runningName(this.pendulum);
+    const d = pinDecision(this.pins, this.pendulum);
     const ref = d.follow ? d.ref : null;
     if (this.repin && this.repin.ref !== ref) {
-      log(`clockgrove/factory@${this.repin.ref} is no longer the workflow's pin: serve stays on ${name}`);
+      log(`clockgrove/pendulum@${this.repin.ref} is no longer the workflow's pin: serve stays on ${name}`);
       this.repin = null;
     }
     if (d.same) {
@@ -3422,15 +3422,15 @@ export class Local {
       return false;
     };
     if (!d.follow) return note(`the workflow on ${where} pins ${d.why}; serve runs no code from it and keeps running ${name}`);
-    if (once) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}; a serve that keeps running takes the pin, --once does not`);
-    if (!this.factory.release) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name} from ${this.factory.root}, which is not a release checkout, so it keeps running that: start serve from ${ref} to run it`);
+    if (once) return note(`the workflow on ${where} pins clockgrove/pendulum@${ref}; this serve runs ${name}; a serve that keeps running takes the pin, --once does not`);
+    if (!this.pendulum.release) return note(`the workflow on ${where} pins clockgrove/pendulum@${ref}; this serve runs ${name} from ${this.pendulum.root}, which is not a release checkout, so it keeps running that: start serve from ${ref} to run it`);
     if (this.repin?.state === "failed" && Date.now() >= this.repin.retryAt) this.repin = null;
     // Counted from the last switch this process made (restartOn), never from a try that did not switch.
-    if (!this.repin && Date.now() - (this.switchedAt || 0) < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
+    if (!this.repin && Date.now() - (this.switchedAt || 0) < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/pendulum@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
     if (!this.repin) {
-      log(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}. It fetches ${ref} from ${RELEASES_URL} and starts no new stage meanwhile; ${inFlight ? `once the ${inFlight} stage(s) in flight here end` : "once fetched"}, serve runs on ${ref}`);
+      log(`the workflow on ${where} pins clockgrove/pendulum@${ref}; this serve runs ${name}. It fetches ${ref} from ${RELEASES_URL} and starts no new stage meanwhile; ${inFlight ? `once the ${inFlight} stage(s) in flight here end` : "once fetched"}, serve runs on ${ref}`);
       const r = (this.repin = { ref, state: "fetching" });
-      r.fetch = releaseCheckout(ref, { ...this.releaseOpts, running: this.factory })
+      r.fetch = releaseCheckout(ref, { ...this.releaseOpts, running: this.pendulum })
         .then(async (c) => {
           const problem = await startProblem(c.dir);
           if (problem) throw new Error(problem);
@@ -3438,12 +3438,12 @@ export class Local {
           r.state = "ready";
         })
         .catch((e) => {
-          // An older commit than this one, or a SHA not on Factory's main: never tried again until the pin changes.
+          // An older commit than this one, or a SHA not on Pendulum's main: never tried again until the pin changes.
           r.state = e?.code === "older" || e?.code === "refused" ? "refused" : "failed";
           r.retryAt = Date.now() + PIN_RETRY_MS;
           if (this.repin !== r) return;
           if (r.state === "refused") log(`${String(e.message).slice(0, 300)}; serve keeps running ${name}`);
-          else log(`clockgrove/factory@${ref} could not be taken (${String(e?.message || e).slice(0, 300)}); serve goes on with ${name} and tries again in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
+          else log(`clockgrove/pendulum@${ref} could not be taken (${String(e?.message || e).slice(0, 300)}); serve goes on with ${name} and tries again in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
         });
     }
     const r = this.repin;
@@ -3468,25 +3468,25 @@ export class Local {
     const script = join(r.checkout.dir, "plugin", "scripts", "local.mjs");
     if (typeof process.execve !== "function") {
       r.state = "manual";
-      log(`this Node (${process.version}) cannot start serve again in its own process (process.execve needs Node 22.15 or newer): serve goes on with ${runningName(this.factory)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "factory")} serve to run clockgrove/factory@${r.ref}`);
+      log(`this Node (${process.version}) cannot start serve again in its own process (process.execve needs Node 22.15 or newer): serve goes on with ${runningName(this.pendulum)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "pendulum")} serve to run clockgrove/pendulum@${r.ref}`);
       return false;
     }
     const problem = checkoutProblem(r.checkout);
     if (problem) {
       r.state = "failed";
       r.retryAt = Date.now() + PIN_RETRY_MS;
-      log(`the checkout of clockgrove/factory@${r.ref} at ${r.checkout.dir} changed since serve fetched it (${problem}); serve does not run it, goes on with ${runningName(this.factory)} and fetches it afresh in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
+      log(`the checkout of clockgrove/pendulum@${r.ref} at ${r.checkout.dir} changed since serve fetched it (${problem}); serve does not run it, goes on with ${runningName(this.pendulum)} and fetches it afresh in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
       return false;
     }
-    log(`no stage runs here: serve starts again on clockgrove/factory@${r.ref} from ${r.checkout.dir}, in this process; it resumes the Objectives this loop holds paused`);
-    const env = { ...process.env, [SWITCHED_ENV]: String(Date.now()), [SWITCHED_FROM_ENV]: this.factory?.root || "" };
+    log(`no stage runs here: serve starts again on clockgrove/pendulum@${r.ref} from ${r.checkout.dir}, in this process; it resumes the Objectives this loop holds paused`);
+    const env = { ...process.env, [SWITCHED_ENV]: String(Date.now()), [SWITCHED_FROM_ENV]: this.pendulum?.root || "" };
     // The new release's skills and agents, from beside its own scripts.
-    delete env.FACTORY_PLUGIN_ROOT;
+    delete env.PENDULUM_PLUGIN_ROOT;
     try {
       (this.execve ?? process.execve)(process.execPath, [process.execPath, ...process.execArgv, script, ...process.argv.slice(2)], env);
     } catch (e) {
       r.state = "manual";
-      log(`serve could not start again on clockgrove/factory@${r.ref} (${String(e?.message || e).slice(0, 200)}): it goes on with ${runningName(this.factory)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "factory")} serve`);
+      log(`serve could not start again on clockgrove/pendulum@${r.ref} (${String(e?.message || e).slice(0, 200)}): it goes on with ${runningName(this.pendulum)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "pendulum")} serve`);
     }
     return false;
   }
@@ -3507,7 +3507,7 @@ export class Local {
   }
 
   /**
-   * The machine's room for this loop's new starts now (lib/machine.mjs machineRoom), with its cap: FACTORY_LOCAL_MAX_CONCURRENT,
+   * The machine's room for this loop's new starts now (lib/machine.mjs machineRoom), with its cap: PENDULUM_LOCAL_MAX_CONCURRENT,
    * else the machine's budget, and its saturation limits (machineLimits). A budget or limit that cannot be used is said once.
    */
   machineBox(running) {
@@ -3517,9 +3517,9 @@ export class Local {
     this.saidBudget = budget.problem;
     const limits = machineLimits({ home });
     const problems = limits.problems.filter((p) => p !== budget.problem).join("; ");
-    if (problems && problems !== this.saidLimits) log(`machine limits: ${problems}; Factory's defaults stand for those`);
+    if (problems && problems !== this.saidLimits) log(`machine limits: ${problems}; Pendulum's defaults stand for those`);
     this.saidLimits = problems;
-    const cap = loopCap(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT, budget.stages);
+    const cap = loopCap(process.env.PENDULUM_LOCAL_MAX_CONCURRENT ?? this.wf.PENDULUM_LOCAL_MAX_CONCURRENT, budget.stages);
     let held = 0;
     try {
       held = slotHolders(dir).length;
@@ -3590,7 +3590,7 @@ export class Local {
   }
 
   /**
-   * The slot of a stage of `factory run` or `review` (stage()): such a loop holds no other, so it takes one whatever the
+   * The slot of a stage of `pendulum run` or `review` (stage()): such a loop holds no other, so it takes one whatever the
    * machine holds, and says what would otherwise hold it.
    */
   holdSlot(holder) {
@@ -3618,11 +3618,11 @@ export class Local {
       });
     const first = this.machineBox(0);
     let shownCap = Math.min(first.cap, first.budget);
-    log(`machine budget: ${first.budget} Objective stage(s) at once on this machine, shared by every Factory loop here (${first.from === "setting" ? first.file : "from its CPU threads and memory"}); this loop: at most ${Math.min(first.cap, first.budget)}${first.cap > first.budget ? `, the budget (FACTORY_LOCAL_MAX_CONCURRENT ${first.cap} is above it)` : " (FACTORY_LOCAL_MAX_CONCURRENT)"}`);
-    this.factory ??= runningFactory();
-    log(`serve runs Factory ${runningName(this.factory)} from ${this.factory.root}`);
+    log(`machine budget: ${first.budget} Objective stage(s) at once on this machine, shared by every Pendulum loop here (${first.from === "setting" ? first.file : "from its CPU threads and memory"}); this loop: at most ${Math.min(first.cap, first.budget)}${first.cap > first.budget ? `, the budget (PENDULUM_LOCAL_MAX_CONCURRENT ${first.cap} is above it)` : " (PENDULUM_LOCAL_MAX_CONCURRENT)"}`);
+    this.pendulum ??= runningPendulum();
+    log(`serve runs Pendulum ${runningName(this.pendulum)} from ${this.pendulum.root}`);
     // A release checkout serve fetched stays while this process runs from it: no serve on this machine prunes it.
-    markInUse(this.factory.root, this.releaseOpts);
+    markInUse(this.pendulum.root, this.releaseOpts);
     // This machine's network (lib/network.mjs): serve's own GitHub calls wait for it to come back, with no bound, one log
     // line when it is lost and one when it answers; its stages wait in place for fifteen minutes and then pause. GitHub's
     // primary rate limit spent is waited out the same way, to its reset: no tick reads, resumes or starts anything until
@@ -3648,7 +3648,7 @@ export class Local {
       if (refused !== null) {
         const now = this.tokenNow();
         const check = () =>
-          checkToken(this.repoFull, now, { max: this.bounded("FACTORY_LOCAL_TOKEN_PROBE_MAX") }).then(
+          checkToken(this.repoFull, now, { max: this.bounded("PENDULUM_LOCAL_TOKEN_PROBE_MAX") }).then(
             () => true,
             (e) => {
               againAt = e.again ? Date.now() + REFUSED_PROBE.ms : Infinity;
@@ -3673,7 +3673,7 @@ export class Local {
         this.opts.token = now;
         refused = null;
       }
-      // The workflow as the default branch has it now: its settings, and its Factory pin, taken at this stage boundary.
+      // The workflow as the default branch has it now: its settings, and its Pendulum pin, taken at this stage boundary.
       await this.refreshSettings().catch((e) => log(`settings: ${e.message.slice(0, 160)}`));
       this.applyLocalLimits();
       // A new pinned release: no new stage starts here until serve runs on it (followPin); stages in flight end as they are.
@@ -3686,7 +3686,7 @@ export class Local {
         cleaned = Date.now();
         await this.cleanup(running).catch((e) => log(`cleanup: ${e.message.slice(0, 160)}`));
       }
-      const inputs = resolveInputs({ args: { repo: this.repoFull }, env: { ...this.baseEnv(), FACTORY_INPUT_GITHUB_TOKEN: this.token } });
+      const inputs = resolveInputs({ args: { repo: this.repoFull }, env: { ...this.baseEnv(), PENDULUM_INPUT_GITHUB_TOKEN: this.token } });
       // Failed starts whose holder was unknown: read their claims again once their backoff ends.
       await this.recheckStarts(running).catch((e) => log(`start recheck: ${e.message.slice(0, 160)}`));
       // The machine's room for new starts (machineBox): its budget, shared by every loop here, this loop's cap and the
@@ -3695,14 +3695,14 @@ export class Local {
       const box = this.machineBox(running.size);
       // This loop's cap, read again at each tick from the settings as they are then (refreshSettings), said when it changes.
       const capNow = Math.min(box.cap, box.budget);
-      if (capNow !== shownCap) log(`this loop: at most ${capNow} Objective stage(s) at once on this machine (${box.cap >= box.budget ? `the machine's budget${box.cap > box.budget ? `; FACTORY_LOCAL_MAX_CONCURRENT ${box.cap} is above it` : ""}` : "FACTORY_LOCAL_MAX_CONCURRENT"})`);
+      if (capNow !== shownCap) log(`this loop: at most ${capNow} Objective stage(s) at once on this machine (${box.cap >= box.budget ? `the machine's budget${box.cap > box.budget ? `; PENDULUM_LOCAL_MAX_CONCURRENT ${box.cap} is above it` : ""}` : "PENDULUM_LOCAL_MAX_CONCURRENT"})`);
       shownCap = capNow;
       const slots = this.takeSlots(box, running);
       // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
       // A fault of this machine that failed the starts of two Objectives or more (machineFault): no new stage starts here
       // until its probe passes, so none is charged for it.
       const machine = switching ? {} : await this.machineWait().catch((e) => (log(`machine probe: ${String(e?.message || e).slice(0, 160)}`), {}));
-      const waitLine = switching ? `no new stage until serve runs on clockgrove/factory@${this.repin?.ref}` : machine.work;
+      const waitLine = switching ? `no new stage until serve runs on clockgrove/pendulum@${this.repin?.ref}` : machine.work;
       // Resumes and reviews too, unless the hold is a clone's (they run in the clone their work made).
       const holdAll = switching || !!machine.all;
       const paused = holdAll ? [] : await this.pausedHere(running);
@@ -3733,9 +3733,9 @@ export class Local {
       // localMarked: each pick the dispatch marks Running, named before its write, so a stop puts back even those of a
       // dispatch that threw midway.
       const marked = [];
-      // No Action runs here (actionState): this loop picks the Objectives without factory:local too, labelling each first.
+      // No Action runs here (actionState): this loop picks the Objectives without pendulum:local too, labelling each first.
       const adopt = (await this.actionState().catch(() => null)) === "none";
-      this.dispatching = dispatch(inputs, { token: this.token, adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
+      this.dispatching = dispatch(inputs, { token: this.token, adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at PENDULUM_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -3767,9 +3767,9 @@ export class Local {
         slots.spare();
         break;
       }
-      // Picks labelled factory:local whose mark is not written yet: their claim's start writes it (backfillMark).
+      // Picks labelled pendulum:local whose mark is not written yet: their claim's start writes it (backfillMark).
       for (const n of result.unmarked || []) (this.unmarked ??= new Set()).add(n);
-      // Queued Objectives this loop does not take only for want of factory:local: said once per start (#455).
+      // Queued Objectives this loop does not take only for want of pendulum:local: said once per start (#455).
       if (result.unrouted?.length && !this.unroutedSaid) {
         this.unroutedSaid = true;
         log(unroutedLine(result.unrouted, this.action ?? null));
@@ -3804,7 +3804,7 @@ export class Local {
   }
 }
 
-/** One account's holds as `factory hold` says them (holds.mjs list's entry), at `now`: `state` alone, its state's words. */
+/** One account's holds as `pendulum hold` says them (holds.mjs list's entry), at `now`: `state` alone, its state's words. */
 export function holdText(h, now, { state = false } = {}) {
   const iso = (ms) => new Date(ms).toISOString();
   const parts = [];
@@ -3814,7 +3814,7 @@ export function holdText(h, now, { state = false } = {}) {
 }
 
 /**
- * `factory hold list | release <account> [--repo OWNER/NAME]` (#376): the usage-limit holds this machine's serves share
+ * `pendulum hold list | release <account> [--repo OWNER/NAME]` (#376): the usage-limit holds this machine's serves share
  * (lib/holds.mjs, read with the same checks as serve), or with --repo those of GitHub Actions and the cloud sandbox
  * (lib/route-holds.mjs, read and written with the person's own token: local mode's, else their gh login). `release`
  * writes one release record for the account named exactly as `list` shows it, which ends its holds and guesses and its
@@ -3843,25 +3843,25 @@ export async function holdCommand(flags, { home = homedir(), now = Date.now(), o
     released = store.release({ account, now });
     // A record that could not be written to the folder is kept in this process alone, which ends with it: nothing released.
     if (failed) {
-      err(`factory: the release could not be written to ${holdsDir(home)} (${String(failed?.message || failed).slice(0, 160)}); nothing was released\n`);
+      err(`pendulum: the release could not be written to ${holdsDir(home)} (${String(failed?.message || failed).slice(0, 160)}); nothing was released\n`);
       return 1;
     }
   }
   if (!released) {
-    err(`factory: nothing is held or passed over for ${JSON.stringify(account)} ${where}; ${known.length ? `the accounts that are: ${known.join(", ")}` : "no account is"}\n`);
+    err(`pendulum: nothing is held or passed over for ${JSON.stringify(account)} ${where}; ${known.length ? `the accounts that are: ${known.join(", ")}` : "no account is"}\n`);
     return 1;
   }
   if (refused) {
-    err(`factory: the release of ${account} was posted on ${repo.full}#${issue}, Factory's holds issue, but it will not count: ${refused}; delete that comment, and release it again with a token of a person who can push\n`);
+    err(`pendulum: the release of ${account} was posted on ${repo.full}#${issue}, Pendulum's holds issue, but it will not count: ${refused}; delete that comment, and release it again with a token of a person who can push\n`);
     return 1;
   }
-  out(`released ${released.account} (${HARNESS_NAMES[released.harness] || released.harness}), which was ${holdText(released, now, { state: true })}\n${repo ? "the next stage on GitHub Actions or the cloud sandbox may start on it, when its workflow pins this Factory release or later; a job on an earlier release still holds it until its reset" : `every serve on this Factory release or later on this machine may start on it at its next tick, and an Objective paused on it resumes then; a serve on an earlier release still holds it until its reset: restart that serve on this release for it to see the release`}\n`);
+  out(`released ${released.account} (${HARNESS_NAMES[released.harness] || released.harness}), which was ${holdText(released, now, { state: true })}\n${repo ? "the next stage on GitHub Actions or the cloud sandbox may start on it, when its workflow pins this Pendulum release or later; a job on an earlier release still holds it until its reset" : `every serve on this Pendulum release or later on this machine may start on it at its next tick, and an Objective paused on it resumes then; a serve on an earlier release still holds it until its reset: restart that serve on this release for it to see the release`}\n`);
   return 0;
 }
 
 /**
- * The token for Factory's own writes from a session (`deliver`, `post-review`): the local token when set up, else the
- * developer's gh login. These commands run no model, so the writes are Factory's, made on the developer's behalf.
+ * The token for Pendulum's own writes from a session (`deliver`, `post-review`): the local token when set up, else the
+ * developer's gh login. These commands run no model, so the writes are Pendulum's, made on the developer's behalf.
  */
 function sessionToken(repoFull) {
   const t = localToken(repoFull);
@@ -3869,7 +3869,7 @@ function sessionToken(repoFull) {
   try {
     return sh("gh", ["auth", "token"]);
   } catch {
-    throw new Error(`no token: save one for local mode with \`factory token set\` (${tokenFile(repoFull)}), or log in with gh`);
+    throw new Error(`no token: save one for local mode with \`pendulum token set\` (${tokenFile(repoFull)}), or log in with gh`);
   }
 }
 
@@ -3888,23 +3888,23 @@ function sessionClone(flags) {
 async function sessionInputs({ dir, repoFull, repo, opts }) {
   const defaultBranch = (await rest(`repos/${repo.full}`, opts)).default_branch;
   await gitIn(dir, ["fetch", "-q", "origin", defaultBranch]);
-  const committed = await gitIn(dir, ["show", `origin/${defaultBranch}:.github/workflows/factory.yml`]).then((r) => workflowSettings(workflowEnv(r.stdout)).kept, () => ({}));
+  const committed = await gitIn(dir, ["show", `origin/${defaultBranch}:.github/workflows/pendulum.yml`]).then((r) => workflowSettings(workflowEnv(r.stdout)).kept, () => ({}));
   const inputs = resolveInputs({ args: { repo: repoFull }, env: { ...process.env, ...committed } });
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
   return { defaultBranch, inputs };
 }
 
-/** Where `factory issue` writes the issue for a session by default, and where `deliver` reads what the session was given. */
-const sessionIssueFile = (dir) => join(process.env.FACTORY_IN || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "factory-in"), "issue.md");
+/** Where `pendulum issue` writes the issue for a session by default, and where `deliver` reads what the session was given. */
+const sessionIssueFile = (dir) => join(process.env.PENDULUM_IN || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "pendulum-in"), "issue.md");
 
 /** A session's refusal of an issue whose author, last editor or latest title renamer cannot vouch for it: the Blocked notice's words. */
 const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`);
-/** A draft (factory:draft) is run on no route, a session's included (lib/stop.mjs stopCause): the refusal and its fix. */
-const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Factory never runs; start it first (take ${DRAFT_LABEL} off and apply the Objective label, or ask "Start Clockgrove Factory Objective ${issue}")`);
+/** A draft (pendulum:draft) is run on no route, a session's included (lib/stop.mjs stopCause): the refusal and its fix. */
+const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Pendulum never runs; start it first (take ${DRAFT_LABEL} off and apply the Objective label, or ask "Start Clockgrove Pendulum Objective ${issue}")`);
 
 /**
- * `factory issue <issue> [--out FILE]`: the issue as a session reads it (/factory:factory-run --here, /factory:factory-review), written
- * to --out (default $FACTORY_IN/issue.md, else <git dir>/factory-in/issue.md) as the worker writes it: the title and
+ * `pendulum issue <issue> [--out FILE]`: the issue as a session reads it (/pendulum:pendulum-run --here, /pendulum:pendulum-review), written
+ * to --out (default $PENDULUM_IN/issue.md, else <git dir>/pendulum-in/issue.md) as the worker writes it: the title and
  * body read with their author, last editor and latest title renamer, only when each can push or is a pinned maintainer. Otherwise nothing is
  * written, the reason and its fix go to stderr, and the exit code is 1: the body never reaches the session. Without
  * --out, also plan.md beside it: the plan comment, only when the plan was made from this text (else none, and an
@@ -3928,10 +3928,10 @@ async function issueForSession(issue, flags) {
   mkdirSync(resolve(file, ".."), { recursive: true });
   writeFileSync(file, inFiles({ issue, issueTitle: t.issueData.title, issueBody: t.issueData.body })["issue.md"]);
   log(`#${issue}: written by ${t.people.map(([role, login]) => `${role} ${login}`).join(", ")}; ${file}`);
-  // A foundation Objective (`factory:foundation`, vouched for as the review job vouches for it): its review has two passes.
+  // A foundation Objective (`pendulum:foundation`, vouched for as the review job vouches for it): its review has two passes.
   const found = await foundationTrusted(clone.repo, issue, t.labels, clone.opts);
   if (!found.ok) log(`#${issue}: ${found.reason}. ${found.fix} Until then post-review posts no review for it.`);
-  else if (found.foundation) log(`#${issue}: a foundation Objective (factory:foundation): its review runs the foundation pass too`);
+  else if (found.foundation) log(`#${issue}: a foundation Objective (pendulum:foundation): its review runs the foundation pass too`);
   if (!planFile) return 0;
   const plan = state === "same" ? (posted.text ?? null) : null;
   if (plan !== null) writeFileSync(planFile, plan);
@@ -3940,20 +3940,20 @@ async function issueForSession(issue, flags) {
 }
 
 /**
- * `factory deliver <issue>`: Factory's half of an Objective worked in a session (/factory:factory-run --here). The session
- * committed on factory/<issue> in this clone and left its hand-off files in --out (default <git dir>/factory-out);
- * Factory checks the issue's author, last editor and latest title renamer (objective-trust.mjs: a Block, nothing pushed,
+ * `pendulum deliver <issue>`: Pendulum's half of an Objective worked in a session (/pendulum:pendulum-run --here). The session
+ * committed on pendulum/<issue> in this clone and left its hand-off files in --out (default <git dir>/pendulum-out);
+ * Pendulum checks the issue's author, last editor and latest title renamer (objective-trust.mjs: a Block, nothing pushed,
  * when one cannot vouch for it), checks the protected paths, pushes, opens or updates the PR from pr.md, posts the plan comment, the
  * replies and the note, and applies the exit record. Returns the process exit code.
  */
 async function deliver(issue, flags) {
   const clone = sessionClone(flags);
   const { dir, repo, opts } = clone;
-  const branch = `factory/${issue}`;
+  const branch = `pendulum/${issue}`;
   const current = sh("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
   if (current !== branch) throw new Error(`the clone is on ${current}; deliver runs on ${branch}`);
-  // Run from a session (/factory:factory-run --here), so the App's key is not read here: notices post with this token.
-  if (process.env.FACTORY_LOCAL_APP_ID) log("notices post with your own token here, so their @mention notifies no one; the App posts them only for serve and run");
+  // Run from a session (/pendulum:pendulum-run --here), so the App's key is not read here: notices post with this token.
+  if (process.env.PENDULUM_LOCAL_APP_ID) log("notices post with your own token here, so their @mention notifies no one; the App posts them only for serve and run");
   const { defaultBranch, inputs } = await sessionInputs(clone);
   // When the Objective was last started, read before the text, as the worker does (objective-trust.mjs startedAt, planGate).
   const labeledAt = await startedAt(repo, issue, inputs.objectiveLabel, opts);
@@ -3966,7 +3966,7 @@ async function deliver(issue, flags) {
     return 1;
   }
   const { issueData } = trusted;
-  // The text the session planned from is the issue.md `factory issue` gave it: changed since, nothing is delivered, and
+  // The text the session planned from is the issue.md `pendulum issue` gave it: changed since, nothing is delivered, and
   // the session reads the issue again. That text is the plan's record (objective-trust.mjs planGate); with no issue.md
   // here (written elsewhere with --out), the plan comment keeps the record it has (handoff.mjs planSync).
   const given = (() => {
@@ -3976,18 +3976,18 @@ async function deliver(issue, flags) {
       return null;
     }
   })();
-  if (given !== null && settled(given) !== settled(inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body })["issue.md"])) throw new Error(`nothing was delivered: the Objective's title or body changed after this session read it; run \`factory issue ${issue}\` again and make the plan again from the new text`);
-  // An edit since the plan the edit check keeps (as `factory issue` judged it, on the gateway alone) keeps the plan's own
+  if (given !== null && settled(given) !== settled(inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body })["issue.md"])) throw new Error(`nothing was delivered: the Objective's title or body changed after this session read it; run \`pendulum issue ${issue}\` again and make the plan again from the new text`);
+  // An edit since the plan the edit check keeps (as `pendulum issue` judged it, on the gateway alone) keeps the plan's own
   // record, its text the baseline the next edit is judged against; else the text the session was given.
   const kept = given === null ? null : await planStateNow(repo, issue, trusted, opts, {}, () => openEditCheck({ inputs }));
   const planRecord = given === null ? null : kept.state === "same" && kept.record && kept.record.sha256 !== trusted.sha ? { ...kept.record, label: labeledAt } : { sha256: trusted.sha, label: labeledAt, text: recordText({ ...issueData, labels: trusted.labels }) };
-  const out = resolve(flags.out || process.env.FACTORY_OUT || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "factory-out"));
+  const out = resolve(flags.out || process.env.PENDULUM_OUT || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "pendulum-out"));
   const { files, refused } = await readOut({ out }, process.env);
   if (refused.length) log(`hand-off files refused: ${refused.join(", ")}`);
-  const record = exitFromOut(files) || { exit: "blocked", reason: "the session left no exit record ($FACTORY_OUT/exit.json)", questions: [] };
+  const record = exitFromOut(files) || { exit: "blocked", reason: "the session left no exit record ($PENDULUM_OUT/exit.json)", questions: [] };
   // An issue body or a plan that needs another repository is the owner's Question (one-repo.mjs): the plan comment and
   // the Question go up, and nothing is pushed. As in the worker, a repository a maintainer has answered about since
-  // Factory asked (its own progress record, written as this token's login) is not asked again, and the ask is recorded
+  // Pendulum asked (its own progress record, written as this token's login) is not asked again, and the ask is recorded
   // for the next run.
   const planText = typeof files["plan.md"] === "string" ? files["plan.md"] : await currentPlan(repo, issue, opts).catch(() => null);
   const asking = await findPr(repo, branch, opts).catch(() => null);
@@ -4001,21 +4001,21 @@ async function deliver(issue, flags) {
     await planSync(repo, issue, opts, planRecord)(files["plan.md"]);
     await postNote(repo, issue, files["note.md"], opts);
     await applyExit(repo, { issue, pr: asking, exit: "question", reason: planNeeds, notify: inputs.notify, stage: "work", askOnIssue: true }, opts);
-    // A `--here` run is unmetered (skills/factory-score): its comment carries no spend line.
+    // A `--here` run is unmetered (skills/pendulum-score): its comment carries no spend line.
     if (needs.repos.length) await progressReporter(repo, issue, opts, { stage: "work", soFar: null }).planAsked(needs.repos);
     log(`#${issue}: question at plan time (${planNeeds}); nothing pushed`);
     return 1;
   }
   // A Question that names no test of the Question rule is checked in the session before anything is delivered.
   if (record.unfounded?.length) throw new Error(`nothing was delivered: ${questionCheckPrompt(record, { file: true })} Then run deliver again.`);
-  // Factory's push (lib/outbox.mjs): checked in its own mirror (protected paths, Git LFS), leased, read back.
+  // Pendulum's push (lib/outbox.mjs): checked in its own mirror (protected paths, Git LFS), leased, read back.
   const tmp = privateTmp({ ...process.env });
-  // The session's workflow hand-over (handoff.mjs handoverChecker), checked in Factory's mirror once the branch is up.
+  // The session's workflow hand-over (handoff.mjs handoverChecker), checked in Pendulum's mirror once the branch is up.
   let handover;
   let ahead = 0;
   try {
-    const outbox = await openOutbox({ branch, defaultBranch, checkout: dir, remote: `https://github.com/${repo.full}.git`, token: () => opts.token, agentEnv: process.env, local: true, protectedList: protectedPaths(inputs.protectedAdditions), setup: inputs.setup, setupContext: { env: process.env, roots: [dir] }, base: tmp.factory });
-    // A merge Factory makes itself here (the default branch's workflow change, an unsynced checkout) carries the
+    const outbox = await openOutbox({ branch, defaultBranch, checkout: dir, remote: `https://github.com/${repo.full}.git`, token: () => opts.token, agentEnv: process.env, local: true, protectedList: protectedPaths(inputs.protectedAdditions), setup: inputs.setup, setupContext: { env: process.env, roots: [dir] }, base: tmp.pendulum });
+    // A merge Pendulum makes itself here (the default branch's workflow change, an unsynced checkout) carries the
     // identity of the token that pushes it, as on every other route.
     outbox.author = commitAuthor(await gitIdentity(null, opts.token));
     if (!(await outbox.push())) throw new Error(`nothing was delivered: ${outbox.error}`);
@@ -4024,7 +4024,7 @@ async function deliver(issue, flags) {
     if (checker.refused()) throw new Error(`the branch is pushed, nothing else was delivered: ${checker.refused()}; fix it and run deliver again`);
     ahead = (await outbox.delta()).count;
   } finally {
-    dropOwned(tmp.factory);
+    dropOwned(tmp.pendulum);
   }
   // Nothing pushed but a hand-over: no PR can carry it, so it goes on the issue and the Objective Blocks, as on every route.
   const openNow = await findPr(repo, branch, opts).catch(() => null);
@@ -4061,16 +4061,16 @@ async function deliver(issue, flags) {
 export const HANDOVER_RISK = "a workflow runs with the repository's secrets, and one that runs `on: push` runs as soon as its branch is pushed";
 
 /**
- * The body of the pull request `factory handover <issue> --push` opens: it names the Objective (Refs, not Closes: the
- * Objective's own PR closes it), links Factory's hand-over comment, and says the person read the change before pushing.
+ * The body of the pull request `pendulum handover <issue> --push` opens: it names the Objective (Refs, not Closes: the
+ * Objective's own PR closes it), links Pendulum's hand-over comment, and says the person read the change before pushing.
  */
 export function handoverPrBody({ issue, url = "" }) {
   return [
     `Refs #${issue}`,
     "",
-    `The workflow change Factory handed over for #${issue}: Factory never pushes a workflow file, so a person applies it. ${url ? `Factory's hand-over comment: ${url}` : `Factory's hand-over comment is on #${issue}.`}`,
+    `The workflow change Pendulum handed over for #${issue}: Pendulum never pushes a workflow file, so a person applies it. ${url ? `Pendulum's hand-over comment: ${url}` : `Pendulum's hand-over comment is on #${issue}.`}`,
     "",
-    `The person who pushed this branch reviewed the workflow change before pushing it: \`factory handover ${issue}\` staged and showed it, and \`factory handover ${issue} --push\` committed and pushed it only once the staged change was exactly that hand-over.`,
+    `The person who pushed this branch reviewed the workflow change before pushing it: \`pendulum handover ${issue}\` staged and showed it, and \`pendulum handover ${issue} --push\` committed and pushed it only once the staged change was exactly that hand-over.`,
   ].join("\n");
 }
 
@@ -4078,15 +4078,15 @@ export function handoverPrBody({ issue, url = "" }) {
 const JOB_TOKEN_LOGIN = "github-actions[bot]";
 
 /**
- * The hand-over `factory handover` may apply, or a refusal (an Error whose message says why; nothing is changed then).
- * The comment's author is trusted directly, and must also have applied `factory:handover` at some time (another
+ * The hand-over `pendulum handover` may apply, or a refusal (an Error whose message says why; nothing is changed then).
+ * The comment's author is trusted directly, and must also have applied `pendulum:handover` at some time (another
  * login's labelling, a triager's relabel included, neither adds nor takes away trust). Trusted are only:
- *  - the Factory App this person names (`appId`: --app or FACTORY_LOCAL_APP_ID; it is the repository's
- *    FACTORY_APP_ID), known by GitHub's own `performed_via_github_app` on the comment (that id, and the author being
+ *  - the Pendulum App this person names (`appId`: --app or PENDULUM_LOCAL_APP_ID; it is the repository's
+ *    PENDULUM_APP_ID), known by GitHub's own `performed_via_github_app` on the comment (that id, and the author being
  *    that App's `<slug>[bot]`). An App's comment is never trusted without the id, and the comment's own App id is never
  *    offered as the value to pass;
  *  - a person (no `[bot]` login) whose repository permission, read from GitHub now, is write, maintain or admin; local
- *    mode's operator, who posts Factory's comments, is one.
+ *    mode's operator, who posts Pendulum's comments, is one.
  * `github-actions[bot]` (the job token, which any workflow can post as) is refused outright, and so is a permission
  * that cannot be read: there is no fallback. The newest trusted comment wins; with none, the newest one's refusal is
  * given. Returns {patch, who, url}.
@@ -4110,19 +4110,19 @@ export async function trustedHandover(repo, issue, opts, { appId = "" } = {}) {
     const app = c.performed_via_github_app;
     if (login === JOB_TOKEN_LOGIN || app?.slug === "github-actions") return { why: `the hand-over comment is ${JOB_TOKEN_LOGIN}'s, which any workflow can post as; it never hands a workflow over` };
     if (app) {
-      if (!id) return { why: `the hand-over comment is from the GitHub App ${app.slug}, not verified: name your Factory App's id with --app ID (or FACTORY_LOCAL_APP_ID); it is the repository's FACTORY_APP_ID, shown on the App's settings page` };
-      if (String(app.id) !== id) return { why: `the hand-over comment is from the GitHub App ${app.slug}, not your Factory App (id ${id})` };
-      if (login !== `${app.slug}[bot]`) return { why: `the hand-over comment came through your Factory App (id ${id}), but its author ${login} is not that App's bot` };
-      return { who: `the Factory App ${login} (id ${id})` };
+      if (!id) return { why: `the hand-over comment is from the GitHub App ${app.slug}, not verified: name your Pendulum App's id with --app ID (or PENDULUM_LOCAL_APP_ID); it is the repository's PENDULUM_APP_ID, shown on the App's settings page` };
+      if (String(app.id) !== id) return { why: `the hand-over comment is from the GitHub App ${app.slug}, not your Pendulum App (id ${id})` };
+      if (login !== `${app.slug}[bot]`) return { why: `the hand-over comment came through your Pendulum App (id ${id}), but its author ${login} is not that App's bot` };
+      return { who: `the Pendulum App ${login} (id ${id})` };
     }
-    if (/\[bot\]$/i.test(login)) return { why: `the hand-over comment is ${login}'s, a bot that is not the Factory App you named` };
+    if (/\[bot\]$/i.test(login)) return { why: `the hand-over comment is ${login}'s, a bot that is not the Pendulum App you named` };
     let permission;
     try {
       permission = await collaboratorPermission(repo, login, opts);
     } catch (e) {
       throw refuse(`${login}'s permission on ${repo.full} could not be read (${String(e?.message || e).slice(0, 120)}), so the hand-over comment is not trusted`);
     }
-    if (!HANDOVER_WRITERS.has(permission)) return { why: `${login}, who wrote the hand-over comment, cannot write to ${repo.full} (${permission || "no access"}); only Factory's App or someone who can write hands a workflow over` };
+    if (!HANDOVER_WRITERS.has(permission)) return { why: `${login}, who wrote the hand-over comment, cannot write to ${repo.full} (${permission || "no access"}); only Pendulum's App or someone who can write hands a workflow over` };
     return { who: `${login} (${permission} permission)` };
   };
   let first = null;
@@ -4140,10 +4140,10 @@ export async function trustedHandover(repo, issue, opts, { appId = "" } = {}) {
 }
 
 /**
- * `factory handover <issue> [--push] [--app ID]`: a person applies Factory's workflow hand-over (handover.mjs) in their
+ * `pendulum handover <issue> [--push] [--app ID]`: a person applies Pendulum's workflow hand-over (handover.mjs) in their
  * clone, in two steps. The first takes the hand-over trustedHandover accepts, says whose it is, checks it again here as
- * Factory did (outbox.mjs checkHandover, against the default branch as fetched now), puts git's own result on a new
- * branch `factory-workflow/<issue>` from the default branch (or, when that fails, leaves the clone as it was), shows
+ * Pendulum did (outbox.mjs checkHandover, against the default branch as fetched now), puts git's own result on a new
+ * branch `pendulum-workflow/<issue>` from the default branch (or, when that fails, leaves the clone as it was), shows
  * `git diff --cached` and stops: nothing is committed or pushed, because pushing a workflow can run it. The second,
  * `--push`, on that branch, takes and checks the hand-over again and goes on only when the staged change is exactly
  * that, then commits (hooks off, as in step one), pushes the branch and opens its pull request with `gh`. Nothing here
@@ -4157,11 +4157,11 @@ async function handoverForPerson(issue, flags) {
   const git = (args, o = {}) => exec("git", ["-C", dir, "-c", "core.hooksPath=/dev/null", ...args], { env: o.env ?? env, input: o.input, maxBytes: 64 * 1024 * 1024 });
   git.env = () => env;
   const fail = (why) => {
-    process.stderr.write(`factory handover: ${why}\n`);
+    process.stderr.write(`pendulum handover: ${why}\n`);
     return 1;
   };
   const check = async (patch, tree, against) => {
-    const scratch = mkdtempSync(join(tmpdir(), "factory-handover-"));
+    const scratch = mkdtempSync(join(tmpdir(), "pendulum-handover-"));
     try {
       return await checkHandover(git, { patch, tree, index: join(scratch, "index"), against });
     } finally {
@@ -4172,7 +4172,7 @@ async function handoverForPerson(issue, flags) {
   if ((await exec("git", ["check-ref-format", "--branch", String(defaultBranch)], { env })).code !== 0) return fail(`GitHub's default branch name ${JSON.stringify(defaultBranch)} is no branch name git takes`);
   let trusted;
   try {
-    trusted = await trustedHandover(repo, issue, opts, { appId: flags.app ?? process.env.FACTORY_LOCAL_APP_ID ?? "" });
+    trusted = await trustedHandover(repo, issue, opts, { appId: flags.app ?? process.env.PENDULUM_LOCAL_APP_ID ?? "" });
   } catch (e) {
     if (!e.refusal) throw e;
     return fail(`${e.message}; nothing was changed here`);
@@ -4180,14 +4180,14 @@ async function handoverForPerson(issue, flags) {
   log(`#${issue}: the hand-over is ${trusted.who}'s comment${trusted.url ? ` (${trusted.url})` : ""}`);
   if (flags.push) {
     const on = (await git(["symbolic-ref", "--short", "-q", "HEAD"])).stdout.trim();
-    if (on !== branch) return fail(`run it on ${branch}, after \`factory handover ${issue}\` put the change there and you read it`);
+    if (on !== branch) return fail(`run it on ${branch}, after \`pendulum handover ${issue}\` put the change there and you read it`);
     // The staged change must be exactly the hand-over as checked on this branch's commit, which step one showed.
     const checked = await check(trusted.patch, "HEAD", branch);
     if (!checked.ok) return fail(`the hand-over ${checked.problem}; nothing was pushed`);
     const staged = await git(["diff-index", "--cached", "-p", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"]);
-    if (staged.code !== 0 || staged.stdout !== checked.patch) return fail(`what is staged on ${branch} is not the hand-over as shown; nothing was pushed. Start again: switch back, delete ${branch} and run \`factory handover ${issue}\``);
+    if (staged.code !== 0 || staged.stdout !== checked.patch) return fail(`what is staged on ${branch} is not the hand-over as shown; nothing was pushed. Start again: switch back, delete ${branch} and run \`pendulum handover ${issue}\``);
     if ((await git(["diff", "--name-only"])).stdout.trim()) return fail(`${branch} has unstaged changes; nothing was pushed`);
-    const title = `#${issue}: the workflow change Factory handed over`;
+    const title = `#${issue}: the workflow change Pendulum handed over`;
     const steps = [
       ["git", ["-C", dir, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", title]],
       ["git", ["-C", dir, "push", "-u", "origin", `HEAD:refs/heads/${branch}`]],
@@ -4221,12 +4221,12 @@ async function handoverForPerson(issue, flags) {
   const shown = await git(["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color"]);
   process.stdout.write(shown.stdout);
   log(`#${issue}: the workflow hand-over (${trusted.who}'s) is staged on ${branch}, from ${defaultBranch}; nothing is committed or pushed.`);
-  log(`Read the diff above before you push it: ${HANDOVER_RISK}. When you have, run \`factory handover ${issue} --push\` to commit it, push ${branch} and open its pull request.`);
+  log(`Read the diff above before you push it: ${HANDOVER_RISK}. When you have, run \`pendulum handover ${issue} --push\` to commit it, push ${branch} and open its pull request.`);
   return 0;
 }
 
 /**
- * The review `factory post-review` posts from a findings file's text, or a throw when the file is no reviewer pass: it
+ * The review `pendulum post-review` posts from a findings file's text, or a throw when the file is no reviewer pass: it
  * holds no reviewer JSON, or it judges no acceptance entry (handoff.mjs reviewMissed). On a foundation
  * Objective (`foundation`, foundationTrusted) the file also holds the foundation pass, `"foundation": {"comments": [...]}`,
  * posted as the review job posts it; a file without it, or with it on any other Objective, is refused. Nothing is
@@ -4246,13 +4246,13 @@ export function reviewPostFor({ issue, text, file, diff, entries, foundation = f
   if (!review.parsed) throw new Error(`${file} holds no reviewer JSON; nothing posted`);
   if (reviewMissed({ review, entries })) throw new Error(entries.length ? `${file} judges none of the issue's acceptance entries (${entries.map((e) => e.id).join(", ")}); nothing posted` : `${file} judges no acceptance entry (its "acceptance" list is empty); nothing posted`);
   const pass = whole && typeof whole === "object" && !Array.isArray(whole) ? whole.foundation : undefined;
-  if (foundation && !Array.isArray(pass?.comments)) throw new Error(`${file} holds no foundation pass ("foundation": {"comments": [...]}), which #${issue}'s factory:foundation label asks for; nothing posted`);
-  if (!foundation && pass !== undefined) throw new Error(`${file} holds a foundation pass, but #${issue} is not a foundation Objective (no trusted factory:foundation label); nothing posted`);
+  if (foundation && !Array.isArray(pass?.comments)) throw new Error(`${file} holds no foundation pass ("foundation": {"comments": [...]}), which #${issue}'s pendulum:foundation label asks for; nothing posted`);
+  if (!foundation && pass !== undefined) throw new Error(`${file} holds a foundation pass, but #${issue} is not a foundation Objective (no trusted pendulum:foundation label); nothing posted`);
   return reviewPost({ issue, review, diff, entries, foundation: foundation ? { comments: pass.comments, acceptance: null, parsed: true } : null });
 }
 
 /**
- * `factory post-review <pr> <findings.json>`: post a reviewer pass made in a session (/factory:factory-review) as Factory's one
+ * `pendulum post-review <pr> <findings.json>`: post a reviewer pass made in a session (/pendulum:pendulum-review) as Pendulum's one
  * comment-only review (handoff.mjs reviewPost): the findings fitted to the diff and their text sanitised, a comment for
  * each entry judged not met without one, the judgments in the body, under the review marker.
  */
@@ -4260,8 +4260,8 @@ async function postFindings(prNumber, file, flags) {
   const clone = sessionClone(flags);
   const { dir, repo, opts } = clone;
   const pr = await getPr(repo, prNumber, opts);
-  const issue = Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
-  if (!issue) throw new Error(`PR #${prNumber} is not on a factory/<issue> branch`);
+  const issue = Number(/^pendulum\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
+  if (!issue) throw new Error(`PR #${prNumber} is not on a pendulum/<issue> branch`);
   // The review job's check: a review judged against text no writer vouches for is not posted.
   const { inputs } = await sessionInputs(clone);
   const trusted = await trustedIssue(repo, issue, await getIssue(repo, issue, opts), opts);
@@ -4282,12 +4282,12 @@ async function postFindings(prNumber, file, flags) {
     } catch {
       // no object store to borrow: the scratch repository fetches what it needs
     }
-    const history = await scratchHistory({ remote: `https://github.com/${repo.full}.git`, token: () => opts.token, objects, base: tmp.factory }).catch(() => null);
+    const history = await scratchHistory({ remote: `https://github.com/${repo.full}.git`, token: () => opts.token, objects, base: tmp.pendulum }).catch(() => null);
     const prd = await prDiff(repo, pr, opts, { diffOf: history ? (base, head) => mirrorDiff(history.git, base, head, { mergeBase: true, maxBytes: 256 * 1024 * 1024 }) : null });
     if (prd.source !== "history") log(`PR #${prNumber}'s diff came from GitHub's files API (local history: ${prd.historyError})${prd.unlisted ? `; ${prd.unlisted} file(s) are past the API's listing` : ""}`);
     diff = prd.text;
   } finally {
-    dropOwned(tmp.factory);
+    dropOwned(tmp.pendulum);
   }
   const post = reviewPostFor({ issue, text: readFileSync(file, "utf8"), file, diff, entries: acceptanceEntries(trusted.issueData.body), foundation: found.foundation });
   const { comments } = post;
@@ -4297,14 +4297,14 @@ async function postFindings(prNumber, file, flags) {
 }
 
 /**
- * `factory wait [<issue>...]` (lib/wait.mjs): one JSON line per event on the queue, read from GitHub, so it tells every
+ * `pendulum wait [<issue>...]` (lib/wait.mjs): one JSON line per event on the queue, read from GitHub, so it tells every
  * route's Objectives with or without `serve`. The repository from --repo, else the clone's origin; the local token,
  * else the gh login (it only reads). A spent rate limit or this machine's network waits, as serve's do, within --timeout.
  * Stdout carries only the events; log lines go to stderr.
  */
 async function waitForQueue(flags) {
   const repoFull = cloneRepo(resolve(flags.checkout || process.cwd()), flags.repo);
-  // Stdout is the events, one JSON line each; Factory's log lines (a retry, a rate limit's wait) go to stderr.
+  // Stdout is the events, one JSON line each; Pendulum's log lines (a retry, a rate limit's wait) go to stderr.
   logTo(process.stderr);
   const timeoutMs = flags.timeout ? flags.timeout * 1000 : null;
   const deadline = timeoutMs ? Date.now() + timeoutMs : Infinity;
@@ -4326,7 +4326,7 @@ async function waitForQueue(flags) {
 }
 
 /**
- * `factory doctor`: doctor.mjs --local on the clone (its top directory) and its repository, --repo else the clone's
+ * `pendulum doctor`: doctor.mjs --local on the clone (its top directory) and its repository, --repo else the clone's
  * origin (cloneRepo); with --repo, it runs outside a clone too. Returns doctor's exit code.
  */
 function doctorCommand(flags) {
@@ -4377,7 +4377,7 @@ export function readSecret(prompt, { stdin = process.stdin, err = process.stderr
 }
 
 /**
- * `factory token set`: the repository's local token (--repo, else the clone's origin, cloneRepo) read without echo
+ * `pendulum token set`: the repository's local token (--repo, else the clone's origin, cloneRepo) read without echo
  * (readSecret) and saved where localToken reads it (saveLocalToken). Prints the file, never the token. Returns 0.
  */
 async function tokenSet(flags, { out = (t) => process.stdout.write(t), err = (t) => process.stderr.write(t) } = {}) {
@@ -4385,7 +4385,7 @@ async function tokenSet(flags, { out = (t) => process.stdout.write(t), err = (t)
   const token = await readSecret(`fine-grained token for ${repoFull} (${LOCAL_TOKEN_PERMISSIONS}): `);
   const file = saveLocalToken(repoFull, token);
   out(`saved the local token for ${repoFull} to ${file} (owner-only)\n`);
-  if (process.env.FACTORY_LOCAL_TOKEN) err(`factory: FACTORY_LOCAL_TOKEN is set in this shell, and local mode takes it over the saved file; unset it for the saved token to apply\n`);
+  if (process.env.PENDULUM_LOCAL_TOKEN) err(`pendulum: PENDULUM_LOCAL_TOKEN is set in this shell, and local mode takes it over the saved file; unset it for the saved token to apply\n`);
   return 0;
 }
 
@@ -4395,7 +4395,7 @@ async function main() {
     parsed = parseArgs(process.argv.slice(2));
   } catch (e) {
     if (!e.usage) throw e;
-    process.stderr.write(`factory: ${e.message}`);
+    process.stderr.write(`pendulum: ${e.message}`);
     process.exit(64);
   }
   if (parsed.help) {
@@ -4403,7 +4403,7 @@ async function main() {
     return;
   }
   if (parsed.version) {
-    process.stdout.write(`factory ${FACTORY_VERSION}\n`);
+    process.stdout.write(`pendulum ${PENDULUM_VERSION}\n`);
     return;
   }
   const { cmd, flags } = parsed;
@@ -4476,9 +4476,9 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
-    process.stderr.write(`[factory] local: ${e.message}\n`);
+    process.stderr.write(`[pendulum] local: ${e.message}\n`);
     // Right after a switch to a new pinned release (restartOn): say so, and how to go back.
-    if (SWITCHED_FROM) process.stderr.write(`[factory] local: serve stopped at the start of the release it switched to, ${PLUGIN_ROOT}, from ${SWITCHED_FROM}; start serve from ${join(SWITCHED_FROM, "plugin", "bin", "factory")} to run that one again\n`);
+    if (SWITCHED_FROM) process.stderr.write(`[pendulum] local: serve stopped at the start of the release it switched to, ${PLUGIN_ROOT}, from ${SWITCHED_FROM}; start serve from ${join(SWITCHED_FROM, "plugin", "bin", "pendulum")} to run that one again\n`);
     process.exit(1);
   });
 }

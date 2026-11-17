@@ -14,7 +14,7 @@ const SCRIPT = join(import.meta.dirname, "..", "skills.mjs");
 const skills = (args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" });
 
 function tree(skillText) {
-  const dir = mkdtempSync(join(tmpdir(), "factory-bench-skills-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-bench-skills-"));
   mkdirSync(join(dir, "plugin", "skills", "demo"), { recursive: true });
   writeFileSync(join(dir, "plugin", "skills", "demo", "SKILL.md"), skillText);
   return { dir, args: ["--plugin", join(dir, "plugin"), "--out", join(dir, "skills.json")] };
@@ -85,7 +85,7 @@ test("two branches that change different skills and re-record merge with no conf
   assert.match(r.stderr, /run node bench\/skills\.mjs and commit bench\/skills\.json/);
 });
 
-// An install copies plugin/ alone (every marketplace entry is a git-subdir of `plugin`), so a skill that names Factory's
+// An install copies plugin/ alone (every marketplace entry is a git-subdir of `plugin`), so a skill that names Pendulum's
 // docs, bench or README, or a path written from the checkout's root, points at nothing in an installed plugin (#454).
 const CHECKOUT = join(import.meta.dirname, "..", "..");
 
@@ -93,10 +93,10 @@ test("every skill and agent definition names only what an installed plugin holds
   assert.deepEqual(unshippedRefs(join(CHECKOUT, "plugin")), []);
 });
 
-test("unshippedRefs: Factory's checkout by path or bare name is refused; the plugin's root, a Factory clone, a tagged link and the adopter's own files are not", () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-bench-refs-"));
+test("unshippedRefs: Pendulum's checkout by path or bare name is refused; the plugin's root, a Pendulum clone, a tagged link and the adopter's own files are not", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-bench-refs-"));
   const files = {
-    "README.md": "# Factory\n\n## To stop everything\n",
+    "README.md": "# Pendulum\n\n## To stop everything\n",
     "AGENTS.md": "rules\n",
     "action.yml": "name: x\n",
     "docs/LOCAL.md": "# Local mode\n\n## Set it up\n",
@@ -112,9 +112,9 @@ test("unshippedRefs: Factory's checkout by path or bare name is refused; the plu
     "---\nname: demo\n---",
     "Walk docs/LOCAL.md, then plugin/scripts/local.mjs; the README.md says more (action.yml).",
     'Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/local.mjs" serve` or `node <plugin root>/scripts/local.mjs serve`; `node <plugin root>/scripts/gone.mjs` is gone.',
-    "With a clone, `node <factory clone>/bench/score.mjs --repo <owner/name>`; `<factory clone>/bench/judge.mjs` is not there.",
-    "[Set it up](https://github.com/clockgrove/factory/blob/v0.9.37/docs/LOCAL.md#set-it-up), [gone](https://github.com/clockgrove/factory/blob/v0.9.37/docs/LOCAL.md#accounts), [main](https://github.com/clockgrove/factory/blob/main/docs/LOCAL.md), [no file](https://github.com/clockgrove/factory/tree/v0.9.37/docs/GONE.md).",
-    "The adopter's own: AGENTS.md, `.github/workflows/factory.yml`, `.agents/skills/`, `src/a.ts`, `$FACTORY_IN/plan.md`, `~/.config/factory/accounts.json`, reference.md, the bench, the docs.",
+    "With a clone, `node <pendulum clone>/bench/score.mjs --repo <owner/name>`; `<pendulum clone>/bench/judge.mjs` is not there.",
+    "[Set it up](https://github.com/clockgrove/pendulum/blob/v0.9.37/docs/LOCAL.md#set-it-up), [gone](https://github.com/clockgrove/pendulum/blob/v0.9.37/docs/LOCAL.md#accounts), [main](https://github.com/clockgrove/pendulum/blob/main/docs/LOCAL.md), [no file](https://github.com/clockgrove/pendulum/tree/v0.9.37/docs/GONE.md).",
+    "The adopter's own: AGENTS.md, `.github/workflows/pendulum.yml`, `.agents/skills/`, `src/a.ts`, `$PENDULUM_IN/plan.md`, `~/.config/pendulum/accounts.json`, reference.md, the bench, the docs.",
   ].join("\n");
   for (const [p, text] of Object.entries(files)) {
     mkdirSync(join(dir, p, ".."), { recursive: true });
@@ -122,15 +122,15 @@ test("unshippedRefs: Factory's checkout by path or bare name is refused; the plu
   }
   const refs = unshippedRefs(join(dir, "plugin")).map((r) => `${r.file}: ${r.ref}`);
   assert.deepEqual(refs, [
-    "plugin/skills/demo/SKILL.md: https://github.com/clockgrove/factory/blob/v0.9.37/docs/LOCAL.md#accounts",
-    "plugin/skills/demo/SKILL.md: https://github.com/clockgrove/factory/blob/main/docs/LOCAL.md",
-    "plugin/skills/demo/SKILL.md: https://github.com/clockgrove/factory/tree/v0.9.37/docs/GONE.md",
+    "plugin/skills/demo/SKILL.md: https://github.com/clockgrove/pendulum/blob/v0.9.37/docs/LOCAL.md#accounts",
+    "plugin/skills/demo/SKILL.md: https://github.com/clockgrove/pendulum/blob/main/docs/LOCAL.md",
+    "plugin/skills/demo/SKILL.md: https://github.com/clockgrove/pendulum/tree/v0.9.37/docs/GONE.md",
     "plugin/skills/demo/SKILL.md: docs/LOCAL.md",
     "plugin/skills/demo/SKILL.md: plugin/scripts/local.mjs",
     "plugin/skills/demo/SKILL.md: README.md",
     "plugin/skills/demo/SKILL.md: action.yml",
     "plugin/skills/demo/SKILL.md: <plugin root>/scripts/gone.mjs",
-    "plugin/skills/demo/SKILL.md: <factory clone>/bench/judge.mjs",
+    "plugin/skills/demo/SKILL.md: <pendulum clone>/bench/judge.mjs",
     "plugin/skills/demo/reference.md: bench/score.mjs",
     "plugin/skills/demo/reference.md: INSTALL.md",
     "plugin/skills/demo/reference.md: README",
@@ -138,14 +138,14 @@ test("unshippedRefs: Factory's checkout by path or bare name is refused; the plu
   ]);
   const r = skills(["--plugin", join(dir, "plugin"), "--out", join(dir, "skills.json"), "--check"]);
   assert.equal(r.status, 4, "the CI gate fails on them");
-  assert.match(r.stderr, /plugin\/skills\/demo\/SKILL\.md: docs\/LOCAL\.md \(a file of Factory's checkout\)/);
+  assert.match(r.stderr, /plugin\/skills\/demo\/SKILL\.md: docs\/LOCAL\.md \(a file of Pendulum's checkout\)/);
 });
 
 // The setup skill walks local mode from its own reference file; docs/LOCAL.md is the guide a person reads. Every command,
 // path, setting and example the skill's file gives is one the guide gives too, so neither changes alone.
 test("the setup skill's local-mode steps give only commands, paths and examples docs/LOCAL.md gives", () => {
   const guide = readFileSync(join(CHECKOUT, "docs", "LOCAL.md"), "utf8");
-  const steps = readFileSync(join(CHECKOUT, "plugin", "skills", "factory-setup", "local.md"), "utf8");
+  const steps = readFileSync(join(CHECKOUT, "plugin", "skills", "pendulum-setup", "local.md"), "utf8");
   const fence = /^([ \t]*)```[^\n]*\n([\s\S]*?)\n\1```/gm;
   const blocks = [...steps.matchAll(fence)].map(([, indent, body]) => body.split("\n").map((l) => (l.startsWith(indent) ? l.slice(indent.length) : l)).join("\n"));
   assert.ok(blocks.length > 0, "the accounts example");
@@ -153,18 +153,18 @@ test("the setup skill's local-mode steps give only commands, paths and examples 
   const spans = [...steps.replace(fence, "").matchAll(/`[^`\n]+`/g)].map(([s]) => s);
   assert.ok(spans.length > 20);
   assert.deepEqual(spans.filter((s) => !guide.includes(s)), [], "code docs/LOCAL.md does not give");
-  assert.match(readFileSync(join(CHECKOUT, "plugin", "skills", "factory-setup", "SKILL.md"), "utf8"), /walk \[local\.md\]\(local\.md\)/);
+  assert.match(readFileSync(join(CHECKOUT, "plugin", "skills", "pendulum-setup", "SKILL.md"), "utf8"), /walk \[local\.md\]\(local\.md\)/);
 });
 
 // How a skill is shown and loaded (#456): the internal stage skills stay out of every harness's user menu and implicit
-// loading but load when Factory names them; a user skill's description opens with what it does, never a Claude-only
+// loading but load when Pendulum names them; a user skill's description opens with what it does, never a Claude-only
 // /command line; a skill that names a plugin path says how each harness finds the plugin.
 test("every skill follows the rules of how it is shown and loaded", () => {
   assert.deepEqual(skillRules(join(CHECKOUT, "plugin")), []);
 });
 
 test("skillRules: an internal skill without each harness's hide setting, a user skill opening with a /command and a plugin path with no plugin-root sentence are refused", () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-bench-rules-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-bench-rules-"));
   const [internal, other] = INTERNAL_SKILLS;
   const skill = (name, fm, body = "Body.", files = {}) => {
     mkdirSync(join(dir, "plugin", "skills", name), { recursive: true });
@@ -182,7 +182,7 @@ test("skillRules: an internal skill without each harness's hide setting, a user 
   assert.deepEqual(rules(), []);
   // Each break on its own.
   skill(other, 'description: "Internal: a stage."', "Body.", hidden);
-  skill("user-slash", 'description: "/factory:factory-x <issue>. Does a thing."');
+  skill("user-slash", 'description: "/pendulum:pendulum-x <issue>. Does a thing."');
   skill("user-hidden", "description: Does a thing.\nuser-invocable: false");
   skill("user-root", "description: Does a thing.", 'Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/x.mjs"`.');
   skill("user-ref", "description: Does a thing.", "Body.", { "reference.md": "Read `<plugin root>/templates/task-card.md`.\n" });
@@ -214,12 +214,12 @@ test("skillRules: an internal skill without each harness's hide setting, a user 
 });
 
 // Codex loads a skill whose implicit invocation is off only when the prompt names it as `$name`; Claude Code and Copilot
-// read the same mention as the skill's name. Every prompt Factory gives a worker or reviewer names its stage skills so.
+// read the same mention as the skill's name. Every prompt Pendulum gives a worker or reviewer names its stage skills so.
 test("the task card and the review job's prompts name each internal skill they load as a $ mention", () => {
   const card = readFileSync(join(CHECKOUT, "plugin", "templates", "task-card.md"), "utf8");
-  for (const s of ["factory-objective-plan", "factory-implement-split", "factory-prove-acceptance", "factory-deliver-pr"]) assert.ok(card.includes(`$${s}`), s);
+  for (const s of ["pendulum-objective-plan", "pendulum-implement-split", "pendulum-prove-acceptance", "pendulum-deliver-pr"]) assert.ok(card.includes(`$${s}`), s);
   assert.match(card, /each is the `SKILL\.md` in `\.agents\/skills\/<name>\/` and `\.claude\/skills\/<name>\/` of this checkout/, "and by path, for a session whose first prompt was compacted away");
   const review = readFileSync(join(CHECKOUT, "plugin", "scripts", "review.mjs"), "utf8");
-  assert.equal(review.match(/Follow the \$factory-review-pr skill/g)?.length, 2, "the reviewer and the foundation pass");
-  assert.match(review, /Load the \$factory-deliver-pr skill's "Reviewer comments" section/);
+  assert.equal(review.match(/Follow the \$pendulum-review-pr skill/g)?.length, 2, "the reviewer and the foundation pass");
+  assert.match(review, /Load the \$pendulum-deliver-pr skill's "Reviewer comments" section/);
 });

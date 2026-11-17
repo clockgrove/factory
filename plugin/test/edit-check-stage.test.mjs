@@ -15,19 +15,19 @@ import { setSelf } from "../scripts/lib/logic.mjs";
 import { EDITED_REASON, objectiveSha, recordText } from "../scripts/lib/objective-trust.mjs";
 
 const SCRIPTS = join(import.meta.dirname, "..", "scripts");
-const SELF = "factory-app[bot]";
+const SELF = "pendulum-app[bot]";
 const KEY = "sk-ant-api-dummy-edit-check";
 // A body naming another repository: the work stage asks its one-repo Question right after the plan check, before any
 // branch work, so a stage that goes on stops there with no git (and no network).
-const BEFORE = { title: "Objective", body: "Build the thing.\n\nFactory-Repository: acme/other", labels: [] };
-const AFTER = { title: "Objective", body: "Build the thing (typo fixed).\n\nFactory-Repository: acme/other", labels: [] };
+const BEFORE = { title: "Objective", body: "Build the thing.\n\nPendulum-Repository: acme/other", labels: [] };
+const AFTER = { title: "Objective", body: "Build the thing (typo fixed).\n\nPendulum-Repository: acme/other", labels: [] };
 const A = objectiveSha(BEFORE.title, BEFORE.body);
 const B = objectiveSha(AFTER.title, AFTER.body);
 const kirk = { __typename: "User", login: "kirk", databaseId: 4 };
 setSelf(SELF);
 
 /**
- * A fake GitHub for Objective 7 (PR 12 on factory/7): the plan comment recorded from BEFORE, the issue now AFTER (edited
+ * A fake GitHub for Objective 7 (PR 12 on pendulum/7): the plan comment recorded from BEFORE, the issue now AFTER (edited
  * by kirk, who can push), its labels `labels` with the timeline `timeline`, and a repository doctor's job checks pass on.
  * Every request and every comment write is kept, in order.
  */
@@ -35,8 +35,8 @@ async function fakeGitHub({ labels = [], timeline = [], reviewsFail = false } = 
   const seen = [];
   // Workload identity federation (harness.mjs federate): the job's OIDC token, then the exchange, a new key each time.
   const exchanged = [];
-  const comments = [{ id: 2, user: { login: SELF, type: "Bot" }, body: `<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: "2026-11-15T09:00:00Z", text: recordText(BEFORE) })}\n## Plan\n- [ ] item`, created_at: "2026-11-15T09:30:00Z" }];
-  const names = ["factory:objective", ...labels];
+  const comments = [{ id: 2, user: { login: SELF, type: "Bot" }, body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: "2026-11-15T09:00:00Z", text: recordText(BEFORE) })}\n## Plan\n- [ ] item`, created_at: "2026-11-15T09:30:00Z" }];
+  const names = ["pendulum:objective", ...labels];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -57,14 +57,14 @@ async function fakeGitHub({ labels = [], timeline = [], reviewsFail = false } = 
         return send(200, { data: {} });
       }
       if (req.method === "GET" && /\/issues\/7$/.test(u)) return send(200, { number: 7, state: "open", ...AFTER, user: { login: "kirk" }, labels: names.map((name) => ({ name })) });
-      if (req.method === "GET" && /\/pulls\/12$/.test(u)) return send(200, { number: 12, state: "open", draft: false, node_id: "PR_12", title: "Objective 7", body: "Closes #7", labels: [{ name: "factory:review" }], head: { sha: "a".repeat(40), ref: "factory/7" }, base: { ref: "main" } });
+      if (req.method === "GET" && /\/pulls\/12$/.test(u)) return send(200, { number: 12, state: "open", draft: false, node_id: "PR_12", title: "Objective 7", body: "Closes #7", labels: [{ name: "pendulum:review" }], head: { sha: "a".repeat(40), ref: "pendulum/7" }, base: { ref: "main" } });
       if (req.method === "GET" && /\/pulls\/12\/reviews$/.test(u) && reviewsFail) return send(422, { message: "the fake's end of the stage" });
       if (req.method === "GET" && /\/user$/.test(u)) return send(200, { login: SELF, type: "Bot" });
       if (req.method === "GET" && /\/collaborators\/(kirk|dev)\/permission$/.test(u)) return send(200, { permission: "write" });
       if (req.method === "GET" && /\/collaborators\/[^/]+\/permission$/.test(u)) return send(200, { permission: "triage" });
       if (req.method === "GET" && /\/issues\/7\/comments$/.test(u)) return send(200, comments);
-      if (req.method === "GET" && /\/issues\/7\/timeline$/.test(u)) return send(200, [{ event: "labeled", label: { name: "factory:objective" }, actor: { login: "kirk", type: "User", id: 4 }, created_at: "2026-11-15T09:00:00Z" }, ...timeline]);
-      if (/contents\/\.github\/workflows\/factory\.yml/.test(u)) return send(404, { message: "Not Found" });
+      if (req.method === "GET" && /\/issues\/7\/timeline$/.test(u)) return send(200, [{ event: "labeled", label: { name: "pendulum:objective" }, actor: { login: "kirk", type: "User", id: 4 }, created_at: "2026-11-15T09:00:00Z" }, ...timeline]);
+      if (/contents\/\.github\/workflows\/pendulum\.yml/.test(u)) return send(404, { message: "Not Found" });
       if (/contents\/\.github\/workflows\/ci\.yml/.test(u)) return send(200, "name: CI\non: [pull_request, merge_group]\npermissions: {}\njobs:\n  ci:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n");
       if (/actions\/permissions\/workflow$/.test(u)) return send(200, { default_workflow_permissions: "read" });
       if (/actions\/workflows$/.test(u)) return send(200, { workflows: [{ path: ".github/workflows/ci.yml", name: "CI", state: "active" }] });
@@ -94,7 +94,7 @@ async function fakeGitHub({ labels = [], timeline = [], reviewsFail = false } = 
  * answers every decision call `{choice, confidence 0.9}` and records each call (its arguments, its credential and its
  * question), and an `srt` that runs what it wraps.
  */
-async function stage(script, gh, choice, { env = { FACTORY_LOCAL: "1", ANTHROPIC_API_KEY: KEY } } = {}) {
+async function stage(script, gh, choice, { env = { PENDULUM_LOCAL: "1", ANTHROPIC_API_KEY: KEY } } = {}) {
   const root = mkdtempSync(join(tmpdir(), "edit-stage-"));
   mkdirSync(join(root, "co"));
   mkdirSync(join(root, "bin"));
@@ -104,7 +104,7 @@ async function stage(script, gh, choice, { env = { FACTORY_LOCAL: "1", ANTHROPIC
   writeFileSync(join(root, "bin", "srt"), `#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`, { mode: 0o755 });
   const args = script === "worker.mjs" ? ["--issue", "7"] : ["--pr", "12"];
   const child = spawn(process.execPath, [join(SCRIPTS, script), "--repo", "o/r", ...args, "--checkout", join(root, "co"), "--usage-dir", join(root, "u"), "--token-fd", "3"], {
-    env: { PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, FACTORY_INPUT_HARNESS: "claude", ...env },
+    env: { PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, PENDULUM_INPUT_HARNESS: "claude", ...env },
     stdio: ["ignore", "pipe", "pipe", "pipe"],
   });
   child.stdio[3].end("test-token");
@@ -117,7 +117,7 @@ async function stage(script, gh, choice, { env = { FACTORY_LOCAL: "1", ANTHROPIC
   return { code, out, decisions: read().filter((c) => c.argv.includes("-p")), saved: () => saved(join(root, "u")) };
 }
 
-const progressLines = (gh) => gh.comments.filter((c) => /^<!-- factory:7:progress:/.test(c.body)).map((c) => c.body).join("\n");
+const progressLines = (gh) => gh.comments.filter((c) => /^<!-- pendulum:7:progress:/.test(c.body)).map((c) => c.body).join("\n");
 
 test("work stage, run for real: a wording-only edit is judged on the stage's harness with its credential, said on the progress comment, and the stage goes on", async () => {
   const gh = await fakeGitHub();
@@ -156,13 +156,13 @@ test("work stage, run for real: a changed requirement Blocks as before, before a
 });
 
 test("work stage, run for real: the choice check comes first; a label no writer applied Blocks before any edit check", async () => {
-  const model = "factory:model:claude-opus-5-5";
+  const model = "pendulum:model:claude-opus-5-5";
   const gh = await fakeGitHub({ labels: [model], timeline: [{ event: "labeled", label: { name: model }, actor: { login: "triager", type: "User", id: 9 }, created_at: "2026-11-15T10:30:00Z" }] });
   try {
     const { out, decisions } = await stage("worker.mjs", gh, "wording");
     assert.equal(decisions.length, 0, out);
     assert.match(out, /exit: blocked/);
-    assert.match(out, /factory:model:claude-opus-5-5` was applied by `triager`/, out);
+    assert.match(out, /pendulum:model:claude-opus-5-5` was applied by `triager`/, out);
   } finally {
     gh.close();
   }
@@ -197,7 +197,7 @@ test("work stage, run for real on a federated credential: the edit check makes a
   // expiry: the passes read theirs as they start, never the one the edit check minted before setup and install.
   const gh = await fakeGitHub();
   try {
-    const env = { FACTORY_APP_TOKEN: "t", ACTIONS_ID_TOKEN_REQUEST_URL: `${gh.url}/oidc?x=1`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: "t", FACTORY_INPUT_ANTHROPIC_OIDC_EXCHANGE_URL: `${gh.url}/exchange` };
+    const env = { PENDULUM_APP_TOKEN: "t", ACTIONS_ID_TOKEN_REQUEST_URL: `${gh.url}/oidc?x=1`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: "t", PENDULUM_INPUT_ANTHROPIC_OIDC_EXCHANGE_URL: `${gh.url}/exchange` };
     const { out, decisions, saved } = await stage("worker.mjs", gh, "wording", { env });
     assert.equal(decisions.length, 1, out);
     assert.deepEqual(gh.exchanged, ["sk-ant-api-federated-1"], "one exchange, the edit check's: the stage stops at its Question before its passes read theirs");

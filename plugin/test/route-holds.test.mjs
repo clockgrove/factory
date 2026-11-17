@@ -21,7 +21,7 @@ const { setSelf } = await import("../scripts/lib/logic.mjs");
 
 RETRY.sleep = async () => {};
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
-const BOT = "factory-test[bot]";
+const BOT = "pendulum-test[bot]";
 const THREE = JSON.stringify({ claude: ["claude", "claude-2", "claude-3"] });
 const TWO = JSON.stringify({ claude: ["claude", "claude-2"] });
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -29,17 +29,17 @@ const KEY = privateKey.export({ type: "pkcs1", format: "pem" });
 const H = 60 * 60_000;
 const iso = (ms) => new Date(ms).toISOString();
 
-/** A hold record as Factory's App writes it (holds.mjs's fields), as a comment on the holds issue by `by`. */
-const holdComment = (id, r, by = BOT) => ({ id, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `${holdLine({ harness: "claude", streak: 0, ...r })}\nFactory: held`, created_at: iso(r.at), updated_at: iso(r.at) });
+/** A hold record as Pendulum's App writes it (holds.mjs's fields), as a comment on the holds issue by `by`. */
+const holdComment = (id, r, by = BOT) => ({ id, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `${holdLine({ harness: "claude", streak: 0, ...r })}\nPendulum: held`, created_at: iso(r.at), updated_at: iso(r.at) });
 
 /**
  * A GitHub for Objective #8 (labels `labels`, each applied by kirk, who can push), its PR #9 (labels `prLabels`, comments
  * on it kept), the App's token mint, and its record issues: `issues` (title, creator, locked, comments), made, closed,
  * locked and commented on by the App's writes. Every request is in `reads` (method and path, with the query).
  */
-async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory:review"], issues = [], openPr = null, lockFails = false, labelWritesFail = false, raceOlder = false, events = [], progress = [] } = {}, fn) {
+async function withGitHub({ labels = ["pendulum:objective"], prLabels = ["pendulum:review"], issues = [], openPr = null, lockFails = false, labelWritesFail = false, raceOlder = false, events = [], progress = [] } = {}, fn) {
   const reads = [];
-  const state = { issue: new Set(labels), pr: new Set(prLabels), prComments: [], issues: issues.map((i) => ({ state: "closed", locked: true, labels: [{ name: "factory:holds" }], comments: [], ...i })), labelMade: false };
+  const state = { issue: new Set(labels), pr: new Set(prLabels), prComments: [], issues: issues.map((i) => ({ state: "closed", locked: true, labels: [{ name: "pendulum:holds" }], comments: [], ...i })), labelMade: false };
   let id = 900;
   let number = 100;
   const real = globalThis.fetch;
@@ -50,7 +50,7 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     reads.push(`${method} ${p}${u.search}`);
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     const body = init.body ? JSON.parse(init.body) : null;
-    if (p === "/app") return json({ slug: "factory-test", name: "Factory test" });
+    if (p === "/app") return json({ slug: "pendulum-test", name: "Pendulum test" });
     if (p === "/repos/acme/app/installation") return json({ id: 3, permissions: { issues: "write", metadata: "read", contents: "write", pull_requests: "write" }, account: { type: "Organization" } });
     if (method === "POST" && p === "/app/installations/3/access_tokens") return json({ token: "ghs_fakeminted0000", expires_at: iso(Date.now() + H), permissions: body.permissions, repositories: [{ full_name: "acme/app" }] }, 201);
     // Objective #8, and #12 for a test of another Objective: the same labels.
@@ -67,11 +67,11 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     if (p === "/repos/acme/app/issues" && method === "POST") {
       const made = { number: ++number, title: body.title, user: { login: BOT, type: "Bot" }, state: "open", locked: false, labels: (body.labels || []).map((name) => ({ name })), comments: [] };
       // Another job's first limit at the same moment: its issue, opened just before this one, closed and locked.
-      if (raceOlder) state.issues.push({ number: 50, title: body.title, user: { login: BOT, type: "Bot" }, state: "closed", locked: true, labels: [{ name: "factory:holds" }], comments: [] });
+      if (raceOlder) state.issues.push({ number: 50, title: body.title, user: { login: BOT, type: "Bot" }, state: "closed", locked: true, labels: [{ name: "pendulum:holds" }], comments: [] });
       state.issues.push(made);
       return json(made, 201);
     }
-    if (p === "/repos/acme/app/labels/factory%3Aholds" || p === "/repos/acme/app/labels/factory:holds") return state.labelMade ? json({ name: "factory:holds" }) : json({ message: "Not Found" }, 404);
+    if (p === "/repos/acme/app/labels/pendulum%3Aholds" || p === "/repos/acme/app/labels/pendulum:holds") return state.labelMade ? json({ name: "pendulum:holds" }) : json({ message: "Not Found" }, 404);
     if (p === "/repos/acme/app/labels" && method === "POST") return (state.labelMade = true), json({ name: body.name }, 201);
     const rec = /^\/repos\/acme\/app\/issues\/(\d+)(\/lock|\/comments)?$/.exec(p);
     const own = rec && state.issues.find((i) => i.number === Number(rec[1]));
@@ -80,7 +80,7 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     if (own && rec[2] === "/comments" && method === "GET") return own.comments ? json(own.comments) : json({ message: "Forbidden" }, 403);
     if (own && rec[2] === "/comments" && method === "POST") {
       const at = iso(Date.now());
-      // A person's token (factory hold --repo, #376) posts as them: `state.poster`.
+      // A person's token (pendulum hold --repo, #376) posts as them: `state.poster`.
       const user = state.poster ? { login: state.poster.login, type: "User" } : { login: BOT, type: "Bot" };
       return own.comments.push({ id: ++id, user, ...(state.poster?.association ? { author_association: state.poster.association } : {}), body: body.body, created_at: at, updated_at: at }), json(own.comments.at(-1), 201);
     }
@@ -124,14 +124,14 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
   }
 }
 
-/** Factory's holds issue (#50) holding `comments`, as the App left it: its own, closed, locked. */
+/** Pendulum's holds issue (#50) holding `comments`, as the App left it: its own, closed, locked. */
 const holdsIssue = (comments = [], extra = {}) => ({ number: 50, title: HOLDS_TITLE, user: { login: BOT, type: "Bot" }, comments, ...extra });
 
 /** The account step as the Action runs it (accountStep: the App's token, then stageAccount), its outputs and log read back. */
-async function runStep({ labels = ["factory:objective"], accounts = THREE, auto = "1", issues = [], issue = "8", env = {}, progress = [] } = {}) {
+async function runStep({ labels = ["pendulum:objective"], accounts = THREE, auto = "1", issues = [], issue = "8", env = {}, progress = [] } = {}) {
   const out = join(mkdtempSync(join(tmpdir(), "acct-")), "output");
   writeFileSync(out, "");
-  const e = { GITHUB_REPOSITORY: "acme/app", GITHUB_ACTIONS: "true", GITHUB_OUTPUT: out, FACTORY_ACCOUNTS: accounts, FACTORY_RENDERED_ACCOUNTS: routeAccountsText(accounts), FACTORY_AUTO_ACCOUNT: auto, FACTORY_HARNESS: "claude", FACTORY_INPUT_APP_ID: "12", FACTORY_INPUT_APP_PRIVATE_KEY: KEY, ...env };
+  const e = { GITHUB_REPOSITORY: "acme/app", GITHUB_ACTIONS: "true", GITHUB_OUTPUT: out, PENDULUM_ACCOUNTS: accounts, PENDULUM_RENDERED_ACCOUNTS: routeAccountsText(accounts), PENDULUM_AUTO_ACCOUNT: auto, PENDULUM_HARNESS: "claude", PENDULUM_INPUT_APP_ID: "12", PENDULUM_INPUT_APP_PRIVATE_KEY: KEY, ...env };
   const lines = [];
   const write = process.stderr.write;
   const writeOut = process.stdout.write;
@@ -150,29 +150,29 @@ const holdReads = (reads) => reads.filter((x) => x.startsWith("GET /repos/acme/a
 
 test("the automatic setting is the workflow file's alone, 1 or 0; it applies only to a harness with two or more declared accounts (#268)", async () => {
   const { OTHER_ROUTE_SETTINGS, WORKFLOW_SETTINGS } = await import("../scripts/lib/inputs.mjs");
-  const { FACTORY_CONTROL_KEYS } = await import("../scripts/lib/harness.mjs");
-  assert.ok(!WORKFLOW_SETTINGS.has("FACTORY_AUTO_ACCOUNT"), "no repository variable or local layer sets it");
-  assert.ok(OTHER_ROUTE_SETTINGS.has("FACTORY_AUTO_ACCOUNT"), "local mode drops it without a warning");
-  assert.ok(FACTORY_CONTROL_KEYS.includes("FACTORY_AUTO_ACCOUNT"), "no harness child sees it");
-  assert.deepEqual(routeAutoSetting({ FACTORY_AUTO_ACCOUNT: "1" }), { on: true, problem: null });
-  for (const v of [undefined, "", "0"]) assert.deepEqual(routeAutoSetting({ FACTORY_AUTO_ACCOUNT: v }), { on: false, problem: null });
-  assert.match(routeAutoSetting({ FACTORY_AUTO_ACCOUNT: "yes" }).problem, /neither 1 nor 0/);
-  assert.deepEqual(routeAutoAccounts({ FACTORY_AUTO_ACCOUNT: "1", FACTORY_ACCOUNTS: TWO }, "claude"), ["claude", "claude-2"]);
-  assert.equal(routeAutoAccounts({ FACTORY_AUTO_ACCOUNT: "0", FACTORY_ACCOUNTS: TWO }, "claude"), null);
-  assert.equal(routeAutoAccounts({ FACTORY_AUTO_ACCOUNT: "1", FACTORY_ACCOUNTS: JSON.stringify({ claude: ["claude"] }) }, "claude"), null, "one account: today's");
-  assert.equal(routeAutoAccounts({ FACTORY_AUTO_ACCOUNT: "1", FACTORY_ACCOUNTS: TWO }, "codex"), null);
+  const { PENDULUM_CONTROL_KEYS } = await import("../scripts/lib/harness.mjs");
+  assert.ok(!WORKFLOW_SETTINGS.has("PENDULUM_AUTO_ACCOUNT"), "no repository variable or local layer sets it");
+  assert.ok(OTHER_ROUTE_SETTINGS.has("PENDULUM_AUTO_ACCOUNT"), "local mode drops it without a warning");
+  assert.ok(PENDULUM_CONTROL_KEYS.includes("PENDULUM_AUTO_ACCOUNT"), "no harness child sees it");
+  assert.deepEqual(routeAutoSetting({ PENDULUM_AUTO_ACCOUNT: "1" }), { on: true, problem: null });
+  for (const v of [undefined, "", "0"]) assert.deepEqual(routeAutoSetting({ PENDULUM_AUTO_ACCOUNT: v }), { on: false, problem: null });
+  assert.match(routeAutoSetting({ PENDULUM_AUTO_ACCOUNT: "yes" }).problem, /neither 1 nor 0/);
+  assert.deepEqual(routeAutoAccounts({ PENDULUM_AUTO_ACCOUNT: "1", PENDULUM_ACCOUNTS: TWO }, "claude"), ["claude", "claude-2"]);
+  assert.equal(routeAutoAccounts({ PENDULUM_AUTO_ACCOUNT: "0", PENDULUM_ACCOUNTS: TWO }, "claude"), null);
+  assert.equal(routeAutoAccounts({ PENDULUM_AUTO_ACCOUNT: "1", PENDULUM_ACCOUNTS: JSON.stringify({ claude: ["claude"] }) }, "claude"), null, "one account: today's");
+  assert.equal(routeAutoAccounts({ PENDULUM_AUTO_ACCOUNT: "1", PENDULUM_ACCOUNTS: TWO }, "codex"), null);
   // The sandbox stage gets it with the accounts; doctor names a value that is neither.
   const { stageEnvironment } = await import("../scripts/launch.mjs");
   const { routeAccountChecks } = await import("../scripts/doctor.mjs");
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "launch.mjs"), "utf8");
-  assert.match(src, /if \(env\.FACTORY_AUTO_ACCOUNT\) out\.FACTORY_AUTO_ACCOUNT = env\.FACTORY_AUTO_ACCOUNT;/);
+  assert.match(src, /if \(env\.PENDULUM_AUTO_ACCOUNT\) out\.PENDULUM_AUTO_ACCOUNT = env\.PENDULUM_AUTO_ACCOUNT;/);
   assert.equal(typeof stageEnvironment, "function");
   assert.match(routeAccountChecks(TWO, "1")[0].detail, /a free one by automatic account choice/);
   assert.doesNotMatch(routeAccountChecks(TWO, "")[0].detail, /automatic/);
   assert.deepEqual(routeAccountChecks(TWO, "on").map((c) => c.status), ["PASS", "WARN"]);
 });
 
-test("a usage limit holds its account on GitHub until its reset: Factory's App writes it on its own locked issue, a later job reads it back with no local state, and writes at once lose none (#268)", async () => {
+test("a usage limit holds its account on GitHub until its reset: Pendulum's App writes it on its own locked issue, a later job reads it back with no local state, and writes at once lose none (#268)", async () => {
   setSelf(BOT);
   const now = Date.UTC(2026, 10, 15, 12);
   await withGitHub({}, async (reads, st) => {
@@ -183,7 +183,7 @@ test("a usage limit holds its account on GitHub until its reset: Factory's App w
     const issue = st.issues.find((i) => i.title === HOLDS_TITLE);
     assert.deepEqual([issue.state, issue.locked, st.labelMade], ["closed", true, true]);
     assert.ok(reads.includes(`POST /repos/acme/app/issues/${issue.number}/comments`));
-    assert.match(issue.comments[0].body, /^<!-- factory:hold \{.*"account":"claude-2".*\} -->\nFactory: account `claude-2` \(Claude Code\) reached its usage limit \(five_hour\); it is held until /);
+    assert.match(issue.comments[0].body, /^<!-- pendulum:hold \{.*"account":"claude-2".*\} -->\nPendulum: account `claude-2` \(Claude Code\) reached its usage limit \(five_hour\); it is held until /);
     // Two jobs at once, each its own comment: neither is lost.
     await Promise.all([
       writeHold(REPO, { kind: "limit", harness: "claude", account: "claude", reset: now + 2 * H, now }, { token: "t" }, { actions: true }),
@@ -204,16 +204,16 @@ test("a usage limit holds its account on GitHub until its reset: Factory's App w
   });
 });
 
-test("only Factory's own comments on its own locked holds issue count: a pasted record, another login's issue, or an unlocked one holds nothing (#268)", async () => {
+test("only Pendulum's own comments on its own locked holds issue count: a pasted record, another login's issue, or an unlocked one holds nothing (#268)", async () => {
   setSelf(BOT);
   const now = Date.now();
   const r = { account: "claude", until: now + 2 * H, at: now - 60_000 };
   const read = (issues) => withGitHub({ issues }, () => readHolds(REPO, { token: "t" }, { now, actions: true }));
-  assert.equal((await read([holdsIssue([holdComment(1, r)])])).store.until("claude", now), now + 2 * H, "Factory's own: held");
+  assert.equal((await read([holdsIssue([holdComment(1, r)])])).store.until("claude", now), now + 2 * H, "Pendulum's own: held");
   assert.equal((await read([holdsIssue([holdComment(1, r, "kirk")])])).store.until("claude", now), null, "a person's pasted record");
   assert.equal((await read([holdsIssue([holdComment(1, r)], { user: { login: "kirk", type: "User" } })])).store.until("claude", now), null, "an issue another login opened");
   assert.equal((await read([holdsIssue([holdComment(1, r)], { locked: false })])).store.until("claude", now), null, "an unlocked one, on Actions");
-  assert.equal((await read([holdsIssue([holdComment(1, r)], { title: "Factory: account holds (copy)" })])).store.until("claude", now), null);
+  assert.equal((await read([holdsIssue([holdComment(1, r)], { title: "Pendulum: account holds (copy)" })])).store.until("claude", now), null);
   // A record held to this clock: an end past the longest window is cut to it, never a hold for ever.
   const far = (await read([holdsIssue([holdComment(1, { ...r, until: now + 400 * 24 * H })])])).store.until("claude", now);
   assert.ok(far <= now + 8 * 24 * H);
@@ -229,7 +229,7 @@ test("the account step: with the setting on, a stage with no pin starts on a fre
   assert.deepEqual(free.outputs, { account: "claude" });
   assert.match(free.log, /automatic account choice: account claude/);
   assert.deepEqual(holdReads(free.reads).map((x) => x.replace(/\?.*/, "")), ["GET /repos/acme/app/issues"]);
-  assert.match(holdReads(free.reads)[0], /labels=factory%3Aholds/);
+  assert.match(holdReads(free.reads)[0], /labels=pendulum%3Aholds/);
   // claude held: of the free ones, the next in the turn.
   const held1 = holdComment(1, { account: "claude", until: now + 2 * H, at: now - 60_000 });
   const one = await runStep({ issues: [holdsIssue([held1])] });
@@ -247,7 +247,7 @@ test("the account step: with the setting on, a stage with no pin starts on a fre
   assert.equal(allHeld.outputs.account, "claude-3");
   assert.match(allHeld.log, /every account of this harness is held, so this stage runs on account claude-3, whose hold ends first/);
   // A trusted pin wins, held or not: no holds read for it.
-  const pinned = await runStep({ labels: ["factory:objective", "factory:account:claude"], issues: [holdsIssue([held1])] });
+  const pinned = await runStep({ labels: ["pendulum:objective", "pendulum:account:claude"], issues: [holdsIssue([held1])] });
   assert.equal(pinned.outputs.account, "claude");
   assert.deepEqual(holdReads(pinned.reads), []);
   // The holds unreadable: it picks as if none is held, and says so.
@@ -258,7 +258,7 @@ test("the account step: with the setting on, a stage with no pin starts on a fre
 
 test("#391: a stage's quota reading is kept on the holds issue, replacing its account's earlier one; the account step picks the free account with the most quota left, ahead of the Objective's turn; a stale or pasted reading counts for nothing", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: THREE, PENDULUM_AUTO_ACCOUNT: "1" };
   const now = Date.now();
   const q = (used, reset = now + 48 * H) => ({ harness: "claude", windows: { seven_day: { used, resetsAt: reset } } });
   let issues;
@@ -270,7 +270,7 @@ test("#391: a stage's quota reading is kept on the holds issue, replacing its ac
     await at("claude-3").reading(q(0.5, now + 4 * H));
     const issue = st.issues.find((i) => i.title === HOLDS_TITLE);
     assert.deepEqual([issue.state, issue.locked], ["closed", true]);
-    assert.match(issue.comments[0].body, /^<!-- factory:quota \{.*"account":"claude".*\} -->\nFactory: account `claude` \(Claude Code\) has used 90% of seven_day until /);
+    assert.match(issue.comments[0].body, /^<!-- pendulum:quota \{.*"account":"claude".*\} -->\nPendulum: account `claude` \(Claude Code\) has used 90% of seven_day until /);
     // A later reading of claude replaces its earlier one; another harness's reading, or none, writes nothing.
     await at("claude").reading(q(0.95));
     assert.equal(await at("claude").reading({ harness: "codex", windows: { "codex/primary": { used: 0, resetsAt: now + H } } }), null);
@@ -286,20 +286,20 @@ test("#391: a stage's quota reading is kept on the holds issue, replacing its ac
   const r = await runStep({ issues });
   assert.equal(r.outputs.account, "claude-2");
   assert.match(r.log, /automatic account choice: account claude-2, 80% of its quota left as its provider last reported/);
-  // A reading pasted by a person, or edited since Factory wrote it, counts for nothing.
-  const pasted = (by, edited = false) => ({ id: 7, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account: "claude-3", at: Date.now(), windows: { seven_day: { used: 0, resetsAt: now + H } } })} -->`, created_at: iso(now), updated_at: iso(now + (edited ? 60_000 : 0)) });
+  // A reading pasted by a person, or edited since Pendulum wrote it, counts for nothing.
+  const pasted = (by, edited = false) => ({ id: 7, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `<!-- pendulum:quota ${JSON.stringify({ harness: "claude", account: "claude-3", at: Date.now(), windows: { seven_day: { used: 0, resetsAt: now + H } } })} -->`, created_at: iso(now), updated_at: iso(now + (edited ? 60_000 : 0)) });
   const kept = issues.map((i) => ({ ...i, comments: [...i.comments, pasted("kirk")] }));
   assert.equal((await runStep({ issues: kept })).outputs.account, "claude-2");
   const edited = issues.map((i) => ({ ...i, comments: [...i.comments, pasted(BOT, true)] }));
   assert.equal((await runStep({ issues: edited })).outputs.account, "claude-2");
-  assert.equal((await runStep({ issues: issues.map((i) => ({ ...i, comments: [...i.comments, pasted(BOT)] })) })).outputs.account, "claude-3", "Factory's own, as written: counted");
+  assert.equal((await runStep({ issues: issues.map((i) => ({ ...i, comments: [...i.comments, pasted(BOT)] })) })).outputs.account, "claude-3", "Pendulum's own, as written: counted");
   // The stages wire it: a stage's quota reading goes through routeLimits at its end.
   for (const script of ["worker.mjs", "review.mjs"]) assert.match(readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8"), /if \(limits && \(usage\.quota \|\| servedSilent\(usage\)\)\) await limits\.reading\(usage\.quota \?\? \{ harness: inputs\.harness, silent: true \}, \{ warmUntil: usage\.cacheWarmUntil \?\? null \}\)/, script);
 });
 
 test("#391: a stage its provider served with no quota reading records so on the holds issue; the account step puts that account after every one with a reading, and one never measured first", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: THREE, PENDULUM_AUTO_ACCOUNT: "1" };
   const now = Date.now();
   let issues;
   await withGitHub({}, async (_reads, st) => {
@@ -309,7 +309,7 @@ test("#391: a stage its provider served with no quota reading records so on the 
     await at("claude-2").reading({ harness: "claude", windows: { seven_day: { used: 0.97, resetsAt: now + 48 * H } } });
     assert.equal(await at("claude").reading({ harness: "codex", silent: true }), null, "another harness's: nothing");
     const issue = st.issues.find((i) => i.title === HOLDS_TITLE);
-    assert.match(issue.comments[0].body, /^<!-- factory:quota \{.*"silentAt":\d+.*\} -->\nFactory: account `claude` \(Claude Code\) ran a stage and its provider reported no quota reading/);
+    assert.match(issue.comments[0].body, /^<!-- pendulum:quota \{.*"silentAt":\d+.*\} -->\nPendulum: account `claude` \(Claude Code\) ran a stage and its provider reported no quota reading/);
     const store = (await readHolds(REPO, { token: "t" }, { now: now + 72 * H, actions: true })).store;
     assert.equal(store.reportsNothing("claude", now + 72 * H), true, "kept past any window: it is no reading that goes stale");
     issues = st.issues;
@@ -317,13 +317,13 @@ test("#391: a stage its provider served with no quota reading records so on the 
   setSelf(null);
   // claude-3, never measured, first; with it read, claude-2's 3% left beats claude's silence, though #8's turn is claude.
   assert.equal((await runStep({ issues })).outputs.account, "claude-3");
-  const read3 = issues.map((i) => ({ ...i, comments: [...i.comments, { id: 77, user: { login: BOT, type: "Bot" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account: "claude-3", at: Date.now(), windows: { seven_day: { used: 1, resetsAt: now + H } } })} -->`, created_at: iso(now), updated_at: iso(now) }] }));
+  const read3 = issues.map((i) => ({ ...i, comments: [...i.comments, { id: 77, user: { login: BOT, type: "Bot" }, body: `<!-- pendulum:quota ${JSON.stringify({ harness: "claude", account: "claude-3", at: Date.now(), windows: { seven_day: { used: 1, resetsAt: now + H } } })} -->`, created_at: iso(now), updated_at: iso(now) }] }));
   assert.equal((await runStep({ issues: read3 })).outputs.account, "claude-2");
 });
 
 test("#391: on these routes the account step keeps an Objective on its previous stage's account while that stage's cache is warm; ranks with the windows its models meet; an unchanged silent record is not written again; readings of accounts no longer declared go", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: THREE, PENDULUM_AUTO_ACCOUNT: "1" };
   const now = Date.now();
   let issues;
   await withGitHub({}, async (reads, st) => {
@@ -340,7 +340,7 @@ test("#391: on these routes the account step keeps an Objective on its previous 
     await at("claude-3").reading({ harness: "claude", silent: true });
     assert.equal(posts(), before, "unchanged: not written again");
     // A reading of an account the declaration no longer names goes at the next write.
-    issue.comments.push({ id: 555, user: { login: BOT, type: "Bot" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account: "claude-9", at: now, windows: {}, silentAt: now })} -->`, created_at: iso(now), updated_at: iso(now) });
+    issue.comments.push({ id: 555, user: { login: BOT, type: "Bot" }, body: `<!-- pendulum:quota ${JSON.stringify({ harness: "claude", account: "claude-9", at: now, windows: {}, silentAt: now })} -->`, created_at: iso(now), updated_at: iso(now) });
     await at("claude").reading({ harness: "claude", windows: { seven_day: { used: 0.5, resetsAt: now + 48 * H } } });
     assert.ok(!issue.comments.some((c) => c.id === 555), "claude-9's reading is deleted");
     issues = st.issues;
@@ -353,19 +353,19 @@ test("#391: on these routes the account step keeps an Objective on its previous 
   // spent opus window weighs: claude (50% left) first; on sonnet and fable alone it does not, and claude-2 (90%) wins.
   const other = await runStep({ issues, issue: "12" });
   assert.equal(other.outputs.account, "claude");
-  const sonnet = await runStep({ issues, issue: "12", labels: ["factory:objective", "factory:model:claude-sonnet-5-5"] });
+  const sonnet = await runStep({ issues, issue: "12", labels: ["pendulum:objective", "pendulum:model:claude-sonnet-5-5"] });
   assert.equal(sonnet.outputs.account, "claude-2");
 });
 
 test("#391: on these routes the stages started since an account's reading are counted from their progress comments, one read: starts before the next reading spread rather than pile on the one with the most left", async () => {
   const now = Date.now();
   const at = now - H;
-  const reading = (id, account, used) => ({ id, user: { login: BOT, type: "Bot" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account, at, windows: { seven_day: { used, resetsAt: now + 48 * H } } })} -->`, created_at: iso(at), updated_at: iso(at) });
+  const reading = (id, account, used) => ({ id, user: { login: BOT, type: "Bot" }, body: `<!-- pendulum:quota ${JSON.stringify({ harness: "claude", account, at, windows: { seven_day: { used, resetsAt: now + 48 * H } } })} -->`, created_at: iso(at), updated_at: iso(at) });
   const issues = [holdsIssue([reading(1, "claude", 0.4), reading(2, "claude-2", 0.41), reading(3, "claude-3", 0.7)])];
   // A stage's progress comment as worker.mjs writes it: its key, then its harness line naming the account (logic.mjs harnessMarker).
-  const progress = (id, objective, account, made, { by = BOT, harness = "claude" } = {}) => ({ id, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `<!-- factory:${objective}:progress:work:${id} -->\n- 10:00 started\n<!-- factory:harness ${JSON.stringify({ harness, model: "claude-opus-5-5", account })} -->`, created_at: iso(made), updated_at: iso(now - 60_000) });
+  const progress = (id, objective, account, made, { by = BOT, harness = "claude" } = {}) => ({ id, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `<!-- pendulum:${objective}:progress:work:${id} -->\n- 10:00 started\n<!-- pendulum:harness ${JSON.stringify({ harness, model: "claude-opus-5-5", account })} -->`, created_at: iso(made), updated_at: iso(now - 60_000) });
   const { harnessMarker } = await import("../scripts/lib/logic.mjs");
-  assert.match(harnessMarker("claude", "m", { worker: null, labels: [], account: "claude" }), /^<!-- factory:harness \{.*"account":"claude"\} -->$/, "the line the stages write");
+  assert.match(harnessMarker("claude", "m", { worker: null, labels: [], account: "claude" }), /^<!-- pendulum:harness \{.*"account":"claude"\} -->$/, "the line the stages write");
   setSelf(null);
   // No stage since the readings: claude, the most left.
   const none = await runStep({ issues, issue: "12" });
@@ -404,11 +404,11 @@ test("with the setting off, or one account, the account step is exactly today's:
 
 test("the stage accepts the step's automatic pick of any declared account when nothing pins it; a pin still has to match, and with the setting off the default only (#268)", async () => {
   const check = (labels, env) => withGitHub({ labels }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels, env, opts: { token: "t" } }));
-  const on = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
-  assert.deepEqual(await check(["factory:objective"], { ...on, FACTORY_STAGE_ACCOUNT: "claude-3" }), { account: "claude-3", note: "", pinned: false });
-  assert.match((await check(["factory:objective"], { ...on, FACTORY_STAGE_ACCOUNT: "claude-9" })).refusal.reason, /prepared with account `claude-9`/);
-  assert.match((await check(["factory:objective", "factory:account:claude-2"], { ...on, FACTORY_STAGE_ACCOUNT: "claude-3" })).refusal.reason, /labels now pick `claude-2`/);
-  assert.match((await check(["factory:objective"], { FACTORY_ACCOUNTS: THREE, FACTORY_STAGE_ACCOUNT: "claude-3" })).refusal.reason, /labels now pick `claude`/);
+  const on = { PENDULUM_ACCOUNTS: THREE, PENDULUM_AUTO_ACCOUNT: "1" };
+  assert.deepEqual(await check(["pendulum:objective"], { ...on, PENDULUM_STAGE_ACCOUNT: "claude-3" }), { account: "claude-3", note: "", pinned: false });
+  assert.match((await check(["pendulum:objective"], { ...on, PENDULUM_STAGE_ACCOUNT: "claude-9" })).refusal.reason, /prepared with account `claude-9`/);
+  assert.match((await check(["pendulum:objective", "pendulum:account:claude-2"], { ...on, PENDULUM_STAGE_ACCOUNT: "claude-3" })).refusal.reason, /labels now pick `claude-2`/);
+  assert.match((await check(["pendulum:objective"], { PENDULUM_ACCOUNTS: THREE, PENDULUM_STAGE_ACCOUNT: "claude-3" })).refusal.reason, /labels now pick `claude`/);
 });
 
 /** A UsageLimitReached as runHarness throws it: claude's five-hour limit, reset at `resetAt`. */
@@ -416,10 +416,10 @@ const limitError = (resetAt) => Object.assign(new Error("limit"), { code: USAGE_
 
 test("a stage that meets its usage limit with another account free holds its own and goes on there, never Blocked: the work back to Queued, the review's label off until the dispatcher's tick (#268)", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: TWO, PENDULUM_AUTO_ACCOUNT: "1" };
   const reset = Date.now() + 3 * H;
   // A work stage on claude: the hold is written, the Objective goes back to Queued, and the stage ends waiting.
-  await withGitHub({ labels: ["factory:objective", "factory:running"] }, async (_reads, st) => {
+  await withGitHub({ labels: ["pendulum:objective", "pendulum:running"] }, async (_reads, st) => {
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" } });
     assert.equal(await limits.elsewhere(), true, "claude-2 is free");
     const ends = [];
@@ -429,7 +429,7 @@ test("a stage that meets its usage limit with another account free holds its own
     assert.equal(ends[0][0], "waiting");
     assert.match(ends[0][1], /Claude Code reached its usage limit on account `claude`, which is held until .*; back to Queued, to go on on another account/);
     assert.equal(ends[0][3].reset, iso(reset));
-    assert.ok(!st.issue.has("factory:running"), "back to Queued");
+    assert.ok(!st.issue.has("pendulum:running"), "back to Queued");
     // The spend line counts it as a usage-limit pause of its account, as a local pause is.
     const { stageSpendLine } = await import("../scripts/lib/logic.mjs");
     assert.equal(stageSpendLine({ usd: 0.5, exit: "waiting", usageLimit: ends[0][3] }).parts.limitPaused, true);
@@ -439,26 +439,26 @@ test("a stage that meets its usage limit with another account free holds its own
     assert.equal(await limits.elsewhere(), true);
   });
   // A review stage: its label off, the wait recorded on the PR; the dispatcher's tick puts the label back.
-  await withGitHub({ labels: ["factory:objective", "factory:in-review"] }, async (_reads, st) => {
+  await withGitHub({ labels: ["pendulum:objective", "pendulum:in-review"] }, async (_reads, st) => {
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "review", pr: 9, harness: "claude", account: "claude-2", env, opts: { token: "t" } });
     const ends = [];
     await usageLimitExit(limitError(reset), { local: false, records: [], finish: async (...a) => ends.push(a), block: async () => assert.fail("no Block"), goOn: limits.limit });
     assert.equal(ends[0][0], "waiting");
     assert.match(ends[0][1], /the review goes on on another account/);
-    assert.ok(!st.pr.has("factory:review"));
+    assert.ok(!st.pr.has("pendulum:review"));
     const wait = accountWaitOf(st.prComments, 8);
     assert.ok(wait);
-    assert.match(st.prComments[0].body, /The review goes on on another account: Factory puts `factory:review` back on this PR at its next tick/);
+    assert.match(st.prComments[0].body, /The review goes on on another account: Pendulum puts `pendulum:review` back on this PR at its next tick/);
     assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: [...st.issue], labelledAt: "2026-01-01T00:00:00Z", opts: { token: "t" } }), "resumed");
-    assert.ok(st.pr.has("factory:review"));
+    assert.ok(st.pr.has("pendulum:review"));
   });
 });
 
 test("#390: a stage waiting in place for a busy provider's time holds its account until then, so automatic choice passes it over meanwhile", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: TWO, PENDULUM_AUTO_ACCOUNT: "1" };
   const reset = Date.now() + 2 * H;
-  await withGitHub({ labels: ["factory:objective", "factory:running"] }, async () => {
+  await withGitHub({ labels: ["pendulum:objective", "pendulum:running"] }, async () => {
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" } });
     await limits.hold({ harness: "claude", status: 429, type: "rate_limit", code: null, message: "m", resetAt: reset });
     const holds = (await readHolds(REPO, { token: "t" })).store;
@@ -469,10 +469,10 @@ test("#390: a stage waiting in place for a busy provider's time holds its accoun
 
 test("with every other account held, a usage limit Blocks provider-quota naming the reset, as today, and the others' first; a hold that cannot be written Blocks as with the setting off (#268)", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: TWO, PENDULUM_AUTO_ACCOUNT: "1" };
   const reset = Date.now() + 3 * H;
   const other = Date.now() + 90 * 60_000;
-  await withGitHub({ labels: ["factory:objective", "factory:running"], issues: [holdsIssue([holdComment(1, { account: "claude-2", until: other, at: Date.now() - 60_000 })])] }, async (_reads, st) => {
+  await withGitHub({ labels: ["pendulum:objective", "pendulum:running"], issues: [holdsIssue([holdComment(1, { account: "claude-2", until: other, at: Date.now() - 60_000 })])] }, async (_reads, st) => {
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" } });
     assert.equal(await limits.elsewhere(), false, "no account free: the reset is waited for in place as today");
     const ends = [];
@@ -481,7 +481,7 @@ test("with every other account held, a usage limit Blocks provider-quota naming 
     assert.equal(ends[0][0], "blocked");
     assert.equal(blocks[0][1], "provider-quota");
     assert.match(blocks[0][0], new RegExp(`which resets at ${iso(reset).replaceAll(".", "\\.")}.* Every other Claude Code account this repository declares is held too, the first until ${iso(other).replaceAll(".", "\\.")}\\.$`));
-    assert.ok(st.issue.has("factory:running"), "no requeue");
+    assert.ok(st.issue.has("pendulum:running"), "no requeue");
   });
   // The holds unwritable (GitHub refuses): the Block as with the setting off.
   const blocks = [];
@@ -496,15 +496,15 @@ test("with every other account held, a usage limit Blocks provider-quota naming 
   assert.equal(blocks[0][1], "provider-quota");
   assert.doesNotMatch(blocks[0][0], /Every other/);
   // Off, or one account, or a stage on no declared account: no handling at all.
-  assert.equal(routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env: { FACTORY_ACCOUNTS: TWO }, opts: {} }), null);
-  assert.equal(routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env: { FACTORY_ACCOUNTS: JSON.stringify({ claude: ["claude"] }), FACTORY_AUTO_ACCOUNT: "1" }, opts: {} }), null);
+  assert.equal(routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env: { PENDULUM_ACCOUNTS: TWO }, opts: {} }), null);
+  assert.equal(routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env: { PENDULUM_ACCOUNTS: JSON.stringify({ claude: ["claude"] }), PENDULUM_AUTO_ACCOUNT: "1" }, opts: {} }), null);
   assert.equal(routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude-9", env, opts: {} }), null);
 });
 
 test("#402: on Actions and in the cloud sandbox the no-reset guess follows the repository's guess_hours, by how many in a row; one that is no list of hours is the default", async () => {
   setSelf(BOT);
   const guessFor = async (hours, times) => {
-    const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1", ...(hours === null ? {} : { FACTORY_GUESS_HOURS: hours }) };
+    const env = { PENDULUM_ACCOUNTS: THREE, PENDULUM_AUTO_ACCOUNT: "1", ...(hours === null ? {} : { PENDULUM_GUESS_HOURS: hours }) };
     const ends = [];
     await withGitHub({}, async () => {
       for (let i = 0; i < times; i += 1) {
@@ -517,7 +517,7 @@ test("#402: on Actions and in the cloud sandbox the no-reset guess follows the r
     return ends.map((ms) => Math.round(ms / (H / 60)) / 60);
   };
   assert.deepEqual(await guessFor("2, 5", 3), [2, 5, 5]);
-  assert.deepEqual(await guessFor(null, 2), [1, 4], "Factory's default");
+  assert.deepEqual(await guessFor(null, 2), [1, 4], "Pendulum's default");
   assert.deepEqual(await guessFor("soon", 1), [1], "not a list of hours: the default");
   assert.deepEqual(await guessFor("1e10", 1), [1], "a step past the longest hold kept (8 days): the default, never a time no date can hold");
   setSelf(null);
@@ -525,7 +525,7 @@ test("#402: on Actions and in the cloud sandbox the no-reset guess follows the r
 
 test("a usage limit with no reset reported still Blocks, and its account is a guess the next account step passes over (#268)", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: THREE, PENDULUM_AUTO_ACCOUNT: "1" };
   let issues;
   await withGitHub({}, async (_reads, st) => {
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" } });
@@ -551,10 +551,10 @@ test("a usage limit with no reset reported still Blocks, and its account is a gu
 
 test("a pinned stage never moves off its account: its limit is held for others, but it waits in place or Blocks as today, work and review alike (#268)", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: TWO, PENDULUM_AUTO_ACCOUNT: "1" };
   const reset = Date.now() + 3 * H;
   for (const stage of ["work", "review"]) {
-    await withGitHub({ labels: ["factory:objective", "factory:account:claude-2", stage === "work" ? "factory:running" : "factory:in-review"] }, async (_reads, st) => {
+    await withGitHub({ labels: ["pendulum:objective", "pendulum:account:claude-2", stage === "work" ? "pendulum:running" : "pendulum:in-review"] }, async (_reads, st) => {
       const limits = routeLimits({ repo: REPO, issue: 8, stage, pr: stage === "review" ? 9 : null, harness: "claude", account: "claude-2", pinned: true, env, opts: { token: "t" } });
       assert.equal(await limits.elsewhere(), false, `${stage}: claude is free, but a pinned stage waits in place`);
       const ends = [];
@@ -564,20 +564,20 @@ test("a pinned stage never moves off its account: its limit is held for others, 
       assert.equal(blocks[0][1], "provider-quota");
       assert.doesNotMatch(blocks[0][0], /Every other/);
       assert.equal((await readHolds(REPO, { token: "t" })).store.until("claude-2", Date.now()), reset, `${stage}: the hold is still recorded`);
-      assert.ok(stage === "work" ? st.issue.has("factory:running") : st.pr.has("factory:review"), `${stage}: not sent on`);
+      assert.ok(stage === "work" ? st.issue.has("pendulum:running") : st.pr.has("pendulum:review"), `${stage}: not sent on`);
       assert.deepEqual(st.prComments, []);
     });
   }
   // The stage learns it is pinned from its account check: a label (or a standing pin) is a pin, the step's pick is not.
-  const check = (labels, prepared) => withGitHub({ labels }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels, env: { ...env, FACTORY_STAGE_ACCOUNT: prepared }, opts: { token: "t" } }));
-  assert.equal((await check(["factory:objective", "factory:account:claude-2"], "claude-2")).pinned, true);
-  assert.equal((await check(["factory:objective"], "claude-2")).pinned, false);
+  const check = (labels, prepared) => withGitHub({ labels }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels, env: { ...env, PENDULUM_STAGE_ACCOUNT: prepared }, opts: { token: "t" } }));
+  assert.equal((await check(["pendulum:objective", "pendulum:account:claude-2"], "claude-2")).pinned, true);
+  assert.equal((await check(["pendulum:objective"], "claude-2")).pinned, false);
 });
 
 test("a hold written but the move refused: the stage Blocks as today and the log says the hold stands (#268)", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1" };
-  await withGitHub({ labels: ["factory:objective", "factory:running"], labelWritesFail: true }, async () => {
+  const env = { PENDULUM_ACCOUNTS: TWO, PENDULUM_AUTO_ACCOUNT: "1" };
+  await withGitHub({ labels: ["pendulum:objective", "pendulum:running"], labelWritesFail: true }, async () => {
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" } });
     const lines = [];
     const write = process.stdout.write;
@@ -610,12 +610,12 @@ test("records are append-only: an edited one holds nothing; a writer finds an is
     assert.equal(reads.filter((x) => x.startsWith("GET /repos/acme/app/issues?")).length, 1);
     await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude-2", reset: now + 2 * H, now }, { token: "t" }, { actions: true });
     assert.equal(st.issues.length, 1, "no new issue");
-    assert.deepEqual(st.issues[0].labels.map((l) => l.name), ["factory:holds"]);
+    assert.deepEqual(st.issues[0].labels.map((l) => l.name), ["pendulum:holds"]);
     assert.equal((await readHolds(REPO, { token: "t" }, { now, actions: true })).store.until("claude-2", now), now + 2 * H);
   });
 });
 
-test("first-limit races: of two locked holds issues the writer uses the oldest and retires the other; an unlocked stray Factory made is retired; a failed lock retires its own (#268)", async () => {
+test("first-limit races: of two locked holds issues the writer uses the oldest and retires the other; an unlocked stray Pendulum made is retired; a failed lock retires its own (#268)", async () => {
   setSelf(BOT);
   const now = Date.now();
   const stray = { number: 55, locked: false };
@@ -669,13 +669,13 @@ test("doctor names more than one holds issue, or an unlocked one, with the setti
 
 test("a kept pin on the default account is a pin: a removal by someone who cannot push leaves it, and a limit with another account free does not move the stage (#268)", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1", FACTORY_STAGE_ACCOUNT: "claude" };
+  const env = { PENDULUM_ACCOUNTS: TWO, PENDULUM_AUTO_ACCOUNT: "1", PENDULUM_STAGE_ACCOUNT: "claude" };
   // kirk (who can push) pinned `claude`, the first declared account; a triage user took the label off.
   const events = [
-    { event: "labeled", label: { name: "factory:account:claude" }, created_at: "2026-11-15T01:00:00Z", actor: { login: "kirk", type: "User", id: 7 } },
-    { event: "unlabeled", label: { name: "factory:account:claude" }, created_at: "2026-11-15T02:00:00Z", actor: { login: "triager", type: "User", id: 9 } },
+    { event: "labeled", label: { name: "pendulum:account:claude" }, created_at: "2026-11-15T01:00:00Z", actor: { login: "kirk", type: "User", id: 7 } },
+    { event: "unlabeled", label: { name: "pendulum:account:claude" }, created_at: "2026-11-15T02:00:00Z", actor: { login: "triager", type: "User", id: 9 } },
   ];
-  await withGitHub({ labels: ["factory:objective", "factory:running"], events }, async (_reads, st) => {
+  await withGitHub({ labels: ["pendulum:objective", "pendulum:running"], events }, async (_reads, st) => {
     const c = await routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: [...st.issue], env, opts: { token: "t" } });
     assert.deepEqual(c, { account: "claude", note: "", pinned: true }, "the timeline is read with automatic choice on, though the step prepared the default");
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: c.account, pinned: c.pinned, env, opts: { token: "t" } });
@@ -683,11 +683,11 @@ test("a kept pin on the default account is a pin: a removal by someone who canno
     const blocks = [];
     await usageLimitExit(limitError(Date.now() + 3 * H), { local: false, records: [], finish: async () => {}, block: async (...a) => blocks.push(a), goOn: limits.limit });
     assert.equal(blocks[0][1], "provider-quota");
-    assert.ok(st.issue.has("factory:running"), "not sent back to Queued");
+    assert.ok(st.issue.has("pendulum:running"), "not sent back to Queued");
   });
   // No pin anywhere: the step's pick of the default is no pin.
-  await withGitHub({ labels: ["factory:objective"] }, async () => {
-    assert.equal((await routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env, opts: { token: "t" } })).pinned, false);
+  await withGitHub({ labels: ["pendulum:objective"] }, async () => {
+    assert.equal((await routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["pendulum:objective"], env, opts: { token: "t" } })).pinned, false);
   });
 });
 
@@ -701,7 +701,7 @@ test("an issue another job is still opening is never retired: B writes to its ow
     // B's first limit: no locked holds issue, so it opens #101 and writes there; A's #10 is left alone.
     await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude-2", reset: now + 2 * H, now }, { token: "t" }, { actions: true });
     assert.equal(by(10).title, HOLDS_TITLE, "A's issue is not retired");
-    assert.deepEqual(by(10).labels.map((l) => l.name), ["factory:holds"]);
+    assert.deepEqual(by(10).labels.map((l) => l.name), ["pendulum:holds"]);
     assert.equal(by(101).comments.length, 1);
     // Both count meanwhile.
     assert.equal((await readHolds(REPO, { token: "t" }, { now, actions: true })).store.until("claude-2", now), now + 2 * H);
@@ -738,9 +738,9 @@ const quotaError = (harness = "copilot") => Object.assign(new Error("quota"), { 
 
 test("a Copilot quota with no reset reported, another account free, goes on there, never Blocked: the guess is written and the next account step passes the account over (#332)", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: COPILOTS, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: COPILOTS, PENDULUM_AUTO_ACCOUNT: "1" };
   let issues;
-  await withGitHub({ labels: ["factory:objective", "factory:running"] }, async (_reads, st) => {
+  await withGitHub({ labels: ["pendulum:objective", "pendulum:running"] }, async (_reads, st) => {
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "copilot", account: "copilot", env, opts: { token: "t" } });
     const ends = [];
     const t = Date.now();
@@ -748,7 +748,7 @@ test("a Copilot quota with no reset reported, another account free, goes on ther
     assert.equal(ends[0][0], "waiting");
     assert.match(ends[0][1], /^Copilot reached its usage limit or quota on account `copilot` with no reset reported, so automatic account choice passes it over until about \S+; back to Queued, to go on on another account$/);
     assert.deepEqual([ends[0][3].reset, ends[0][3].noReset], [null, true]);
-    assert.ok(!st.issue.has("factory:running"), "back to Queued");
+    assert.ok(!st.issue.has("pendulum:running"), "back to Queued");
     const store = (await readHolds(REPO, { token: "t" })).store;
     assert.equal(store.until("copilot", Date.now()), null, "a guess, no hold");
     assert.ok(store.avoidUntil("copilot", Date.now()) >= t + H, "passed over for an hour");
@@ -757,18 +757,18 @@ test("a Copilot quota with no reset reported, another account free, goes on ther
   setSelf(null);
   // Objective #8's turn is copilot; its guess passes it over, so the next stage's account step starts it on copilot-2.
   assert.equal(routeTurn(8, 2), 0);
-  const r = await runStep({ issues, accounts: COPILOTS, env: { FACTORY_HARNESS: "copilot" } });
+  const r = await runStep({ issues, accounts: COPILOTS, env: { PENDULUM_HARNESS: "copilot" } });
   assert.equal(r.outputs.account, "copilot-2");
   assert.match(r.log, /copilot held until/);
 });
 
 test("a limit with no reset and every other account held or passed over Blocks once, provider-quota, naming each one's hold; a pinned stage never moves on one (#332)", async () => {
   setSelf(BOT);
-  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const env = { PENDULUM_ACCOUNTS: THREE, PENDULUM_AUTO_ACCOUNT: "1" };
   const t = Date.now();
   const held = t + 3 * H;
   const guess = { account: "claude-3", until: t + H - 60_000, at: t - 60_000, guess: true };
-  await withGitHub({ labels: ["factory:objective", "factory:running"], issues: [holdsIssue([holdComment(1, { account: "claude-2", until: held, at: t - 60_000 }), holdComment(2, guess)])] }, async (_reads, st) => {
+  await withGitHub({ labels: ["pendulum:objective", "pendulum:running"], issues: [holdsIssue([holdComment(1, { account: "claude-2", until: held, at: t - 60_000 }), holdComment(2, guess)])] }, async (_reads, st) => {
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" }, now: () => t });
     const ends = [];
     const blocks = [];
@@ -777,17 +777,17 @@ test("a limit with no reset and every other account held or passed over Blocks o
     assert.equal(blocks[0][1], "provider-quota");
     assert.match(blocks[0][0], new RegExp(`Every other Claude Code account this repository declares is held too: \`claude-2\` held until ${iso(held).replaceAll(".", "\\.")}; \`claude-3\` passed over until about ${iso(guess.until).replaceAll(".", "\\.")} \\(no reset reported\\)\\.$`));
     assert.equal(ends[0][0], "blocked");
-    assert.ok(st.issue.has("factory:running"), "no requeue");
+    assert.ok(st.issue.has("pendulum:running"), "no requeue");
     assert.equal((await readHolds(REPO, { token: "t" })).store.avoidUntil("claude", t), t + H, "its own guess is written too");
   });
   // Pinned: its guess is written for other Objectives, nothing moves, and the stage Blocks as before.
-  await withGitHub({ labels: ["factory:objective", "factory:account:claude", "factory:running"] }, async (_reads, st) => {
+  await withGitHub({ labels: ["pendulum:objective", "pendulum:account:claude", "pendulum:running"] }, async (_reads, st) => {
     const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", pinned: true, env, opts: { token: "t" } });
     const blocks = [];
     await usageLimitExit(quotaError("claude"), { local: false, records: [], finish: async () => {}, block: async (...a) => blocks.push(a), goOn: limits.limit });
     assert.equal(blocks[0][1], "provider-quota");
     assert.doesNotMatch(blocks[0][0], /Every other/);
-    assert.ok(st.issue.has("factory:running"));
+    assert.ok(st.issue.has("pendulum:running"));
   });
   // The stages wire it: a stage moves on such a limit only with automatic choice on and no pin.
   for (const script of ["worker.mjs", "review.mjs"]) {
@@ -842,7 +842,7 @@ test("#376: a person who can push releases an account's holds on GitHub: their r
     assert.equal(rel.released.account, "claude-2");
     const posted = st.issues[0].comments.at(-1);
     assert.equal(posted.user.login, "kirk");
-    assert.match(posted.body, /^<!-- factory:release \{"account":"claude-2"\} -->\nFactory: account `claude-2` \(Claude Code\) released by a person/);
+    assert.match(posted.body, /^<!-- pendulum:release \{"account":"claude-2"\} -->\nPendulum: account `claude-2` \(Claude Code\) released by a person/);
     const later = Date.parse(posted.created_at) + 1000;
     const { store } = await readHolds(REPO, { token: "t" }, { now: later, actions: true });
     assert.equal(store.avoidUntil("claude-2", later), null);
@@ -869,7 +869,7 @@ test("#376: a person who can push releases an account's holds on GitHub: their r
     assert.equal((await by({ ...noAssoc, user: { login: "reader", type: "User" } })).store.until("claude", later), now + 2 * H, "read permission: it does not");
     // An App's comment (another App, or the workflow's token) is no release, whatever its association.
     assert.equal((await by({ ...noAssoc, user: { login: "github-actions[bot]", type: "Bot" }, author_association: "MEMBER" })).store.until("claude", later), now + 2 * H, "a Bot's release ends nothing");
-    assert.equal((await by({ ...noAssoc, user: { login: BOT, type: "Bot" } })).store.until("claude", later), now + 2 * H, "nor Factory's own App's");
+    assert.equal((await by({ ...noAssoc, user: { login: BOT, type: "Bot" } })).store.until("claude", later), now + 2 * H, "nor Pendulum's own App's");
     // Held to the reader's clock as a hold record is: a release dated after the reader's now ends nothing until then.
     const ahead = { ...noAssoc, created_at: iso(later + 60_000), updated_at: iso(later + 60_000) };
     assert.equal((await by(ahead)).store.until("claude", later), now + 2 * H, "dated after now: nothing yet");
@@ -878,13 +878,13 @@ test("#376: a person who can push releases an account's holds on GitHub: their r
   });
 });
 
-test("#376: factory hold --repo lists and releases on the holds issue with the person's own token", async () => {
+test("#376: pendulum hold --repo lists and releases on the holds issue with the person's own token", async () => {
   setSelf(BOT);
   const { holdCommand } = await import("../scripts/local.mjs");
   const now = Date.now();
   const issues = [holdsIssue([holdComment(1, { account: "claude-2", until: now + 2 * H, at: now - 60_000, window: "five_hour" })])];
-  const saved = process.env.FACTORY_LOCAL_TOKEN;
-  process.env.FACTORY_LOCAL_TOKEN = "github_pat_fake";
+  const saved = process.env.PENDULUM_LOCAL_TOKEN;
+  process.env.PENDULUM_LOCAL_TOKEN = "github_pat_fake";
   try {
     await withGitHub({ issues }, async (reads, st) => {
       const said = [];
@@ -892,24 +892,24 @@ test("#376: factory hold --repo lists and releases on the holds issue with the p
       assert.equal(await holdCommand({ _: ["hold", "list"], repo: "acme/app" }, io), 0);
       assert.match(said.pop(), /^claude-2 \(Claude Code\): held until \S+ \(five_hour\), back-off count 0\n$/);
       assert.equal(await holdCommand({ _: ["hold", "release", "claude"], repo: "acme/app" }, io), 1);
-      assert.match(said.pop(), /^ERR factory: nothing is held or passed over for "claude" on acme\/app's holds issue .*; the accounts that are: claude-2\n$/);
+      assert.match(said.pop(), /^ERR pendulum: nothing is held or passed over for "claude" on acme\/app's holds issue .*; the accounts that are: claude-2\n$/);
       st.poster = { login: "kirk", association: "COLLABORATOR" };
       assert.equal(await holdCommand({ _: ["hold", "release", "claude-2"], repo: "acme/app" }, io), 0);
-      assert.match(said.pop(), /^released claude-2 \(Claude Code\), which was held until .*\nthe next stage on GitHub Actions or the cloud sandbox may start on it, when its workflow pins this Factory release or later; a job on an earlier release still holds it until its reset\n$/);
+      assert.match(said.pop(), /^released claude-2 \(Claude Code\), which was held until .*\nthe next stage on GitHub Actions or the cloud sandbox may start on it, when its workflow pins this Pendulum release or later; a job on an earlier release still holds it until its reset\n$/);
       assert.equal(reads.filter((r) => r.startsWith("POST")).length, 1);
-      assert.match(st.issues[0].comments.at(-1).body, /^<!-- factory:release \{"account":"claude-2"\} -->/);
+      assert.match(st.issues[0].comments.at(-1).body, /^<!-- pendulum:release \{"account":"claude-2"\} -->/);
       // Posted with a token that will not count: read back as a job reads it, said, and exit 1.
       st.issues[0].comments.pop();
       st.poster = { login: "reader" };
       assert.equal(await holdCommand({ _: ["hold", "release", "claude-2"], repo: "acme/app" }, io), 1);
-      assert.match(said.pop(), /^ERR factory: the release of claude-2 was posted on acme\/app#50, Factory's holds issue, but it will not count: reader cannot push to acme\/app, and Factory counts a release only from a person who can push; delete that comment/);
+      assert.match(said.pop(), /^ERR pendulum: the release of claude-2 was posted on acme\/app#50, Pendulum's holds issue, but it will not count: reader cannot push to acme\/app, and Pendulum counts a release only from a person who can push; delete that comment/);
       st.issues[0].comments.pop();
       st.poster = null;
       assert.equal(await holdCommand({ _: ["hold", "release", "claude-2"], repo: "acme/app" }, io), 1);
-      assert.match(said.pop(), /will not count: it was posted as factory-test\[bot\], which is no person/);
+      assert.match(said.pop(), /will not count: it was posted as pendulum-test\[bot\], which is no person/);
     });
   } finally {
-    if (saved === undefined) delete process.env.FACTORY_LOCAL_TOKEN;
-    else process.env.FACTORY_LOCAL_TOKEN = saved;
+    if (saved === undefined) delete process.env.PENDULUM_LOCAL_TOKEN;
+    else process.env.PENDULUM_LOCAL_TOKEN = saved;
   }
 });

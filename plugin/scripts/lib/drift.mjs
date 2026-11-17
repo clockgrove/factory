@@ -4,7 +4,7 @@
 // job log, at most once per harness run. It is advice only: it never stops, pauses, blocks or redirects a run.
 // The question goes through the one decision interface (decider.mjs, docs/ADAPTERS.md): with an AI Gateway key, the
 // gateway's decision model on its own model setting; without one, the stage's own harness on its login. This runs in
-// Factory's own process, never in a harness. Only the typed label and its confidence reach code; the activity is read
+// Pendulum's own process, never in a harness. Only the typed label and its confidence reach code; the activity is read
 // from the harness's own event stream (Claude stream-json, Codex JSONL, Copilot JSON) by structure.
 import { openDecider } from "./decider.mjs";
 import { log, redactSecrets } from "./inputs.mjs";

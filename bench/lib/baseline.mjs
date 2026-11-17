@@ -50,7 +50,7 @@ export function baselineOf(rows, opts = {}) {
 }
 
 export function formatBaseline(line) {
-  const head = `baseline ${line.label ?? ""}${line.repo ? ` ${line.repo}` : ""}: ${line.rows} merged Objective(s)${line.from ? ` ${line.from.slice(0, 10)}..${line.to.slice(0, 10)}` : ""}, walk-away ${line.walkAway ?? "?"}% (${line.walkAwayAskedOnly ?? "?"}% counting only input Factory asked for)\n`;
+  const head = `baseline ${line.label ?? ""}${line.repo ? ` ${line.repo}` : ""}: ${line.rows} merged Objective(s)${line.from ? ` ${line.from.slice(0, 10)}..${line.to.slice(0, 10)}` : ""}, walk-away ${line.walkAway ?? "?"}% (${line.walkAwayAskedOnly ?? "?"}% counting only input Pendulum asked for)\n`;
   const fmt = (m) => (m.median === null ? "none" : `${m.median} (${m.p25}..${m.p75}, n=${m.n})`);
   return head + MEASURES.map(([key, , name]) => `  ${name.padEnd(12)} ${fmt(line.measures[key])}`).join("\n") + "\n";
 }

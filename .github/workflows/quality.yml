@@ -28,7 +28,7 @@ jobs:
       # Every skill follows the Agent Skills standard (agentskills.io): its name matches its folder, its description and
       # frontmatter are what Claude Code, Codex and Copilot accept. A skill they would drop silently fails here instead.
       # skills-ref's own rules, through tools/deps/skills-validate.py, which also lets a skill carry the one harness field
-      # Factory sets (Claude Code's user-invocable: false, on the internal stage skills) that the standard does not define.
+      # Pendulum sets (Claude Code's user-invocable: false, on the internal stage skills) that the standard does not define.
       - name: Every skill follows the Agent Skills standard
         run: |
           python3 -m venv "$RUNNER_TEMP/skills-ref"

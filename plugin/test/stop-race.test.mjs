@@ -105,13 +105,13 @@ test("after the stop no repository command starts, no PR is opened or rewritten 
     import { sh } from ${JSON.stringify(pathToFileURL(join(SCRIPTS, "lib", "checkout.mjs")).href)};
     import { publishPr, postReplies } from ${JSON.stringify(LIB("handoff.mjs"))};
     import { requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
-    ${FETCH(["factory:objective"])}
+    ${FETCH(["pendulum:objective"])}
     const root = process.env.FAKE_STATE;
     const repo = { owner: "acme", name: "app", full: "acme/app" };
     requestStageStop("unlabeled");
     const settled = [];
     sh(root, "echo ran >> " + root + "/ran").then(() => settled.push("sh"));
-    publishPr(repo, { branch: "factory/7", base: "main", issue: 7, issueTitle: "t", prText: "Title\\n\\nBody" }, { token: "t" }).then(() => settled.push("publish"));
+    publishPr(repo, { branch: "pendulum/7", base: "main", issue: 7, issueTitle: "t", prText: "Title\\n\\nBody" }, { token: "t" }).then(() => settled.push("publish"));
     postReplies(repo, 70, 7, JSON.stringify([{ id: 1, body: "done" }]), [1], { token: "t" }).then(() => settled.push("replies"));
     await new Promise((r) => setTimeout(r, 1000));
     process.stdout.write(JSON.stringify({ settled, calls }) + "\\n");
@@ -134,8 +134,8 @@ test("confirmRunning and the merge pass: a stopped Objective asks for the stop a
     const repo = { owner: "acme", name: "app", full: "acme/app" };
     const asked = [];
     let confirmed = null;
-    confirmRunning({ read: () => getIssue(repo, 7, { token: "t" }), label: "factory:objective", onStop: (c) => asked.push(c) }).then((v) => (confirmed = v));
-    const how = await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "factory:objective" }, { token: "t" });
+    confirmRunning({ read: () => getIssue(repo, 7, { token: "t" }), label: "pendulum:objective", onStop: (c) => asked.push(c) }).then((v) => (confirmed = v));
+    const how = await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "pendulum:objective" }, { token: "t" });
     await new Promise((r) => setTimeout(r, 200));
     process.stdout.write(JSON.stringify({ asked, confirmed, how, calls }) + "\\n");
     process.exit(0);
@@ -146,7 +146,7 @@ test("confirmRunning and the merge pass: a stopped Objective asks for the stop a
   assert.equal(stopped.json.confirmed, null, "the caller parks");
   assert.equal(stopped.json.how, "stopped");
   assert.ok(!stopped.json.calls.some((c) => /merge|enqueue/i.test(c.replace("/pulls/70", ""))), stopped.json.calls.join("\n"));
-  const live = await stage(script(["factory:objective"]), root, 30_000);
+  const live = await stage(script(["pendulum:objective"]), root, 30_000);
   assert.deepEqual(live.json.asked, []);
   assert.equal(live.json.confirmed, true);
   assert.notEqual(live.json.how, "stopped");
@@ -157,11 +157,11 @@ test("stopStage: a stop racing the stage's own exit (being applied, or its merge
   const script = `
     import { stopStage } from ${JSON.stringify(LIB("session.mjs"))};
     import { commitExit } from ${JSON.stringify(LIB("stop.mjs"))};
-    ${FETCH(["factory:objective"])}
+    ${FETCH(["pendulum:objective"])}
     const repo = { owner: "acme", name: "app", full: "acme/app" };
     commitExit();
     const ends = [];
-    const took = await stopStage({ cause: "closed", label: "factory:objective", repo, issue: 7, pr: { number: 70 }, records: [], finish: async (e) => ends.push(e), opts: { token: "t" } });
+    const took = await stopStage({ cause: "closed", label: "pendulum:objective", repo, issue: 7, pr: { number: 70 }, records: [], finish: async (e) => ends.push(e), opts: { token: "t" } });
     process.stdout.write(JSON.stringify({ took, ends, calls, again: commitExit() }) + "\\n");
     process.exit(0);
   `;
@@ -177,7 +177,7 @@ test("stopStage: the usage and spend line first, then a tidy bounded in time; a 
   const script = (finishHangs) => `
     import { runHarness, stageSpendSoFar } from ${JSON.stringify(LIB("harness.mjs"))};
     import { stopStage } from ${JSON.stringify(LIB("session.mjs"))};
-    ${FETCH(["factory:objective"], "/graphql")}
+    ${FETCH(["pendulum:objective"], "/graphql")}
     const root = process.env.FAKE_STATE;
     const repo = { owner: "acme", name: "app", full: "acme/app" };
     // A pass whose process ignores the stop's SIGTERM: still running when the short settle ends.
@@ -192,7 +192,7 @@ test("stopStage: the usage and spend line first, then a tidy bounded in time; a 
     };
     let exited = null;
     let ended = null;
-    const took = stopStage({ cause: "unlabeled", label: "factory:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, records, finish, opts: { token: "t" }, settleMs: 1, tidyMs: 500, exitMs: ${finishHangs ? 1500 : 60_000}, endNow: (recs) => (ended = recs.map((r) => ({ label: r.label, usd: r.usd, low: !!r.usdLowerBound }))), exit: (code) => (exited = code) });
+    const took = stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, records, finish, opts: { token: "t" }, settleMs: 1, tidyMs: 500, exitMs: ${finishHangs ? 1500 : 60_000}, endNow: (recs) => (ended = recs.map((r) => ({ label: r.label, usd: r.usd, low: !!r.usdLowerBound }))), exit: (code) => (exited = code) });
     const result = await Promise.race([took, new Promise((r) => setTimeout(() => r("pending"), 4000))]);
     process.stdout.write(JSON.stringify({ result, order, ms: Date.now() - t0, exited, ended, records: records.map((r) => ({ label: r.label, usd: r.usd, low: !!r.usdLowerBound })) }) + "\\n");
     process.exit(0);
@@ -217,13 +217,13 @@ test("the merge pass fails closed: an issue it cannot read merges nothing ('pend
     import { mergeReadyOne } from ${JSON.stringify(LIB("session.mjs"))};
     import { RETRY } from ${JSON.stringify(LIB("github.mjs"))};
     RETRY.sleep = async () => {};
-    ${FETCH(["factory:objective"], "/issues/7")}
+    ${FETCH(["pendulum:objective"], "/issues/7")}
     const repo = { owner: "acme", name: "app", full: "acme/app" };
     const real = globalThis.fetch;
     globalThis.fetch = (url, init) => (new URL(url).pathname === "/repos/acme/app/issues/7" ? Promise.resolve(new Response('{"message":"bad gateway"}', { status: 502, headers: { "content-type": "application/json" } })) : real(url, init));
-    const unread = await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "factory:objective" }, { token: "t" });
+    const unread = await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "pendulum:objective" }, { token: "t" });
     calls.length = 0;
-    const listed = await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "factory:objective", issueData: { number: 7, state: "open", labels: [] } }, { token: "t" });
+    const listed = await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "pendulum:objective", issueData: { number: 7, state: "open", labels: [] } }, { token: "t" });
     process.stdout.write(JSON.stringify({ unread, listed, calls }) + "\\n");
     process.exit(0);
   `;
@@ -239,12 +239,12 @@ test("confirmRunning with `commit`: the exit begins at the read, so a later stop
   const script = `
     import { confirmRunning, requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
     import { stopStage } from ${JSON.stringify(LIB("session.mjs"))};
-    ${FETCH(["factory:objective"])}
+    ${FETCH(["pendulum:objective"])}
     const repo = { owner: "acme", name: "app", full: "acme/app" };
-    const live = { number: 7, state: "open", labels: [{ name: "factory:objective" }] };
-    const first = await confirmRunning({ read: async () => live, label: "factory:objective", onStop: () => {}, commit: true });
+    const live = { number: 7, state: "open", labels: [{ name: "pendulum:objective" }] };
+    const first = await confirmRunning({ read: async () => live, label: "pendulum:objective", onStop: () => {}, commit: true });
     const ends = [];
-    const took = await stopStage({ cause: "unlabeled", label: "factory:objective", repo, issue: 7, records: [], finish: async (e) => ends.push(e), opts: { token: "t" } });
+    const took = await stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, records: [], finish: async (e) => ends.push(e), opts: { token: "t" } });
     process.stdout.write(JSON.stringify({ first, took, ends }) + "\\n");
     process.exit(0);
   `;
@@ -255,7 +255,7 @@ test("confirmRunning with `commit`: the exit begins at the read, so a later stop
     import { confirmRunning, requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
     let settled = false;
     // The stop lands while the issue is being read: the caller parks.
-    confirmRunning({ read: async () => (requestStageStop("unlabeled"), { number: 7, state: "open", labels: [{ name: "factory:objective" }] }), label: "factory:objective", onStop: () => {}, commit: true }).then(() => (settled = true));
+    confirmRunning({ read: async () => (requestStageStop("unlabeled"), { number: 7, state: "open", labels: [{ name: "pendulum:objective" }] }), label: "pendulum:objective", onStop: () => {}, commit: true }).then(() => (settled = true));
     await new Promise((r) => setTimeout(r, 200));
     process.stdout.write(JSON.stringify({ settled }) + "\\n");
     process.exit(0);
@@ -271,13 +271,13 @@ test("stoppedEnd (a review stage whose merge pass found the Objective stopped): 
     ${FETCH([])}
     const repo = { owner: "acme", name: "app", full: "acme/app" };
     const order = [];
-    await stoppedEnd({ cause: "unlabeled", label: "factory:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, finish: async (e, why) => order.push(e + ": " + why + " @" + calls.length), opts: { token: "t" } });
+    await stoppedEnd({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, finish: async (e, why) => order.push(e + ": " + why + " @" + calls.length), opts: { token: "t" } });
     process.stdout.write(JSON.stringify({ order, calls }) + "\\n");
     process.exit(0);
   `;
   const r = await stage(script, root, 30_000);
   assert.ok(r.json, r.err);
-  assert.deepEqual(r.json.order, ["stopped: `factory:objective` was removed @0"]);
+  assert.deepEqual(r.json.order, ["stopped: `pendulum:objective` was removed @0"]);
   assert.ok(r.json.calls.some((c) => /convertPullRequestToDraft/.test(c)), r.json.calls.join("\n"));
 });
 
@@ -313,5 +313,5 @@ test("the backstop's spend write: a final figure set but not landed is written a
   assert.equal(await new Promise((r) => child.on("exit", r)), 0, err);
   server.close();
   assert.ok(existsSync(root));
-  assert.match(bodies.at(-1), /^PATCH [^]*<!-- factory:spend \{"usd":1\.5\} -->/, bodies.join("\n---\n"));
+  assert.match(bodies.at(-1), /^PATCH [^]*<!-- pendulum:spend \{"usd":1\.5\} -->/, bodies.join("\n---\n"));
 });

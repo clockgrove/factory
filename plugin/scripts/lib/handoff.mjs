@@ -1,7 +1,7 @@
-// The hand-off between the harness and Factory. The harness never writes to GitHub: it reads what Factory rendered
-// into $FACTORY_IN and leaves its intent as files in $FACTORY_OUT (plan.md, pr.md, replies.json, note.md, exit.json,
+// The hand-off between the harness and Pendulum. The harness never writes to GitHub: it reads what Pendulum rendered
+// into $PENDULUM_IN and leaves its intent as files in $PENDULUM_OUT (plan.md, pr.md, replies.json, note.md, exit.json,
 // and workflow.patch for a workflow change it hands over: handover.mjs).
-// Factory reads them, sanitises the text, adds its own markers and makes every write. Every byte crossing between the
+// Pendulum reads them, sanitises the text, adds its own markers and makes every write. Every byte crossing between the
 // two goes through the agent's own sandbox (backend().sandbox.command), so a symlink, a FIFO or a swapped directory
 // reaches only what the harness itself could reach.
 import { randomBytes } from "node:crypto";
@@ -16,17 +16,17 @@ import { refusalFields } from "./usage.mjs";
 import { exec } from "./proc.mjs";
 import { commandFailed, log } from "./inputs.mjs";
 
-/** The files the harness may leave in $FACTORY_OUT. Anything else there is ignored. */
+/** The files the harness may leave in $PENDULUM_OUT. Anything else there is ignored. */
 export const OUT_FILES = ["plan.md", "pr.md", "replies.json", "note.md", "exit.json", HANDOVER_FILE];
-/** The largest hand-off file Factory reads; GitHub's own comment and body limit is 65,536 characters. */
+/** The largest hand-off file Pendulum reads; GitHub's own comment and body limit is 65,536 characters. */
 export const FILE_CAP = 256 * 1024;
 const TEXT_MAX = 60_000;
 
 // ------------------------------------------------------------------ sanitising
 
 /**
- * Harness text as Factory publishes it: no HTML comment can open (so no Factory marker and nothing hidden), no closing
- * keyword closes an issue (Factory adds its own `Closes #N`), no @-mention notifies anyone, and no line starts with a
+ * Harness text as Pendulum publishes it: no HTML comment can open (so no Pendulum marker and nothing hidden), no closing
+ * keyword closes an issue (Pendulum adds its own `Closes #N`), no @-mention notifies anyone, and no line starts with a
  * `/` a bot would read as a command. Idempotent, and capped to fit one GitHub comment.
  */
 export function sanitize(text, { max = TEXT_MAX } = {}) {
@@ -37,7 +37,7 @@ export function sanitize(text, { max = TEXT_MAX } = {}) {
   s = s.replace(/&(?!amp;|lt;!--)(?=#[0-9]|#x[0-9a-f]|[a-z][a-z0-9]*;)/gi, "&amp;");
   s = s.replace(/<!--/g, "&lt;!--");
   // A closing keyword, however it is dressed (bold, a code span, a colon, a link around the reference), followed by an
-  // issue reference: the keyword becomes `refs`. Factory adds the one closing line itself.
+  // issue reference: the keyword becomes `refs`. Pendulum adds the one closing line itself.
   s = s.replace(/\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(?=[\s*_~`:]*\[?\s*(?:[\w.-]+\/[\w.-]+)?#\d|[\s*_~`:]*\[?\s*<?https?:\/\/)/gi, "refs");
   s = s.replace(/@(?=[A-Za-z0-9])/g, "@\u200b");
   // A line that starts with `/` after any space or invisible format character (a bot's trim strips them) is no bot's
@@ -80,7 +80,7 @@ export function reviewMissed({ ok = true, review, entries = [], judges = true })
 }
 
 /**
- * Whether a reviewer call produced a review Factory can post: the call finished (a crash, a non-zero exit, a time or
+ * Whether a reviewer call produced a review Pendulum can post: the call finished (a crash, a non-zero exit, a time or
  * dollar cap, an idle kill is no review, whatever its stream held) and its answer parsed as the reviewer's JSON.
  */
 export const reviewProduced = (rec, review) => !!rec?.ok && !!review?.parsed;
@@ -114,7 +114,7 @@ export function reviewCallTimeout(remaining) {
 }
 
 /**
- * The call whose answer Factory posts, from a pass and its rerun (null when there was none): the rerun's when it
+ * The call whose answer Pendulum posts, from a pass and its rerun (null when there was none): the rerun's when it
  * produced a review (reviewProduced), else the first pass's when that did, else null. Null is no review at all: the
  * stage Blocks with noReviewReason and posts nothing, so the PR cannot merge on a review that did not happen.
  */
@@ -129,7 +129,7 @@ export function reviewCallEnd(rec, review) {
   if (rec.budgetExceeded) return "the dollar cap";
   if (rec.timedOut) return "the time cap";
   if (rec.idle) return "a hang (no output and no progress; killed)";
-  if (rec.stopped) return "a stop by Factory";
+  if (rec.stopped) return "a stop by Pendulum";
   if (rec.refusal) return `a refusal by the provider (${refusalFields(rec.refusal)})`;
   return rec.signal ? `a crash (signal ${rec.signal})` : `a crash (exit ${rec.exitCode ?? "?"})`;
 }
@@ -141,19 +141,19 @@ export function noReviewReason(recs, reviewOf) {
 }
 
 /**
- * What Factory posts for one reviewer pass, from its parsed answer (parseReview): the review body (the marker, the count
+ * What Pendulum posts for one reviewer pass, from its parsed answer (parseReview): the review body (the marker, the count
  * and the reviewer's judgment of each acceptance entry, one line each) and the line comments, sanitised and fitted to the
  * diff. An entry judged not met with no comment of its own (its `entry`, or an "acceptance X:" body prefix) gets one at
  * the judgment's path and line, so the answer pass handles it, except, on a split part that leaves work for the next
  * (`splitPart`), one judged `deferred` (a later part delivers it), which the body lists as such; an entry of the issue (acceptanceEntries) the reviewer
- * left unjudged is named in the body and returned in `unjudged`. With no comment at all, Factory's placeholder goes on
+ * left unjudged is named in the body and returned in `unjudged`. With no comment at all, Pendulum's placeholder goes on
  * the first line the diff shows, and `placeholder` is true: nothing to answer. The placeholder only ever stands for a
  * pass that ran and answered: a failed call (`ok` false) or an answer with no reviewer JSON throws, so no caller can
  * post a review that did not happen (reviewAnswer; the review job Blocks instead). `foundation`: a foundation Objective's
  * second pass (review.mjs foundationReview), parsed: its comments go up with the first pass's, the body counts them and
  * carries the foundation marker (reviewsCover). `review` null with `foundation`: the foundation pass alone, on a PR whose
  * first pass was posted before the Objective was labelled a foundation one; it judges no entry. `since`: the head
- * Factory's review covered when this pass read only the commits written after it (review.mjs, #350); the body says so.
+ * Pendulum's review covered when this pass read only the commits written after it (review.mjs, #350); the body says so.
  */
 export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false, foundation = null, since = null }) {
   if (!ok) throw new Error("no review to post: the reviewer call failed");
@@ -184,15 +184,15 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
       review && judgedNone(review, entries)
         ? "the reviewer judged none of the acceptance entries; this is not a clean pass."
         : "no findings; the pass ran and returned nothing line-tied.";
-    comments = [{ path: first?.[0] ?? null, line: first ? (first[1].first ?? Math.min(...first[1].lines)) : null, side: "RIGHT", body: `${PLACEHOLDER_MARKER}\nFactory reviewer: ${said}` }];
+    comments = [{ path: first?.[0] ?? null, line: first ? (first[1].first ?? Math.min(...first[1].lines)) : null, side: "RIGHT", body: `${PLACEHOLDER_MARKER}\nPendulum reviewer: ${said}` }];
   }
   const checked = "checked the shared contracts the diff changes against their callers";
   const on = since ? ` on the commits since ${since.slice(0, 7)}` : "";
   const lines = !foundation
-    ? [marker(issue, "review"), `Factory reviewer: one comment-only pass${on}, ${comments.length} comment(s).`]
+    ? [marker(issue, "review"), `Pendulum reviewer: one comment-only pass${on}, ${comments.length} comment(s).`]
     : review
-      ? [marker(issue, "review"), marker(issue, "foundation"), `Factory reviewer: one comment-only review of two passes${on}, ${comments.length} comment(s); the foundation pass ${checked} and raised ${extra.length}.`]
-      : [marker(issue, "review"), marker(issue, "foundation"), `Factory reviewer: the foundation pass, after this PR's first review (the Objective was labelled a foundation one since), ${comments.length} comment(s); it ${checked}.`];
+      ? [marker(issue, "review"), marker(issue, "foundation"), `Pendulum reviewer: one comment-only review of two passes${on}, ${comments.length} comment(s); the foundation pass ${checked} and raised ${extra.length}.`]
+      : [marker(issue, "review"), marker(issue, "foundation"), `Pendulum reviewer: the foundation pass, after this PR's first review (the Objective was labelled a foundation one since), ${comments.length} comment(s); it ${checked}.`];
   if (review) {
     lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map((a) => judgedLine(a, splitPart)));
     if (unjudged.length) lines.push("", `Not judged: ${unjudged.map((id) => sanitize(id)).join(", ")}.`);
@@ -201,9 +201,9 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
 }
 
 /**
- * What Factory's reviews on a PR (`reviews`, GitHub's list) already cover: `reviewed`, one carries its review marker (the
+ * What Pendulum's reviews on a PR (`reviews`, GitHub's list) already cover: `reviewed`, one carries its review marker (the
  * first pass ran); `foundation`, one also carries the foundation marker (the foundation pass ran, with the first pass or
- * after it). Only reviews from Factory or someone who can push count.
+ * after it). Only reviews from Pendulum or someone who can push count.
  */
 export function reviewsCover(reviews, issue) {
   const own = (reviews || []).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
@@ -220,11 +220,11 @@ export function parsePrText(text, issue) {
   return { title, body: sanitize(lines.slice(at + 1).join("\n").trim()) };
 }
 
-/** The PR body's last lines, Factory's own: `Closes #N`, or `Refs #N` for a split part that leaves work for the next. */
+/** The PR body's last lines, Pendulum's own: `Closes #N`, or `Refs #N` for a split part that leaves work for the next. */
 export const prFooter = (issue, splitPart) => `${splitPart ? "Refs" : "Closes"} #${issue}`;
 
 /**
- * replies.json as the replies Factory posts: one per comment id in `allowed`, the first for each id, bodies sanitised.
+ * replies.json as the replies Pendulum posts: one per comment id in `allowed`, the first for each id, bodies sanitised.
  * An id is a line comment's number, or the string id of a finding in a review body (logic.mjs bodyFindingId).
  */
 export function parseReplies(text, allowed) {
@@ -355,7 +355,7 @@ process.stdout.write(JSON.stringify(out));
 
 /**
  * Run one AGENT_IO operation in the agent's sandbox. `env` is the stage's child env (the sandbox settings ride in it);
- * `profile` "git" is the sandbox Factory's own work on the checkout runs in (backend.mjs sandbox.git).
+ * `profile` "git" is the sandbox Pendulum's own work on the checkout runs in (backend.mjs sandbox.git).
  */
 async function agentIo(op, dir, names, env, input, profile = "command") {
   const [cmd, args] = backend(env).sandbox[profile]([process.execPath, "-e", AGENT_IO, op, dir, ...names], env);
@@ -369,20 +369,20 @@ async function agentIo(op, dir, names, env, input, profile = "command") {
 }
 
 /**
- * The stage's hand-off directories: `in` (what Factory renders for the harness) and `out` (what the harness leaves),
- * under a fresh temp directory in the agent's reach (its own TMPDIR, never Factory's). Returns {in, out, env}, `env` the variables the harness gets.
+ * The stage's hand-off directories: `in` (what Pendulum renders for the harness) and `out` (what the harness leaves),
+ * under a fresh temp directory in the agent's reach (its own TMPDIR, never Pendulum's). Returns {in, out, env}, `env` the variables the harness gets.
  */
 export async function handoffDirs(env, base = env.TMPDIR || tmpdir()) {
   // Made by the agent, in its own temp directory: on Actions only the agent uid can write there.
-  const root = join(base, `factory-handoff-${randomBytes(8).toString("hex")}`);
+  const root = join(base, `pendulum-handoff-${randomBytes(8).toString("hex")}`);
   const dirs = { in: join(root, "in"), out: join(root, "out") };
   await agentIo("mkdir", root, [], env);
   await agentIo("mkdir", dirs.out, [], env);
   await agentIo("write", dirs.in, [], env, "{}");
-  return { ...dirs, env: { FACTORY_IN: dirs.in, FACTORY_OUT: dirs.out } };
+  return { ...dirs, env: { PENDULUM_IN: dirs.in, PENDULUM_OUT: dirs.out } };
 }
 
-/** Recreate $FACTORY_IN with `files` ({relative path: text}); a name Factory did not choose never reaches a path. */
+/** Recreate $PENDULUM_IN with `files` ({relative path: text}); a name Pendulum did not choose never reaches a path. */
 export const writeIn = (dirs, files, env) => agentIo("write", dirs.in, [], env, JSON.stringify(files));
 
 /** Named files in a directory of the agent's, read as the agent: {files: {name: text}, refused}. */
@@ -406,8 +406,8 @@ export async function readOut(dirs, env) {
 }
 
 /**
- * Write files into the agent's tree, from inside the sandbox Factory's git work runs in (as the agent uid on Actions):
- * {relative path: {text, mode?, replace?}}. Factory never writes into the agent's tree from the host. Returns the
+ * Write files into the agent's tree, from inside the sandbox Pendulum's git work runs in (as the agent uid on Actions):
+ * {relative path: {text, mode?, replace?}}. Pendulum never writes into the agent's tree from the host. Returns the
  * paths written.
  */
 export async function putFiles(root, files, env = process.env) {
@@ -418,19 +418,19 @@ export async function putFiles(root, files, env = process.env) {
 /** Remove hand-off files before a pass whose own record must not be mistaken for an earlier one's. */
 export const clearOut = (dirs, names, env) => agentIo("clear", dirs.out, names, env);
 
-// ------------------------------------------------------------ what Factory renders
+// ------------------------------------------------------------ what Pendulum renders
 
-/** Where the diff since the PR's last green head sits in $FACTORY_IN, for a fix pass after a checks red. */
+/** Where the diff since the PR's last green head sits in $PENDULUM_IN, for a fix pass after a checks red. */
 export const DIFF_FILE = "checks/diff-since-green.patch";
 
-/** Where a failed check's or command's whole output sits in $FACTORY_IN: `checks/<n>-<name>.log`, n from 1. */
+/** Where a failed check's or command's whole output sits in $PENDULUM_IN: `checks/<n>-<name>.log`, n from 1. */
 export const checkFile = (i, name) => `checks/${i + 1}-${String(name).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "").slice(0, 80) || "check"}.log`;
 
 /**
- * The files of $FACTORY_IN: the issue, the maintainers' decisions (all of them, uncut), the plan comment and the PR as
- * they stand (Factory's hand-over line left out), the workflow hand-over Factory published (workflow.patch), the review comments to answer, the failed checks' whole
+ * The files of $PENDULUM_IN: the issue, the maintainers' decisions (all of them, uncut), the plan comment and the PR as
+ * they stand (Pendulum's hand-over line left out), the workflow hand-over Pendulum published (workflow.patch), the review comments to answer, the failed checks' whole
  * logs, the diff since the last green head, the merged parts of a split Objective, and the default branch's commit
- * Factory fetched.
+ * Pendulum fetched.
  */
 export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = null, pr = null, handover = null, reviewComments = [], checks = [], diff = null, parts = [], base = "" }) {
   const files = {
@@ -453,23 +453,23 @@ export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = n
 /**
  * The plan's record of the Objective text it was made from, on the plan comment's marker line after the marker:
  * `sha256` of that title and body (objective-trust.mjs objectiveSha), `label`, the Objective's start time (the later
- * of its last `factory:objective` label and its last `factory:draft` removal: objective-trust.mjs startedAt) when the
+ * of its last `pendulum:objective` label and its last `pendulum:draft` removal: objective-trust.mjs startedAt) when the
  * work stage last started from that text (planGate), `text` that text itself ({title, body, labels}: what an edit's
  * before is, #400) and `verdicts`, the edit check's verdict for each later text by its hash (edit-check.mjs). Only
- * Factory writes it: harness text never carries `<!--` (sanitize), only Factory's own comment is read, and `<` and `>`
+ * Pendulum writes it: harness text never carries `<!--` (sanitize), only Pendulum's own comment is read, and `<` and `>`
  * in the record are JSON escapes, so no text in it closes the comment. `room`: the most UTF-8 bytes the line may take
  * (the comment's limit less the plan, recordRoom); a record too long for it drops its verdicts before its text (a
  * verdict dropped is asked again; the text gone would end the edit check), then its text.
  */
 export function planTextMarker(rec, room = Infinity) {
-  const line = (o) => `<!-- factory:plan-text ${JSON.stringify(o).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+  const line = (o) => `<!-- pendulum:plan-text ${JSON.stringify(o).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
   const base = { sha256: rec.sha256, label: rec.label ?? null };
   const text = rec.text ? { text: rec.text } : {};
   const verdicts = rec.verdicts && Object.keys(rec.verdicts).length ? { verdicts: rec.verdicts } : {};
   const fits = [{ ...base, ...text, ...verdicts }, { ...base, ...text }, { ...base, ...verdicts }].map(line).find((l) => Buffer.byteLength(l) <= room);
   return fits ?? line(base);
 }
-const PLAN_TEXT = /^<!-- factory:plan-text (\{[^\n]*\}) -->$/;
+const PLAN_TEXT = /^<!-- pendulum:plan-text (\{[^\n]*\}) -->$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 /** GitHub's own limit on a comment's body, 65,536 characters: counted here as UTF-8 bytes, never more than its characters. */
 export const COMMENT_MAX = 65_536;
@@ -512,7 +512,7 @@ const recordHead = (issue, body, record) => (now) => {
 
 /**
  * The Objective's plan comment among `comments`: the newest written (its last update) of those that carry the marker on
- * their first line and come from Factory's own login or a person who can push (local mode writes as its developer):
+ * their first line and come from Pendulum's own login or a person who can push (local mode writes as its developer):
  * {id, at (when it was posted), own, text (the plan, the marker line dropped), record (the plan-text record, or null)}.
  * No other App counts (logic.mjs trustedAuthor), github-actions[bot] included: its comment never stands in for a plan
  * comment that exists. Only when none does, the oldest such App comment's time is kept ({foreign: true}, no text, no
@@ -526,7 +526,7 @@ export function planOf(comments, issue) {
   const seen = (x) => Date.parse(x.updated_at ?? x.created_at) || 0;
   const c = marked.filter((x) => trustedAuthor(x)).sort((a, b) => seen(b) - seen(a))[0];
   if (!c) {
-    // Factory's App seen from a local process looks like any other App: its time only, the earliest such comment's.
+    // Pendulum's App seen from a local process looks like any other App: its time only, the earliest such comment's.
     const posted = (x) => Date.parse(x.created_at) || 0;
     const app = marked.filter((x) => x.user?.type === "Bot").sort((a, b) => posted(a) - posted(b))[0];
     return app ? { id: app.id, at: app.created_at ?? null, own: false, foreign: true, text: null, record: null } : null;
@@ -549,17 +549,17 @@ export async function planComment(repo, issue, opts) {
 }
 
 /**
- * The plan comment's text a stage hands its harness as $FACTORY_IN/plan.md: only a plan recorded from the stage's text
+ * The plan comment's text a stage hands its harness as $PENDULUM_IN/plan.md: only a plan recorded from the stage's text
  * (`record`, or neither recorded), so a plan made from other text is made again from the new one; never another App's.
  */
 export const planHanded = (posted, record) => (posted && posted.text !== null && (posted.record?.sha256 ?? null) === (record?.sha256 ?? null) ? posted.text : null);
 
-/** The plan comment's text as the harness wrote it last (Factory's marker line dropped), or null when there is none. */
+/** The plan comment's text as the harness wrote it last (Pendulum's marker line dropped), or null when there is none. */
 export async function currentPlan(repo, issue, opts) {
   return (await planComment(repo, issue, opts).catch(() => null))?.text ?? null;
 }
 
-// ------------------------------------------------------------- what Factory posts
+// ------------------------------------------------------------- what Pendulum posts
 
 /**
  * Post plan.md as the issue's plan comment when it changed since the last post. `record` (planTextMarker) goes on the
@@ -591,16 +591,16 @@ export async function postNote(repo, issue, text, opts) {
 }
 
 /**
- * Open or update the branch's one PR from pr.md. A new PR opens as a draft (Factory marks it ready once its own
- * validation is green); its body ends with Factory's closing line. Without pr.md an existing PR is left as it is, and
+ * Open or update the branch's one PR from pr.md. A new PR opens as a draft (Pendulum marks it ready once its own
+ * validation is green); its body ends with Pendulum's closing line. Without pr.md an existing PR is left as it is, and
  * a new one gets the issue's title and `fallbackBody`, sanitised. Returns the PR, or null when there is nothing to open.
- * `handover`: the workflow hand-over as Factory publishes it ({patch, files}: git's own patch and the files it checked,
- * outbox.mjs checkHandover); "" for none; undefined keeps the one Factory's comment on the issue carries (handoverPosted),
+ * `handover`: the workflow hand-over as Pendulum publishes it ({patch, files}: git's own patch and the files it checked,
+ * outbox.mjs checkHandover); "" for none; undefined keeps the one Pendulum's comment on the issue carries (handoverPosted),
  * unlabelled once a person has applied it (handoverApplied). With one, that comment holds it
- * (handoverText), the issue carries the factory:handover label, and the PR body's first line is Factory's, pointing to
+ * (handoverText), the issue carries the pendulum:handover label, and the PR body's first line is Pendulum's, pointing to
  * the comment (handoverLine); with none, the label comes off and a notice there says the PR carries none. The label and
  * the comment are put right on every publish, so a write GitHub refused is made again on the next. The harness's text
- * is held to closedHarnessText, so nothing it leaves open runs into Factory's text after it.
+ * is held to closedHarnessText, so nothing it leaves open runs into Pendulum's text after it.
  */
 export async function publishPr(repo, { branch, base, issue, issueTitle, prText, fallbackBody = "", splitPart = false, pr = null, handover = undefined }, opts) {
   // A stopped stage opens no PR and rewrites none from a half-written pr.md (stop.mjs holdIfStopped).
@@ -608,8 +608,8 @@ export async function publishPr(repo, { branch, base, issue, issueTitle, prText,
   const parsed = prText ? parsePrText(prText, issue) : null;
   const existing = pr || (await findPr(repo, branch, opts));
   const posted = await handoverPosted(repo, issue, opts);
-  // The hand-over this publish carries: the stage's checked one, none, or (undefined) the one Factory's comment holds,
-  // its files read back from Factory's own text (patchFiles). A kept one a person has applied (they took the label off)
+  // The hand-over this publish carries: the stage's checked one, none, or (undefined) the one Pendulum's comment holds,
+  // its files read back from Pendulum's own text (patchFiles). A kept one a person has applied (they took the label off)
   // is not labelled again: the label is the person's step, and it is done.
   const kept = handover === undefined;
   const current = kept ? (posted?.patch ? { patch: posted.patch, files: patchFiles(posted.patch) } : null) : handover || null;
@@ -633,7 +633,7 @@ export async function publishPr(repo, { branch, base, issue, issueTitle, prText,
     out = title === existing.title && body === existing.body ? existing : await updatePr(repo, existing.number, { title, body }, opts);
   } else {
     const title = parsed?.title || `#${issue}: ${sanitize(String(issueTitle || ""), { max: 100 }).replace(/\s+/g, " ")}`;
-    harnessBody = closedHarnessText(withoutHandoverLine(parsed?.body || sanitize(fallbackBody || "Opened by Factory; the harness left no pr.md."), issue));
+    harnessBody = closedHarnessText(withoutHandoverLine(parsed?.body || sanitize(fallbackBody || "Opened by Pendulum; the harness left no pr.md."), issue));
     out = await createPr(repo, { head: branch, base, title, body: withFooter(`${head}${harnessBody}`, footer), draft: true }, opts);
   }
   out = await closingChecked(repo, out, { issue, splitPart, harnessBody, footer, head }, opts);
@@ -645,7 +645,7 @@ export async function publishPr(repo, { branch, base, issue, issueTitle, prText,
 }
 
 /**
- * Factory's hand-over comment on the issue (handoverMarker on its first line, Factory's own login only): {id,
+ * Pendulum's hand-over comment on the issue (handoverMarker on its first line, Pendulum's own login only): {id,
  * html_url, text (after the marker line), patch (handoverOf)}, or null.
  */
 export async function handoverPosted(repo, issue, opts) {
@@ -681,8 +681,8 @@ async function syncHandover(repo, { issue, posted, text, label }, opts) {
 
 /**
  * The stage's workflow hand-over (handover.mjs), from `files()` (the hand-off files as last collected), checked in
- * Factory's mirror against the branch as GitHub has it (outbox.mjs handover), once per text. `now()`: undefined when no
- * pass left workflow.patch (the one Factory published stands), "" for an empty one (none), else {patch, files}: git's
+ * Pendulum's mirror against the branch as GitHub has it (outbox.mjs handover), once per text. `now()`: undefined when no
+ * pass left workflow.patch (the one Pendulum published stands), "" for an empty one (none), else {patch, files}: git's
  * own regenerated patch (never the worker's text) and the files git read back; undefined too
  * for one that cannot go out, which `refused()` then names (handoverRefusedReason): its stage Blocks.
  */
@@ -720,8 +720,8 @@ export async function handoverUpFront(repo, issue, { named, from = "issue" }, op
 }
 
 /**
- * The whole change is a hand-over (nothing to push, so no PR): Factory's comment on the issue carries it, with the
- * factory:handover label.
+ * The whole change is a hand-over (nothing to push, so no PR): Pendulum's comment on the issue carries it, with the
+ * pendulum:handover label.
  */
 export async function handoverOnIssue(repo, { issue, handover, defaultBranch }, opts) {
   await syncHandover(repo, { issue, posted: await handoverPosted(repo, issue, opts), text: handoverText({ issue, patch: handover.patch, files: handover.files, defaultBranch }), label: true }, opts);
@@ -731,8 +731,8 @@ export async function handoverOnIssue(repo, { issue, handover, defaultBranch }, 
 export const HANDOVER_WRITERS = new Set(["admin", "maintain", "write"]);
 
 /**
- * Whether the hand-over has been applied: after Factory last applied the factory:handover label, it was taken off by
- * Factory's own login (in local mode that is the operator, who applies it; Factory itself takes it off only when it drops
+ * Whether the hand-over has been applied: after Pendulum last applied the pendulum:handover label, it was taken off by
+ * Pendulum's own login (in local mode that is the operator, who applies it; Pendulum itself takes it off only when it drops
  * the hand-over, and then its comment holds none, so this is not asked) or by someone whose repository permission, read
  * now, is write, maintain or admin. A triager's or another bot's removal never counts, and neither does one whose
  * permission cannot be read. A timeline that cannot be read reads as not applied: the label goes on again, which a
@@ -765,7 +765,7 @@ export const inertRefs = (text) => String(text).replace(/#(?=\d)/g, "#\u200b").r
 /**
  * GitHub's own reading of the PR must close exactly this Objective's issue (nothing, for a split part that leaves
  * work). When the harness's text still makes it close something else, its references are made inert; failing that, the
- * body becomes Factory's alone; failing that, it throws (code "closing-refs") and the stage Blocks.
+ * body becomes Pendulum's alone; failing that, it throws (code "closing-refs") and the stage Blocks.
  */
 async function closingChecked(repo, pr, { issue, splitPart, harnessBody, footer, head = "" }, opts) {
   const want = splitPart ? "" : String(issue);
@@ -781,13 +781,13 @@ async function closingChecked(repo, pr, { issue, splitPart, harnessBody, footer,
   };
   let got = await read();
   if (got === want) return pr;
-  for (const body of [withFooter(`${head}${inertRefs(harnessBody)}`, footer), withFooter(`${head}Factory could not publish the harness's description here without it linking other issues; see the plan comment and the commits.`, footer)]) {
+  for (const body of [withFooter(`${head}${inertRefs(harnessBody)}`, footer), withFooter(`${head}Pendulum could not publish the harness's description here without it linking other issues; see the plan comment and the commits.`, footer)]) {
     pr = (await updatePr(repo, pr.number, { body }, opts).catch(() => null)) || pr;
     got = await read();
     if (got === want) return pr;
   }
   // Failing closed: the stage Blocks, and the PR (new or not) still goes back to the caller to be recorded.
-  const e = new Error(got === null ? `PR #${pr.number}'s closing references could not be read, so Factory cannot tell what it would close on merge` : `PR #${pr.number} would close issue(s) ${got || "none"} on merge, not ${want ? `#${want}` : "none"}`);
+  const e = new Error(got === null ? `PR #${pr.number}'s closing references could not be read, so Pendulum cannot tell what it would close on merge` : `PR #${pr.number} would close issue(s) ${got || "none"} on merge, not ${want ? `#${want}` : "none"}`);
   e.code = "closing-refs";
   e.pr = pr;
   throw e;
@@ -799,7 +799,7 @@ const withFooter = (body, footer) => `${String(body || "").trimEnd()}\n\n${foote
 
 /**
  * Post the harness's replies to the reviewer's comments: only to `allowed` (the comments the pass was given), one per
- * comment, each under Factory's reply marker. Returns how many were posted.
+ * comment, each under Pendulum's reply marker. Returns how many were posted.
  */
 export async function postReplies(repo, prNumber, issue, text, allowed, opts) {
   await holdIfStopped();
@@ -822,14 +822,14 @@ export async function postReplies(repo, prNumber, issue, text, allowed, opts) {
  * (inputs.mjs resolveInputs `maxParts`): a count of PRs, not a spend bound (each part's jobs have their own max_usd).
  */
 export const MAX_PARTS = 6;
-const PARTS = (issue) => `<!-- factory:${issue}:parts `;
+const PARTS = (issue) => `<!-- pendulum:${issue}:parts `;
 
-/** The split record on the issue ({prs: [numbers], remaining: count}, Factory's own comment only), or null. */
+/** The split record on the issue ({prs: [numbers], remaining: count}, Pendulum's own comment only), or null. */
 export async function partsRecord(repo, issue, opts) {
   const c = sinceRestart(await listComments(repo, issue, opts)).find((x) => isSelf(x) && (x.body || "").startsWith(PARTS(issue)));
   if (!c) return null;
   try {
-    const v = JSON.parse(/^<!-- factory:\d+:parts (\{[^\n]*\}) -->/.exec(c.body)?.[1] || "null");
+    const v = JSON.parse(/^<!-- pendulum:\d+:parts (\{[^\n]*\}) -->/.exec(c.body)?.[1] || "null");
     const prs = (Array.isArray(v?.prs) ? v.prs : []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
     return { prs, remaining: Math.max(0, Number(v?.remaining) || 0), commentId: c.id };
   } catch {
@@ -843,7 +843,7 @@ export async function recordPart(repo, issue, prNumber, remaining, opts) {
   if (!rec.prs.length && !remaining) return null;
   const prs = rec.prs.includes(prNumber) ? rec.prs : [...rec.prs, prNumber];
   const data = JSON.stringify({ prs, remaining });
-  const text = remaining ? `Factory: this Objective is split into sequential PRs. Part ${prs.length} is PR #${prNumber}; ${remaining} item(s) remain for the next part, which starts from the default branch once this one merges.` : `Factory: PR #${prNumber} is the last part of this Objective (${prs.length} part(s)).`;
+  const text = remaining ? `Pendulum: this Objective is split into sequential PRs. Part ${prs.length} is PR #${prNumber}; ${remaining} item(s) remain for the next part, which starts from the default branch once this one merges.` : `Pendulum: PR #${prNumber} is the last part of this Objective (${prs.length} part(s)).`;
   const body = `${PARTS(issue)}${data} -->\n${text}`;
   if (rec.commentId) await rest(`repos/${repo.full}/issues/comments/${rec.commentId}`, { ...opts, method: "PATCH", body: { body } });
   else await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body } });
@@ -856,7 +856,7 @@ export const isSplitPart = (rec, prNumber) => !!rec && rec.remaining > 0 && rec.
 /** What the reviewer is told of a split part that leaves work for the next: its 1-based part number; null for the last part or a one-PR Objective. */
 export const splitPartOf = (rec, prNumber) => (isSplitPart(rec, prNumber) ? { number: rec.prs.indexOf(prNumber) + 1 } : null);
 
-/** The merged PRs of the Objective's earlier parts, oldest first, for $FACTORY_IN/parts.md. */
+/** The merged PRs of the Objective's earlier parts, oldest first, for $PENDULUM_IN/parts.md. */
 export async function mergedParts(repo, issue, opts) {
   const rec = await partsRecord(repo, issue, opts).catch(() => null);
   const out = [];
@@ -873,15 +873,15 @@ export async function mergedParts(repo, issue, opts) {
  * Objective is not a split waiting on its next part.
  */
 export async function nextPart(repo, issue, opts, { maxParts = MAX_PARTS } = {}) {
-  if (await findPr(repo, `factory/${issue}`, opts)) return null;
+  if (await findPr(repo, `pendulum/${issue}`, opts)) return null;
   const rec = await partsRecord(repo, issue, opts);
   if (!rec?.remaining || !rec.prs.length) return null;
   const last = await getPr(repo, rec.prs.at(-1), opts).catch(() => null);
   if (!last?.merged_at) return null;
-  const merged = (await closedPrsFor(repo, `factory/${issue}`, opts)).filter((p) => p.merged_at);
+  const merged = (await closedPrsFor(repo, `pendulum/${issue}`, opts)).filter((p) => p.merged_at);
   if (merged[0] && merged[0].number !== last.number) return null;
   if (rec.prs.length >= maxParts) return "cap";
-  await rest(`repos/${repo.full}/git/refs/heads/${encodeURIComponent(`factory/${issue}`).replace(/%2F/g, "/")}`, { ...opts, method: "DELETE" }).catch((e) => {
+  await rest(`repos/${repo.full}/git/refs/heads/${encodeURIComponent(`pendulum/${issue}`).replace(/%2F/g, "/")}`, { ...opts, method: "DELETE" }).catch((e) => {
     if (![404, 422].includes(e.status)) throw e;
   });
   return "next";
@@ -895,8 +895,8 @@ export const exitFromOut = (files) => (typeof files?.["exit.json"] === "string" 
 
 /**
  * A stage's hand-off: its directories, the harness's env additions, and the reads and renders a stage makes.
- * `render()` hands the checkout the default branch and writes $FACTORY_IN from GitHub as it stands (call it
- * before every harness pass); `collect()` reads $FACTORY_OUT after one and keeps the plan comment current; `tick()` does
+ * `render()` hands the checkout the default branch and writes $PENDULUM_IN from GitHub as it stands (call it
+ * before every harness pass); `collect()` reads $PENDULUM_OUT after one and keeps the plan comment current; `tick()` does
  * the plan part at most every two minutes while a harness runs, handing the plan.md it read to `onPlan`; `beforeFix()`
  * renders with a validation pass's failures. `record` (planTextMarker): the Objective text this stage works from, written
  * with the plan comment; a plan comment recorded from other text is not handed to the harness (the plan is made again).
@@ -912,10 +912,10 @@ export async function openHandoff({ repo, issue, issueData, env, opts, outbox, b
   let ticking = null;
   let lastTick = Date.now();
   let plan = null;
-  // plan.md as last read from $FACTORY_OUT (the drift advisory's plan, before the plan comment catches up).
+  // plan.md as last read from $PENDULUM_OUT (the drift advisory's plan, before the plan comment catches up).
   let planOut = null;
   const render = async ({ checks = [], diff = null } = {}) => {
-    // The default branch as GitHub has it, handed to the checkout as a bundle (outbox.mjs feed): Factory runs no git there.
+    // The default branch as GitHub has it, handed to the checkout as a bundle (outbox.mjs feed): Pendulum runs no git there.
     const base = await outbox.feed();
     const pr = prNumber ? await getPr(repo, prNumber, opts).catch(() => null) : await findPr(repo, branch, opts).catch(() => null);
     plan = planHanded(await planComment(repo, issue, opts).catch(() => null), record);
@@ -946,10 +946,10 @@ export async function openHandoff({ repo, issue, issueData, env, opts, outbox, b
     collect,
     /**
      * What names a fix pass's scope (outbox.mjs fence), as of the last render: the plan comment, and the issue and the
-     * maintainers' decisions. Factory's own reads from GitHub, never a file the harness could have edited during the pass.
+     * maintainers' decisions. Pendulum's own reads from GitHub, never a file the harness could have edited during the pass.
      */
     scope: () => ({ plan: plan || "", texts: [`${issueData.title || ""}\n${issueData.body || ""}`, ...decisions.map((d) => d?.body || "")] }),
-    // The output as Factory holds it in memory; never a file a command could have swapped.
+    // The output as Pendulum holds it in memory; never a file a command could have swapped.
     beforeFix: (failures, { diff = null } = {}) => render({ checks: failures.map((f) => ({ name: f.command, output: f.full || f.output })), diff }),
     /** `onPlan` (optional): called with the plan.md this stage's harness has written, when it has written one. */
     tick(onPlan = null) {

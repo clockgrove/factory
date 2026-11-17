@@ -12,14 +12,14 @@ import { test } from "node:test";
 import { recordBody } from "../scripts/launch.mjs";
 import { marker } from "../scripts/lib/logic.mjs";
 
-const BOT = { login: "factory-app[bot]", type: "Bot" };
+const BOT = { login: "pendulum-app[bot]", type: "Bot" };
 
 const STAGE = join(import.meta.dirname, "..", "scripts", "stage.mjs");
 
 test("a stage started by the launcher writes its part of the record before anything else can fail", async () => {
   const writes = [];
   // The launcher's claim comment, carrying this stage's claim, as the stage reads it before its first write.
-  const claimComment = { id: 1, user: BOT, body: `${marker(7, "sandbox")}\n` + recordBody({ claim: "abc123", stage: "work", state: "running", id: "factory-0123456789ab", leaseUntil: new Date(Date.now() + 600_000).toISOString(), launches: [] }) };
+  const claimComment = { id: 1, user: BOT, body: `${marker(7, "sandbox")}\n` + recordBody({ claim: "abc123", stage: "work", state: "running", id: "pendulum-0123456789ab", leaseUntil: new Date(Date.now() + 600_000).toISOString(), launches: [] }) };
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -48,15 +48,15 @@ test("a stage started by the launcher writes its part of the record before anyth
       TMPDIR: process.env.TMPDIR,
       GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
       GITHUB_REPOSITORY: "owner/repo",
-      FACTORY_STAGE_ISSUE: "7",
-      FACTORY_STAGE: "work",
-      FACTORY_STAGE_CLAIM: "abc123",
-      FACTORY_APP_TOKEN: "test-token",
-      FACTORY_APP_SLUG: "factory-app",
-      FACTORY_STAGE_DIR: join(home, "d"),
-      FACTORY_IMAGE_CHECKOUT: image,
-      FACTORY_TIMEOUT_MINUTES: "30",
-      FACTORY_STAGE_SESSION_END: new Date(Date.now() + 3_600_000).toISOString(),
+      PENDULUM_STAGE_ISSUE: "7",
+      PENDULUM_STAGE: "work",
+      PENDULUM_STAGE_CLAIM: "abc123",
+      PENDULUM_APP_TOKEN: "test-token",
+      PENDULUM_APP_SLUG: "pendulum-app",
+      PENDULUM_STAGE_DIR: join(home, "d"),
+      PENDULUM_IMAGE_CHECKOUT: image,
+      PENDULUM_TIMEOUT_MINUTES: "30",
+      PENDULUM_STAGE_SESSION_END: new Date(Date.now() + 3_600_000).toISOString(),
     },
     stdio: ["ignore", "pipe", "pipe"],
     // Its own process group, so the kill below also ends the worker it starts (which retries its GitHub calls, #168).
@@ -79,5 +79,5 @@ test("a stage started by the launcher writes its part of the record before anyth
   server.close();
   assert.doesNotMatch(stderr, /before initialization/, stderr);
   assert.ok(writes.length > 0, `the stage wrote no comment before it ended:\n${stderr}`);
-  assert.match(writes[0], /factory:7:stage:abc123/);
+  assert.match(writes[0], /pendulum:7:stage:abc123/);
 });

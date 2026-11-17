@@ -9,26 +9,26 @@ import { DECLARE_KEY, NEED_KEY, answeredRepos, declaredQuestion, declaredRepos, 
 import { applyExit, crashed, questionNotice } from "../scripts/lib/session.mjs";
 
 const source = { owner: "acme", name: "platform", full: "acme/platform" };
-const BOT = "factory-app[bot]";
+const BOT = "pendulum-app[bot]";
 setSelf(BOT);
-const ask = (plan, opts = {}) => planNeeds(plan, { source, label: "factory:objective", ...opts }).reason || "";
+const ask = (plan, opts = {}) => planNeeds(plan, { source, label: "pendulum:objective", ...opts }).reason || "";
 
 test("one repository: an issue body naming another repository is a Question before any harness, asking the owner to split it", () => {
-  const body = "Add the export format.\n\nFactory-Repository: acme/world allow .github/workflows/ci.yml\n";
+  const body = "Add the export format.\n\nPendulum-Repository: acme/world allow .github/workflows/ci.yml\n";
   assert.equal(
-    declaredQuestion(body, { source, label: "factory:objective" }),
-    "the issue names acme/world on a Factory-Repository line, and Factory works in one repository per Objective; split it into one Objective per repository (this one changes only acme/platform), remove the line and re-apply factory:objective",
+    declaredQuestion(body, { source, label: "pendulum:objective" }),
+    "the issue names acme/world on a Pendulum-Repository line, and Pendulum works in one repository per Objective; split it into one Objective per repository (this one changes only acme/platform), remove the line and re-apply pendulum:objective",
   );
   assert.deepEqual(declaredRepos(body, source), ["acme/world"]);
-  assert.deepEqual(declaredRepos("- factory-repository: `Acme/World`\nFactory-Repository: acme/infra", source), ["Acme/World", "acme/infra"], "any case, a list item, backticks");
-  assert.match(declaredQuestion("Factory-Repository: acme/world\nFactory-Repository: acme/infra", { source }), /names acme\/world, acme\/infra on a/);
+  assert.deepEqual(declaredRepos("- pendulum-repository: `Acme/World`\nPendulum-Repository: acme/infra", source), ["Acme/World", "acme/infra"], "any case, a list item, backticks");
+  assert.match(declaredQuestion("Pendulum-Repository: acme/world\nPendulum-Repository: acme/infra", { source }), /names acme\/world, acme\/infra on a/);
   // This repository named on the line is no other repository; a line in a code fence, or in prose, is no line.
-  assert.equal(declaredQuestion("Factory-Repository: Acme/Platform", { source }), "");
-  assert.equal(declaredQuestion("```\nFactory-Repository: acme/world\n```", { source }), "");
-  assert.equal(declaredQuestion("It once had a Factory-Repository: acme/world line.", { source }), "");
-  assert.equal(declaredQuestion("Factory-Repository: <!-- x --> @someone", { source }), "", "the author's words never reach the Question");
+  assert.equal(declaredQuestion("Pendulum-Repository: Acme/Platform", { source }), "");
+  assert.equal(declaredQuestion("```\nPendulum-Repository: acme/world\n```", { source }), "");
+  assert.equal(declaredQuestion("It once had a Pendulum-Repository: acme/world line.", { source }), "");
+  assert.equal(declaredQuestion("Pendulum-Repository: <!-- x --> @someone", { source }), "", "the author's words never reach the Question");
   assert.equal(declaredQuestion("", { source }), "");
-  assert.ok(!declaredQuestion("Factory-Repository: acme/world", { source }).includes("\n"), "one line");
+  assert.ok(!declaredQuestion("Pendulum-Repository: acme/world", { source }).includes("\n"), "one line");
 });
 
 test("one repository: the worker and the session's deliver ask the body's Question before any harness, branch or push", () => {
@@ -37,15 +37,15 @@ test("one repository: the worker and the session's deliver ask the body's Questi
   const at = worker.indexOf("declaredQuestion(", run);
   assert.ok(at > worker.indexOf("await authorGate(", run), "on the body the trust check read");
   for (const later of ["openOutbox(", "installPlugin(", "runHarness(", "openHandoff("]) assert.ok(worker.indexOf(later, run) > at, `before ${later}`);
-  assert.match(worker.slice(at, at + 500), /findPr\(repo, `factory\/\$\{issue\}`[^\n]*\n[^\n]*pr: asking, exit: "question", reason: named, [^\n]*askOnIssue: true/, "an open PR goes back to a draft with the Question");
+  assert.match(worker.slice(at, at + 500), /findPr\(repo, `pendulum\/\$\{issue\}`[^\n]*\n[^\n]*pr: asking, exit: "question", reason: named, [^\n]*askOnIssue: true/, "an open PR goes back to a draft with the Question");
   const local = readFileSync(join(PLUGIN_ROOT, "scripts", "local.mjs"), "utf8");
   const deliver = local.indexOf("async function deliver(");
   const q = local.indexOf("declaredQuestion(", deliver);
-  assert.ok(q > deliver && q < local.indexOf("openOutbox(", deliver), "deliver asks it before Factory's push");
+  assert.ok(q > deliver && q < local.indexOf("openOutbox(", deliver), "deliver asks it before Pendulum's push");
 });
 
 test("one repository: the body's Question puts an open, conflicting PR back to a draft, so the dispatcher sends it back for no rebase", async () => {
-  const pr = { number: 7, node_id: "PR_7", draft: false, mergeable_state: "dirty", head: { sha: "abc" }, user: { login: "factory[bot]" } };
+  const pr = { number: 7, node_id: "PR_7", draft: false, mergeable_state: "dirty", head: { sha: "abc" }, user: { login: "pendulum[bot]" } };
   assert.equal(staleDecision({ pr }), "rebase", "the loop: a ready, conflicting PR is sent back each tick");
   const calls = [];
   const real = globalThis.fetch;
@@ -57,7 +57,7 @@ test("one repository: the body's Question puts an open, conflicting PR back to a
     return new Response(JSON.stringify(json), { status: 200, headers: { "content-type": "application/json" } });
   };
   try {
-    const reason = declaredQuestion("Factory-Repository: acme/world", { source });
+    const reason = declaredQuestion("Pendulum-Repository: acme/world", { source });
     await applyExit({ owner: "acme", name: "platform", full: "acme/platform" }, { issue: 2, pr, exit: "question", reason, notify: "kirk", stage: "work", askOnIssue: true }, { token: "t" });
   } finally {
     globalThis.fetch = real;
@@ -103,9 +103,9 @@ test("plan-time Question: a plan that needs another repository asks the owner to
   assert.equal(ask("no such line\n```\nNeeds-Repository: acme/world\n```"), "", "inside a fence it is no line");
   assert.equal(
     ask("Needs-Repository: acme/world the CI there"),
-    "the plan needs a change in acme/world, and Factory works in one repository per Objective; split it into one Objective per repository and re-apply factory:objective, or answer in a comment how to do the work in acme/platform alone",
+    "the plan needs a change in acme/world, and Pendulum works in one repository per Objective; split it into one Objective per repository and re-apply pendulum:objective, or answer in a comment how to do the work in acme/platform alone",
   );
-  assert.match(ask("Needs-Repository: acme/infra\nNeeds-Repository: acme/world"), /^the plan needs a change in acme\/infra, acme\/world, and Factory works in one repository per Objective; /);
+  assert.match(ask("Needs-Repository: acme/infra\nNeeds-Repository: acme/world"), /^the plan needs a change in acme\/infra, acme\/world, and Pendulum works in one repository per Objective; /);
   // The harness's words never reach the issue: a value that is no OWNER/NAME asks nothing.
   assert.equal(ask("Needs-Repository: <!-- hidden --> @someone closes #1"), "");
   assert.equal(ask("Needs-Repository: <!-- hidden --> @someone\nNeeds-Repository: acme/world"), ask("Needs-Repository: acme/world"));
@@ -114,7 +114,7 @@ test("plan-time Question: a plan that needs another repository asks the owner to
   assert.deepEqual(planNeeds("Needs-Repository: none", { source }), {});
 });
 
-test("plan-time Question: one a maintainer answered since Factory asked is not asked again, whatever the plan line still says", () => {
+test("plan-time Question: one a maintainer answered since Pendulum asked is not asked again, whatever the plan line still says", () => {
   const asked = { "acme/deploy": "2026-11-09T10:00:00Z" };
   const d = (body, at, seen = at) => ({ author: "owner", at, seen, body, key: `comment:${at}` });
   const after = "2026-11-09T10:05:00Z";
@@ -158,7 +158,7 @@ test("#421: plan-time Question: the plan-answer check judges whether the comment
   const answered = await judgedAnswers(asked, reply, { source, check: check((input) => ({ verdict: input.includes("The other repository: acme/shared-lib") ? "answered" : "open", confidence: 0.9 })) });
   assert.deepEqual([...answered], ["acme/shared-lib"]);
   assert.equal(seen[0].question, PLAN_ANSWER_QUESTION);
-  assert.match(seen[0].input, /needs a change in acme\/shared-lib, and Factory works in one repository per Objective/, "Factory's own question line");
+  assert.match(seen[0].input, /needs a change in acme\/shared-lib, and Pendulum works in one repository per Objective/, "Pendulum's own question line");
   assert.match(seen[0].input, /No, copy the helper into this repo instead\./);
   assert.ok(!seen[0].input.includes("Old note"), "only comments since the ask");
   assert.equal(ask("Needs-Repository: acme/shared-lib", { answered }), "", "not asked again");
@@ -176,15 +176,15 @@ test("#421: plan-time Question: the plan-answer check judges whether the comment
   assert.equal(seen.length, 0);
 });
 
-test("plan-time Question: the ask is recorded in Factory's own progress comment, and only its own record counts", () => {
+test("plan-time Question: the ask is recorded in Pendulum's own progress comment, and only its own record counts", () => {
   const at = "2026-11-09T10:00:00Z";
   const own = (body, login = BOT) => ({ user: { login }, body });
   const rec = planAskedMarker({ "acme/deploy": at });
-  assert.equal(rec, `<!-- factory:plan-asked {"acme/deploy":"${at}"} -->`);
-  const progress = (extra) => `<!-- factory:7:progress:work:1 -->\nFactory work run 1: started\n${extra}`;
+  assert.equal(rec, `<!-- pendulum:plan-asked {"acme/deploy":"${at}"} -->`);
+  const progress = (extra) => `<!-- pendulum:7:progress:work:1 -->\nPendulum work run 1: started\n${extra}`;
   assert.deepEqual(planAskedOf([own(progress(rec))], { issue: 7, self: BOT }), { "acme/deploy": at });
   assert.deepEqual(planAskedOf([own(progress(rec), "someone")], { issue: 7, self: BOT }), {}, "someone else's comment");
-  assert.deepEqual(planAskedOf([own(progress(rec))], { issue: 7, self: null }), {}, "Factory's login unknown: nothing counts");
+  assert.deepEqual(planAskedOf([own(progress(rec))], { issue: 7, self: null }), {}, "Pendulum's login unknown: nothing counts");
 });
 
 test("plan-time Question: the issue comment says to answer on the issue, never to mark the PR ready", () => {
@@ -195,7 +195,7 @@ test("plan-time Question: the issue comment says to answer on the issue, never t
   assert.ok(!withPr.includes("\n"), "one line");
 });
 
-test("plan-time Question: a harness Factory stopped is no crash, so it is not run again", () => {
+test("plan-time Question: a harness Pendulum stopped is no crash, so it is not run again", () => {
   const rec = { ok: false, timedOut: false, budgetExceeded: false, signal: "SIGTERM", exitCode: null };
   assert.equal(crashed(rec), true, "control: killed by a signal it did not expect");
   assert.equal(crashed({ ...rec, stopped: true }), false);
@@ -205,7 +205,7 @@ test("plan-time Question: the exit is a Question even with no commit and no PR, 
   const planNeedsReason = ask("Needs-Repository: acme/world");
   const harness = { ok: true };
   assert.deepEqual(decideExit({ harness, pr: null, commits: 0, planNeeds: planNeedsReason }), { exit: "question", reason: planNeedsReason });
-  assert.deepEqual(decideExit({ harness: { ok: false, error: "stopped by Factory", unmetered: true }, pr: null, commits: 0, planNeeds: planNeedsReason }), { exit: "question", reason: planNeedsReason });
+  assert.deepEqual(decideExit({ harness: { ok: false, error: "stopped by Pendulum", unmetered: true }, pr: null, commits: 0, planNeeds: planNeedsReason }), { exit: "question", reason: planNeedsReason });
   assert.equal(decideExit({ harness, pr: null, commits: 0 }).reason, "worker ended without commits or a PR", "control: without it, an empty run Blocks");
   const pr = { exists: true, draft: true, body: "" };
   assert.equal(decideExit({ harness: { ok: false, error: "max turns" }, pr, commits: 3, validation: { passes: 1, green: false }, record: { exit: "blocked", reason: "x" }, planNeeds: planNeedsReason }).exit, "question");
@@ -214,8 +214,8 @@ test("plan-time Question: the exit is a Question even with no commit and no PR, 
   assert.equal(decideExit({ harness, pr, commits: 1, protectedHits: [".github/x"], planNeeds: planNeedsReason }).exit, "blocked");
 });
 
-test("plan-time Question: the factory-objective-plan skill names the plan line Factory reads and the one-repository rule", () => {
-  const skill = readFileSync(join(PLUGIN_ROOT, "skills", "factory-objective-plan", "SKILL.md"), "utf8");
+test("plan-time Question: the pendulum-objective-plan skill names the plan line Pendulum reads and the one-repository rule", () => {
+  const skill = readFileSync(join(PLUGIN_ROOT, "skills", "pendulum-objective-plan", "SKILL.md"), "utf8");
   assert.ok(skill.includes(`\`${NEED_KEY}: OWNER/NAME\``), "the plan line, as plannedRepos reads it");
   assert.match(skill, /one repository per Objective/);
   assert.match(skill, /`question` exit record \(test `access`\)/);

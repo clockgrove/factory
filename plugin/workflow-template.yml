@@ -1,10 +1,10 @@
-# Factory: unattended Objectives. Written by `/factory setup`; edit the env block, not the jobs.
-# Triggers: cron, manual (one issue), a new factory:objective label or its removal, the review job's own last step,
-# pull_request when the Factory App labels a PR factory:review, and a review submitted on a Factory PR. Never from a fork: the Objective text (a writer) and the label (a
-# maintainer) are the only inputs. FACTORY_AUTO_MERGE is ON: Factory merges the reviewed head with
+# Pendulum: unattended Objectives. Written by `/pendulum setup`; edit the env block, not the jobs.
+# Triggers: cron, manual (one issue), a new pendulum:objective label or its removal, the review job's own last step,
+# pull_request when the Pendulum App labels a PR pendulum:review, and a review submitted on a Pendulum PR. Never from a fork: the Objective text (a writer) and the label (a
+# maintainer) are the only inputs. PENDULUM_AUTO_MERGE is ON: Pendulum merges the reviewed head with
 # no human read. The gate is your CI workflow's checks on that exact head (and the merge queue's
 # commit), the comment-only reviewer pass, and the queue's own re-run. Set it false for ready PRs.
-name: factory
+name: pendulum
 on:
   schedule:
     - cron: "*/10 * * * *" # the dispatcher's backstop: GitHub fires a schedule late or not at all under load
@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       issue: { description: Objective issue number (empty runs the dispatcher), required: false }
-      harness: { description: "Override FACTORY_HARNESS for this run (claude | codex | copilot)", required: false }
+      harness: { description: "Override PENDULUM_HARNESS for this run (claude | codex | copilot)", required: false }
       wake: { description: "Set by a wake job only (the deadline it slept to); leave empty", required: false }
       # {{#sandbox}}
       failed_launch: { description: "Set by a launch job that failed only (its Objective); leave empty", required: false }
@@ -24,66 +24,66 @@ on:
       image: { description: "true builds the sandbox image from the default branch now", required: false }
       sweep: { description: "true runs the sandbox sweep now", required: false }
       # {{/sandbox}}
-  issues: # a new Objective dispatches at once (labelled at creation, or labelled later); factory:objective removed: the dispatcher leaves a stopped Objective's PR a draft; factory:restart: the dispatcher restarts it; factory:draft applied: a stop, removed: a start; closed: an Objective blocked by that issue is ready now
+  issues: # a new Objective dispatches at once (labelled at creation, or labelled later); pendulum:objective removed: the dispatcher leaves a stopped Objective's PR a draft; pendulum:restart: the dispatcher restarts it; pendulum:draft applied: a stop, removed: a start; closed: an Objective blocked by that issue is ready now
     # {{^sandbox}}
     types: [opened, labeled, unlabeled, closed]
     # {{/sandbox}}
     # {{#sandbox}}
-    types: [opened, labeled, unlabeled, closed] # closed also runs the sandbox sweep, which destroys a closed Objective's sandbox; so do the factory:blocked and factory:question labels, which stop one left running
+    types: [opened, labeled, unlabeled, closed] # closed also runs the sandbox sweep, which destroys a closed Objective's sandbox; so do the pendulum:blocked and pendulum:question labels, which stop one left running
     # {{/sandbox}}
-  pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready (the App's own ready mark starts no job), a Factory PR merged (siblings may be stale now), or the merge queue dropped one (the dispatcher re-enqueues it once, then Blocks)
+  pull_request: # fires because the App (not the job token) applies pendulum:review, a human marks a Question draft ready (the App's own ready mark starts no job), a Pendulum PR merged (siblings may be stale now), or the merge queue dropped one (the dispatcher re-enqueues it once, then Blocks)
     types: [labeled, ready_for_review, closed, dequeued]
   # {{#sandbox}}
   push: # a merge to the default branch refreshes the sandbox image (the image job)
     branches:
       - {{default_branch}}
-  repository_dispatch: # factory-stage: a stage in its sandbox asks for fresh tokens, or says it ended (only Factory's App sends these)
-    types: [factory-stage]
+  repository_dispatch: # pendulum-stage: a stage in its sandbox asks for fresh tokens, or says it ended (only Pendulum's App sends these)
+    types: [pendulum-stage]
   issue_comment: # a maintainer's comment on an Objective: the answer to its Question
     types: [created]
   # {{/sandbox}}
-  pull_request_review: # an App's review of a Factory PR (a third-party reviewer's): the dispatcher puts back the review label a stage waiting for it took off
+  pull_request_review: # an App's review of a Pendulum PR (a third-party reviewer's): the dispatcher puts back the review label a stage waiting for it took off
     types: [submitted]
-  check_suite: # CI from a GitHub App outside Actions finished on a factory/ branch: a stage waiting on it resumes, or the dispatcher's merge pass runs
+  check_suite: # CI from a GitHub App outside Actions finished on a pendulum/ branch: a stage waiting on it resumes, or the dispatcher's merge pass runs
     types: [completed]
   workflow_run: # CI on Actions finished (GitHub sends no check_suite event for a suite Actions made)
     workflows:
       - {{ci_workflow}}
     types: [completed]
 # Several accounts of a harness (docs/INSTALL.md, Several accounts), in the env block below:
-#   FACTORY_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'  each account its own secrets; re-render after any change,
+#   PENDULUM_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'  each account its own secrets; re-render after any change,
 #     since setup writes each declared account's secrets into the jobs by name
-#   FACTORY_AUTO_ACCOUNT: "1"  a stage with no account label starts on one no usage limit holds
+#   PENDULUM_AUTO_ACCOUNT: "1"  a stage with no account label starts on one no usage limit holds
 env:
-  FACTORY_HARNESS: {{harness}} # claude | codex | copilot
-  FACTORY_MODEL: {{model}}
-  FACTORY_SUBAGENT_MODEL: {{subagent_model}}
-  FACTORY_REVIEWER_MODEL: {{reviewer_model}}
-  FACTORY_CREDENTIAL: {{credential}} # api; plan only for your own repository
-  FACTORY_MAX_CONCURRENT: {{max_concurrent}}
-  FACTORY_DAILY_USD: {{daily_usd}}
-  FACTORY_MAX_USD: {{max_usd}}
-  FACTORY_TIMEOUT_MINUTES: {{timeout_minutes}} # under 360 on hosted runners; mirrored in timeout-minutes below
-  FACTORY_AUTO_MERGE: {{auto_merge}}
-  FACTORY_NOTIFY: {{notify}} # login#id: the id pins the account (setup writes it)
-  FACTORY_SETUP: {{setup}}
-  FACTORY_INSTALL: {{install}} # auto (from the lockfile), none, or your own command
-  FACTORY_VALIDATION: {{validation}}
-  FACTORY_BUDGET_COMMAND: {{budget_command}}
-  FACTORY_PROTECTED_PATHS: {{protected_paths}}
-  FACTORY_CI_CHECKS: {{ci_checks}}
-  FACTORY_NODE_VERSION: {{node_version}} # the Node.js your CI uses
+  PENDULUM_HARNESS: {{harness}} # claude | codex | copilot
+  PENDULUM_MODEL: {{model}}
+  PENDULUM_SUBAGENT_MODEL: {{subagent_model}}
+  PENDULUM_REVIEWER_MODEL: {{reviewer_model}}
+  PENDULUM_CREDENTIAL: {{credential}} # api; plan only for your own repository
+  PENDULUM_MAX_CONCURRENT: {{max_concurrent}}
+  PENDULUM_DAILY_USD: {{daily_usd}}
+  PENDULUM_MAX_USD: {{max_usd}}
+  PENDULUM_TIMEOUT_MINUTES: {{timeout_minutes}} # under 360 on hosted runners; mirrored in timeout-minutes below
+  PENDULUM_AUTO_MERGE: {{auto_merge}}
+  PENDULUM_NOTIFY: {{notify}} # login#id: the id pins the account (setup writes it)
+  PENDULUM_SETUP: {{setup}}
+  PENDULUM_INSTALL: {{install}} # auto (from the lockfile), none, or your own command
+  PENDULUM_VALIDATION: {{validation}}
+  PENDULUM_BUDGET_COMMAND: {{budget_command}}
+  PENDULUM_PROTECTED_PATHS: {{protected_paths}}
+  PENDULUM_CI_CHECKS: {{ci_checks}}
+  PENDULUM_NODE_VERSION: {{node_version}} # the Node.js your CI uses
   # {{#project}}
-  FACTORY_PROJECT: {{project}} # the Factory board's node id (setup records it with the board)
+  PENDULUM_PROJECT: {{project}} # the Pendulum board's node id (setup records it with the board)
   # {{/project}}
   # {{#sandbox}}
-  FACTORY_SANDBOX: {{sandbox}} # each stage runs in the Objective's cloud sandbox, started by a launch job; re-run setup to change
-  FACTORY_SANDBOX_VCPUS: {{sandbox_vcpus}} # the sandbox's size (2 GB of memory per vCPU on Vercel); set it from your own capacity test
-  FACTORY_IMAGE_REFRESH: {{image_refresh}} # merge: rebuild the sandbox image on a merge that changes what it is made from (docs/ADAPTERS.md, Refresh) until the minutes below, then on the next UTC day's first tick; nightly: once a day
-  FACTORY_IMAGE_DAILY_MINUTES: {{image_daily_minutes}} # image build minutes a day on merges
-  FACTORY_IMAGE_MAX_AGE_DAYS: {{image_max_age_days}} # an image older than this many days (1 to 30) is built again even when nothing it is made from changed
-  FACTORY_SANDBOX_IDLE_DAYS: {{sandbox_idle_days}} # the sweep destroys a sandbox stopped this long, its Objective neither Running nor In review
-  FACTORY_SWEEP_MAX_DESTROYS: {{sweep_max_destroys}} # sandboxes one sweep run destroys at most
+  PENDULUM_SANDBOX: {{sandbox}} # each stage runs in the Objective's cloud sandbox, started by a launch job; re-run setup to change
+  PENDULUM_SANDBOX_VCPUS: {{sandbox_vcpus}} # the sandbox's size (2 GB of memory per vCPU on Vercel); set it from your own capacity test
+  PENDULUM_IMAGE_REFRESH: {{image_refresh}} # merge: rebuild the sandbox image on a merge that changes what it is made from (docs/ADAPTERS.md, Refresh) until the minutes below, then on the next UTC day's first tick; nightly: once a day
+  PENDULUM_IMAGE_DAILY_MINUTES: {{image_daily_minutes}} # image build minutes a day on merges
+  PENDULUM_IMAGE_MAX_AGE_DAYS: {{image_max_age_days}} # an image older than this many days (1 to 30) is built again even when nothing it is made from changed
+  PENDULUM_SANDBOX_IDLE_DAYS: {{sandbox_idle_days}} # the sweep destroys a sandbox stopped this long, its Objective neither Running nor In review
+  PENDULUM_SWEEP_MAX_DESTROYS: {{sweep_max_destroys}} # sandboxes one sweep run destroys at most
   # {{/sandbox}}
 permissions: # the job token reads code and Actions; every write goes through the App's token
   contents: read
@@ -93,11 +93,11 @@ permissions: # the job token reads code and Actions; every write goes through th
 jobs:
   dispatch:
     # Ticks: the */10 cron only (a backstop: GitHub fires schedules late or not at all; other schedules are other
-    # jobs'), a manual run, a new Objective's label or its removal (a stop), a restart's label, a draft's label applied or removed (a stop, a start), any issue closing (it may block an Objective), Factory's own jobs'
-    # last steps (a slot freed, a failed or requeued start), a merged Factory PR, the merge queue dropping one
-    # (only GitHub and people with write access dequeue), an App's review on a Factory PR that is not Factory's own (a
+    # jobs'), a manual run, a new Objective's label or its removal (a stop), a restart's label, a draft's label applied or removed (a stop, a start), any issue closing (it may block an Objective), Pendulum's own jobs'
+    # last steps (a slot freed, a failed or requeued start), a merged Pendulum PR, the merge queue dropping one
+    # (only GitHub and people with write access dequeue), an App's review on a Pendulum PR that is not Pendulum's own (a
     # third-party reviewer's: a review stage may wait for it; a person's review ticks nothing), the queue watch, and, without a sandbox, CI finishing on a
-    # factory/ branch (the merge pass merges a PR whose checks just went green; with a sandbox the gate job takes those
+    # pendulum/ branch (the merge pass merges a PR whose checks just went green; with a sandbox the gate job takes those
     # events and ticks this job itself).
     if: >-
       # {{^sandbox}}
@@ -106,15 +106,15 @@ jobs:
       # {{#sandbox}}
       (github.event_name == 'schedule' && github.event.schedule == '*/10 * * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.image != 'true') ||
       # {{/sandbox}}
-      (github.event_name == 'issues' && (github.event.action == 'closed' || github.event.label.name == 'factory:objective' || github.event.label.name == 'factory:draft' || (github.event.action == 'labeled' && github.event.label.name == 'factory:restart') || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')))) ||
-      (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/')) ||
-      (github.event_name == 'pull_request' && github.event.action == 'dequeued' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'pull_request_review' && github.event.review.user.type == 'Bot' && startsWith(github.event.pull_request.head.ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository && !startsWith(github.event.review.body, '<!-- factory:'))
+      (github.event_name == 'issues' && (github.event.action == 'closed' || github.event.label.name == 'pendulum:objective' || github.event.label.name == 'pendulum:draft' || (github.event.action == 'labeled' && github.event.label.name == 'pendulum:restart') || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'pendulum:objective')))) ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'pendulum/')) ||
+      (github.event_name == 'pull_request' && github.event.action == 'dequeued' && startsWith(github.head_ref, 'pendulum/') && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'pull_request_review' && github.event.review.user.type == 'Bot' && startsWith(github.event.pull_request.head.ref, 'pendulum/') && github.event.pull_request.head.repo.full_name == github.repository && !startsWith(github.event.review.body, '<!-- pendulum:'))
       # {{^sandbox}}
-      || (github.event_name == 'check_suite' && startsWith(github.event.check_suite.head_branch, 'factory/')) ||
-      (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'factory/') && github.event.workflow_run.head_repository.full_name == github.repository)
+      || (github.event_name == 'check_suite' && startsWith(github.event.check_suite.head_branch, 'pendulum/')) ||
+      (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'pendulum/') && github.event.workflow_run.head_repository.full_name == github.repository)
       # {{/sandbox}}
-    concurrency: { group: factory-dispatch, cancel-in-progress: false } # ticks run one at a time
+    concurrency: { group: pendulum-dispatch, cancel-in-progress: false } # ticks run one at a time
     runs-on: ubuntu-latest
     timeout-minutes: 15 # a tick takes seconds; a hung one would hold every later tick for the runner's six hours
     outputs:
@@ -129,7 +129,7 @@ jobs:
     steps:
       - uses: {{action}}
         id: f
-        with: { mode: dispatch, issue: "${{ inputs.issue }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        with: { mode: dispatch, issue: "${{ inputs.issue }}", app_id: "${{ secrets.PENDULUM_APP_ID }}", app_private_key: "${{ secrets.PENDULUM_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
   queue-watch:
     # The PRs the merge pass left in the merge queue: this job reads each entry every 30 s until it leaves the queue,
     # then ticks the dispatcher, whose merge pass re-enqueues a dropped PR once, then Blocks. The tick is this job's own
@@ -145,15 +145,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions: { contents: read, actions: write } # actions: write only for the dispatcher tick
-    concurrency: { group: factory-queue-watch, cancel-in-progress: false }
+    concurrency: { group: pendulum-queue-watch, cancel-in-progress: false }
     steps:
       - uses: {{action}}
         id: w
-        with: { mode: watch, pr: "${{ needs.dispatch.outputs.queue_watch }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        with: { mode: watch, pr: "${{ needs.dispatch.outputs.queue_watch }}", app_id: "${{ secrets.PENDULUM_APP_ID }}", app_private_key: "${{ secrets.PENDULUM_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - name: Dispatch tick (a watched PR left the queue or stalled there, or the watch's time is up)
         if: steps.w.outputs.tick == 'true'
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" } # no checkout here: gh names the repository from GH_REPO
-        run: gh workflow run factory.yml
+        run: gh workflow run pendulum.yml
   wake:
     # The dispatcher's own next tick, for a wait only time ends (GitHub's cron fires late or not at all): a sandbox
     # stage's lease end (a stage that died silently), a retry the sandbox vendor's quota set, the next try of a start
@@ -177,11 +177,11 @@ jobs:
           left=$(( $(date -u -d "$WAKE_AT" +%s) - $(date -u +%s) ))
           if [ "$left" -gt 21000 ]; then
             sleep 21000
-            gh workflow run factory.yml || { sleep 30; gh workflow run factory.yml; }
+            gh workflow run pendulum.yml || { sleep 30; gh workflow run pendulum.yml; }
             exit 0
           fi
           if [ "$left" -gt 0 ]; then sleep "$left"; fi
-          gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT" || { sleep 30; gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT"; }
+          gh workflow run pendulum.yml -f wake="$WAKE_KIND $WAKE_AT" || { sleep 30; gh workflow run pendulum.yml -f wake="$WAKE_KIND $WAKE_AT"; }
   # {{^sandbox}}
   work:
     needs: dispatch
@@ -190,53 +190,53 @@ jobs:
     timeout-minutes: {{timeout_minutes}}
     strategy: { fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } } # the dispatcher picks at most max_concurrent less the ones running, a repository variable's included
     permissions: { contents: read, issues: write, actions: write } # actions: write for the tick at the end and triage's rerun of failed CI jobs
-    concurrency: { group: "factory-${{ matrix.issue }}", cancel-in-progress: false } # one job per issue; a repeat waits, siblings keep running
+    concurrency: { group: "pendulum-${{ matrix.issue }}", cancel-in-progress: false } # one job per issue; a repeat waits, siblings keep running
     steps:
       - uses: {{action}}
-        id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
-        if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        id: account # several accounts (PENDULUM_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
+        if: env.PENDULUM_ACCOUNTS != ''
+        with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.PENDULUM_APP_ID }}", app_private_key: "${{ secrets.PENDULUM_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: {{action}}
         id: f
         with:
-          vars: ${{ toJSON(vars) }} # the repository's variables: each FACTORY_<NAME> one sets that setting over the env block (docs/INSTALL.md, Settings in layers)
+          vars: ${{ toJSON(vars) }} # the repository's variables: each PENDULUM_<NAME> one sets that setting over the env block (docs/INSTALL.md, Settings in layers)
           mode: work
           issue: ${{ matrix.issue }}
-          harness: ${{ inputs.harness }} # empty falls through to FACTORY_HARNESS
+          harness: ${{ inputs.harness }} # empty falls through to PENDULUM_HARNESS
           account: ${{ steps.account.outputs.account }} # empty with no accounts declared: the secrets below are today's
-          app_id: ${{ secrets.FACTORY_APP_ID }}
-          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          app_id: ${{ secrets.PENDULUM_APP_ID }}
+          app_private_key: ${{ secrets.PENDULUM_APP_PRIVATE_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # Claude; empty with federation
           codex_api_key: ${{ secrets.CODEX_API_KEY }} # Codex; reaches the harness step only
-          codex_gateway_key: ${{ secrets.FACTORY_CODEX_GATEWAY_KEY }} # Codex through the Vercel AI Gateway; wins over CODEX_API_KEY when set
+          codex_gateway_key: ${{ secrets.PENDULUM_CODEX_GATEWAY_KEY }} # Codex through the Vercel AI Gateway; wins over CODEX_API_KEY when set
           copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }} # Copilot; a token with only the Copilot Requests permission (required)
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }} # optional: the gateway's decision models answer red-check triage, the drift advisory, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check and the edit check; empty, the stage's own harness answers them (decision_route)
-          worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # optional, with FACTORY_WORKER_SECRETS in the env block: SOURCE=value lines for the worker's shell only; a dedicated key with a gateway-side budget (docs/PLAN.md, Worker secrets)
+          worker_secret_values: ${{ secrets.PENDULUM_WORKER_SECRET_VALUES }} # optional, with PENDULUM_WORKER_SECRETS in the env block: SOURCE=value lines for the worker's shell only; a dedicated key with a gateway-side budget (docs/PLAN.md, Worker secrets)
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }} # Claude federation (with id-token: write above)
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
       - uses: actions/upload-artifact@v7
         if: always()
-        with: { name: "factory-usage-${{ matrix.issue }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90 }
+        with: { name: "pendulum-usage-${{ matrix.issue }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90 }
       - name: Dispatch tick (this worker finished; a conflicting PR fires no review job)
         if: always()
         env: { GH_TOKEN: "${{ github.token }}" }
-        run: gh workflow run factory.yml || true
+        run: gh workflow run pendulum.yml || true
   review:
     name: review (${{ github.head_ref }})
     if: >-
-      github.event_name == 'pull_request' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository &&
-      ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || (github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'))
+      github.event_name == 'pull_request' && startsWith(github.head_ref, 'pendulum/') && github.event.pull_request.head.repo.full_name == github.repository &&
+      ((github.event.action == 'labeled' && github.event.label.name == 'pendulum:review') || (github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'))
     runs-on: {{runs_on}}
     timeout-minutes: {{timeout_minutes}}
     permissions: { contents: read, issues: write, actions: write } # actions: write here, for the tick below and triage's rerun of failed CI jobs
-    concurrency: { group: "factory-review-${{ github.event.pull_request.number }}", cancel-in-progress: false }
+    concurrency: { group: "pendulum-review-${{ github.event.pull_request.number }}", cancel-in-progress: false }
     steps:
       - uses: {{action}}
-        id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
-        if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, rendered_accounts: {{rendered_accounts}}, harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        id: account # several accounts (PENDULUM_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
+        if: env.PENDULUM_ACCOUNTS != ''
+        with: { mode: account, rendered_accounts: {{rendered_accounts}}, harness: "${{ inputs.harness }}", app_id: "${{ secrets.PENDULUM_APP_ID }}", app_private_key: "${{ secrets.PENDULUM_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: {{action}}
@@ -247,23 +247,23 @@ jobs:
           pr: ${{ github.event.pull_request.number }}
           harness: ${{ inputs.harness }}
           account: ${{ steps.account.outputs.account }}
-          app_id: ${{ secrets.FACTORY_APP_ID }}
-          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          app_id: ${{ secrets.PENDULUM_APP_ID }}
+          app_private_key: ${{ secrets.PENDULUM_APP_PRIVATE_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           codex_api_key: ${{ secrets.CODEX_API_KEY }}
-          codex_gateway_key: ${{ secrets.FACTORY_CODEX_GATEWAY_KEY }}
+          codex_gateway_key: ${{ secrets.PENDULUM_CODEX_GATEWAY_KEY }}
           copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
-          worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: the fix and answer passes only, never the reviewer
+          worker_secret_values: ${{ secrets.PENDULUM_WORKER_SECRET_VALUES }} # with PENDULUM_WORKER_SECRETS: the fix and answer passes only, never the reviewer
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.issue_number != ''
-        with: { name: "factory-usage-${{ steps.f.outputs.issue_number }}-review", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # one name per review run; the bench lists it exactly
+        with: { name: "pendulum-usage-${{ steps.f.outputs.issue_number }}-review", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # one name per review run; the bench lists it exactly
       - name: Dispatch tick (a worker slot freed)
         if: always()
         env: { GH_TOKEN: "${{ github.token }}" }
-        run: gh workflow run factory.yml || true
+        run: gh workflow run pendulum.yml || true
   # {{/sandbox}}
   # {{#sandbox}}
   launch:
@@ -275,32 +275,32 @@ jobs:
     timeout-minutes: 5
     strategy: { fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } }
     permissions: { contents: read, actions: write } # the job token reads usage artifacts and this run, and ticks the dispatcher; every other write is the App's
-    concurrency: { group: "factory-launch-factory/${{ matrix.issue }}", cancel-in-progress: false } # one launcher per Objective at a time, with launch-event's
+    concurrency: { group: "pendulum-launch-pendulum/${{ matrix.issue }}", cancel-in-progress: false } # one launcher per Objective at a time, with launch-event's
     steps:
       - uses: {{action}}
-        id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
-        if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        id: account # several accounts (PENDULUM_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
+        if: env.PENDULUM_ACCOUNTS != ''
+        with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.PENDULUM_APP_ID }}", app_private_key: "${{ secrets.PENDULUM_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: {{action}}
         id: f
         with:
           vars: ${{ toJSON(vars) }}
           mode: launch
           issue: ${{ matrix.issue }}
-          harness: ${{ inputs.harness }} # empty falls through to FACTORY_HARNESS
+          harness: ${{ inputs.harness }} # empty falls through to PENDULUM_HARNESS
           account: ${{ steps.account.outputs.account }}
-          app_id: ${{ secrets.FACTORY_APP_ID }}
-          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          app_id: ${{ secrets.PENDULUM_APP_ID }}
+          app_private_key: ${{ secrets.PENDULUM_APP_PRIVATE_KEY }}
           vercel_token: ${{ secrets.VERCEL_TOKEN }}
           vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
           vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # the harness's credential goes into the stage's environment only
           codex_api_key: ${{ secrets.CODEX_API_KEY }}
-          codex_gateway_key: ${{ secrets.FACTORY_CODEX_GATEWAY_KEY }}
+          codex_gateway_key: ${{ secrets.PENDULUM_CODEX_GATEWAY_KEY }}
           copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
-          worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
+          worker_secret_values: ${{ secrets.PENDULUM_WORKER_SECRET_VALUES }} # with PENDULUM_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # an earlier stage's usage whose end was never answered
@@ -309,7 +309,7 @@ jobs:
         # A failed launch names its Objective: the dispatcher then wakes at the end of its launch grace, not the cron.
         # A quota refusal's sweep that left usage for the sweep job's upload slots runs that job with the same tick.
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && matrix.issue || '' }}", SWEEP: "${{ steps.f.outputs.sweep }}" } # no checkout here: gh names the repository from GH_REPO
-        run: gh workflow run factory.yml -f failed_launch="$FAILED" -f sweep="$SWEEP" || true
+        run: gh workflow run pendulum.yml -f failed_launch="$FAILED" -f sweep="$SWEEP" || true
   launch-gate:
     # An event on one Objective: a maintainer's comment, finished CI on its branch, its PR labelled for review or marked
     # ready, its stage asking for tokens or saying it ended. The gate decides in no concurrency group, so an event that starts nothing (a stranger's comment, a fork's
@@ -318,12 +318,12 @@ jobs:
     if: >-
       (github.event_name == 'issue_comment' && !github.event.issue.pull_request && github.event.comment.user.type != 'Bot' &&
        (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.comment.author_association) || contains(fromJSON('[{{maintainer_ids}}]'), github.event.comment.user.id)) &&
-       !startsWith(github.event.comment.body, '<!-- factory:') && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')) ||
-      (github.event_name == 'check_suite' && startsWith(github.event.check_suite.head_branch, 'factory/')) ||
-      (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'factory/') && github.event.workflow_run.head_repository.full_name == github.repository) ||
-      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository &&
-       ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || (github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'))) ||
-      (github.event_name == 'repository_dispatch' && github.event.action == 'factory-stage')
+       !startsWith(github.event.comment.body, '<!-- pendulum:') && contains(join(github.event.issue.labels.*.name, ','), 'pendulum:objective')) ||
+      (github.event_name == 'check_suite' && startsWith(github.event.check_suite.head_branch, 'pendulum/')) ||
+      (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'pendulum/') && github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'pendulum/') && github.event.pull_request.head.repo.full_name == github.repository &&
+       ((github.event.action == 'labeled' && github.event.label.name == 'pendulum:review') || (github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'))) ||
+      (github.event_name == 'repository_dispatch' && github.event.action == 'pendulum-stage')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: { contents: read }
@@ -331,7 +331,7 @@ jobs:
     steps:
       - uses: {{action}}
         id: f
-        with: { mode: gate, app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        with: { mode: gate, app_id: "${{ secrets.PENDULUM_APP_ID }}", app_private_key: "${{ secrets.PENDULUM_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
   launch-event:
     name: launch (${{ needs.launch-gate.outputs.issue }})
     needs: launch-gate
@@ -341,37 +341,37 @@ jobs:
     permissions: { contents: read, actions: write } # actions: write only for the dispatcher tick after a requeue, a stop, a quota refusal or a failed launch
     # The group is the Objective's only when the gate said start; a skipped job's group is its own run's, whatever GitHub
     # does with the group of a job it skips.
-    concurrency: { group: "${{ needs.launch-gate.outputs.start == 'true' && format('factory-launch-factory/{0}', needs.launch-gate.outputs.issue) || format('factory-launch-none-{0}', github.run_id) }}", cancel-in-progress: false }
+    concurrency: { group: "${{ needs.launch-gate.outputs.start == 'true' && format('pendulum-launch-pendulum/{0}', needs.launch-gate.outputs.issue) || format('pendulum-launch-none-{0}', github.run_id) }}", cancel-in-progress: false }
     steps:
       - uses: {{action}}
-        id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
-        if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ needs.launch-gate.outputs.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        id: account # several accounts (PENDULUM_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
+        if: env.PENDULUM_ACCOUNTS != ''
+        with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ needs.launch-gate.outputs.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.PENDULUM_APP_ID }}", app_private_key: "${{ secrets.PENDULUM_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: {{action}}
         id: f
         with:
           vars: ${{ toJSON(vars) }}
           mode: launch
           account: ${{ steps.account.outputs.account }}
-          app_id: ${{ secrets.FACTORY_APP_ID }}
-          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          app_id: ${{ secrets.PENDULUM_APP_ID }}
+          app_private_key: ${{ secrets.PENDULUM_APP_PRIVATE_KEY }}
           vercel_token: ${{ secrets.VERCEL_TOKEN }}
           vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
           vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # the harness's credential goes into the stage's environment only
           codex_api_key: ${{ secrets.CODEX_API_KEY }}
-          codex_gateway_key: ${{ secrets.FACTORY_CODEX_GATEWAY_KEY }}
+          codex_gateway_key: ${{ secrets.PENDULUM_CODEX_GATEWAY_KEY }}
           copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
-          worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
+          worker_secret_values: ${{ secrets.PENDULUM_WORKER_SECRET_VALUES }} # with PENDULUM_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # the ended stage's usage, as the work and review jobs upload theirs
       - name: Dispatch tick (an answered Question is Queued, a stage ended and its sandbox stopped, or this launch failed, was cut off, deferred its stage to a retry time or started nothing)
         if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped' || steps.f.outputs.exit == 'tick' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked' || steps.f.outputs.exit == 'skipped')
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && needs.launch-gate.outputs.issue || '' }}", SWEEP: "${{ steps.f.outputs.sweep }}" } # no checkout here: gh names the repository from GH_REPO
-        run: gh workflow run factory.yml -f failed_launch="$FAILED" -f sweep="$SWEEP" || true
+        run: gh workflow run pendulum.yml -f failed_launch="$FAILED" -f sweep="$SWEEP" || true
   launch-tick:
     # CI finished on an In-review Objective's PR head with no stage waiting on it (the gate's answer): the dispatcher's
     # merge pass runs now, not on GitHub's cron. In no Objective group: it starts nothing there, so it replaces no launch.
@@ -384,12 +384,12 @@ jobs:
     steps:
       - name: Dispatch tick (the merge pass)
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" }
-        run: gh workflow run factory.yml
+        run: gh workflow run pendulum.yml
   image:
-    # The sandbox image every stage starts from: FACTORY_SETUP run in a fresh sandbox beside a clone of the default
-    # branch's head, the dependency store and the harness CLIs, kept as a snapshot and recorded by the Factory App on
-    # its image issue (label factory:image). Built on a merge that changes what it is made from, or once it is
-    # FACTORY_IMAGE_MAX_AGE_DAYS old (docs/ADAPTERS.md, Refresh), until today's builds reach FACTORY_IMAGE_DAILY_MINUTES,
+    # The sandbox image every stage starts from: PENDULUM_SETUP run in a fresh sandbox beside a clone of the default
+    # branch's head, the dependency store and the harness CLIs, kept as a snapshot and recorded by the Pendulum App on
+    # its image issue (label pendulum:image). Built on a merge that changes what it is made from, or once it is
+    # PENDULUM_IMAGE_MAX_AGE_DAYS old (docs/ADAPTERS.md, Refresh), until today's builds reach PENDULUM_IMAGE_DAILY_MINUTES,
     # then nightly; by hand with the workflow's `image` input. Never on a pull request: the image is the default branch's.
     # A head an earlier day left unbuilt (today's minutes used up, or image_refresh nightly) is built on the UTC day's
     # first dispatcher tick that finds it owed (needs.dispatch.outputs.image_owed), from the default branch's head, on
@@ -410,7 +410,7 @@ jobs:
     outputs: { wake_at: "${{ steps.f.outputs.wake_at }}", wake_kind: "${{ steps.f.outputs.wake_kind }}" }
     # One build at a time; a newer merge replaces a pending one. Any run in this repository can join the group with
     # cancel-in-progress and cancel a build (Actions cannot stop that); the next build destroys what it left.
-    concurrency: { group: factory-image, cancel-in-progress: false }
+    concurrency: { group: pendulum-image, cancel-in-progress: false }
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false, ref: "${{ needs.dispatch.outputs.image_owed == 'true' && github.event.repository.default_branch || '' }}" } # the image's clone gets the whole history, from a bundle; an owed build, the default branch whatever the event
@@ -420,16 +420,16 @@ jobs:
           vars: ${{ toJSON(vars) }}
           mode: image
           image_owed: ${{ needs.dispatch.outputs.image_owed }}
-          app_id: ${{ secrets.FACTORY_APP_ID }}
-          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          app_id: ${{ secrets.PENDULUM_APP_ID }}
+          app_private_key: ${{ secrets.PENDULUM_APP_PRIVATE_KEY }}
           vercel_token: ${{ secrets.VERCEL_TOKEN }}
           vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
           vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
   sweep:
-    # The sandbox sweep: Factory's Objective sandboxes in the vendor's project that no live Objective needs (its issue
-    # closed, its record naming another sandbox, or stopped FACTORY_SANDBOX_IDLE_DAYS with the Objective neither Running
+    # The sandbox sweep: Pendulum's Objective sandboxes in the vendor's project that no live Objective needs (its issue
+    # closed, its record naming another sandbox, or stopped PENDULUM_SANDBOX_IDLE_DAYS with the Objective neither Running
     # nor In review; a Question's card sits in In review, and its label makes it a Question) are destroyed, at most
-    # FACTORY_SWEEP_MAX_DESTROYS a run, then this repository's superseded images. A stage's usage the launcher never
+    # PENDULUM_SWEEP_MAX_DESTROYS a run, then this repository's superseded images. A stage's usage the launcher never
     # collected is uploaded as the launcher would. Hourly, by hand, and when an Objective closes or its PR merges, so a
     # finished Objective's stop snapshot does not hold the vendor's storage. Its own wake (sweep-wake below) runs it again
     # when what it left is due, minutes later: an end's or a new sandbox's grace, a superseded image, a cap's rest. A
@@ -439,13 +439,13 @@ jobs:
     # moments ago to it (logic.mjs sweepDecision), and its claim under the record lock keeps the two apart.
     if: >-
       github.event.schedule == '17 * * * *' || (github.event_name == 'workflow_dispatch' && (inputs.sweep == 'true' || startsWith(inputs.wake, 'sweep '))) ||
-      (github.event_name == 'issues' && github.event.action == 'closed' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')) ||
-      (github.event_name == 'issues' && github.event.action == 'labeled' && (github.event.label.name == 'factory:blocked' || github.event.label.name == 'factory:question')) ||
-      (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event_name == 'issues' && github.event.action == 'closed' && contains(join(github.event.issue.labels.*.name, ','), 'pendulum:objective')) ||
+      (github.event_name == 'issues' && github.event.action == 'labeled' && (github.event.label.name == 'pendulum:blocked' || github.event.label.name == 'pendulum:question')) ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'pendulum/') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions: { contents: read, actions: read } # actions: read for the armed wakes; every write is the App's
-    concurrency: { group: factory-sweep, cancel-in-progress: false }
+    concurrency: { group: pendulum-sweep, cancel-in-progress: false }
     outputs: { wake_at: "${{ steps.f.outputs.wake_at }}", wake_kind: "${{ steps.f.outputs.wake_kind }}" }
     steps:
       - uses: {{action}}
@@ -453,8 +453,8 @@ jobs:
         with:
           vars: ${{ toJSON(vars) }}
           mode: sweep
-          app_id: ${{ secrets.FACTORY_APP_ID }}
-          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          app_id: ${{ secrets.PENDULUM_APP_ID }}
+          app_private_key: ${{ secrets.PENDULUM_APP_PRIVATE_KEY }}
           vercel_token: ${{ secrets.VERCEL_TOKEN }}
           vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
           vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
@@ -483,7 +483,7 @@ jobs:
         run: |
           left=$(( $(date -u -d "$WAKE_AT" +%s) - $(date -u +%s) ))
           if [ "$left" -gt 0 ]; then sleep "$left"; fi
-          gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT" || { sleep 30; gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT"; }
+          gh workflow run pendulum.yml -f wake="$WAKE_KIND $WAKE_AT" || { sleep 30; gh workflow run pendulum.yml -f wake="$WAKE_KIND $WAKE_AT"; }
   image-wake:
     # The sweep's wake an image build arms when it left an older image: the sweep destroys it once no stage can still be
     # starting from it. Sleeps and ticks as sweep-wake does.
@@ -501,5 +501,5 @@ jobs:
         run: |
           left=$(( $(date -u -d "$WAKE_AT" +%s) - $(date -u +%s) ))
           if [ "$left" -gt 0 ]; then sleep "$left"; fi
-          gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT" || { sleep 30; gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT"; }
+          gh workflow run pendulum.yml -f wake="$WAKE_KIND $WAKE_AT" || { sleep 30; gh workflow run pendulum.yml -f wake="$WAKE_KIND $WAKE_AT"; }
   # {{/sandbox}}

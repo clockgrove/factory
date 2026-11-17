@@ -1,10 +1,10 @@
-// The lapse check: whether a local stage that ended with no exit record (killed, crashed, or Factory's set-up of it
+// The lapse check: whether a local stage that ended with no exit record (killed, crashed, or Pendulum's set-up of it
 // threw) would most likely end the same way if started again on this machine with nothing changed. It is a decision
 // call through the one decision interface (decider.mjs, docs/ADAPTERS.md), on red-check triage's model setting and
 // confidence floor (triage.mjs confidenceFloor). The local loop asks it where no stage runs, so only the AI Gateway
 // answers (as the answer check in the dispatcher). Given: the stage, its exit code or signal, the set-up error's code, the end of its
 // log (stageRelay already redacted it) and the machine's pressure at the end, and the same for the lapse before it.
-// This runs in Factory's own process, never in a harness: the log is data between random-tag markers.
+// This runs in Pendulum's own process, never in a harness: the log is data between random-tag markers.
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
@@ -53,7 +53,7 @@ export function logTail(file) {
 
 /**
  * One lapse's facts, as lapseInput shows them: {stage, end, setup, code, log, pressure}. `end`: the exit code or signal;
- * `setup`: whether Factory's set-up threw (and `code` its error code), `log` the end of the stage's log, `pressure` the
+ * `setup`: whether Pendulum's set-up threw (and `code` its error code), `log` the end of the stage's log, `pressure` the
  * machine's load (machine.mjs readPressure) or null.
  */
 export function lapseFacts({ result = null, failure = null, pressure = null }) {
@@ -73,7 +73,7 @@ export function lapseInput(now, before = null, tag = randomBytes(8).toString("he
     title,
     `Stage: ${f.stage}`,
     `Ended with: ${f.end}`,
-    `Factory's set-up threw: ${f.setup ? `yes (error code ${f.code})` : f.code ? `no; Factory's local loop threw (error code ${f.code})` : "no"}`,
+    `Pendulum's set-up threw: ${f.setup ? `yes (error code ${f.code})` : f.code ? `no; Pendulum's local loop threw (error code ${f.code})` : "no"}`,
     `Machine at the end: ${f.pressure ?? "unknown"}`,
     `The end of its log:`,
     `<<<BEGIN ${tag}>>>`,

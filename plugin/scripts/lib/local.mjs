@@ -1,5 +1,5 @@
-// Local mode: Factory on a developer's own box. The claim that keeps the Actions path and a
-// local loop off each other's Objectives, the sandbox the harness and Factory's own shell
+// Local mode: Pendulum on a developer's own box. The claim that keeps the Actions path and a
+// local loop off each other's Objectives, the sandbox the harness and Pendulum's own shell
 // commands run in, the env a child may see, and the adopter's workflow env block read as the
 // local configuration. GitHub stays the only state.
 import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
@@ -11,7 +11,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
 import { addLabels, listComments, primeSelf, primeWriters, prComment, rest, upsertComment } from "./github.mjs";
 import { isSelf, knownWriter, marker, pinnedMaintainer, selfLogin, trustedAuthor } from "./logic.mjs";
-import { FACTORY_CONTROL_KEYS, commandFailed, isFactorySecret } from "./inputs.mjs";
+import { PENDULUM_CONTROL_KEYS, commandFailed, isPendulumSecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
 import { SKIP_SMUDGE_ENV } from "./lfs.mjs";
 import { exec } from "./proc.mjs";
@@ -33,22 +33,22 @@ const CLAIM_SKEW_MS = 2 * 60_000;
 export const claimMarker = (issue) => marker(issue, "local");
 
 /**
- * Factory's own code on this machine that a serve may run (lib/release.mjs releasesDir): no sandbox may write it. Every
+ * Pendulum's own code on this machine that a serve may run (lib/release.mjs releasesDir): no sandbox may write it. Every
  * sandbox only writes where it is told to, so this is already out of reach; it is named in each one's write denials too,
  * so a later widening of what a sandbox may write cannot take it in. Named only when it is there: a sandbox cannot bind
- * a path that does not exist, and none can create it (none may write ~/.cache/factory).
+ * a path that does not exist, and none can create it (none may write ~/.cache/pendulum).
  */
-export const factoryCodeDirs = (home = homedir()) => [releasesDir(home)].filter((d) => existsSync(d));
+export const pendulumCodeDirs = (home = homedir()) => [releasesDir(home)].filter((d) => existsSync(d));
 
 /** The routing label: an Objective carrying it belongs to a developer's local loop, and the Actions path leaves it alone. */
-export const LOCAL_LABEL = "factory:local";
+export const LOCAL_LABEL = "pendulum:local";
 const issueTimeline = (repo, n, opts) => rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true });
-/** The marker of Factory's mark of the `labeled factory:local` event `id` on issue `n` (localRouteEvent, markLocalRoute). */
+/** The marker of Pendulum's mark of the `labeled pendulum:local` event `id` on issue `n` (localRouteEvent, markLocalRoute). */
 export const localRouteMarker = (n, id) => marker(n, "local-route", String(id));
 
 /**
- * The `labeled factory:local` event that put the label on an issue as it is now, from its timeline `events`: the last
- * such event with no `unlabeled factory:local` after it, as {id, mine} (`mine`: Factory's own login, selfLogin, made it;
+ * The `labeled pendulum:local` event that put the label on an issue as it is now, from its timeline `events`: the last
+ * such event with no `unlabeled pendulum:local` after it, as {id, mine} (`mine`: Pendulum's own login, selfLogin, made it;
  * `id` null when the event carries none). Null when the timeline shows no such label on.
  */
 export function localRouteEvent(events) {
@@ -62,9 +62,9 @@ export function localRouteEvent(events) {
 }
 
 /**
- * Factory's mark of the factory:local label a local loop put on Objective `n` (#455): one comment whose marker names
- * that exact label event (localRouteMarker), which the scorer reads (bench/lib/objective.mjs localFactoryActions) so the
- * label counts as Factory's, not a person's. The event is read from the issue's timeline (localRouteEvent), by Factory's
+ * Pendulum's mark of the pendulum:local label a local loop put on Objective `n` (#455): one comment whose marker names
+ * that exact label event (localRouteMarker), which the scorer reads (bench/lib/objective.mjs localPendulumActions) so the
+ * label counts as Pendulum's, not a person's. The event is read from the issue's timeline (localRouteEvent), by Pendulum's
  * own login (read once if unknown; unreadable, no mark). `check`: read the comments first and write nothing when this
  * login's mark of that event is there (a later tick's backfill). Never throws: {id, marked, why, person}, `marked` true
  * when the mark is written or already there, false with the cause otherwise (no such event yet, a failed read or write);
@@ -72,12 +72,12 @@ export function localRouteEvent(events) {
  */
 export async function markLocalRoute(repo, n, opts, { check = false, timeline = issueTimeline } = {}) {
   if (!selfLogin()) await primeSelf(opts).catch(() => null);
-  if (!selfLogin()) return { id: null, marked: false, why: "Factory's own login could not be read" };
+  if (!selfLogin()) return { id: null, marked: false, why: "Pendulum's own login could not be read" };
   const events = await timeline(repo, n, opts).catch((e) => ({ failed: e }));
   if (events?.failed) return { id: null, marked: false, why: `the timeline could not be read (${String(events.failed?.message || events.failed).slice(0, 120)})` };
   const ev = localRouteEvent(events);
-  if (ev && !ev.mine) return { id: null, marked: false, why: "a person put the factory:local label on", person: true };
-  if (!ev?.id) return { id: null, marked: false, why: "the timeline does not show this login's factory:local label event yet" };
+  if (ev && !ev.mine) return { id: null, marked: false, why: "a person put the pendulum:local label on", person: true };
+  if (!ev?.id) return { id: null, marked: false, why: "the timeline does not show this login's pendulum:local label event yet" };
   const id = ev.id;
   const mark = localRouteMarker(n, id);
   if (check) {
@@ -85,15 +85,15 @@ export async function markLocalRoute(repo, n, opts, { check = false, timeline = 
     if (!comments) return { id, marked: false, why: "the comments could not be read" };
     if (comments.some((c) => isSelf(c) && String(c.body || "").startsWith(mark))) return { id, marked: true, why: null };
   }
-  return prComment(repo, n, `${mark}\nFactory: no Action runs Objectives in this repository, so a local loop took this Objective and labelled it \`${LOCAL_LABEL}\`; it stays that machine's.`, opts).then(
+  return prComment(repo, n, `${mark}\nPendulum: no Action runs Objectives in this repository, so a local loop took this Objective and labelled it \`${LOCAL_LABEL}\`; it stays that machine's.`, opts).then(
     () => ({ id, marked: true, why: null }),
     (e) => ({ id, marked: false, why: `the mark could not be posted (${String(e?.message || e).slice(0, 120)})` }),
   );
 }
 
 /**
- * Labels Objective `n` factory:local for a local loop where no Action runs (#455), then marks that label event as
- * Factory's (markLocalRoute). Throws only when the label write fails; a mark that could not be written is {marked: false,
+ * Labels Objective `n` pendulum:local for a local loop where no Action runs (#455), then marks that label event as
+ * Pendulum's (markLocalRoute). Throws only when the label write fails; a mark that could not be written is {marked: false,
  * why}, for a later tick to write (Local.backfillMark).
  */
 export async function adoptLocal(repo, n, opts, { timeline = issueTimeline } = {}) {
@@ -103,11 +103,11 @@ export async function adoptLocal(repo, n, opts, { timeline = issueTimeline } = {
 
 export const hasLocalLabel = (issue) => (issue?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === LOCAL_LABEL);
 
-/** True when this process is the local backend (factory run / serve set it). */
-export const isLocal = (env = process.env) => env.FACTORY_LOCAL === "1";
+/** True when this process is the local backend (pendulum run / serve set it). */
+export const isLocal = (env = process.env) => env.PENDULUM_LOCAL === "1";
 
 
-/** The claim comment Factory writes, read back by structure: which loop holds it and its last heartbeat. */
+/** The claim comment Pendulum writes, read back by structure: which loop holds it and its last heartbeat. */
 export const claimBody = (holder, at = new Date()) => `Running in local mode (${holder}).\nholder: ${holder}\nheartbeat: ${at.toISOString()}`;
 
 /**
@@ -128,7 +128,7 @@ export function parseClaim(body, now = Date.now(), updatedAt = null) {
 /**
  * A claim that could not be read or verified this time: no answer, never "no claim" (it only delays a Block). `marked`:
  * a marked comment was seen and only its author could not be checked (else the comments read failed). `updatedAt`:
- * GitHub's last update of the newest such comment by Factory's own login or by a person GitHub shows with push access
+ * GitHub's last update of the newest such comment by Pendulum's own login or by a person GitHub shows with push access
  * (an outsider's look-alike never delays a Block), or null.
  */
 export class ClaimUnread extends Error {
@@ -143,9 +143,9 @@ export class ClaimUnread extends Error {
 
 /**
  * The issue's local claim, or null; `fresh` says whether its loop is alive. A local loop writes it as its developer, so
- * only Factory's own login or a person whose push access is known (the writer list, a pinned maintainer) counts, never
+ * only Pendulum's own login or a person whose push access is known (the writer list, a pinned maintainer) counts, never
  * an author association, and only with the marker on the comment's first line. Throws ClaimUnread when the comments
- * cannot be read, or when a marked comment's author cannot be checked because the writer list or Factory's own login
+ * cannot be read, or when a marked comment's author cannot be checked because the writer list or Pendulum's own login
  * is unknown: as the live-job listing (github.mjs activeWorkIssues), no read is ever taken for "none".
  */
 export async function localClaim(repo, issue, opts, now = Date.now()) {
@@ -163,7 +163,7 @@ export async function localClaim(repo, issue, opts, now = Date.now()) {
   if (!c) {
     if (marked.length && (!writersKnown || !selfLogin())) {
       const updatedAt = marked.filter(trustedAuthor).map((x) => x.updated_at).filter((t) => !Number.isNaN(Date.parse(t))).sort().at(-1) ?? null;
-      throw new ClaimUnread(`#${issue}'s claim author could not be checked (the writer list or Factory's own login is unread)`, { marked: true, updatedAt });
+      throw new ClaimUnread(`#${issue}'s claim author could not be checked (the writer list or Pendulum's own login is unread)`, { marked: true, updatedAt });
     }
     return null;
   }
@@ -182,15 +182,15 @@ export async function dropClaim(repo, issue, holder, opts) {
   if (c && c.holder === holder) await rest(`repos/${repo.full}/issues/comments/${c.commentId}`, { ...opts, method: "DELETE" }).catch(() => {});
 }
 
-/** ~/.config/factory: the literal path every sandbox denies, where local mode's key files sit. */
-export const factoryKeyDir = (home = homedir()) => join(home, ".config", "factory");
+/** ~/.config/pendulum: the literal path every sandbox denies, where local mode's key files sit. */
+export const pendulumKeyDir = (home = homedir()) => join(home, ".config", "pendulum");
 
 /** The AI Gateway key's file in local mode (the decision calls, decider.mjs deciderKeyState). */
-export const gatewayKeyFile = (home = homedir()) => join(factoryKeyDir(home), "ai-gateway-key");
+export const gatewayKeyFile = (home = homedir()) => join(pendulumKeyDir(home), "ai-gateway-key");
 
 /**
  * The `harness` home, or any harness login folder on the machine (harnessLogins: a stage may run on any of them), that
- * equals or holds ~/.config/factory, or null. The outer sandbox leaves the harness's own homes readable (#2551), so such
+ * equals or holds ~/.config/pendulum, or null. The outer sandbox leaves the harness's own homes readable (#2551), so such
  * a home would expose every key file there: the App's key (localApp) and the AI Gateway key (decider.mjs
  * deciderKeyState, and serve's start).
  */
@@ -203,13 +203,13 @@ export function keyDirExposedBy(harness, env = process.env, home = homedir()) {
       return p;
     }
   };
-  const literal = factoryKeyDir(home);
+  const literal = pendulumKeyDir(home);
   const holds = (h) => literal === h || literal.startsWith(`${h}/`);
   return [...harnessHomes(harness, env, home), ...harnessLogins(home, env).map((l) => l.dir)].find((h) => holds(h) || holds(real(h))) || null;
 }
 
 /**
- * Why serve cannot start with the AI Gateway key file in place, or null: a `harness` home that holds ~/.config/factory
+ * Why serve cannot start with the AI Gateway key file in place, or null: a `harness` home that holds ~/.config/pendulum
  * would leave the file readable in the outer sandbox, as localApp refuses for the App's key. The file's existence is
  * enough (lstat: a symlink counts); its text is never read here.
  */
@@ -221,23 +221,23 @@ export function gatewayKeyProblem(env = process.env, home = homedir(), harness =
     return null;
   }
   const exposed = keyDirExposedBy(harness, env, home);
-  return exposed ? `${file}: ${factoryKeyDir(home)} is inside the ${harness} harness's home ${exposed}, which its sandbox can read; point that home elsewhere` : null;
+  return exposed ? `${file}: ${pendulumKeyDir(home)} is inside the ${harness} harness's home ${exposed}, which its sandbox can read; point that home elsewhere` : null;
 }
 
 /**
- * The Factory App local notices post with (#2522), from FACTORY_LOCAL_APP_ID and FACTORY_LOCAL_APP_KEY (the path of its
- * private key). The key must sit under ~/.config/factory, which every sandbox denies by that literal path, so no stage
- * can read it: the check is on the key's real path, and ~/.config/factory must be no symlink itself, since a deny list
+ * The Pendulum App local notices post with (#2522), from PENDULUM_LOCAL_APP_ID and PENDULUM_LOCAL_APP_KEY (the path of its
+ * private key). The key must sit under ~/.config/pendulum, which every sandbox denies by that literal path, so no stage
+ * can read it: the check is on the key's real path, and ~/.config/pendulum must be no symlink itself, since a deny list
  * names the literal path. A second hard link would be a path to the key outside it, so one is refused, and so are
  * group or world permission bits, and so is a `harness` home (readable in the outer sandbox) that holds
- * ~/.config/factory. Returns {app: {id, key}}, {app: null} when neither is set, or {problem}. The key's text is never
+ * ~/.config/pendulum. Returns {app: {id, key}}, {app: null} when neither is set, or {problem}. The key's text is never
  * in a message.
  */
 export function localApp(env = process.env, home = homedir(), harness = null) {
-  const id = String(env.FACTORY_LOCAL_APP_ID || "").trim();
-  const path = String(env.FACTORY_LOCAL_APP_KEY || "").trim().replace(/^~(?=\/)/, home);
+  const id = String(env.PENDULUM_LOCAL_APP_ID || "").trim();
+  const path = String(env.PENDULUM_LOCAL_APP_KEY || "").trim().replace(/^~(?=\/)/, home);
   if (!id && !path) return { app: null };
-  if (!/^\d+$/.test(id) || !path) return { problem: "set both FACTORY_LOCAL_APP_ID (the Factory App's numeric id) and FACTORY_LOCAL_APP_KEY (the path of its private key), or neither" };
+  if (!/^\d+$/.test(id) || !path) return { problem: "set both PENDULUM_LOCAL_APP_ID (the Pendulum App's numeric id) and PENDULUM_LOCAL_APP_KEY (the path of its private key), or neither" };
   const real = (p) => {
     try {
       return realpathSync(p);
@@ -246,24 +246,24 @@ export function localApp(env = process.env, home = homedir(), harness = null) {
     }
   };
   const key = real(path);
-  if (!key) return { problem: `FACTORY_LOCAL_APP_KEY: no file at ${path}` };
-  const literal = factoryKeyDir(home);
+  if (!key) return { problem: `PENDULUM_LOCAL_APP_KEY: no file at ${path}` };
+  const literal = pendulumKeyDir(home);
   const root = real(literal);
-  if (root !== literal) return { problem: `FACTORY_LOCAL_APP_KEY: ${literal} must be a real directory, not a symlink (it resolves to ${root || "nothing"}): the sandboxes deny that literal path` };
-  if (!key.startsWith(`${root}/`)) return { problem: `FACTORY_LOCAL_APP_KEY: the App's private key must sit under ${literal}, which no sandbox can read (it is at ${key}); move it there, don't copy it` };
+  if (root !== literal) return { problem: `PENDULUM_LOCAL_APP_KEY: ${literal} must be a real directory, not a symlink (it resolves to ${root || "nothing"}): the sandboxes deny that literal path` };
+  if (!key.startsWith(`${root}/`)) return { problem: `PENDULUM_LOCAL_APP_KEY: the App's private key must sit under ${literal}, which no sandbox can read (it is at ${key}); move it there, don't copy it` };
   const exposed = keyDirExposedBy(harness, env, home);
-  if (exposed) return { problem: `FACTORY_LOCAL_APP_KEY: ${literal} is inside the ${harness} harness's home ${exposed}, which its sandbox can read; point that home elsewhere` };
+  if (exposed) return { problem: `PENDULUM_LOCAL_APP_KEY: ${literal} is inside the ${harness} harness's home ${exposed}, which its sandbox can read; point that home elsewhere` };
   const st = statSync(key);
-  if (!st.isFile()) return { problem: `FACTORY_LOCAL_APP_KEY: ${key} is not a file` };
-  if (st.nlink > 1) return { problem: `FACTORY_LOCAL_APP_KEY: ${key} has ${st.nlink} hard links, so it is reachable outside ${literal}; keep one copy (move it, don't link it)` };
-  if (st.mode & 0o077) return { problem: `FACTORY_LOCAL_APP_KEY: ${key} is readable or writable by others (mode ${(st.mode & 0o777).toString(8)}); chmod 600 ${key}` };
+  if (!st.isFile()) return { problem: `PENDULUM_LOCAL_APP_KEY: ${key} is not a file` };
+  if (st.nlink > 1) return { problem: `PENDULUM_LOCAL_APP_KEY: ${key} has ${st.nlink} hard links, so it is reachable outside ${literal}; keep one copy (move it, don't link it)` };
+  if (st.mode & 0o077) return { problem: `PENDULUM_LOCAL_APP_KEY: ${key} is readable or writable by others (mode ${(st.mode & 0o777).toString(8)}); chmod 600 ${key}` };
   return { app: { id, key: readFileSync(key, "utf8") } };
 }
 
 /**
  * The paths srt write-protects in the working directory on its own (its DANGEROUS_FILES and dangerous directories,
  * sandbox-runtime 0.0.81). Where one is absent, srt mounts /dev/null in its place for the command, which a repository
- * check that walks the tree cannot open (nodev: EACCES) or reads as a file where it expects a directory. Factory
+ * check that walks the tree cannot open (nodev: EACCES) or reads as a file where it expects a directory. Pendulum
  * makes each absent one before any sandbox opens: an empty directory, or an empty file listed in the clone's
  * .git/info/exclude, so srt protects a real, harmless path and git status stays clean.
  */
@@ -275,18 +275,18 @@ export const SRT_PROTECTED = {
 /**
  * The clone's paths a harness reads as its own configuration: Claude Code's `.claude`, Codex's `.codex`, the `.agents`
  * skills, Copilot's hooks, settings, agents and skills under `.github`, and `.mcp.json`. A sandboxed command could plant
- * a hook there that the next harness start runs outside every sandbox, so no sandbox may write them (Factory's own git
- * profile, which writes the plugin's skills and agents, excepted), and Factory makes each absent directory empty first,
+ * a hook there that the next harness start runs outside every sandbox, so no sandbox may write them (Pendulum's own git
+ * profile, which writes the plugin's skills and agents, excepted), and Pendulum makes each absent directory empty first,
  * as with SRT_PROTECTED. A local harness loads none of the executable ones from the clone anyway (harness.mjs).
  */
 export const HARNESS_CONFIG = { dirs: [".claude", ".codex", ".agents", ".github/hooks", ".github/copilot", ".github/agents", ".github/skills"], files: [".mcp.json", ".gitmodules"] };
 export const harnessConfigPaths = (clone) => [...HARNESS_CONFIG.dirs, ...HARNESS_CONFIG.files].map((p) => join(clone, p));
 
 /**
- * The harness configuration that can run code on the host (hooks, settings with helpers, MCP servers) and that Factory
+ * The harness configuration that can run code on the host (hooks, settings with helpers, MCP servers) and that Pendulum
  * never writes: before every local harness start, a tracked one is restored from HEAD and anything else there removed
  * (clearHarnessConfig), so nothing planted earlier survives into the start. `.mcp.json` is not here: srt keeps it
- * unwritable in every profile, Factory's git work included.
+ * unwritable in every profile, Pendulum's git work included.
  */
 export const HARNESS_EXEC_CONFIG = [".claude/settings.json", ".claude/settings.local.json", ".claude/hooks", ".codex/config.toml", ".codex/hooks.json", ".github/hooks", ".github/copilot"];
 
@@ -298,21 +298,21 @@ export const HARNESS_EXEC_CONFIG = [".claude/settings.json", ".claude/settings.l
 export const HARNESS_GIT_ENV = harnessGitEnv();
 
 /**
- * What in a git directory can point git at another one, beside `commondir`, which Factory keeps as `.` (the clone's own
+ * What in a git directory can point git at another one, beside `commondir`, which Pendulum keeps as `.` (the clone's own
  * .git) and read-only in every sandbox (gitGuards), since a harness CLI also runs git on the host between tool calls, whose config (filters, an fsmonitor command) the harness CLI's
  * own `git status` or `git diff` on the host would then run: removed from the clone's .git before every harness start.
  */
 export const GIT_REPOINT = ["gitdir", "config.worktree", "worktrees"];
 
 /**
- * The clone's .git as Factory cloned it: its inode and birth time, kept in the Objective's .sandbox directory (no sandbox
- * reaches it) when Factory makes the clone, and never read again from the clone itself. A command in a sandbox that lets
+ * The clone's .git as Pendulum cloned it: its inode and birth time, kept in the Objective's .sandbox directory (no sandbox
+ * reaches it) when Pendulum makes the clone, and never read again from the clone itself. A command in a sandbox that lets
  * it rename .git (Copilot's did) could otherwise put a .git of its own in place, whose config every later harness
  * start, and its own git on the host, would trust. Each stage and each harness start refuses when .git is not it.
  * The device number is not part of it: it is not stable across a restart (a WSL2 distro's disk is /dev/sd<x> in the
  * order disks attach; tmpfs and 9p mounts get a fresh one per mount). Instead .git must be on the filesystem the pin file
  * is on, which the clone beside it moves with. The birth time (0 where the filesystem keeps none) tells a new directory
- * that got a freed inode back from the one Factory cloned.
+ * that got a freed inode back from the one Pendulum cloned.
  */
 export const gitPinFile = (ws) => join(ws, ".sandbox", "git-id");
 const gitIdOf = (st) => `${st.ino}:${st.birthtimeNs}`;
@@ -330,7 +330,7 @@ export function readGitPin(file) {
     return null;
   }
 }
-/** The inode alone, as Factory's git guard (gitGuardScript) compares it with `ls -di`. */
+/** The inode alone, as Pendulum's git guard (gitGuardScript) compares it with `ls -di`. */
 export const pinnedInode = (id) => String(id || "").split(":")[0] || "unpinned";
 /** Why the clone's .git is not the pinned one ("" when it is). `pinFile`: .git must be on the filesystem it is on. */
 export function gitDirChanged(clone, id, pinFile = null) {
@@ -338,19 +338,19 @@ export function gitDirChanged(clone, id, pinFile = null) {
   const st = lstatSync(join(clone, ".git"), { throwIfNoEntry: false, bigint: true });
   if (!st || !st.isDirectory()) return `${clone}/.git is not a directory any more`;
   const [ino, born] = id.split(":");
-  if (String(st.ino) !== ino || (born !== "0" && String(st.birthtimeNs) !== born)) return `${clone}/.git is not the directory Factory cloned (it was replaced)`;
+  if (String(st.ino) !== ino || (born !== "0" && String(st.birthtimeNs) !== born)) return `${clone}/.git is not the directory Pendulum cloned (it was replaced)`;
   if (pinFile) {
     const p = lstatSync(pinFile, { throwIfNoEntry: false, bigint: true });
     if (!p || p.dev !== st.dev) return `${clone}/.git is not on the filesystem of the Objective's directory`;
   }
   return "";
 }
-/** The Blocked reason a stage posts when the clone's .git is not the one Factory cloned: fixed text, no local path. */
-export const gitIdentityReason = (issue) => `local mode: the clone's .git is not the directory Factory cloned (git-identity); remove .factory/${issue} in the local clone to start the Objective afresh`;
+/** The Blocked reason a stage posts when the clone's .git is not the one Pendulum cloned: fixed text, no local path. */
+export const gitIdentityReason = (issue) => `local mode: the clone's .git is not the directory Pendulum cloned (git-identity); remove .pendulum/${issue} in the local clone to start the Objective afresh`;
 /** The rule Copilot's runner probe names when a command does not find or run the stage's toolchain (copilot-runner.mjs probeDriver). */
 export const TOOLCHAIN_RULE = "the stage's toolchain does not run in a command";
 /**
- * The Blocked reason for a harness start Factory refused (GitRefusal): fixed text per code, no local path and no command
+ * The Blocked reason for a harness start Pendulum refused (GitRefusal): fixed text per code, no local path and no command
  * output (both go to the stage log).
  */
 export const gitRefusalReason = (code, issue, { path = null, rule = null, harness = "codex", local = false } = {}) =>
@@ -359,7 +359,7 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
     : code === "git-state"
       ? "local mode: the clone's .git config, hooks, commondir or info/attributes changed during the stage (git-state); the harness was not started"
       : code === "roots"
-        ? `${path ? `\`${path}\`, a directory the harness's sandbox lets commands write,` : "A directory the harness's sandbox lets commands write"} is a link, or has one on its path, that Factory cannot replace (roots); the harness was not started. Something the repository's setup, install or validation ran made it: stop it making that link, then re-apply \`factory:objective\``
+        ? `${path ? `\`${path}\`, a directory the harness's sandbox lets commands write,` : "A directory the harness's sandbox lets commands write"} is a link, or has one on its path, that Pendulum cannot replace (roots); the harness was not started. Something the repository's setup, install or validation ran made it: stop it making that link, then re-apply \`pendulum:objective\``
       : code === "sandbox"
         ? path
           ? `Codex's sandbox cannot protect the checkout's \`${path}\`, a link to nothing (sandbox); the harness was not started. Remove the link from the branch, or point it at a path that exists`
@@ -374,13 +374,13 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
                 : "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (codex sandbox: bwrap, apparmor, start) name what is missing"
         : code === "relay"
           ? `the gateway relay's forwarder did not come up in ${harness === "copilot" ? "Copilot" : harness === "claude" ? "Claude Code" : "Codex"}'s sandbox (relay); the harness was not started, and the key was never handed over. ${local ? "The stage log on the local machine" : "The work job's log"} has the probe's output`
-          : "Factory's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
+          : "Pendulum's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
 /**
  * The Blocked comment's marker id for a git-identity Block: the same for every repeat on one clone (a stage that keeps
  * finding it updates its comment rather than adding one), a new one for a fresh clone. The pin is hashed: no inode on GitHub.
  */
 export const gitIdentityKey = (stage, id) => `git-identity:${stage}:${createHash("sha256").update(String(id || "none")).digest("hex").slice(0, 12)}`;
-/** A harness start Factory refused (beforeHarness, a runner's pre-start clear, the relay probe): `code` is git-identity, git-state, git-clear, roots, sandbox or relay; the stage Blocks (gitRefusalReason). */
+/** A harness start Pendulum refused (beforeHarness, a runner's pre-start clear, the relay probe): `code` is git-identity, git-state, git-clear, roots, sandbox or relay; the stage Blocks (gitRefusalReason). */
 export class GitRefusal extends Error {
   /** `path` (checkout-relative), `rule` (a fixed confinement rule), `harness` (whose sandbox) and `local` (local mode's probe): named in the Blocked reason (gitRefusalReason). */
   constructor(code, detail, { path = null, rule = null, harness = null, local = false } = {}) {
@@ -394,13 +394,13 @@ export class GitRefusal extends Error {
 }
 /**
  * The Blocked exit a stage applies for a GitRefusal ({reason, key}; key is set for git-identity, whose repeats on one clone
- * share a comment), or null for any other error. `env` is the stage's (its FACTORY_LOCAL_SANDBOX names the pinned .git).
+ * share a comment), or null for any other error. `env` is the stage's (its PENDULUM_LOCAL_SANDBOX names the pinned .git).
  */
 export function refusalExit(e, { stage, issue, env = process.env }) {
   if (!(e instanceof GitRefusal)) return null;
   let id = null;
   try {
-    id = JSON.parse(env.FACTORY_LOCAL_SANDBOX || "{}").gitId || null;
+    id = JSON.parse(env.PENDULUM_LOCAL_SANDBOX || "{}").gitId || null;
   } catch {
     // no pin to name: one key for the stage
   }
@@ -408,7 +408,7 @@ export function refusalExit(e, { stage, issue, env = process.env }) {
 }
 
 /**
- * The git state Factory set up for a stage (after its own git work: identity, credential helpers, Git LFS), hashed:
+ * The git state Pendulum set up for a stage (after its own git work: identity, credential helpers, Git LFS), hashed:
  * .git/config, .git/commondir, .git/info/attributes and every hook. pinGitState records it in this stage's process,
  * checkGitState compares before each harness start. A file is read only when it is a regular file (never a link).
  */
@@ -443,7 +443,7 @@ export const pinGitState = (clone) => GIT_STATE.set(clone, gitStateHash(clone));
 export function checkGitState(clone) {
   const want = GIT_STATE.get(clone);
   if (!want) return "";
-  return gitStateHash(clone) === want ? "" : `${clone}/.git's config, hooks, commondir or info/attributes changed since Factory set them up`;
+  return gitStateHash(clone) === want ? "" : `${clone}/.git's config, hooks, commondir or info/attributes changed since Pendulum set them up`;
 }
 
 /** Make the absent SRT_PROTECTED and HARNESS_CONFIG paths in the clone (host side, before a stage). Never writes through an existing path. */
@@ -481,12 +481,12 @@ export function prepareProtectedPaths(clone) {
     mkdirSync(join(clone, ".git", "info"), { recursive: true });
     const have = existsSync(exclude) ? readFileSync(exclude, "utf8").split("\n") : [];
     const add = made.map((f) => `/${f}`).filter((l) => !have.includes(l));
-    if (add.length) appendFileSync(exclude, `${have.length && have.at(-1) !== "" ? "\n" : ""}# Factory: srt's protected paths, made empty so the sandbox protects a real path\n${add.join("\n")}\n`);
+    if (add.length) appendFileSync(exclude, `${have.length && have.at(-1) !== "" ? "\n" : ""}# Pendulum: srt's protected paths, made empty so the sandbox protects a real path\n${add.join("\n")}\n`);
   }
   return made;
 }
 
-// The same, run inside the clone's own sandbox (backend.mjs sandbox.git), so Factory's process writes nothing in the
+// The same, run inside the clone's own sandbox (backend.mjs sandbox.git), so Pendulum's process writes nothing in the
 // clone between stages, where the agent may have planted a symlink. CommonJS for `node -e`: argv is the clone, "1" to
 // clear first ("fresh" at a stage's start: see below), the stale git locks to remove as JSON (prepareClone), then more
 // directories to make (the package caches that live in the clone). Always: .git/commondir is
@@ -496,7 +496,7 @@ export function prepareProtectedPaths(clone) {
 // directory), HARNESS_EXEC_CONFIG back to HEAD (a tracked file restored, anything else removed, never followed through a
 // symlink), and the submodule names .gitmodules gives printed as JSON for the harness's git env. Fresh, at a stage's
 // start: the untracked files an earlier stage or run left in this reused clone (never pushed) removed, best effort
-// ("fresh-strict", a fresh work stage's: a removal that fails exits 4); ignored ones (dependencies, Factory's plugin) and the paths Factory makes here stay. Its changes to tracked files are
+// ("fresh-strict", a fresh work stage's: a removal that fails exits 4); ignored ones (dependencies, Pendulum's plugin) and the paths Pendulum makes here stay. Its changes to tracked files are
 // the checkout's to discard (outbox.mjs putOn).
 const PREPARE_CLONE = String.raw`
 const fs = require("fs"), path = require("path"), cp = require("child_process");
@@ -530,7 +530,7 @@ if (clear === "1") {
   const keep = new Set(headLinks);
   const stray = links(git("ls-files", "-s", "-z")).filter((p) => !keep.has(p));
   if (stray.length) git("update-index", "--force-remove", "--", ...stray);
-  // No submodule is checked out when a harness starts (Factory never initialises one): a git that entered it would read
+  // No submodule is checked out when a harness starts (Pendulum never initialises one): a git that entered it would read
   // its config, which sandboxed code can write.
   for (const p of [...headLinks, ...stray]) if (realParents(path.join(p, ".git"))) fs.rmSync(path.join(clone, p, ".git"), { recursive: true, force: true });
   fs.rmSync(path.join(dotgit, "modules"), { recursive: true, force: true });
@@ -564,7 +564,7 @@ if (made.length) {
   fs.mkdirSync(path.dirname(ex), { recursive: true });
   const have = fs.existsSync(ex) ? fs.readFileSync(ex, "utf8").split("\n") : [];
   const add = made.map((f) => "/" + f).filter((l) => !have.includes(l));
-  if (add.length) fs.appendFileSync(ex, (have.length && have.at(-1) !== "" ? "\n" : "") + "# Factory: srt's protected paths, made empty so the sandbox protects a real path\n" + add.join("\n") + "\n");
+  if (add.length) fs.appendFileSync(ex, (have.length && have.at(-1) !== "" ? "\n" : "") + "# Pendulum: srt's protected paths, made empty so the sandbox protects a real path\n" + add.join("\n") + "\n");
 }
 process.stdout.write(JSON.stringify({ submodules: names, locks: removed }));
 `;
@@ -635,7 +635,7 @@ export function cloneInUse(clone, proc = "/proc") {
  * The liveness check: a lock older than the box's last boot has no holder (no process survives a restart). A newer one
  * is stale only where /proc shows no process with its working directory or an open file in the clone. Not the lock file
  * alone: git closes a ref lock between writing it and renaming it into place, but stays in the repository (git chdirs
- * into the repository it works on; Factory runs every git with `-C <clone>`). Without /proc (macOS) only the boot rule holds.
+ * into the repository it works on; Pendulum runs every git with `-C <clone>`). Without /proc (macOS) only the boot rule holds.
  */
 export function staleGitLocks(clone, { proc = "/proc", bootMs = Date.now() - uptime() * 1000 } = {}) {
   const found = [];
@@ -680,7 +680,7 @@ export function harnessGitEnv(submodules = []) {
  */
 export const stageTmpBase = (home = homedir(), os = osPlatform()) => {
   if (os !== "darwin") {
-    const dir = join(home, ".cache", "factory", "s");
+    const dir = join(home, ".cache", "pendulum", "s");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
     return dir;
@@ -694,7 +694,7 @@ export const stageTmpBase = (home = homedir(), os = osPlatform()) => {
   return dir;
 };
 
-/** The names Factory makes under stageTmpBase: a stage's temp directory (`<issue>-XXXXXX`), a probe's and a version check's. */
+/** The names Pendulum makes under stageTmpBase: a stage's temp directory (`<issue>-XXXXXX`), a probe's and a version check's. */
 const STAGE_TMP_NAMES = /^(?:\d+|probe|version|decision)-[A-Za-z0-9]{6}$/;
 
 /**
@@ -731,7 +731,7 @@ const readOr = (f) => {
   }
 };
 
-/** srt's and Claude Code's own scratch directory, writable in every one of their sandboxes on the box; Factory points nothing there. */
+/** srt's and Claude Code's own scratch directory, writable in every one of their sandboxes on the box; Pendulum points nothing there. */
 export const SHARED_TMP = ["/tmp/claude", "/private/tmp/claude"];
 
 /**
@@ -749,7 +749,7 @@ export const LOCAL_DOMAINS = ["github.com", "api.github.com", "codeload.github.c
  * Credential stores under the home directory that no sandboxed command and no file tool may read.
  * The harness CLI itself runs outside the sandbox, so its own login keeps working.
  */
-export const CREDENTIAL_PATHS = [".ssh", ".aws", ".azure", ".config/gcloud", ".kube", ".docker", ".gnupg", ".netrc", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".cargo/credentials", ".cargo/credentials.toml", ".git-credentials", ".config/gh", ".config/hub", ".claude/.credentials.json", ".claude.json", ".codex", ".copilot", ".config/github-copilot", ".vercel", ".local/share/com.vercel.cli", ".config/com.vercel.cli", ".config/factory"];
+export const CREDENTIAL_PATHS = [".ssh", ".aws", ".azure", ".config/gcloud", ".kube", ".docker", ".gnupg", ".netrc", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".cargo/credentials", ".cargo/credentials.toml", ".git-credentials", ".config/gh", ".config/hub", ".claude/.credentials.json", ".claude.json", ".codex", ".copilot", ".config/github-copilot", ".vercel", ".local/share/com.vercel.cli", ".config/com.vercel.cli", ".config/pendulum"];
 
 /** Claude Code's `.claude.json`: in CLAUDE_CONFIG_DIR when that is set, else in the home directory. */
 export const claudeJson = (env = {}, home = homedir()) => join(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
@@ -784,7 +784,7 @@ export const realish = (p) => {
  * `~/.config/github-copilot`); every `~/.claude-*`, `~/.codex-*` and `~/.copilot-*` folder (a login made there during a
  * stage is hidden too, since the deny is in place before its file exists); and the folders CLAUDE_CONFIG_DIR, CODEX_HOME and COPILOT_HOME name in `env`.
  * That is enough for every login a stage can run on: a stage runs on the home directory and the CLAUDE_CONFIG_DIR or
- * CODEX_HOME of Factory's own environment (stageLogin), and Copilot's home is Factory's. A login kept elsewhere under
+ * CODEX_HOME of Pendulum's own environment (stageLogin), and Copilot's home is Pendulum's. A login kept elsewhere under
  * another name and named in no variable is out of its reach, and so is one the system keeps outside the disk (Claude
  * Code's on macOS is in the Keychain). The accounts this machine declares (accounts.mjs declaredLogins) are added, and
  * `declared` ([{harness, dir}]) adds more folders.
@@ -834,7 +834,7 @@ export function harnessLogins(home = homedir(), env = process.env, { declared = 
 
 /**
  * The login folder a `harness` stage runs on ({harness, dir}), or null: CLAUDE_CONFIG_DIR, else `~/.claude`; CODEX_HOME,
- * else `~/.codex`; the stage's Copilot home, which Factory makes and which holds no login (its token is in its env).
+ * else `~/.codex`; the stage's Copilot home, which Pendulum makes and which holds no login (its token is in its env).
  */
 export function stageLogin(harness, env = {}, home = homedir()) {
   const dir = harness === "claude" ? env.CLAUDE_CONFIG_DIR || join(home, ".claude") : harness === "codex" ? env.CODEX_HOME || join(home, ".codex") : harness === "copilot" ? env.COPILOT_HOME || null : null;
@@ -866,7 +866,7 @@ const topLinks = (dir) => {
  * settings, skills and projects); then what bears its login is denied. The default Codex and Copilot homes go whole, as
  * they always did. Each path is also denied where it really is, and a link at the top of the stage's own folder (which
  * its outer sandbox reads and writes) that leads to a denied path, or above one, is denied by that name too.
- * Serve makes it once per stage and hands it to the stage (FACTORY_LOCAL_SANDBOX `credentials`) and to the harness's
+ * Serve makes it once per stage and hands it to the stage (PENDULUM_LOCAL_SANDBOX `credentials`) and to the harness's
  * outer sandbox, so each sandbox kind denies the same list.
  */
 export function credentialPaths(home = homedir(), env = process.env, { own = null, declared = [] } = {}) {
@@ -1064,8 +1064,8 @@ export function loginsExposedBy(harness, env = process.env, home = homedir()) {
 }
 
 /**
- * A clone's git internals Factory itself runs or reads (hooks, config, commondir, info/attributes, whose filters run in
- * Factory's own git): no sandboxed command and no edit may change them.
+ * A clone's git internals Pendulum itself runs or reads (hooks, config, commondir, info/attributes, whose filters run in
+ * Pendulum's own git): no sandboxed command and no edit may change them.
  */
 export const gitGuards = (clone) => [join(clone, ".git", "hooks"), join(clone, ".git", "config"), join(clone, ".git", "commondir"), join(clone, ".git", "info", "attributes")];
 
@@ -1076,7 +1076,7 @@ export const gitGuards = (clone) => [join(clone, ".git", "hooks"), join(clone, "
  * config are not bound read-only and a resumed stage can remove and replace the checkout. Those binds guarded nothing:
  * they cover only a repository that exists when a command starts, and only one directly in the working directory, so a
  * command could always make a new one, hooks and all. Nothing outside a sandbox runs git in a nested repository
- * (Factory's git and every harness's run in the clone, with no fsmonitor and no submodule entered: harnessGitEnv), and
+ * (Pendulum's git and every harness's run in the clone, with no fsmonitor and no submodule entered: harnessGitEnv), and
  * the clone's own git internals stay unwritable by gitGuards. Every other name the scan finds stays protected.
  * It fails closed: whenever ripgrep fails or the filter cannot finish (an error, a timeout's TERM), it prints ripgrep's
  * whole list unfiltered and exits non-zero, so the sandbox binds everything listed, nested .git included; a shortened
@@ -1095,7 +1095,7 @@ export function nestedGitLine(line, root) {
   return false;
 }
 export const nestedGitScanScript = (realRg) => `"use strict";
-// Factory: ripgrep for the sandboxes' scan of protected names (lib/local.mjs nestedGitScanScript). Fails closed: on any
+// Pendulum: ripgrep for the sandboxes' scan of protected names (lib/local.mjs nestedGitScanScript). Fails closed: on any
 // failure, ripgrep's whole list unfiltered and a non-zero exit, which the sandbox reads as a failed scan and still binds.
 const { spawn } = require("child_process");
 const { writeSync } = require("fs");
@@ -1150,7 +1150,7 @@ child.on("close", (code) => {
  * it mid-stage), so every name stays protected.
  */
 export const nestedGitScanWrapper = (dir, node, js, realRg) => `#!/bin/sh
-# Factory: the sandboxes' scan (lib/local.mjs nestedGitScanScript), or the real ripgrep unfiltered when node cannot run.
+# Pendulum: the sandboxes' scan (lib/local.mjs nestedGitScanScript), or the real ripgrep unfiltered when node cannot run.
 for t do :; done
 case "$t" in /*) cd ${shq(dir)} 2>/dev/null ;; esac
 [ -x ${shq(node)} ] && [ -r ${shq(js)} ] && exec ${shq(node)} ${shq(js)} "$@"
@@ -1209,7 +1209,7 @@ export function writeNestedGitScan(dir, rg = ripgrepOnPath(), { node = process.e
       mkdirSync(dirname(join(t, f)), { recursive: true });
       writeFileSync(join(t, f), "");
     }
-    writeFileSync(join(t, ".tool-versions"), "ripgrep 0.0.0-factory-absent\n");
+    writeFileSync(join(t, ".tool-versions"), "ripgrep 0.0.0-pendulum-absent\n");
     // As srt starts it: the wrapper itself (/bin/sh runs it, as its first line says), with the scanned directory last.
     const r = spawnSync("/bin/sh", [p, "--files", "--hidden", "--no-ignore", "--no-config", "--max-depth", "4", "--iglob", ".bashrc", "--iglob", "**/.git/hooks/**", "--iglob", "**/.git/HEAD", "--iglob", "**/.git/config", t], { cwd: t, encoding: "utf8", timeout: 30_000 });
     const got = String(r.stdout || "").split("\n").filter(Boolean).sort();
@@ -1234,7 +1234,7 @@ export const CLAUDE_SECRET_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"
  * use it alike (claudeRunnerSettings).
  */
 export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), env = process.env, credentials = null, readOnly = [], writable = [], readable = [], secrets = credentials ?? credentialPaths(home, env, { own: stageLogin("claude", env, home) }), secretEnv = CLAUDE_SECRET_ENV, ripgrep = null } = {}) {
-  // readOnly: Factory's own helpers inside a writable directory (factory-db in the usage dir): no write, no edit.
+  // readOnly: Pendulum's own helpers inside a writable directory (pendulum-db in the usage dir): no write, no edit.
   const guards = [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly];
   return {
     // No hook runs, whatever a skill or agent definition declares: a hook runs outside the sandbox.
@@ -1249,7 +1249,7 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       // writable: the package caches, for shell commands only (no file tool, and no CLAUDE.md read from them).
       // readable: the stage's node, package manager and repository tools, read-only (local.mjs stageEnv, #137, #371): its sandbox shows nothing of
       // the home but these, the working and added directories.
-      filesystem: { denyRead: [...secrets, "/proc"], ...(readable.length ? { allowRead: readable } : {}), ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP, ...factoryCodeDirs(home)] },
+      filesystem: { denyRead: [...secrets, "/proc"], ...(readable.length ? { allowRead: readable } : {}), ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP, ...pendulumCodeDirs(home)] },
       // The model's credential (and any other the harness holds) is not in a command's environment.
       credentials: { envVars: [...new Set(secretEnv)].map((name) => ({ name, mode: "deny" })) },
       // Linux: the scan that leaves a nested checkout's .git writable (nestedGitScanScript).
@@ -1281,7 +1281,7 @@ export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, writable,
 
 /**
  * The hosts a runner's sandboxed commands may reach: LOCAL_DOMAINS plus the `allowed_domains` input (the Actions and
- * cloud sandbox counterpart of FACTORY_LOCAL_DOMAINS), split on commas and white space, plus `hosts`, the stage's
+ * cloud sandbox counterpart of PENDULUM_LOCAL_DOMAINS), split on commas and white space, plus `hosts`, the stage's
  * Objective's own (openedStageHosts). An entry is a host name or `*.` and one; anything else is dropped.
  */
 const DOMAIN_ENTRY = /^(\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
@@ -1385,7 +1385,7 @@ export function runnerDomains(value = "", hosts = []) {
 }
 
 /**
- * The hosts this stage's Objective opens with its `factory:host:` labels (choice.mjs hostsOf), once the stage's choice
+ * The hosts this stage's Objective opens with its `pendulum:host:` labels (choice.mjs hostsOf), once the stage's choice
  * check has passed (worker.mjs, review.mjs: openStageHosts). A runner's sandboxes add them to `allowed_domains`
  * (harness.mjs claudeRunner, codexRunner, copilotRunner); a stage process works one Objective, and nothing else sets
  * them, so no other Objective's sandbox ever gets them. Local mode's loop opens them itself (Local.stageEnv).
@@ -1403,7 +1403,7 @@ export const droppedDomains = (value = "") => domainEntries(value).filter((d) =>
  * Codex's `domains` and Copilot's `allowedHosts` from `domains`: the entries their sandboxes enforce as written (hostEntry,
  * as runnerDomains keeps). Copilot 1.0.109's sandbox drops its proxy, and with it every host rule, for a `host:port`
  * entry (#106); Codex 0.167's proxy ignores the port and admits every port of a loopback name or address (#108). Local
- * mode's FACTORY_LOCAL_DOMAINS can come from the workflow file, so no such entry reaches either; serve logs and doctor
+ * mode's PENDULUM_LOCAL_DOMAINS can come from the workflow file, so no such entry reaches either; serve logs and doctor
  * names each one dropped (sandboxDroppedHosts).
  */
 export const sandboxHosts = (domains = []) => [...new Set(domainEntries(domains.join(" ")).filter(hostEntry))];
@@ -1438,12 +1438,12 @@ export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDir
   // probe checks the read refusal with a decoy before every start (codex-runner.mjs).
   const deny = [...secrets.map((p) => `${tq(p)}="deny"`), ...(denyProc ? [`${tq("/proc")}="deny"`] : [])];
   // The clone's harness configuration by absolute path, where present: a path relative to the workspace roots applies to
-  // every root, and Codex's sandbox fails to start on an absent one (a stage's temp directory has no .github). Factory makes
+  // every root, and Codex's sandbox fails to start on an absent one (a stage's temp directory has no .github). Pendulum makes
   // them all before a harness starts (prepareClone).
   // .git/commondir and .git/info/attributes likewise by absolute path: relative, Codex would make them in every root
   // that has no .git.
   // `exists`: on a runner the checkout is the agent's (700), so what is there is listed as the agent (codex-runner.mjs).
-  const ro = [...(clone ? codexReadOnly(clone).filter(exists) : []), ...readOnly, ...factoryCodeDirs(home)].map((p) => `${tq(p)}="read"`);
+  const ro = [...(clone ? codexReadOnly(clone).filter(exists) : []), ...readOnly, ...pendulumCodeDirs(home)].map((p) => `${tq(p)}="read"`);
   const roots = addDirs.map((d) => `${tq(d)}=true`);
   // Host names only (sandboxHosts): Codex's proxy ignores an entry's port, so `127.0.0.1:N` would admit every port (#108).
   const net = sandboxHosts(domains).map((d) => `${tq(d)}="allow"`);
@@ -1451,8 +1451,8 @@ export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDir
   // allow_local_binding: the repository's own test servers on 127.0.0.1 (a loopback Postgres). Codex's sandbox has its own
   // network namespace, so the host's loopback services stay out of reach (checked: a host server refused).
   return [
-    `default_permissions="factory"`,
-    `permissions.factory=${profile}`,
+    `default_permissions="pendulum"`,
+    `permissions.pendulum=${profile}`,
     // Without the proxy feature the domain list is ignored and the network is open.
     `features.network_proxy=true`,
     `approval_policy="never"`,
@@ -1478,7 +1478,7 @@ export const codexReadOnly = (clone) => [...harnessConfigPaths(clone), join(clon
 export const codexShellExclude = (names) => `shell_environment_policy.exclude=[${names.map(tq).join(",")}]`;
 
 /**
- * The settings.json for the COPILOT_HOME Factory gives a local Copilot run (`copilot --sandbox`): commands in
+ * The settings.json for the COPILOT_HOME Pendulum gives a local Copilot run (`copilot --sandbox`): commands in
  * Copilot's sandbox with no bypass, writes in the working directory and `addDirs` only, the clone's hooks and
  * config and `readOnly` unwritable, credential stores denied, no gh or git login handed in, and the network
  * limited to `domains`. Copilot reads this policy only from its home directory, so the developer's own
@@ -1506,7 +1506,7 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
         // `readable`: paths outside these that a runner's commands read (copilot-runner.mjs: the agent's read-only GitHub
         // login); `denied`: a runner's own list (none there: that login is for its commands); `alsoDenied`: more paths beside
         // the credential stores (local mode on Linux: Copilot's own TMPDIR, copilotPrivateTmp).
-        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable, ...factoryCodeDirs(home)])], deniedPaths: [...(denied ?? (platform === "linux" ? credentialPaths(home, env).filter(isDir) : credentialPaths(home, env))), ...alsoDenied] },
+        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable, ...pendulumCodeDirs(home)])], deniedPaths: [...(denied ?? (platform === "linux" ? credentialPaths(home, env).filter(isDir) : credentialPaths(home, env))), ...alsoDenied] },
         network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: sandboxHosts(domains) },
       },
     },
@@ -1519,7 +1519,7 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
  * command could rewrite the next command's rules and reach past Copilot's proxy (#99's review; reproduced inside srt:
  * srt's own proxy, whose list adds Copilot's API hosts). This directory is in the usage directory's `harness` folder,
  * which only the harness process may write, is made afresh before every start (harness.mjs) and is denied to commands
- * (copilotLocalSettings `alsoDenied`); Factory's bwrap gives each command the stage's temp directory as its TMPDIR.
+ * (copilotLocalSettings `alsoDenied`); Pendulum's bwrap gives each command the stage's temp directory as its TMPDIR.
  */
 export const copilotPrivateTmp = (usageDir) => join(usageDir, "harness", "copilot-tmp");
 
@@ -1527,7 +1527,7 @@ export const copilotPrivateTmp = (usageDir) => join(usageDir, "harness", "copilo
  * The temp directory a local Copilot run's commands must be given. Copilot's sandbox opens the temp directory it is
  * started with (`TMPDIR`, else the host's /tmp) read-write to every command, and gives each command a fresh, empty /tmp
  * otherwise. Only the stage's own temp directory (one of the sandbox's added directories) keeps the host's shared /tmp
- * out of reach. On Linux Copilot itself starts with copilotPrivateTmp instead, and Factory's bwrap hands its commands
+ * out of reach. On Linux Copilot itself starts with copilotPrivateTmp instead, and Pendulum's bwrap hands its commands
  * this one.
  */
 export function copilotTmpdir(local, env = {}) {
@@ -1536,11 +1536,11 @@ export function copilotTmpdir(local, env = {}) {
   return t;
 }
 
-/** Settings for `srt`, which runs Factory's own shell commands (setup, install, validation) on a model-edited tree. */
+/** Settings for `srt`, which runs Pendulum's own shell commands (setup, install, validation) on a model-edited tree. */
 export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = process.env, credentials = credentialPaths(home, env), readOnly = [], ripgrep = null } = {}) {
   return {
     network: { allowedDomains: [...new Set(domains)], deniedDomains: [] },
-    filesystem: { denyRead: [...credentials, "/proc"], allowWrite: writable, denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...factoryCodeDirs(home)] },
+    filesystem: { denyRead: [...credentials, "/proc"], allowWrite: writable, denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...pendulumCodeDirs(home)] },
     // Linux: the scan that leaves a nested checkout's .git writable (nestedGitScanScript).
     ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}),
   };
@@ -1548,15 +1548,15 @@ export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = nu
 
 /**
  * The `git` a local harness finds first on its PATH (lib/harness.mjs), on the host and in its sandbox: the real one,
- * refused once the clone's .git is not the directory Factory checked before the harness started (FACTORY_GIT_DIR,
- * FACTORY_GIT_ID: its inode). A sandbox that lets a command rename .git (Copilot's) would otherwise let it put a .git
+ * refused once the clone's .git is not the directory Pendulum checked before the harness started (PENDULUM_GIT_DIR,
+ * PENDULUM_GIT_ID: its inode). A sandbox that lets a command rename .git (Copilot's) would otherwise let it put a .git
  * of its own in place, whose config the harness's own git on the host then reads between tool calls.
  */
 export const gitGuardScript = (realGit) => `#!/bin/sh
-if [ -n "$FACTORY_GIT_DIR" ]; then
-  id=$(ls -di "$FACTORY_GIT_DIR" 2>/dev/null | awk '{print $1}')
-  if [ -L "$FACTORY_GIT_DIR" ] || [ "$id" != "$FACTORY_GIT_ID" ]; then
-    echo "factory: $FACTORY_GIT_DIR is not the git directory Factory checked; git refused" >&2
+if [ -n "$PENDULUM_GIT_DIR" ]; then
+  id=$(ls -di "$PENDULUM_GIT_DIR" 2>/dev/null | awk '{print $1}')
+  if [ -L "$PENDULUM_GIT_DIR" ] || [ "$id" != "$PENDULUM_GIT_ID" ]; then
+    echo "pendulum: $PENDULUM_GIT_DIR is not the git directory Pendulum checked; git refused" >&2
     exit 128
   fi
 fi
@@ -1570,7 +1570,7 @@ export const HARNESS_API_DOMAINS = {
   copilot: ["api.githubcopilot.com", "api.individual.githubcopilot.com", "api.business.githubcopilot.com", "api.enterprise.githubcopilot.com", "copilot-proxy.githubusercontent.com", "telemetry.individual.githubcopilot.com"],
 };
 
-/** A harness CLI's own state (its login, settings, sessions), which it reads and writes; Copilot's home is Factory's. */
+/** A harness CLI's own state (its login, settings, sessions), which it reads and writes; Copilot's home is Pendulum's. */
 export function harnessHomes(harness, env = {}, home = homedir()) {
   if (harness === "claude") return [env.CLAUDE_CONFIG_DIR || join(home, ".claude"), claudeJson(env, home)];
   if (harness === "codex") return [env.CODEX_HOME || join(home, ".codex")];
@@ -1610,7 +1610,7 @@ export const OUTER_PROBED = ["codex", "copilot"];
  * srt runs the wrapper on the host, so it lives where no sandbox can write (the stage's usage directory).
  */
 export const bwrapTunScript = (realBwrap, tun = "/dev/net/tun") => `#!/bin/sh
-# Factory: bubblewrap for Copilot's outer sandbox, with the host's /dev/net/tun after srt's fresh /dev (local.mjs).
+# Pendulum: bubblewrap for Copilot's outer sandbox, with the host's /dev/net/tun after srt's fresh /dev (local.mjs).
 # Only among bubblewrap's own options (before the first --), only once, and only where the host has the device: without
 # it bubblewrap would refuse to start, and outerProbe says "no /dev/net/tun" instead.
 first=1; prev=""; added=""; [ -c ${JSON.stringify(tun)} ] || added=1
@@ -1665,16 +1665,16 @@ const versionOf = (cmd) => {
 /**
  * Where Copilot's own binary unpacks the release it carries (`pkg/`) and keeps its caches: read-only in its outer
  * sandbox, so the harness cannot change code it runs at its next start. sandboxedVersion unpacks it, the one place
- * Factory lets Copilot write there.
+ * Pendulum lets Copilot write there.
  */
 export const copilotCacheHome = (env = {}, home = homedir(), platform = osPlatform()) => env.COPILOT_CACHE_HOME || (platform === "darwin" ? join(home, "Library", "Caches", "copilot") : join(env.XDG_CACHE_HOME || join(home, ".cache"), "copilot"));
 /**
  * sandboxedVersion's srt settings: no network, no writes but Copilot's unpacking, credential stores unreadable. Copilot's
- * home (COPILOT_HOME) is the stage's, which Factory makes and which holds no login (its token is in its environment).
+ * home (COPILOT_HOME) is the stage's, which Pendulum makes and which holds no login (its token is in its environment).
  */
 export const versionSettings = (harness, env = {}, home = homedir()) => ({
   network: { allowedDomains: [], deniedDomains: [] },
-  filesystem: { denyRead: [...credentialPaths(home, harness === "copilot" ? { ...env, COPILOT_HOME: "" } : env), "/proc"], allowRead: harnessInstall(whichPath(harness, env) || harness, home), allowWrite: harness === "copilot" ? [copilotCacheHome(env, home)] : [], denyWrite: factoryCodeDirs(home) },
+  filesystem: { denyRead: [...credentialPaths(home, harness === "copilot" ? { ...env, COPILOT_HOME: "" } : env), "/proc"], allowRead: harnessInstall(whichPath(harness, env) || harness, home), allowWrite: harness === "copilot" ? [copilotCacheHome(env, home)] : [], denyWrite: pendulumCodeDirs(home) },
 });
 
 /**
@@ -1693,12 +1693,12 @@ export function sandboxedVersion(harness, settingsDir, { env = process.env, home
 /**
  * Linux: whether `harness` runs in the outer sandbox on this host ({on, why, cached, cacheFile}). Claude Code: yes. A
  * probed harness (Codex, Copilot): its own sandbox, or what it needs, is started once inside the outer sandbox's profile
- * on a throwaway directory. Only a yes is kept, in ~/.cache/factory/outer-probe.json by harness, bubblewrap and srt
+ * on a throwaway directory. Only a yes is kept, in ~/.cache/pendulum/outer-probe.json by harness, bubblewrap and srt
  * version and by the account it was made on (`account`, lib/accounts.mjs: its name and its login folder or token file;
  * none, the implicit one), so the next stage on that account reads it; a no (which a loaded box or a missing tool
  * installed since can cause) is probed again by the next serve start and the next stage.
  */
-export function outerProbe(harness, { domains = LOCAL_DOMAINS, env = process.env, home = homedir(), account = null, cacheFile = join(home, ".cache", "factory", "outer-probe.json"), keyOf = outerProbeKey, probe = runOuterProbe } = {}) {
+export function outerProbe(harness, { domains = LOCAL_DOMAINS, env = process.env, home = homedir(), account = null, cacheFile = join(home, ".cache", "pendulum", "outer-probe.json"), keyOf = outerProbeKey, probe = runOuterProbe } = {}) {
   if (osPlatform() !== "linux") return { on: false, why: "not Linux (Seatbelt cannot start inside another sandbox)" };
   if (!OUTER_HARNESSES.includes(harness)) return { on: false, why: "not supported" };
   if (!OUTER_PROBED.includes(harness)) return { on: true, why: "" };
@@ -1711,7 +1711,7 @@ export function outerProbe(harness, { domains = LOCAL_DOMAINS, env = process.env
   }
   if (cache[key]?.on === true) return { ...cache[key], cached: true, cacheFile };
   const result = probe(harness, { domains, env, home });
-  // A no from an older Factory is dropped with the rewrite.
+  // A no from an older Pendulum is dropped with the rewrite.
   const kept = Object.fromEntries(Object.entries(cache).filter(([, v]) => v?.on === true));
   if (result.on || Object.keys(kept).length !== Object.keys(cache).length) {
     try {
@@ -1852,14 +1852,14 @@ export function homePlaces(harness, env = {}, home = homedir()) {
   const denied = [...new Set([...credentialPaths(home, env, { own }).map(realPlace).filter((c) => !ownEntries.has(c)), ...others.map(realPlace), ...ownFiles.map(realPlace)])];
   const where = (real) => (denied.some((c) => within(real, c)) ? "in a credential store or another harness login" : roots.some((r) => within(real, r) || r.startsWith(`${real}/`)) ? null : "outside the harness homes this stage may write");
   return {
-    // Refused unless `p` really lies where Factory may make it (an ancestor of a home not made yet included). `link`: the
+    // Refused unless `p` really lies where Pendulum may make it (an ancestor of a home not made yet included). `link`: the
     // link to nothing whose target `p` is.
     check(p, link = null) {
       const real = realPlace(p);
       const bad = where(real);
       if (!bad) return;
       const what = link ? `${link} is a link to ${p}, which does not exist and` : `${p}${real !== resolve(p) ? ` (really ${real})` : ""}`;
-      throw homeLinkError(link || p, link ? p : real, `${what} lies ${bad}; Factory makes nothing there: create it yourself or remove the link`);
+      throw homeLinkError(link || p, link ? p : real, `${what} lies ${bad}; Pendulum makes nothing there: create it yourself or remove the link`);
     },
   };
 }
@@ -1984,7 +1984,7 @@ const claudeProjectPath = (clone, env, home) => join(harnessStateDir("claude", e
 
 /**
  * In the outer sandbox Claude Code's `projects` is read-only, so a run can make no other project (whose memory a later
- * session of the developer's in that directory would read). The clone's own project is a link Factory makes there to
+ * session of the developer's in that directory would read). The clone's own project is a link Pendulum makes there to
  * `dir`, a directory of the Objective's own that the outer sandbox may write (harnessOuterSettings `projectDir`). A
  * project directory an earlier stage left there moves to `dir` with its sessions (else it goes: each stage's session is
  * also saved in its usage directory). Returns `dir`, or null for a clone whose project name Claude Code shortens.
@@ -2134,7 +2134,7 @@ export function hostSockets(env = {}, uid = process.getuid?.() ?? 0, { roots = S
  * without it, made here from `env`.
  * `relaySocketDir`: the directory of the stage's gateway relay socket, as serve made it (worker-relay.mjs handSocketDir;
  * null for a stage that relays nothing, which then reaches no socket directory at all): the one socket directory that
- * stays reachable inside, for the forwarder Factory's bwrap shim starts in each command's sandbox
+ * stays reachable inside, for the forwarder Pendulum's bwrap shim starts in each command's sandbox
  * (relay-shim.mjs); never writable.
  */
 export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, credentials = null, readOnly = [], install = [], projectDir = null, bwrapPath = null, relaySocketDir = null, ripgrep = null } = {}) {
@@ -2153,7 +2153,7 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
       ...(install.length ? { allowRead: install } : {}),
       allowWrite: [...writable, ...writableOwn, ...(harness === "claude" && projectDir ? [projectDir] : [])],
       // This machine's usage-limit holds (holds.mjs): never in a writable path, and read-only even under a harness home around them.
-      denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install, ...factoryCodeDirs(home), holdsDir(home)],
+      denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install, ...pendulumCodeDirs(home), holdsDir(home)],
     },
     allowNestedUserNamespaces: true,
     // Copilot: bubblewrap with /dev/net/tun for its sandbox's network (bwrapTunScript); srt runs it on the host.
@@ -2164,17 +2164,17 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
 }
 
 /**
- * The local harness flags, from FACTORY_LOCAL_SANDBOX ({addDirs, domains, clone}) in the child env; null on
+ * The local harness flags, from PENDULUM_LOCAL_SANDBOX ({addDirs, domains, clone}) in the child env; null on
  * Actions. A local child without them refuses: it must never fall back to a runner's skipped permissions.
  */
 export function localSandbox(env = {}) {
-  if (!env.FACTORY_LOCAL_SANDBOX) {
-    if (env.FACTORY_LOCAL === "1") throw new Error("local mode without its sandbox settings (FACTORY_LOCAL_SANDBOX); refusing to run the harness unsandboxed");
+  if (!env.PENDULUM_LOCAL_SANDBOX) {
+    if (env.PENDULUM_LOCAL === "1") throw new Error("local mode without its sandbox settings (PENDULUM_LOCAL_SANDBOX); refusing to run the harness unsandboxed");
     return null;
   }
-  const s = JSON.parse(env.FACTORY_LOCAL_SANDBOX);
+  const s = JSON.parse(env.PENDULUM_LOCAL_SANDBOX);
   // Sandboxed code can rename or replace a directory it may write the parent of; a writable path that now resolves
-  // elsewhere (a symlink to the home directory) would open that place to the next sandbox. Factory made each one real.
+  // elsewhere (a symlink to the home directory) would open that place to the next sandbox. Pendulum made each one real.
   for (const d of [s.clone, ...(s.addDirs || []), ...(s.readDirs || [])].filter(Boolean)) {
     let real = null;
     try {
@@ -2190,39 +2190,39 @@ export function localSandbox(env = {}) {
 /**
  * The env a local child starts from: an allow-list, not the developer's whole shell, so AWS_*, NPM_TOKEN
  * and the like never reach the harness. `extra` names more variables the adopter's commands need
- * (FACTORY_LOCAL_ENV, such as DATABASE_URL); Factory's own service keys (inputs.mjs FACTORY_SECRET_KEYS) are never
+ * (PENDULUM_LOCAL_ENV, such as DATABASE_URL); Pendulum's own service keys (inputs.mjs PENDULUM_SECRET_KEYS) are never
  * among them, since the workflow file that can name them is repository content, nor any of its control variables
- * (inputs.mjs FACTORY_CONTROL_KEYS: a stage's own, which serve alone sets). Nor is a worker secret's NAME or SOURCE
+ * (inputs.mjs PENDULUM_CONTROL_KEYS: a stage's own, which serve alone sets). Nor is a worker secret's NAME or SOURCE
  * (`workerSecrets`, the worker_secrets setting): that reaches the work lineage's harness alone (lib/worker-secrets.mjs),
- * never every stage's every command; doctor warns when FACTORY_LOCAL_ENV names one.
+ * never every stage's every command; doctor warns when PENDULUM_LOCAL_ENV names one.
  */
 export function localBaseEnv(env = process.env, extra = [], { workerSecrets = "" } = {}) {
   const keep = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z]+|TERM|COLORTERM|TMPDIR|TZ|XDG_[A-Z_]+|HTTPS?_PROXY|NO_PROXY|https?_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|MISE_[A-Z_]+|NVM_DIR|VOLTA_HOME|PNPM_HOME|COREPACK_HOME|BUN_INSTALL|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|JAVA_HOME|CLAUDE_CONFIG_DIR|CODEX_HOME)$/;
   const worker = new Set(parseWorkerSecrets(workerSecrets).entries.flatMap((e) => [e.name, e.source]));
-  const wanted = new Set(extra.filter((k) => !isFactorySecret(k) && !FACTORY_CONTROL_KEYS.includes(k) && !worker.has(k)));
+  const wanted = new Set(extra.filter((k) => !isPendulumSecret(k) && !PENDULUM_CONTROL_KEYS.includes(k) && !worker.has(k)));
   const out = {};
   for (const [k, v] of Object.entries(env)) if (keep.test(k) || wanted.has(k)) out[k] = v;
   // Tool telemetry would only hit the sandbox's network allow-list (a Codex sandbox reports each refusal as an error).
   return { TURBO_TELEMETRY_DISABLED: "1", NEXT_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1", ...out };
 }
 
-/** Where local mode's token for a repository lives: ~/.config/factory/tokens/<owner>/<name> (the sandboxes hide ~/.config/factory). */
+/** Where local mode's token for a repository lives: ~/.config/pendulum/tokens/<owner>/<name> (the sandboxes hide ~/.config/pendulum). */
 export function tokenFile(repoFull, home = homedir()) {
   const [owner, name] = repoFull.split("/");
-  return join(home, ".config", "factory", "tokens", owner, name);
+  return join(home, ".config", "pendulum", "tokens", owner, name);
 }
 /** The fix for a token reached through a symbolic link (tokenPlaceProblem), as every message and doctor's row name it. */
-export const TOKEN_LINK_FIX = "replace the link with a real folder (or file) of your own, then save the token with `factory token set`";
+export const TOKEN_LINK_FIX = "replace the link with a real folder (or file) of your own, then save the token with `pendulum token set`";
 /** What is wrong with a token place reached through the symbolic link at `at`, without the fix. */
-export const tokenLinkDetail = (at) => `${at} is a symbolic link; local mode keeps its token only under a real ~/.config/factory, which every sandbox hides by that path`;
+export const tokenLinkDetail = (at) => `${at} is a symbolic link; local mode keeps its token only under a real ~/.config/pendulum, which every sandbox hides by that path`;
 /**
  * Why local mode's token file for a repository may not be read or written, else null: a symbolic link at
- * ~/.config/factory, its `tokens` folder, the owner's folder or the file itself. The sandboxes hide ~/.config/factory by
+ * ~/.config/pendulum, its `tokens` folder, the owner's folder or the file itself. The sandboxes hide ~/.config/pendulum by
  * that path alone, so a token behind a link could sit where a stage reads it. `{at, line}`: the link, and the line to say.
  */
 export function tokenPlaceProblem(repoFull, home = homedir()) {
   const file = tokenFile(repoFull, home);
-  const base = join(home, ".config", "factory");
+  const base = join(home, ".config", "pendulum");
   for (const at of [base, join(base, "tokens"), dirname(file), file]) {
     let st;
     try {
@@ -2235,12 +2235,12 @@ export function tokenPlaceProblem(repoFull, home = homedir()) {
   return null;
 }
 /**
- * Local mode's token for a repository: FACTORY_LOCAL_TOKEN, else its tokenFile; "" when neither is set, or when no
- * token file is there to read (a linked ~/.config/factory with no token behind it leaves the callers' own fallbacks).
+ * Local mode's token for a repository: PENDULUM_LOCAL_TOKEN, else its tokenFile; "" when neither is set, or when no
+ * token file is there to read (a linked ~/.config/pendulum with no token behind it leaves the callers' own fallbacks).
  * Throws tokenPlaceProblem's line, with `link` set to the link's path, when a token file is reached through a link.
  */
 export function localToken(repoFull, env = process.env) {
-  if (env.FACTORY_LOCAL_TOKEN) return env.FACTORY_LOCAL_TOKEN.trim();
+  if (env.PENDULUM_LOCAL_TOKEN) return env.PENDULUM_LOCAL_TOKEN.trim();
   const f = tokenFile(repoFull);
   if (!existsSync(f)) return "";
   const problem = tokenPlaceProblem(repoFull);
@@ -2290,7 +2290,7 @@ export function saveLocalToken(repoFull, token, home = homedir()) {
   return file;
 }
 /** The line that says local mode has no token for a repository, and the fix. */
-export const noTokenLine = (repoFull) => `no token for ${repoFull}: create a fine-grained token for this one repository (${LOCAL_TOKEN_PERMISSIONS}) and save it with \`factory token set\` in the clone (it asks for the token and writes ${tokenFile(repoFull)}), or export FACTORY_LOCAL_TOKEN`;
+export const noTokenLine = (repoFull) => `no token for ${repoFull}: create a fine-grained token for this one repository (${LOCAL_TOKEN_PERMISSIONS}) and save it with \`pendulum token set\` in the clone (it asks for the token and writes ${tokenFile(repoFull)}), or export PENDULUM_LOCAL_TOKEN`;
 
 const gitTry = (args) => spawnSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
 /** Throws the plain line for git missing from PATH (spawn's ENOENT) or a git that did not start; else returns its result. */
@@ -2340,12 +2340,12 @@ export const LOCAL_TOKEN_PERMISSIONS = "Contents, Issues and Pull requests read 
  * What local mode says when its token cannot list the repository's variables (HTTP `status`, 403 or 404): the variable
  * layer of its settings (inputs.mjs settingLayers) is off on this machine and the workflow's values stand.
  */
-export const variablesRefusedLine = (status) => `the local token cannot read this repository's variables (HTTP ${status}), so its FACTORY_* repository variables do not apply on this machine and the workflow's values stand; give the token Variables: read (docs/LOCAL.md, Set it up)`;
+export const variablesRefusedLine = (status) => `the local token cannot read this repository's variables (HTTP ${status}), so its PENDULUM_* repository variables do not apply on this machine and the workflow's values stand; give the token Variables: read (docs/LOCAL.md, Set it up)`;
 
 const workflowWarned = new Set();
 /**
  * The adopter workflow's top-level `env:` block, so a local run uses the repository's own configuration, read from the
- * parsed file (yaml.mjs parseYaml): each FACTORY_* key whose value is text. An empty value reads as "", as Actions sets
+ * parsed file (yaml.mjs parseYaml): each PENDULUM_* key whose value is text. An empty value reads as "", as Actions sets
  * it; a plain number or boolean reads as written in the file (`25`, `true`), where Actions may write a number its own
  * way (`1.0` as `1`), so quote one to be sure. A value that is an Actions expression (`${{ ... }}`) has no meaning off a
  * runner and is left out, and so is a mapping or a list. A file that does not parse throws (code `WORKFLOW_PARSE`);
@@ -2356,15 +2356,15 @@ export function workflowEnv(text, { warn = (line) => workflowWarned.has(line) ||
   try {
     doc = parseYaml(text);
   } catch (e) {
-    throw Object.assign(new Error(`.github/workflows/factory.yml does not parse (${e.message})`), { code: "WORKFLOW_PARSE" });
+    throw Object.assign(new Error(`.github/workflows/pendulum.yml does not parse (${e.message})`), { code: "WORKFLOW_PARSE" });
   }
   const mapping = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
   // An empty file, a scalar, or an `env:` that is no mapping holds no settings: said, never read silently as none.
-  if (!mapping(doc) || !mapping(doc.env)) warn(`.github/workflows/factory.yml ${!mapping(doc) ? "is no mapping" : doc.env === undefined ? "has no top-level env block" : "has an env: that is no mapping"}: no settings read from it`);
+  if (!mapping(doc) || !mapping(doc.env)) warn(`.github/workflows/pendulum.yml ${!mapping(doc) ? "is no mapping" : doc.env === undefined ? "has no top-level env block" : "has an env: that is no mapping"}: no settings read from it`);
   const env = mapping(doc) && mapping(doc.env) ? doc.env : {};
   const out = {};
   for (const [k, v] of Object.entries(env)) {
-    if (!/^FACTORY_[A-Z0-9_]+$/.test(k)) continue;
+    if (!/^PENDULUM_[A-Z0-9_]+$/.test(k)) continue;
     const value = v === null ? "" : v;
     if (typeof value === "string" && !value.includes("${{")) out[k] = value;
   }
@@ -2373,7 +2373,7 @@ export function workflowEnv(text, { warn = (line) => workflowWarned.has(line) ||
 
 /** The working tree's workflow env block (workflowEnv); none when the file is absent, or does not parse (said once per process, on stderr). */
 export function readWorkflowEnv(dir, { warn = (line) => workflowWarned.has(line) || (workflowWarned.add(line), process.stderr.write(`${line}\n`)) } = {}) {
-  const file = join(dir, ".github", "workflows", "factory.yml");
+  const file = join(dir, ".github", "workflows", "pendulum.yml");
   if (!existsSync(file)) return {};
   try {
     return workflowEnv(readFileSync(file, "utf8"));
@@ -2396,7 +2396,7 @@ export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-
   const branch = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(ok(git(["ls-remote", "--symref", "origin", "HEAD"])) || "")?.[1] || (ok(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])) || "").trim().replace(/^origin\//, "") || null;
   if (!branch) return { wf: {}, pins: [], branch: null, error: "origin's default branch could not be read" };
   git(["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-  return committedWorkflow(ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/factory.yml`])), branch);
+  return committedWorkflow(ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/pendulum.yml`])), branch);
 }
 
 /**
@@ -2404,7 +2404,7 @@ export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-
  * parse is the `error`, with `parseError`, and no settings: `serve`, `run` and `review` do not start on it).
  */
 function committedWorkflow(text, branch) {
-  if (text === null) return { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml` };
+  if (text === null) return { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/pendulum.yml` };
   try {
     return { wf: workflowEnv(text), pins: workflowPins(text), branch, error: null, text };
   } catch (e) {
@@ -2416,24 +2416,24 @@ function committedWorkflow(text, branch) {
  * The same read for a running `serve`, every few minutes (#276): the default branch serve found at its start, fetched now,
  * without blocking the loop's event loop while git talks to GitHub. A fetch that fails (offline) reads nothing:
  * `unfetched`, and serve keeps the settings it has, never an older commit's. The developer works in this clone
- * meanwhile, so the fetch writes only a ref of serve's own (refs/factory/serve/<branch>; --refmap= keeps git from
+ * meanwhile, so the fetch writes only a ref of serve's own (refs/pendulum/serve/<branch>; --refmap= keeps git from
  * moving origin's ref with it) and no FETCH_HEAD: their own fetch never meets serve's lock on origin's ref, and their
  * `git pull` never merges what serve fetched. `git(args)` resolves to {code, stdout}.
  */
-export async function committedWorkflowNow(dir, branch, { token = "", timeoutMs = 60_000, git = (args) => exec("git", ["-C", dir, ...args], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: token, GIT_TERMINAL_PROMPT: "0" }, timeoutMs, group: true }) } = {}) {
-  const own = `refs/factory/serve/${branch}`;
+export async function committedWorkflowNow(dir, branch, { token = "", timeoutMs = 60_000, git = (args) => exec("git", ["-C", dir, ...args], { env: { ...localBaseEnv(process.env), PENDULUM_LOCAL_TOKEN: token, GIT_TERMINAL_PROMPT: "0" }, timeoutMs, group: true }) } = {}) {
+  const own = `refs/pendulum/serve/${branch}`;
   // serve's own token for GitHub, never the developer's credential helper; no maintenance run in their clone; a stalled
   // transfer ends (http.lowSpeed*), and at the timeout the whole command does, every process it started included.
-  const helper = '!f() { echo username=x-access-token; echo "password=$FACTORY_LOCAL_TOKEN"; }; f';
+  const helper = '!f() { echo username=x-access-token; echo "password=$PENDULUM_LOCAL_TOKEN"; }; f';
   const safe = ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=60"];
   const fetched = await git([...safe, "fetch", "-q", "--no-tags", "--no-auto-maintenance", "--no-write-fetch-head", "--refmap=", "origin", `+refs/heads/${branch}:${own}`]).catch(() => null);
   if (fetched?.code !== 0) return { wf: {}, pins: [], branch, error: `origin/${branch} could not be fetched`, unfetched: true };
-  const r = await git(["-c", "core.fsmonitor=", "show", `${own}:.github/workflows/factory.yml`]).catch(() => null);
+  const r = await git(["-c", "core.fsmonitor=", "show", `${own}:.github/workflows/pendulum.yml`]).catch(() => null);
   return committedWorkflow(r?.code === 0 ? String(r.stdout) : null, branch);
 }
 
 /**
- * The Factory refs a workflow's steps call (`uses: clockgrove/factory@<ref>` in jobs.<job>.steps), each once, in order of
+ * The Pendulum refs a workflow's steps call (`uses: clockgrove/pendulum@<ref>` in jobs.<job>.steps), each once, in order of
  * first use: the release a repository pins. A workflow that does not parse pins nothing serve can follow.
  */
 export function workflowPins(text) {
@@ -2446,7 +2446,7 @@ export function workflowPins(text) {
   const refs = [];
   for (const job of Object.values(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {})) {
     for (const step of Array.isArray(job?.steps) ? job.steps : []) {
-      const ref = typeof step?.uses === "string" ? /^clockgrove\/factory@(\S+)$/.exec(step.uses.trim())?.[1] : null;
+      const ref = typeof step?.uses === "string" ? /^clockgrove\/pendulum@(\S+)$/.exec(step.uses.trim())?.[1] : null;
       if (ref && !refs.includes(ref)) refs.push(ref);
     }
   }

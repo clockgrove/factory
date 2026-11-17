@@ -1,5 +1,5 @@
 // Workflow files, pnpm-workspace.yaml and agent frontmatter, read with the `yaml` library (vendored: plugin/vendor/yaml,
-// pinned in tools/deps). The library parses; turning the tree into values is Factory's own, so each refusal sits in one
+// pinned in tools/deps). The library parses; turning the tree into values is Pendulum's own, so each refusal sits in one
 // place. Plain scalars come back as their source text (`true`, `1.0` and `on` stay strings), null for an empty value,
 // `~` or `null`. Anchors and aliases are read as GitHub Actions reads them, unless the caller turns them off; an alias
 // copies its anchor's value, against an expansion budget, and an anchor name may be used once. What GitHub does not take, or a reader could not be sure of,

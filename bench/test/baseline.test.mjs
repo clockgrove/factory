@@ -22,10 +22,10 @@ test("baselineOf: medians, spread and walk-away over the picked rows; the line f
   assert.equal(line.measures.usd.median, 4);
   assert.equal(line.measures.sessions.median, 1);
   const text = formatBaseline(line);
-  assert.match(text, /^baseline w0 o\/r: 4 merged Objective\(s\) 2026-11-01\.\.2026-11-04, walk-away 75% \(\?% counting only input Factory asked for\)\n/, "rows scored before the split say so");
+  assert.match(text, /^baseline w0 o\/r: 4 merged Objective\(s\) 2026-11-01\.\.2026-11-04, walk-away 75% \(\?% counting only input Pendulum asked for\)\n/, "rows scored before the split say so");
   const split = rows.map((r) => (r.walkAway ? { ...r, walkAway: { ...r.walkAway, askedOnly: { value: r.walkAway.value || r.issue === 2 } } } : r));
   assert.equal(baselineOf(split, { repo: "o/r" }).walkAwayAskedOnly, 100);
-  assert.match(formatBaseline(baselineOf(split, { repo: "o/r", label: "w1" })), /walk-away 75% \(100% counting only input Factory asked for\)/);
+  assert.match(formatBaseline(baselineOf(split, { repo: "o/r", label: "w1" })), /walk-away 75% \(100% counting only input Pendulum asked for\)/);
   assert.match(text, /model min {4}40 \(25\.\.55, n=4\)/);
   assert.equal(baselineOf([], { label: "empty" }).rows, 0);
   assert.equal(baselineOf([{ issue: 9, exit: "merged", mergedAt: "2026-11-05T00:00:00Z" }], { label: "bare" }).measures.modelMinutes.median, null);

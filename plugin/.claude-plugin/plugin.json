@@ -1,13 +1,13 @@
 {
-  "name": "factory",
+  "name": "pendulum",
   "version": "0.9.37",
-  "description": "File a GitHub Objective, walk away, come back to merged work: the Factory worker, reviewer and scorecard as skills.",
+  "description": "File a GitHub Objective, walk away, come back to merged work: the Pendulum worker, reviewer and scorecard as skills.",
   "author": {
     "name": "Clockgrove",
     "url": "https://github.com/clockgrove"
   },
-  "homepage": "https://github.com/clockgrove/factory#readme",
-  "repository": "https://github.com/clockgrove/factory",
+  "homepage": "https://github.com/clockgrove/pendulum#readme",
+  "repository": "https://github.com/clockgrove/pendulum",
   "license": "MIT",
   "keywords": [
     "development",

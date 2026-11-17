@@ -1,17 +1,17 @@
-// GitHub's status adapter (docs/ADAPTERS.md): whether GitHub reports an incident on the parts of it Factory's requests
+// GitHub's status adapter (docs/ADAPTERS.md): whether GitHub reports an incident on the parts of it Pendulum's requests
 // use, from its public status page (githubstatus.com, an Atlassian Statuspage: its v2 JSON API, no key, no SDK). Asked
-// by `factory serve` for an Objective paused on GitHub answering 5xx past the client's retries (local.mjs resume).
+// by `pendulum serve` for an Objective paused on GitHub answering 5xx past the client's retries (local.mjs resume).
 // `GITHUB_STATUS_URL` sets the page's base URL, as `GITHUB_API_URL` does GitHub's API, so a test points it at a fake.
 import { causeCode, githubOrigin } from "../network.mjs";
 
-/** The status page's components Factory's requests go through: its REST and GraphQL calls on issues and pull requests. */
+/** The status page's components Pendulum's requests go through: its REST and GraphQL calls on issues and pull requests. */
 export const GITHUB_COMPONENTS = Object.freeze(["API Requests", "Issues", "Pull Requests"]);
 
 /** GitHub.com's API origin: the one host githubstatus.com speaks for. */
 const GITHUB_COM_API = "https://api.github.com";
 
 /**
- * The status page's base URL: `GITHUB_STATUS_URL`, else githubstatus.com when Factory talks to GitHub.com; else null
+ * The status page's base URL: `GITHUB_STATUS_URL`, else githubstatus.com when Pendulum talks to GitHub.com; else null
  * (GitHub Enterprise Server or GHE.com, whose status githubstatus.com does not report).
  */
 export const statusBase = (env = process.env) => {
@@ -28,7 +28,7 @@ export const statusBase = (env = process.env) => {
  * `in_progress`; `operational` when none of that holds; null when the page cannot say. `incidents` and `maintenances`
  * are the names of those counted (for the log). With `state` null, `error` is the reason as a code: `no page` (no status
  * page speaks for this GitHub host), `HTTP 503`, a connect-level code, `no answer`, `invalid` (no JSON, or no
- * components list), or `missing <name>` (a component of GITHUB_COMPONENTS the page no longer lists: Factory's contract
+ * components list), or `missing <name>` (a component of GITHUB_COMPONENTS the page no longer lists: Pendulum's contract
  * with the page broke). Never throws.
  */
 export async function githubStatus({ env = process.env, timeoutMs = 10_000 } = {}) {

@@ -1,4 +1,4 @@
-// The decision-model adapter contract (docs/ADAPTERS.md). Every vendor that answers Factory's typed questions sits behind
+// The decision-model adapter contract (docs/ADAPTERS.md). Every vendor that answers Pendulum's typed questions sits behind
 // this one shape, so a second vendor is one module beside decider-ai-gateway.mjs and decider-harness.mjs, not a
 // refactor. No vendor-side state: each question is one stateless call. Callers open a decider through lib/decider.mjs,
 // which picks the vendor.

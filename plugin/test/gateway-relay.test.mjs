@@ -171,7 +171,7 @@ test("relay: the key in the token's place, allowlisted headers both ways; refuse
     assert.equal((await call(relay.socketPath, { token: `${relay.token}x` })).status, 401);
     assert.equal((await call(relay.socketPath, { token: relay.token })).status, 403, "outside a pass");
     assert.equal((await call(relay.socketPath, { token: relay.token, method: "GET", path: "/v1/models" })).status, 403, "the model list too, outside a pass");
-    assert.equal((await call(relay.socketPath, { method: "GET", path: RELAY_PING })).text.trim(), `factory-relay ${relay.probeId}`);
+    assert.equal((await call(relay.socketPath, { method: "GET", path: RELAY_PING })).text.trim(), `pendulum-relay ${relay.probeId}`);
     relay.beginPass(1);
     for (const [method, path, headers] of [["GET", "/v1/credits"], ["GET", "/v1/generation?id=gen_x"], ["POST", "/v4/ai/echo-key"], ["TRACE", "/v1/models"], ["GET", "/v1/models", { "x-http-method-override": "POST" }]]) assert.equal((await call(relay.socketPath, { token: relay.token, method, path, headers })).status, 403, `${method} ${path}`);
     assert.equal(gw.seen.length, 0, "nothing reached the gateway");
@@ -337,7 +337,7 @@ test("a pass's key spend joins its record: usd, max_usd and daily_usd count it; 
     rmSync(dir, { recursive: true, force: true });
   }
   // The scorecard: Codex's repriced dollars keep the key's spend, and the row names it.
-  const row = benchCostOf([{ harness: "codex", model: "gpt-5", tokens: { input: 1_000_000, output: 0, cached: 0 }, workerKeyUsd: 0.5, artifact: "factory-usage-1" }], CODEX_PRICES);
+  const row = benchCostOf([{ harness: "codex", model: "gpt-5", tokens: { input: 1_000_000, output: 0, cached: 0 }, workerKeyUsd: 0.5, artifact: "pendulum-usage-1" }], CODEX_PRICES);
   assert.equal(row.usd, Math.round((CODEX_PRICES.perMillion["gpt-5"].input + 0.5) * 1e4) / 1e4);
   assert.equal(row.workerKeyUsd, 0.5);
 });
@@ -368,7 +368,7 @@ test("the shim wraps only a command sandbox: --unshare-net before the separator,
     assert.ok(!wrapped.join("\n").includes("PLANTED"), "BASH_ENV was not read");
     execFileSync("bash", ["-n", join(shimDir, "bwrap")]);
     assert.throws(() => relayShimScript({ bwrap: "bwrap", socat: "/usr/bin/socat", socket: "/s", port: 41234 }), /absolute/);
-    assert.match(relayProbeCommand(41234, "abc"), /factory-relay abc/);
+    assert.match(relayProbeCommand(41234, "abc"), /pendulum-relay abc/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -390,7 +390,7 @@ test("worker relay: a machine without socat Blocks with the key out of the shell
   const shell = { [RELAYED_NAME]: KEY, FAL_KEY: "fal-0123456789" };
   const none = await openWorkerRelay({ inputs: { harness: "claude", maxUsd: 5 }, shell: { FAL_KEY: "f" }, usageDir: "/nope" });
   assert.deepEqual([none.relay, none.blocked, none.shell], [null, null, { FAL_KEY: "f" }]);
-  const noSocat = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: "/nope", env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => (n === "bwrap" ? "/usr/bin/bwrap" : null) });
+  const noSocat = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: "/nope", env: { PENDULUM_LOCAL: "1", PATH: "/nope" }, which: (n) => (n === "bwrap" ? "/usr/bin/bwrap" : null) });
   assert.match(noSocat.blocked, /needs socat/);
   assert.ok(!(RELAYED_NAME in noSocat.shell));
   assert.deepEqual(noSocat.masked, [KEY], "the key stays in the stage's mask list");
@@ -418,10 +418,10 @@ test("local mode: the outer sandbox keeps the relay socket's directory reachable
 });
 
 test("the relay's socket goes in a short directory of the stage's own: made 700 in a 700 parent of this user's, a link, a file or a directory open to others refused; a path over the limit Blocks with that reason (#182)", async () => {
-  // Its place: /tmp/factory-relay-<uid>/<12 hex of the usage directory>, the same however long the usage directory is.
+  // Its place: /tmp/pendulum-relay-<uid>/<12 hex of the usage directory>, the same however long the usage directory is.
   const uid = process.getuid();
-  const long = join("/home/someone/projects/an-adopter-with-a-long-checkout-path", ".factory", "81", "usage-review-2026-11-13T05-00-00-000Z");
-  assert.match(relaySocketDir(long), new RegExp(`^${realpathSync(RELAY_SOCKET_ROOT)}/factory-relay-${uid}/[0-9a-f]{12}$`));
+  const long = join("/home/someone/projects/an-adopter-with-a-long-checkout-path", ".pendulum", "81", "usage-review-2026-11-13T05-00-00-000Z");
+  assert.match(relaySocketDir(long), new RegExp(`^${realpathSync(RELAY_SOCKET_ROOT)}/pendulum-relay-${uid}/[0-9a-f]{12}$`));
   assert.equal(relaySocketDir(long), relaySocketDir(`${long}/`), "one directory per usage directory");
   assert.notEqual(relaySocketDir(long), relaySocketDir(`${long}x`));
   assert.ok(Buffer.byteLength(join(relaySocketDir(long), "relay-0123456789ab.sock")) <= UNIX_SOCKET_PATH_MAX);
@@ -435,7 +435,7 @@ test("the relay's socket goes in a short directory of the stage's own: made 700 
     assert.equal(makeSocketDir(dir), dir, "this user's own, made before: used");
     // The parent open to others, a link, a file: refused, never used.
     chmodSync(dirname(dir), 0o755);
-    assert.throws(() => makeSocketDir(dir), /factory-relay-\d+ is open to other users \(mode 755\)/);
+    assert.throws(() => makeSocketDir(dir), /pendulum-relay-\d+ is open to other users \(mode 755\)/);
     rmSync(dirname(dir), { recursive: true, force: true });
     mkdirSync(join(root, "elsewhere"), { mode: 0o700 });
     symlinkSync(join(root, "elsewhere"), dirname(dir));
@@ -451,7 +451,7 @@ test("the relay's socket goes in a short directory of the stage's own: made 700 
     mkdirSync(deep, { mode: 0o1700 });
     chmodSync(deep, 0o1700);
     const shell = { [RELAYED_NAME]: KEY };
-    const r = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u"), env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => `/usr/bin/${n}`, socketRoot: deep, socketRootUid: uid });
+    const r = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u"), env: { PENDULUM_LOCAL: "1", PATH: "/nope" }, which: (n) => `/usr/bin/${n}`, socketRoot: deep, socketRootUid: uid });
     assert.equal(r.relay, null);
     assert.match(r.blocked, new RegExp(`^the gateway relay for ${RELAYED_NAME} could not start: its socket's path would be \\d+ bytes, over this system's limit of ${UNIX_SOCKET_PATH_MAX} for a Unix socket`));
     assert.ok(!(RELAYED_NAME in r.shell), "the key is out of the shell");
@@ -462,7 +462,7 @@ test("the relay's socket goes in a short directory of the stage's own: made 700 
   }
 });
 
-test("a long checkout path: the relay starts, a call through Factory's forwarder in a command's sandbox is relayed, and the socket's directory goes with the stage (#182)", { skip: (!existsSync("/usr/bin/socat") && "needs socat") || (process.platform === "win32" && "unix") }, async () => {
+test("a long checkout path: the relay starts, a call through Pendulum's forwarder in a command's sandbox is relayed, and the socket's directory goes with the stage (#182)", { skip: (!existsSync("/usr/bin/socat") && "needs socat") || (process.platform === "win32" && "unix") }, async () => {
   const gw = await fakeGateway({ [IMAGE]: priced(0.04), "/v1/generation": { body: { data: { total_cost: 0.04 } } } });
   const root = mkdtempSync(join(realpathSync("/tmp"), "fxr-"));
   const dir = mkdtempSync(join(tmpdir(), "relay-long-"));
@@ -470,7 +470,7 @@ test("a long checkout path: the relay starts, a call through Factory's forwarder
   const fake = join(dir, "fake-bwrap");
   writeFileSync(fake, '#!/bin/bash\nwhile [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n', { mode: 0o755 });
   // The checkout an adopter's run had, and longer: the old socket's path would have been over the limit.
-  const usageDir = join(dir, "an-adopter-whose-checkout-path-is-long", ".factory", "81", "usage-review-2026-11-13T05-00-00-000Z");
+  const usageDir = join(dir, "an-adopter-whose-checkout-path-is-long", ".pendulum", "81", "usage-review-2026-11-13T05-00-00-000Z");
   assert.ok(Buffer.byteLength(join(localRelayDir(usageDir), "relay-0123456789ab.sock")) > UNIX_SOCKET_PATH_MAX);
   const shell = { [RELAYED_NAME]: KEY };
   // The stand-in shares this machine's network, where the relay's pick for a namespace of the command's own could be a
@@ -481,7 +481,7 @@ test("a long checkout path: the relay starts, a call through Factory's forwarder
   let opened = null;
   try {
     chmodSync(root, 0o1700);
-    opened = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => (n === "bwrap" ? fake : "/usr/bin/socat"), open, socketRoot: root, socketRootUid: process.getuid() });
+    opened = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { PENDULUM_LOCAL: "1", PATH: "/nope" }, which: (n) => (n === "bwrap" ? fake : "/usr/bin/socat"), open, socketRoot: root, socketRootUid: process.getuid() });
     assert.equal(opened.blocked, null, opened.blocked);
     const relay = opened.relay;
     assert.equal(dirname(relay.socketPath), relaySocketDir(usageDir, { root }));
@@ -489,11 +489,11 @@ test("a long checkout path: the relay starts, a call through Factory's forwarder
     assert.equal(statSync(relay.socketPath).mode & 0o777, 0o600);
     assert.equal(relay.dir, localRelayDir(usageDir), "the shims stay in the usage directory");
     relay.beginPass(5);
-    // A command in a sandbox with its own network: Factory's shim starts the forwarder before it, and its call to the
+    // A command in a sandbox with its own network: Pendulum's shim starts the forwarder before it, and its call to the
     // relay's address carries the run's token, never the key.
-    const script = `fetch(process.env.FACTORY_GATEWAY_URL + "${IMAGE}", { method: "POST", headers: { authorization: "Bearer " + process.env.AI_GATEWAY_API_KEY, "content-type": "application/json", "ai-model-id": "recraft/recraft-v4.1-flash" }, body: "{}" }).then(async (r) => { console.log(r.status); process.exit(0); }, (e) => { console.log("failed " + e.message); process.exit(1); })`;
+    const script = `fetch(process.env.PENDULUM_GATEWAY_URL + "${IMAGE}", { method: "POST", headers: { authorization: "Bearer " + process.env.AI_GATEWAY_API_KEY, "content-type": "application/json", "ai-model-id": "recraft/recraft-v4.1-flash" }, body: "{}" }).then(async (r) => { console.log(r.status); process.exit(0); }, (e) => { console.log("failed " + e.message); process.exit(1); })`;
     // In a process group of its own: the forwarder's socat goes with it afterwards, as it goes with a sandbox's namespace.
-    const child = spawn(join(relay.shimDir, "bwrap"), ["--unshare-net", "--", process.execPath, "-e", script], { env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin", FACTORY_GATEWAY_URL: relay.url, AI_GATEWAY_API_KEY: opened.shell[RELAYED_NAME] }, detached: true, stdio: ["ignore", "pipe", "inherit"] });
+    const child = spawn(join(relay.shimDir, "bwrap"), ["--unshare-net", "--", process.execPath, "-e", script], { env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin", PENDULUM_GATEWAY_URL: relay.url, AI_GATEWAY_API_KEY: opened.shell[RELAYED_NAME] }, detached: true, stdio: ["ignore", "pipe", "inherit"] });
     let out = "";
     child.stdout.on("data", (c) => (out += c));
     const code = await new Promise((r) => child.on("exit", r));
@@ -714,9 +714,9 @@ test("the re-review's minors: unbilled only for known refusals, a stream's cost 
   // H: --level-prefix takes no value, so the separator after it is found.
   const shim = relayShimScript({ bwrap: "/usr/bin/bwrap", socat: "/usr/bin/socat", socket: "/s/r.sock", port: 41234 });
   assert.match(shim, /--assert-userns-disabled\|--level-prefix\) n=0/);
-  // The relay's address and the state directory from anywhere but Factory never reach a child.
+  // The relay's address and the state directory from anywhere but Pendulum never reach a child.
   const { scrubbedEnv } = await import("../scripts/lib/harness.mjs");
-  const scrubbed = scrubbedEnv({ FACTORY_GATEWAY_URL: "http://evil", FACTORY_STATE_DIR: "/evil", PATH: "/bin" });
+  const scrubbed = scrubbedEnv({ PENDULUM_GATEWAY_URL: "http://evil", PENDULUM_STATE_DIR: "/evil", PATH: "/bin" });
   assert.deepEqual(scrubbed, { PATH: "/bin" });
 });
 
@@ -763,7 +763,7 @@ test("Copilot: its own shim hands each call to the relay's, which adds the socke
   try {
     const fake = join(dir, "real-bwrap");
     writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
-    const relayShim = join(writeRelayShim(join(dir, "relay", "bin"), { bwrap: fake, socat: "/usr/bin/socat", socket: "/var/lib/factory-relay/s/relay.sock", port: 41234, extra: copilotRelayExtra("/var/lib/factory-relay/s") }), "bwrap");
+    const relayShim = join(writeRelayShim(join(dir, "relay", "bin"), { bwrap: fake, socat: "/usr/bin/socat", socket: "/var/lib/pendulum-relay/s/relay.sock", port: 41234, extra: copilotRelayExtra("/var/lib/pendulum-relay/s") }), "bwrap");
     // Copilot's own shim, with the relay's shim path baked in (never read from the environment).
     const shim = join(dir, "bwrap");
     writeFileSync(shim, bwrapShim(fake, null, "/agent/tmp", null, relayShim), { mode: 0o755 });
@@ -775,17 +775,17 @@ test("Copilot: its own shim hands each call to the relay's, which adds the socke
     assert.deepEqual(plain, ["--unshare-net", "--setenv", "TMPDIR", "/agent/tmp", "--seccomp", "60", "--", "sh", "-c", "curl x"], "no relay shim at the baked path: as before");
     const relayed = run(cmd);
     const sep = relayed.indexOf("--", 6);
-    assert.deepEqual(relayed.slice(0, sep), ["--unshare-net", "--setenv", "TMPDIR", "/agent/tmp", "--seccomp", "60", "--ro-bind", "/var/lib/factory-relay/s", "/var/lib/factory-relay/s", "--setenv", "NO_PROXY", "127.0.0.1", "--setenv", "no_proxy", "127.0.0.1"], "Copilot's own rewrite, then the relay's options");
+    assert.deepEqual(relayed.slice(0, sep), ["--unshare-net", "--setenv", "TMPDIR", "/agent/tmp", "--seccomp", "60", "--ro-bind", "/var/lib/pendulum-relay/s", "/var/lib/pendulum-relay/s", "--setenv", "NO_PROXY", "127.0.0.1", "--setenv", "no_proxy", "127.0.0.1"], "Copilot's own rewrite, then the relay's options");
     assert.deepEqual(relayed.slice(sep + 1, sep + 4), ["/bin/bash", "-p", "-c"]);
-    assert.deepEqual(relayed.slice(-8), ["bash", "/var/lib/factory-relay/s/relay.sock", "41234", "/usr/bin/socat", "", "sh", "-c", "curl x"]);
+    assert.deepEqual(relayed.slice(-8), ["bash", "/var/lib/pendulum-relay/s/relay.sock", "41234", "/usr/bin/socat", "", "sh", "-c", "curl x"]);
     assert.deepEqual(run(["--version"]), ["--version"], "no network namespace: as given");
     // Repository content can reach Copilot's environment in local mode: a variable naming another bubblewrap is ignored.
-    assert.deepEqual(run(cmd, { FACTORY_RELAY_BWRAP: fake }, absent), plain, "the environment never picks the bubblewrap");
+    assert.deepEqual(run(cmd, { PENDULUM_RELAY_BWRAP: fake }, absent), plain, "the environment never picks the bubblewrap");
     assert.ok(!bwrapShim(fake, "/h", "/t", "/n").includes("${"), "nothing systemd-run would expand");
     // The probe's rule: this relay's ping through the forwarder.
     const driver = probeDriver({ gitConfig: "/c/.git/config", host: "example.com", marker: "m", relay: { port: 41234, probeId: "abc123" } });
-    assert.match(driver, /http:\/\/127\.0\.0\.1:41234\/\.factory-relay\/ping/);
-    assert.match(driver, /factory-relay abc123/);
+    assert.match(driver, /http:\/\/127\.0\.0\.1:41234\/\.pendulum-relay\/ping/);
+    assert.match(driver, /pendulum-relay abc123/);
     assert.ok(driver.includes("the gateway relay is out of the commands") && RELAY_RULE.startsWith("the gateway relay is out of the commands"));
     assert.ok(!driver.includes("${"));
     assert.ok(!probeDriver({ gitConfig: "/c/.git/config", host: "example.com", marker: "m" }).includes("gateway relay"), "no relay, no rule");
@@ -804,7 +804,7 @@ test("Copilot on a runner: each stage's relay shim is its own, in its relay dire
     writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
     // Two stages: each relay directory holds its own shim, and each stage's Copilot shim names its own.
     const stage = (name) => {
-      const relayDir = join(dir, "factory-relay", `stage-${name}`);
+      const relayDir = join(dir, "pendulum-relay", `stage-${name}`);
       const at = copilotRelayShimIn(relayDir);
       writeRelayShim(join(relayDir, "copilot"), { bwrap: fake, socat: "/usr/bin/socat", socket: join(relayDir, `${name}.sock`), port: 41234, extra: copilotRelayExtra(relayDir) });
       const layout = { bin: join(dir, `copilot-home-${name}`, "bin"), agentHome: "/home/agent", agentTmp: "/home/agent/tmp" };
@@ -821,11 +821,11 @@ test("Copilot on a runner: each stage's relay shim is its own, in its relay dire
     rmSync(a.relayDir, { recursive: true, force: true });
     assert.ok(run(b.shim).includes(join(b.relayDir, "b.sock")));
     assert.deepEqual(run(a.shim), ["--unshare-net", "--", "sh", "-c", "x"], "nothing left to hand to: the real bubblewrap, as given");
-    // A shared shim from an older Factory: removed when a Copilot stage starts.
-    const shared = join(dir, "factory-relay", "copilot");
+    // A shared shim from an older Pendulum: removed when a Copilot stage starts.
+    const shared = join(dir, "pendulum-relay", "copilot");
     mkdirSync(shared, { recursive: true });
     writeFileSync(join(shared, "bwrap"), "#!/bin/sh\n", { mode: 0o755 });
-    dropSharedCopilotRelay(join(dir, "factory-relay"));
+    dropSharedCopilotRelay(join(dir, "pendulum-relay"));
     assert.equal(existsSync(shared), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -964,7 +964,7 @@ test("image edits (#129): 128 MB at most (a real 38.5 MiB turnaround passes), re
   }
 });
 
-test("the AI Gateway's own budget refusal (402 quota_for_entity_exceeded) costs $0, is named, and refuses later calls apart from Factory's own cap 402 (#134)", async () => {
+test("the AI Gateway's own budget refusal (402 quota_for_entity_exceeded) costs $0, is named, and refuses later calls apart from Pendulum's own cap 402 (#134)", async () => {
   // The body the gateway answered an adopter's run with (v0.9.16), its key in the message to show it is cut.
   const MESSAGE = `Team budget exceeded. Current spend: $50.06, limit: $50.00. Team owners can edit this budget in AI Gateway Budgets & Spend (https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fbudgets&title=AI+Gateway+Budgets+%26+Spend).`;
   const real = { type: "quota_for_entity_exceeded", message: MESSAGE };
@@ -995,14 +995,14 @@ test("the AI Gateway's own budget refusal (402 quota_for_entity_exceeded) costs 
     assert.equal(first.status, 402);
     assert.equal(JSON.parse(first.text).type, "quota_for_entity_exceeded");
     assert.ok(first.text.includes("Team budget exceeded") && !first.text.includes(KEY), "the gateway's own answer, the key cut");
-    // Every later billable call: the gateway's refusal at once, never sent, and told apart from Factory's cap.
+    // Every later billable call: the gateway's refusal at once, never sent, and told apart from Pendulum's cap.
     const sent = modelCalls();
     const later = await call(relay.socketPath, { token: relay.token, path: "/v4/ai/embedding-model" });
     assert.equal(later.status, 402);
     const e = JSON.parse(later.text).error;
     assert.deepEqual([e.type, e.source], ["quota_for_entity_exceeded", "ai-gateway"]);
     assert.match(e.message, /^AI Gateway refused: quota_for_entity_exceeded \(Team budget exceeded\. Current spend: \$50\.06/);
-    assert.match(e.message, /not Factory's max_usd/);
+    assert.match(e.message, /not Pendulum's max_usd/);
     assert.equal(modelCalls(), sent, "not sent");
     assert.equal((await call(relay.socketPath, { token: relay.token, method: "GET", path: "/v1/models" })).status, 200, "the model list costs nothing and still passes");
     const pass = await relay.endPass();
@@ -1020,7 +1020,7 @@ test("the AI Gateway's own budget refusal (402 quota_for_entity_exceeded) costs 
     assert.match(withGatewayRefusal("the lookdev call failed", totals.gatewayRefused), /^AI Gateway refused: quota_for_entity_exceeded \(Team budget exceeded\. Current spend: \$50\.06, limit: \$50\.00\..*\); the lookdev call failed$/);
     assert.equal(withGatewayRefusal("time cap reached", null), "time cap reached");
 
-    // Factory's own cap: a 402 of its own type, saying it is Factory's cap.
+    // Pendulum's own cap: a 402 of its own type, saying it is Pendulum's cap.
     const capped = await open({ key: KEY, dir: join(dir, "b"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1] });
     quota = false;
     capped.beginPass(0.05);
@@ -1028,8 +1028,8 @@ test("the AI Gateway's own budget refusal (402 quota_for_entity_exceeded) costs 
     const own = await call(capped.socketPath, { token: capped.token });
     assert.equal(own.status, 402);
     const oe = JSON.parse(own.text).error;
-    assert.equal(oe.type, "factory_max_usd");
-    assert.match(oe.message, /^Factory's gateway relay: Factory's dollar cap is reached/);
+    assert.equal(oe.type, "pendulum_max_usd");
+    assert.match(oe.message, /^Pendulum's gateway relay: Pendulum's dollar cap is reached/);
     assert.equal(oe.source, undefined);
     assert.equal((await capped.endPass()).gatewayRefused, null);
 
@@ -1115,7 +1115,7 @@ test("a failed call is priced where it can be; a cost still unknown is booked at
     await relay.endPass();
     const totals = relay.totals();
     assert.deepEqual([totals.estimated, totals.estimatedUsd, totals.failClosed, totals.callLog?.file], [11, 4.4, true, CALL_LOG], "the two looked-up failures are no estimates any more");
-    // The call log: one line per call, the model from its header, no key and no body; only Factory's user reads it.
+    // The call log: one line per call, the model from its header, no key and no body; only Pendulum's user reads it.
     const log = readFileSync(join(usage, CALL_LOG), "utf8");
     assert.ok(!log.includes(KEY) && !log.includes("boom") && !log.includes('"mode"') && !log.includes("aG"), "no key, no body, no gateway message");
     assert.equal(statSync(join(usage, CALL_LOG)).mode & 0o777, 0o600);
@@ -1159,7 +1159,7 @@ test("a failed call is priced where it can be; a cost still unknown is booked at
     await call(near.socketPath, { token: near.token, body: '{"mode":"drop"}' }).catch(() => null);
     const capped = await call(near.socketPath, { token: near.token, body: '{"mode":"ok"}' });
     assert.equal(capped.status, 402);
-    assert.equal(JSON.parse(capped.text).error.type, "factory_max_usd");
+    assert.equal(JSON.parse(capped.text).error.type, "pendulum_max_usd");
     const np = await near.endPass();
     assert.deepEqual([np.usd, np.estimated, np.capped], [IMAGE_UNKNOWN_FLOOR_USD, 1, true]);
   } finally {
@@ -1176,7 +1176,7 @@ test("a failed call is priced where it can be; a cost still unknown is booked at
 
 test("a stage the relay shut Blocks naming the shutdown; only an actual max_usd overrun reads \"dollar cap reached\" (#142)", () => {
   const shut = { calls: 2, why: "the call failed after it was sent: ECONNRESET; no generation id" };
-  assert.equal(withRelayShut("dollar cap reached", shut, false), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); Factory's max_usd was not reached");
+  assert.equal(withRelayShut("dollar cap reached", shut, false), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); Pendulum's max_usd was not reached");
   assert.equal(withRelayShut("dollar cap reached", shut, true), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); dollar cap reached");
   assert.equal(withRelayShut("the look-dev stalled", shut), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); the look-dev stalled");
   assert.equal(withRelayShut("dollar cap reached", null), "dollar cap reached", "no shutdown: the reason stands");
@@ -1220,7 +1220,7 @@ test("#142 review: no caller-shaped answer gets the estimate; the call log keeps
     const pa = await a.endPass();
     assert.deepEqual([pa.usd, pa.estimated, pa.unpriced, pa.shut?.complete], [0.26, 1, 1, true]);
     const ta = a.totals();
-    assert.equal(stageBlockReason("dollar cap reached", ta, maxUsdReached(10, [addKeySpend({ usd: 1 }, pa)], ta)), "gateway relay shut: a complete answer could not be priced (the answer named no cost and no generation); Factory's max_usd was not reached");
+    assert.equal(stageBlockReason("dollar cap reached", ta, maxUsdReached(10, [addKeySpend({ usd: 1 }, pa)], ta)), "gateway relay shut: a complete answer could not be priced (the answer named no cost and no generation); Pendulum's max_usd was not reached");
 
     // Minor 3: a pre-model type at the top level of a 4xx body says nothing: an unknown cost, the estimate (an image call
     // with none priced on its route: $1.00).
@@ -2010,7 +2010,7 @@ test("a pass's end waits for the lookups a bounded time: an estimate still stand
 });
 
 test("#423: the repository's relay_unknown_shut and floors reach the stage's relay: two failures that may have been billed shut it, booked at the repository's floors", async () => {
-  const inputs = { ...resolveInputs({ env: { FACTORY_RELAY_UNKNOWN_SHUT: "2", FACTORY_RELAY_UNKNOWN_FLOOR_USD: "0.1", FACTORY_RELAY_SLOW_FLOOR_USD: "0.5" } }), harness: "claude", maxUsd: 100 };
+  const inputs = { ...resolveInputs({ env: { PENDULUM_RELAY_UNKNOWN_SHUT: "2", PENDULUM_RELAY_UNKNOWN_FLOOR_USD: "0.1", PENDULUM_RELAY_SLOW_FLOOR_USD: "0.5" } }), harness: "claude", maxUsd: 100 };
   const dir = mkdtempSync(join(tmpdir(), "relay-own-"));
   const root = join(dir, "root");
   mkdirSync(root, { mode: 0o1700 });
@@ -2163,7 +2163,7 @@ test("the socket's root must be root's and sticky: a non-sticky stand-in is refu
     assert.equal(checkSocketRoot(root, { rootUid: uid }), root);
     chmodSync(root, 0o777);
     const shell = { [RELAYED_NAME]: KEY };
-    for (const env of [{ FACTORY_LOCAL: "1", PATH: "/nope" }, { PATH: "/nope" }]) {
+    for (const env of [{ PENDULUM_LOCAL: "1", PATH: "/nope" }, { PATH: "/nope" }]) {
       const r = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u"), env, which: (n) => `/usr/bin/${n}`, socketRoot: root, socketRootUid: uid });
       assert.equal(r.relay, null);
       assert.match(r.blocked, new RegExp(`^the gateway relay for ${RELAYED_NAME} could not start: its socket's directory: ${root} has no sticky bit`));
@@ -2184,31 +2184,31 @@ test("a refused per-user directory: the stage's socket goes in a private mkdtemp
   const opts = { socketRoot: root, socketRootUid: uid };
   try {
     // Another user's stand-in at the per-user name: a file (a directory of theirs, or one open to others, is refused the same way).
-    writeFileSync(join(root, `factory-relay-${uid}`), "taken");
+    writeFileSync(join(root, `pendulum-relay-${uid}`), "taken");
     // A developer's own session: the stage falls back itself.
     const own = await openWorkerRelay({ inputs: { harness: "claude", maxUsd: 5 }, shell, usageDir: join(root, "u1"), env: { PATH: "/nope" }, ...opts });
     assert.equal(own.blocked, null, own.blocked);
     const fallback = dirname(own.relay.socketPath);
-    assert.match(fallback, new RegExp(`^${root}/factory-relay-${uid}-[A-Za-z0-9]{6}$`));
+    assert.match(fallback, new RegExp(`^${root}/pendulum-relay-${uid}-[A-Za-z0-9]{6}$`));
     assert.equal(statSync(fallback).mode & 0o7777, 0o700);
     assert.equal(statSync(own.relay.socketPath).mode & 0o777, 0o600);
     await closeWorkerRelay(own.relay);
     assert.ok(!existsSync(fallback), "removed with the stage");
 
     // Local mode with nothing handed: refused, never a directory the outer sandbox does not name.
-    const unhanded = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u2"), env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => `/usr/bin/${n}`, ...opts });
-    assert.match(unhanded.blocked, /its socket's directory: .*factory-relay-\d+ is not a directory/);
+    const unhanded = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u2"), env: { PENDULUM_LOCAL: "1", PATH: "/nope" }, which: (n) => `/usr/bin/${n}`, ...opts });
+    assert.match(unhanded.blocked, /its socket's directory: .*pendulum-relay-\d+ is not a directory/);
 
     // Local mode: the loop makes the private directory, records it, names it in the outer sandbox and hands it over.
     const usageDir = join(root, "u3");
     mkdirSync(usageDir);
     const m = handSocketDir(usageDir, { root, rootUid: uid });
-    assert.match(m.refused, /factory-relay-\d+ is not a directory/);
-    assert.match(m.dir, new RegExp(`^${root}/factory-relay-${uid}-[A-Za-z0-9]{6}$`));
+    assert.match(m.refused, /pendulum-relay-\d+ is not a directory/);
+    assert.match(m.dir, new RegExp(`^${root}/pendulum-relay-${uid}-[A-Za-z0-9]{6}$`));
     assert.equal(readSocketDirRecord(usageDir).dir, m.dir);
     const outer = harnessOuterSettings({ harness: "codex", writable: ["/w"], relaySocketDir: m.dir, env: {} });
     assert.ok(!outer.filesystem.denyRead.some((p) => m.dir === p || m.dir.startsWith(`${p}/`)), "the outer sandbox keeps it reachable");
-    const handed = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { FACTORY_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: m.dir }, which: (n) => `/usr/bin/${n}`, ...opts });
+    const handed = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { PENDULUM_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: m.dir }, which: (n) => `/usr/bin/${n}`, ...opts });
     assert.equal(handed.blocked, null, handed.blocked);
     assert.equal(dirname(handed.relay.socketPath), m.dir);
     await closeWorkerRelay(handed.relay);
@@ -2217,17 +2217,17 @@ test("a refused per-user directory: the stage's socket goes in a private mkdtemp
 
     // A handed path that is not one of this user's socket directories there is refused, even where recorded.
     writeFileSync(join(usageDir, SOCKET_DIR_RECORD), JSON.stringify({ dir: join(root, "elsewhere") }));
-    const odd = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { FACTORY_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: join(root, "elsewhere") }, which: (n) => `/usr/bin/${n}`, ...opts });
+    const odd = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { PENDULUM_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: join(root, "elsewhere") }, which: (n) => `/usr/bin/${n}`, ...opts });
     assert.match(odd.blocked, /is not a socket directory of this user's under/);
 
     // The path limit, for the fallback too: a stand-in root deep enough that the private directory's socket passes it.
     const deep = join(root, "d".repeat(80));
     mkdirSync(deep, { mode: 0o1700 });
     chmodSync(deep, 0o1700);
-    writeFileSync(join(deep, `factory-relay-${uid}`), "taken");
+    writeFileSync(join(deep, `pendulum-relay-${uid}`), "taken");
     const long = await openWorkerRelay({ inputs: { harness: "claude", maxUsd: 5 }, shell, usageDir: join(root, "u4"), env: { PATH: "/nope" }, socketRoot: deep, socketRootUid: uid });
-    assert.match(long.blocked, new RegExp(`could not start: its socket's path would be \\d+ bytes, over this system's limit of ${UNIX_SOCKET_PATH_MAX} for a Unix socket \\(${deep}/factory-relay-${uid}-`));
-    assert.deepEqual(readdirSync(deep), [`factory-relay-${uid}`], "the private directory removed");
+    assert.match(long.blocked, new RegExp(`could not start: its socket's path would be \\d+ bytes, over this system's limit of ${UNIX_SOCKET_PATH_MAX} for a Unix socket \\(${deep}/pendulum-relay-${uid}-`));
+    assert.deepEqual(readdirSync(deep), [`pendulum-relay-${uid}`], "the private directory removed");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2302,7 +2302,7 @@ test("a loop's reap removes the socket directory of a dead stage, never a live o
     assert.ok(existsSync(dirs["usage-work-live"]), "a live stage's: kept");
     assert.ok(existsSync(dirs["usage-work-unstarted-live-loop"]), "one a live loop is starting a stage with: kept");
     assert.ok(existsSync(other), "a path of another shape: kept");
-    assert.ok(existsSync(join(root, `factory-relay-${uid}`)), "the per-user directory stays");
+    assert.ok(existsSync(join(root, `pendulum-relay-${uid}`)), "the per-user directory stays");
     assert.equal(reapSocketDirs(ws, { root, rootUid: uid }), 0, "done once");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -2310,7 +2310,7 @@ test("a loop's reap removes the socket directory of a dead stage, never a live o
 });
 
 test("local mode hands a socket directory only to a stage that relays the gateway key (#185)", () => {
-  const env = (v) => ({ FACTORY_WORKER_SECRETS: v });
+  const env = (v) => ({ PENDULUM_WORKER_SECRETS: v });
   assert.equal(relaysGatewayKey("worker.mjs", env("AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY")), true);
   assert.equal(relaysGatewayKey("review.mjs", env("FAL_KEY, AI_GATEWAY_API_KEY=W")), true);
   assert.equal(relaysGatewayKey("merge.mjs", env("AI_GATEWAY_API_KEY=W")), false);
@@ -2332,8 +2332,8 @@ test("removing a socket directory never goes through a link: a recorded path who
     mkdirSync(join(elsewhere, hash), { recursive: true });
     for (const d of [join(root, "clone"), elsewhere, join(elsewhere, hash)]) chmodSync(d, 0o700);
     writeFileSync(join(elsewhere, hash, "precious.txt"), "keep");
-    symlinkSync(elsewhere, join(root, `factory-relay-${uid}`));
-    const dir = join(root, `factory-relay-${uid}`, hash);
+    symlinkSync(elsewhere, join(root, `pendulum-relay-${uid}`));
+    const dir = join(root, `pendulum-relay-${uid}`, hash);
     const ws = join(root, "ws");
     for (const name of ["usage-work-dead", "usage-work-ended"]) {
       mkdirSync(join(ws, name), { recursive: true });
@@ -2353,7 +2353,7 @@ test("locally the stage takes only the socket directory made for it: another sta
   const root = stickyRoot();
   const shell = { [RELAYED_NAME]: KEY };
   const opts = { socketRoot: root, socketRootUid: uid };
-  const env = (dir) => ({ FACTORY_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: dir });
+  const env = (dir) => ({ PENDULUM_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: dir });
   // Any relay a failed check let start is closed below, so a failure here never hangs the run.
   const opened = [];
   try {

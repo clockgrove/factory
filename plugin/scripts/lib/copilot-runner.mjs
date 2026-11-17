@@ -6,24 +6,24 @@
 // environment of every other process of that uid (/proc/<pid>/environ), Copilot's own and the git processes it starts
 // with it (#87). Copilot's sandbox runs each command in a user namespace, a PID namespace with a fresh /proc and a
 // network namespace whose only way out is Copilot's proxy with the host allow-list, so no process outside it is
-// visible. Two things it does not do, which Factory adds (checked with Copilot 1.0.109):
+// visible. Two things it does not do, which Pendulum adds (checked with Copilot 1.0.109):
 // - It starts bubblewrap with Copilot's whole environment, the token included, and bubblewrap stays in the sandbox as
-//   its pid 1, readable by every command. Factory's `bwrap` (BWRAP_SHIM), first on Copilot's PATH, starts the real one
+//   its pid 1, readable by every command. Pendulum's `bwrap` (BWRAP_SHIM), first on Copilot's PATH, starts the real one
 //   with an empty environment; bubblewrap sets each command's environment itself (`--clearenv`, `--setenv`).
 // - Its commands get Copilot's own HOME and TMPDIR. The shim gives them the agent's instead, so package caches, the
-//   agent's read-only gh login and $FACTORY_IN/$FACTORY_OUT work as before.
+//   agent's read-only gh login and $PENDULUM_IN/$PENDULUM_OUT work as before.
 //
 // The invariant, as for Claude Code and Codex: nothing the agent uid can write, inside or outside Copilot's sandbox, is
 // read or run by Copilot's own start-up outside the sandbox. Validation, install and setup run the repository's code
 // as the agent outside the sandbox, so the agent's home and the checkout's .git are the agent's to plant things in. So:
-// - Copilot's HOME is a directory Factory owns (COPILOT_RUNNER_HOME), with the shim and the release Copilot's binary
-//   unpacks and runs (COPILOT_CACHE_HOME, unpacked by Factory before the agent starts). The unit (or NAMESPACE_WRAP)
+// - Copilot's HOME is a directory Pendulum owns (COPILOT_RUNNER_HOME), with the shim and the release Copilot's binary
+//   unpacks and runs (COPILOT_CACHE_HOME, unpacked by Pendulum before the agent starts). The unit (or NAMESPACE_WRAP)
 //   sees it read-only. Its TMPDIR is /tmp, which its unit (PrivateTmp) or NAMESPACE_WRAP makes fresh for every start.
 // - COPILOT_HOME (its settings, which are also its sandbox's policy, its trusted folders, MCP servers and sessions) lives
-//   in the agent's home but is made afresh before every start, with only the sessions Factory itself captured put back.
+//   in the agent's home but is made afresh before every start, with only the sessions Pendulum itself captured put back.
 //   Its sandboxed commands cannot write it.
 // - The checkout's .git config, commondir, info/attributes and hooks, which Copilot's own git reads after every tool call
-//   with the token in its environment, are put back to what Factory pinned and are read-only to its commands; the
+//   with the token in its environment, are put back to what Pendulum pinned and are read-only to its commands; the
 //   checkout's harness configuration is restored to the commit (local.mjs clearHarnessConfig), and so is anything of
 //   that kind in the agent's temp directory, an added directory whose .github agents and skills Copilot loads.
 import { randomBytes } from "node:crypto";
@@ -33,7 +33,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { exec, SAFE_PATH } from "./proc.mjs";
 import { GitRefusal, HARNESS_CONFIG, LOCAL_DOMAINS, TOOLCHAIN_RULE, codexReadOnly, copilotHomeFiles, copilotLocalSettings, credentialPaths, gitGuards } from "./local.mjs";
-import { RUNNER_CACHES, SESSIONS_HELD, prepareFactoryHome } from "./claude-runner.mjs";
+import { RUNNER_CACHES, SESSIONS_HELD, preparePendulumHome } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, decoyLaunch } from "./codex-runner.mjs";
 import { untarAsAgent } from "./untar.mjs";
 import { commandText, simpleCommands } from "./logic.mjs";
@@ -43,21 +43,21 @@ import { RELAY_PING } from "./gateway-relay.mjs";
 
 export { TOOLCHAIN_RULE };
 
-/** Copilot's HOME on a runner: Factory's own, outside every home the agent can write. */
-export const COPILOT_RUNNER_HOME = "/var/lib/factory-copilot";
+/** Copilot's HOME on a runner: Pendulum's own, outside every home the agent can write. */
+export const COPILOT_RUNNER_HOME = "/var/lib/pendulum-copilot";
 
 /** Copilot's sessions on a runner, relative to the agent's home (session.mjs reads and restores them there). */
-export const COPILOT_RUNNER_SESSION_ROOT = ".factory-copilot/home/session-state";
+export const COPILOT_RUNNER_SESSION_ROOT = ".pendulum-copilot/home/session-state";
 
 /** A shell word for `s`: single-quoted. */
 const sq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 
 /** The agent's read-only GitHub login (agent.mjs readTokenFiles), which its commands use: read-only in the sandbox. */
-const LOGIN = [".gitconfig", ".config/gh", ".factory"];
+const LOGIN = [".gitconfig", ".config/gh", ".pendulum"];
 
-/** Where everything lives for one agent: Factory's HOME for Copilot, and the per-start state in the agent's home. */
+/** Where everything lives for one agent: Pendulum's HOME for Copilot, and the per-start state in the agent's home. */
 export function copilotRunnerLayout(agent, home = COPILOT_RUNNER_HOME) {
-  const state = join(agent.home, ".factory-copilot");
+  const state = join(agent.home, ".pendulum-copilot");
   return {
     home,
     bin: join(home, "bin"),
@@ -75,7 +75,7 @@ export function copilotRunnerLayout(agent, home = COPILOT_RUNNER_HOME) {
 }
 
 /**
- * Factory's `bwrap` for Copilot's sandbox on a runner. Copilot (MXC) starts bubblewrap with Copilot's whole environment,
+ * Pendulum's `bwrap` for Copilot's sandbox on a runner. Copilot (MXC) starts bubblewrap with Copilot's whole environment,
  * the token included, and bubblewrap stays in every command's sandbox as its pid 1, whose environment each command can
  * read; this starts the real one with none (bubblewrap sets every command's environment itself: `--clearenv`, then
  * `--setenv`). Among bubblewrap's own options (before the first `--`) each command's HOME and TMPDIR become the agent's
@@ -88,11 +88,11 @@ export function copilotRunnerLayout(agent, home = COPILOT_RUNNER_HOME) {
  * environment: it adds the relay's forwarder, the socket's
  * directory read-only and loopback off Copilot's proxy to a command's sandbox, and runs every other call as given.
  * Copilot's commands can open the relay's socket directly too (its filter allows Unix sockets): the same relay, behind
- * the same token check. Nothing else changes. Lives in Factory's HOME for Copilot, which the agent cannot write. Local mode runs
+ * the same token check. Nothing else changes. Lives in Pendulum's HOME for Copilot, which the agent cannot write. Local mode runs
  * it without `home` (local.mjs stageEnv), in the stage's usage directory.
  */
 export const bwrapShim = (realBwrap, home = null, tmp = null, pathFirst = null, relayShim = null) => `#!/bin/sh
-# Factory: Copilot's bubblewrap (lib/copilot-runner.mjs). Started with no environment, so the token Copilot holds is
+# Pendulum: Copilot's bubblewrap (lib/copilot-runner.mjs). Started with no environment, so the token Copilot holds is
 # not in the sandbox's pid 1${home || tmp ? "; each command's HOME and TMPDIR are the agent's" : ""}${pathFirst ? "; the stage's node leads each command's PATH" : ""}.
 first=1; p1=""; p2=""; done=""
 for a do
@@ -107,12 +107,12 @@ ${relayShim ? `if [ -f ${sq(relayShim)} ] && [ -x ${sq(relayShim)} ]; then next=
 `;
 
 /**
- * Factory's HOME for Copilot made afresh (claude-runner.mjs prepareFactoryHome) with the shim in its bin directory and
- * Copilot's release unpacked into its cache directory: by Factory's own user, from the CLI the Action or the start
+ * Pendulum's HOME for Copilot made afresh (claude-runner.mjs preparePendulumHome) with the shim in its bin directory and
+ * Copilot's release unpacked into its cache directory: by Pendulum's own user, from the CLI the Action or the start
  * installed, with an environment of PATH, HOME and COPILOT_CACHE_HOME only. The agent reads both and writes neither.
  */
 export async function prepareCopilotHome(layout, { env = process.env, sudo = true, run = exec } = {}) {
-  await prepareFactoryHome(layout.home, "Copilot", { sudo });
+  await preparePendulumHome(layout.home, "Copilot", { sudo });
   // The system's bwrap, never one on a PATH entry another user could write.
   const bwrap = await run("/bin/sh", ["-c", "command -v bwrap"], { env: { PATH: SAFE_PATH }, cwd: "/" });
   const real = String(bwrap.stdout).trim();
@@ -127,7 +127,7 @@ export async function prepareCopilotHome(layout, { env = process.env, sudo = tru
 
 /**
  * A runner's Copilot shim for this stage, written again with its relay's shim baked in (`relayShim`, in the stage's own
- * relay directory): by Factory's user, in Factory's HOME for Copilot, which the agent reads and never writes.
+ * relay directory): by Pendulum's user, in Pendulum's HOME for Copilot, which the agent reads and never writes.
  */
 export function bakeCopilotRelay(layout, realBwrap, relayShim) {
   writeFileSync(join(layout.bin, "bwrap"), bwrapShim(realBwrap, layout.agentHome, layout.agentTmp, null, relayShim), { mode: 0o755 });
@@ -156,12 +156,12 @@ export function copilotRunnerSettings(runner) {
   });
 }
 
-/** The env Copilot gets on a runner beside its credential: its fresh state and Factory's unpacked release. */
+/** The env Copilot gets on a runner beside its credential: its fresh state and Pendulum's unpacked release. */
 export const copilotRunnerEnv = (layout) => ({ COPILOT_HOME: layout.copilotHome, COPILOT_CACHE_HOME: layout.cacheHome });
 
 /**
  * Copilot's flags on a runner: its sandbox, tools and URLs allowed, file tools kept to the checkout and the agent's temp
- * directory, no update of itself (it would run a release Factory did not unpack), and no logs: Copilot binds its logs
+ * directory, no update of itself (it would run a release Pendulum did not unpack), and no logs: Copilot binds its logs
  * directory into every command's sandbox, a deny in its policy notwithstanding (checked with 1.0.109).
  */
 export const copilotRunnerFlags = (runner) => ["--sandbox", "--allow-all-tools", "--allow-all-urls", "--no-auto-update", "--log-level", "none", "--add-dir", runner.agentTmp];
@@ -173,21 +173,21 @@ export const copilotRunnerFlags = (runner) => ["--sandbox", "--allow-all-tools",
  * rules and open its network (found in review); this directory is denied to commands (copilotRunnerSettings), which
  * keep their own /tmp and the agent's $TMPDIR.
  */
-export const COPILOT_TMP = "/tmp/factory-copilot";
+export const COPILOT_TMP = "/tmp/pendulum-copilot";
 
 /** A PATH's absolute entries only: a relative one would resolve against whatever directory a process runs in. */
 export const absolutePath = (path = "") => path.split(":").filter((d) => d.startsWith("/")).join(":");
 
 /**
- * Copilot's command line on a runner: Factory's HOME for it, COPILOT_TMP as its TMPDIR (made here, a directory of its
- * own: an existing one that is a link or not its own refuses the start), and a PATH with Factory's shim first and
+ * Copilot's command line on a runner: Pendulum's HOME for it, COPILOT_TMP as its TMPDIR (made here, a directory of its
+ * own: an existing one that is a link or not its own refuses the start), and a PATH with Pendulum's shim first and
  * nothing of the agent's home, so nothing the agent wrote is read at its start.
  */
 export function copilotLaunch(layout, cmd, args, path = process.env.PATH || "") {
-  return ["/bin/sh", ["-c", COPILOT_TMP_LAUNCH, "factory-copilot", COPILOT_TMP, `HOME=${layout.home}`, `PATH=${[layout.bin, ...launchPath(layout, path)].join(":")}`, cmd, ...args]];
+  return ["/bin/sh", ["-c", COPILOT_TMP_LAUNCH, "pendulum-copilot", COPILOT_TMP, `HOME=${layout.home}`, `PATH=${[layout.bin, ...launchPath(layout, path)].join(":")}`, cmd, ...args]];
 }
 
-/** The stage's PATH as Copilot gets it after Factory's bin: its absolute entries, none in the agent's home. */
+/** The stage's PATH as Copilot gets it after Pendulum's bin: its absolute entries, none in the agent's home. */
 export const launchPath = (layout, path = "") => absolutePath(path).split(":").filter((d) => d && !within(d, layout.agentHome));
 
 /** Whether `p` is `dir` or under it. */
@@ -204,14 +204,14 @@ const SYSTEM_BOUND = ["/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib32", "/usr/l
 const NOT_TOOLCHAIN = ["/proc", "/sys", "/dev", "/run", "/var/run"];
 
 /**
- * Factory's own directories on the route (its HOME, the runner's temp directory and workspace, its usage and private
+ * Pendulum's own directories on the route (its HOME, the runner's temp directory and workspace, its usage and private
  * directories, its TMPDIR other than /tmp, which each start has private): never in commands' reach as toolchain.
  */
-export const factoryDirs = (env = process.env) =>
-  [...new Set(["HOME", "RUNNER_TEMP", "GITHUB_WORKSPACE", "FACTORY_USAGE_DIR", "FACTORY_PRIVATE_DIR", "TMPDIR"].map((k) => String(env[k] || "").replace(/\/+$/, "")))].filter((d) => d.startsWith("/") && d !== "/tmp");
+export const pendulumDirs = (env = process.env) =>
+  [...new Set(["HOME", "RUNNER_TEMP", "GITHUB_WORKSPACE", "PENDULUM_USAGE_DIR", "PENDULUM_PRIVATE_DIR", "TMPDIR"].map((k) => String(env[k] || "").replace(/\/+$/, "")))].filter((d) => d.startsWith("/") && d !== "/tmp");
 
-/** Where no toolchain directory may be, nor above: the agent's home, Factory's HOME for Copilot, its TMPDIR, the kernel's, Factory's own. */
-const offLimits = (layout, env) => [layout.agentHome, layout.home, COPILOT_TMP, ...NOT_TOOLCHAIN, ...factoryDirs(env)];
+/** Where no toolchain directory may be, nor above: the agent's home, Pendulum's HOME for Copilot, its TMPDIR, the kernel's, Pendulum's own. */
+const offLimits = (layout, env) => [layout.agentHome, layout.home, COPILOT_TMP, ...NOT_TOOLCHAIN, ...pendulumDirs(env)];
 
 /** `dirs` less those under another one of them, which is in commands' reach already. */
 const outermost = (dirs) => dirs.filter((t) => !dirs.some((o) => o !== t && within(t, o)));
@@ -233,8 +233,8 @@ function toolchainCandidates(layout, path, env) {
  * The directories the stage's toolchain lives in, by the PATH Copilot gets (launchPath), for its commands to read: each
  * entry Copilot's sandbox does not bind itself, as its install prefix where it is a `bin` or `sbin` directory (npm is
  * bin/npm -> ../lib/node_modules/npm, Python's lib is beside its bin). Without them a command finds Copilot's PATH but
- * none of its toolchain (#105). Never `/`, nothing in or above the agent's home, Factory's HOME for Copilot, its TMPDIR,
- * NOT_TOOLCHAIN or Factory's own directories (factoryDirs). Pure: runnerToolchain keeps those the agent can neither
+ * none of its toolchain (#105). Never `/`, nothing in or above the agent's home, Pendulum's HOME for Copilot, its TMPDIR,
+ * NOT_TOOLCHAIN or Pendulum's own directories (pendulumDirs). Pure: runnerToolchain keeps those the agent can neither
  * change nor fail to reach.
  */
 export const toolchainDirs = (layout, path = "", env = {}) => outermost(toolchainCandidates(layout, path, env));
@@ -244,7 +244,7 @@ export const toolchainDirs = (layout, path = "", env = {}) => outermost(toolchai
  * nor any directory above it, by its path and by its real path, is the agent's or writable by it. Copilot's bubblewrap
  * binds a toolchain directory by its path when each command starts, after this check, following links: a directory the
  * agent could replace with a link (one it owns, or in a directory it can write) would put whatever the link names
- * (Factory's HOME for Copilot, Factory's own directories) in commands' reach. A sticky directory (/tmp) it can write
+ * (Pendulum's HOME for Copilot, Pendulum's own directories) in commands' reach. A sticky directory (/tmp) it can write
  * counts only where the entry under it is the agent's. No `${...}`: systemd-run expands that form itself.
  */
 export const TOOLCHAIN_CHECK = [
@@ -262,7 +262,7 @@ export const TOOLCHAIN_CHECK = [
 
 /**
  * The stage's toolchain directories (toolchainDirs) the agent can reach and cannot change (TOOLCHAIN_CHECK, as the agent)
- * whose real path is not off-limits either (a link into the agent's home or Factory's is dropped): Copilot's sandbox
+ * whose real path is not off-limits either (a link into the agent's home or Pendulum's is dropped): Copilot's sandbox
  * cannot bind one the agent cannot reach, and would not start. Kept on `runner.toolchain` for its settings
  * (copilotRunnerSettings), once per runner.
  */
@@ -281,7 +281,7 @@ export async function runnerToolchain(runner, env = process.env) {
 
 /**
  * The stage's node and the npm beside it, as a command finds them on the PATH Copilot gets (launchPath): the first entry
- * with an executable `node`, read by Factory. {node, npm}: npm "" where there is none beside it; null where the PATH has
+ * with an executable `node`, read by Pendulum. {node, npm}: npm "" where there is none beside it; null where the PATH has
  * no node (nothing to prove).
  */
 export function stageNode(layout, path = "") {
@@ -303,7 +303,7 @@ export function stageNode(layout, path = "") {
 /**
  * Local mode's toolchain for Copilot's commands on Linux (#111): the stage's node, which a developer's version manager
  * (nvm, mise, asdf, Volta) keeps in their home, where Copilot's sandbox binds nothing. The first `node` on the stage's
- * PATH by its real path; a version manager's shim (whose real path is not a `node`) gives way to the node running Factory
+ * PATH by its real path; a version manager's shim (whose real path is not a `node`) gives way to the node running Pendulum
  * (`execPath`), which is what the shim chose. Returns {bin, toolchain: {node, npm}, dirs, denied}, or null with no node:
  * - `bin` leads each command's PATH (bwrapShim `pathFirst`), so a command finds this node before a shim it cannot run;
  * - `dirs`: its install prefix (`bin`'s parent; npm is bin/npm -> ../lib), read-only in commands' policy, and nothing
@@ -352,7 +352,7 @@ export function localToolchain({ path = "", off = [], home = homedir(), execPath
  * nothing of the home but what their settings name. The stage's node (localToolchain), the repository's package manager
  * (localPackageManager) and every other tool the repository's own commands run (repositoryTools), the latter two linked
  * from `<usageDir>/toolbin`, which no sandbox may write. Returns {lead, readable, denied, probe, unresolved}: the
- * directories to put first on each command's PATH (after Factory's git), those readable read-only, those denied, what the
+ * directories to put first on each command's PATH (after Pendulum's git), those readable read-only, those denied, what the
  * probe proves (probeDriver, Claude Code's local probe) and the command words not made visible (repositoryTools). Codex's
  * sandbox reads the whole system but the credential stores, so its commands find them all as the developer does: nothing.
  */
@@ -380,20 +380,20 @@ export function localTools({ harness, clone, commands = {}, path = "", off = [],
 
 /**
  * The commands a local stage runs for the repository, from its settings (`env`, as the stage gets them): the validation
- * commands (FACTORY_LOCAL_VALIDATION where set, else FACTORY_VALIDATION), local mode's setup (FACTORY_LOCAL_SETUP; the
- * workflow's assumes a runner) and the install setting (FACTORY_INSTALL; the caller resolves `auto` by the lockfile with
+ * commands (PENDULUM_LOCAL_VALIDATION where set, else PENDULUM_VALIDATION), local mode's setup (PENDULUM_LOCAL_SETUP; the
+ * workflow's assumes a runner) and the install setting (PENDULUM_INSTALL; the caller resolves `auto` by the lockfile with
  * checkout.mjs installCommand before handing it to localTools).
  */
 export const stageCommands = (env = {}) => ({
-  validation: String(env.FACTORY_LOCAL_VALIDATION || env.FACTORY_VALIDATION || "")
+  validation: String(env.PENDULUM_LOCAL_VALIDATION || env.PENDULUM_VALIDATION || "")
     .split(/\r?\n|,/)
     .map((c) => commandText(c).trim())
     .filter(Boolean),
-  setup: env.FACTORY_LOCAL_SETUP || "",
-  install: env.FACTORY_INSTALL || "auto",
+  setup: env.PENDULUM_LOCAL_SETUP || "",
+  install: env.PENDULUM_INSTALL || "auto",
 });
 
-/** The tools the stage's node gives (localToolchain) and Factory's own git: never resolved as a repository's tool. */
+/** The tools the stage's node gives (localToolchain) and Pendulum's own git: never resolved as a repository's tool. */
 const STAGE_OWN = new Set(["node", "npm", "npx", "corepack", "git"]);
 /** At most this many package.json scripts are followed, and this many command words resolved. */
 const MAX_SCRIPTS = 32;
@@ -564,8 +564,8 @@ export function installRoot(real) {
   return within(bin, "/usr/local") && /^s?bin$/.test(basename(bin)) && dirname(bin) !== "/usr" ? dirname(bin) : null;
 }
 
-/** Never made visible from a package.json script, which the agent writes: Factory's own front end, the harnesses, their sandboxes. */
-const NEVER_FROM_SCRIPTS = ["factory", "claude", "codex", "copilot", "srt", "bwrap"];
+/** Never made visible from a package.json script, which the agent writes: Pendulum's own front end, the harnesses, their sandboxes. */
+const NEVER_FROM_SCRIPTS = ["pendulum", "claude", "codex", "copilot", "srt", "bwrap"];
 
 /**
  * The tools the repository's own commands run (repositoryWords), each resolved on the stage's PATH to its real path on
@@ -580,7 +580,7 @@ const NEVER_FROM_SCRIPTS = ["factory", "claude", "codex", "copilot", "srt", "bwr
  *   `off` (what a sandbox may write). A bound install with an `etc` (a global npmrc can hold a registry token) is bound by
  *   its other entries, and its `etc` is in `denied`.
  * - `unresolved`: {word, from, why}: a word not on PATH, a shim no install answers, a rustup proxy (it needs the rustup
- *   home, which is not made visible), Factory's or a harness's own from a script, or one only reachable through a
+ *   home, which is not made visible), Pendulum's or a harness's own from a script, or one only reachable through a
  *   directory the rules above keep out. Named, never guessed.
  * A word that is the stage's own (node, npm, git: STAGE_OWN), in `skip` (the package manager), the repository's own
  * file (in the clone) or, in a script, a dependency's (node_modules/.bin) is left out. Nothing is run.
@@ -609,7 +609,7 @@ export function repositoryTools({ clone, commands = {}, path = "", off = [], hom
     }
     if (within(first, clone)) continue;
     if (script && (NEVER_FROM_SCRIPTS.includes(word) || harnessReal.has(realOf(first)))) {
-      unresolved.push({ word, from, why: "Factory's or a harness's own, never made visible from a package.json script" });
+      unresolved.push({ word, from, why: "Pendulum's or a harness's own, never made visible from a package.json script" });
       continue;
     }
     if (system(first)) {
@@ -635,7 +635,7 @@ export function repositoryTools({ clone, commands = {}, path = "", off = [], hom
       continue;
     }
     if (harnessReal.has(real) && script) {
-      unresolved.push({ word, from, why: "Factory's or a harness's own, never made visible from a package.json script" });
+      unresolved.push({ word, from, why: "Pendulum's or a harness's own, never made visible from a package.json script" });
       continue;
     }
     root ??= installRoot(real);
@@ -705,7 +705,7 @@ const MANAGED = (name, v) => [`installs/${name}/${v}/bin/${name}`, `installs/${n
  * install and a version manager all keep it there. The first `name` on the stage's PATH by its real path. A version
  * manager's shim (whose real path is the manager) is resolved by the manager's install layout (MANAGED) and the version
  * `packageManager` pins, never by running anything: a version manager reads the repository's own configuration
- * (.mise.toml, .tool-versions, package.json), which can run commands, so Factory runs no tool with the clone in reach.
+ * (.mise.toml, .tool-versions, package.json), which can run commands, so Pendulum runs no tool with the clone in reach.
  * Returns {name, real, dirs, via}, or {name, real: null, dirs: [], via} when none is found that way (the probe then
  * Blocks), or null with no such package manager (`via`: the version manager behind a shim, else the npm package it
  * belongs to, corepack or pnpm, else "its own install"; for doctor's row):
@@ -766,7 +766,7 @@ export function localPackageManager({ clone, path = "", off = [], home = homedir
   const safe = dir !== "/" && !within(home, dir) && !fenced.some((x) => within(dir, x) || within(x, dir));
   return { name, real: target, dirs: safe ? [dir] : [], via: via || (root ? basename(root) : "its own install") };
 }
-export const COPILOT_TMP_LAUNCH = 'if [ -L "$1" ] || { [ -e "$1" ] && ! [ -d "$1" -a -O "$1" ]; }; then echo "factory: $1 is not a directory of its own" >&2; exit 126; fi; [ -d "$1" ] || mkdir -m 700 -- "$1" || exit 126; t=$1; shift; exec /usr/bin/env TMPDIR="$t" "$@"';
+export const COPILOT_TMP_LAUNCH = 'if [ -L "$1" ] || { [ -e "$1" ] && ! [ -d "$1" -a -O "$1" ]; }; then echo "pendulum: $1 is not a directory of its own" >&2; exit 126; fi; [ -d "$1" ] || mkdir -m 700 -- "$1" || exit 126; t=$1; shift; exec /usr/bin/env TMPDIR="$t" "$@"';
 
 /** Copilot's settings and seeds for a fresh COPILOT_HOME: nothing trusted, no MCP servers, the sandbox's policy. */
 const homeFiles = (runner) => ({ ...copilotHomeFiles(), "settings.json": `${JSON.stringify(copilotRunnerSettings(runner), null, 2)}\n` });
@@ -781,7 +781,7 @@ async function writeAgentFiles(dir, files, cwd, env) {
 
 /**
  * Copilot's state made afresh before a start, as the agent: its state directory removed (a link is removed, never
- * followed) and made with a fresh COPILOT_HOME holding Factory's settings, then every session archive Factory holds
+ * followed) and made with a fresh COPILOT_HOME holding Pendulum's settings, then every session archive Pendulum holds
  * unpacked into its session-state; and the harness configuration Copilot would load from the agent's temp directory, an
  * added directory, removed.
  */
@@ -801,25 +801,25 @@ export async function resetCopilotState(runner, env = process.env) {
 // ------------------------------------------------------------- the confinement probe
 
 /** The file the probe leaves its result in, in the agent's temp directory: its exit code, then its last line. */
-export const PROBE_RESULT = ".factory-copilot-probe";
+export const PROBE_RESULT = ".pendulum-copilot-probe";
 /**
- * The file the probe tries to make, from inside the sandbox, in the agent's home, the probe's own COPILOT_HOME, Factory's
+ * The file the probe tries to make, from inside the sandbox, in the agent's home, the probe's own COPILOT_HOME, Pendulum's
  * HOME for Copilot and its release (persistDirs); none may be there afterwards.
  */
-export const PROBE_PERSIST = ".factory-copilot-probe-home";
+export const PROBE_PERSIST = ".pendulum-copilot-probe-home";
 export const persistDirs = (runner) => [runner.agentHome, runner.probeHome, runner.home, runner.cacheHome];
 
 /**
- * The command the probe's model runs, from Copilot's environment (FACTORY_COPILOT_PROBE): Copilot's path checks refuse a
+ * The command the probe's model runs, from Copilot's environment (PENDULUM_COPILOT_PROBE): Copilot's path checks refuse a
  * command that names a path outside the checkout, so the paths travel in the script, never in the command line. Inside
  * the sandbox it refuses to go on without its script or its decoy (an empty one would pass unchecked); checks that
  * Copilot's own TMPDIR, where each command's network rules are written, is neither listed nor writable; tries a file in
- * each of `persist` (Factory checks from outside that none was made: inside, a path the sandbox does not bind is a
- * throwaway); then runs CONFINEMENT_PROBE (FACTORY_PROBE_SCRIPT) with no home rule. It writes an exit code and a last
+ * each of `persist` (Pendulum checks from outside that none was made: inside, a path the sandbox does not bind is a
+ * throwaway); then runs CONFINEMENT_PROBE (PENDULUM_PROBE_SCRIPT) with no home rule. It writes an exit code and a last
  * line to PROBE_RESULT: a pass is 0 and PROBE_PASS, nothing else. `copilotTmp`: Copilot's own TMPDIR (local mode's:
  * harness.mjs copilotLocalCheck); the commands' own $TMPDIR must not hold its rules either. `tmp`: the temp directory
  * commands must have, for the result and the temp rule, by its path (local mode: where $TMPDIR is not it, as without
- * Factory's bwrap, the probe still writes its result and names the rule that broke); else $TMPDIR. `toolchain`: the
+ * Pendulum's bwrap, the probe still writes its result and names the rule that broke); else $TMPDIR. `toolchain`: the
  * stage's node and npm (stageNode), which a command must find on its PATH, the same node, and run (#105), and locally
  * the repository's package manager (`pm`, #137), which must run; null: no rule. `systemTmp`: the system temp
  * directory, where Copilot's rules would be had it ignored its TMPDIR (/tmp; a test gives one of its own, as the host's
@@ -842,8 +842,8 @@ export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", 
   const T = tmp ? sq(tmp) : '"$TMPDIR"';
   return [
     `out() { printf '%s\\n%s\\n' "$1" "$2" > ${T}/${PROBE_RESULT}; exit 0; }`,
-    `[ -n "$FACTORY_PROBE_SCRIPT" ] || out 4 "the probe script is missing"`,
-    `[ -n "$FACTORY_PROBE_DECOY" ] || out 4 "the probe's decoy is missing"`,
+    `[ -n "$PENDULUM_PROBE_SCRIPT" ] || out 4 "the probe script is missing"`,
+    `[ -n "$PENDULUM_PROBE_DECOY" ] || out 4 "the probe's decoy is missing"`,
     // Where Copilot's TMPDIR is, where it would be had it the system's (systemTmp), and the commands' own (had it theirs).
     `for p in ${sq(copilotTmp)}/mxc-bwrap-proxy-* "$TMPDIR"/mxc-bwrap-proxy-* ${T}/mxc-bwrap-proxy-* ${sq(systemTmp)}/mxc-bwrap-proxy-*; do if [ -e "$p" ]; then out 4 "Copilot's network rules are visible to commands"; fi; done`,
     `if true >> ${sq(`${copilotTmp}/${PROBE_PERSIST}`)} 2>/dev/null; then out 4 "Copilot's temp directory is writable"; fi`,
@@ -855,19 +855,19 @@ export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", 
     // The stage's toolchain, as a command finds it: the same node first on its PATH, and it and npm run.
     ...toolchainRules(toolchain),
     // The gateway relay (gateway-relay.mjs), when the run relays a key: this relay's ping through the forwarder.
-    ...(relay ? [`got=$( (curl -sS --max-time 5 ${sq(`http://127.0.0.1:${relay.port}${RELAY_PING}`)} || node -e 'fetch(process.argv[1]).then((r) => r.text()).then((t) => process.stdout.write(t), () => {})' ${sq(`http://127.0.0.1:${relay.port}${RELAY_PING}`)}) 2>/dev/null)`, `case "$got" in *${sq(`factory-relay ${relay.probeId}`)}*) ;; *) out 4 ${sq(RELAY_RULE)} ;; esac`] : []),
+    ...(relay ? [`got=$( (curl -sS --max-time 5 ${sq(`http://127.0.0.1:${relay.port}${RELAY_PING}`)} || node -e 'fetch(process.argv[1]).then((r) => r.text()).then((t) => process.stdout.write(t), () => {})' ${sq(`http://127.0.0.1:${relay.port}${RELAY_PING}`)}) 2>/dev/null)`, `case "$got" in *${sq(`pendulum-relay ${relay.probeId}`)}*) ;; *) out 4 ${sq(RELAY_RULE)} ;; esac`] : []),
     ...persist.map((d) => `true >> ${sq(`${d}/${PROBE_PERSIST}`)} 2>/dev/null`),
-    `r=0; o=$(sh -c "$FACTORY_PROBE_SCRIPT" sh "" ${sq(gitConfig)} ${T} ${sq(host)} ${sq(marker)} "$FACTORY_PROBE_DECOY") || r=$?`,
+    `r=0; o=$(sh -c "$PENDULUM_PROBE_SCRIPT" sh "" ${sq(gitConfig)} ${T} ${sq(host)} ${sq(marker)} "$PENDULUM_PROBE_DECOY") || r=$?`,
     `out "$r" "$(printf '%s\\n' "$o" | tail -n 1)"`,
   ].join("\n");
 };
 
 /** The probe's launch: CONFINEMENT_PROBE's decoy, then Copilot with the decoy's pid in its environment (for the decoy rule). */
-export const COPILOT_DECOY_LAUNCH = decoyLaunch('FACTORY_PROBE_DECOY=$d copilot "$@"');
+export const COPILOT_DECOY_LAUNCH = decoyLaunch('PENDULUM_PROBE_DECOY=$d copilot "$@"');
 
 /**
  * A model for the probe, on this machine's loopback: Copilot's BYOK provider (COPILOT_OFFLINE), speaking the Responses
- * API. Its first answer is one shell call, `sh -c "$FACTORY_COPILOT_PROBE"`; every later one ends the session. Nothing
+ * API. Its first answer is one shell call, `sh -c "$PENDULUM_COPILOT_PROBE"`; every later one ends the session. Nothing
  * leaves the machine and nothing is billed. Returns {env, close, toolOutput}: the provider variables Copilot needs, and
  * what Copilot answered for the call (for the log only: where the sandbox did not start, its reason is there).
  */
@@ -892,14 +892,14 @@ export async function probeModel() {
       if (answered) toolOutput = String(outputs.at(-1).output ?? "").slice(0, 2000);
       const item = answered
         ? { type: "message", role: "assistant", id: "msg_probe", status: "completed", content: [{ type: "output_text", text: "done", annotations: [] }] }
-        : { type: "function_call", id: "fc_probe", call_id: "call_probe", name: "bash", arguments: JSON.stringify({ command: 'sh -c "$FACTORY_COPILOT_PROBE"', description: "Factory's sandbox probe" }), status: "completed" };
+        : { type: "function_call", id: "fc_probe", call_id: "call_probe", name: "bash", arguments: JSON.stringify({ command: 'sh -c "$PENDULUM_COPILOT_PROBE"', description: "Pendulum's sandbox probe" }), status: "completed" };
       const id = `resp_probe_${++n}`;
       res.writeHead(200, { "content-type": "text/event-stream" });
       for (const e of [
         { type: "response.created", response: { id } },
         { type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress" } },
         { type: "response.output_item.done", output_index: 0, item },
-        { type: "response.completed", response: { id, object: "response", status: "completed", model: "factory-probe", output: [item], usage } },
+        { type: "response.completed", response: { id, object: "response", status: "completed", model: "pendulum-probe", output: [item], usage } },
       ])
         res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
       res.end();
@@ -922,7 +922,7 @@ export async function probeModel() {
 }
 
 /**
- * The probe's environment beside the provider's: a fresh COPILOT_HOME of its own (the run's settings), Factory's
+ * The probe's environment beside the provider's: a fresh COPILOT_HOME of its own (the run's settings), Pendulum's
  * release, the marker Copilot and the decoy hold (as Copilot holds the token), and the scripts; `toolchain` for its
  * toolchain rule, and `runner.systemTmp` for the system temp directory it checks (probeDriver).
  */
@@ -934,14 +934,14 @@ export function probeEnv(runner, marker, host, toolchain = null, relay = null) {
     COPILOT_HOME: runner.probeHome,
     COPILOT_CACHE_HOME: runner.cacheHome,
     [PROBE_MARKER]: marker,
-    FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE,
-    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner), logs: join(runner.probeHome, "logs"), toolchain, relay, ...(runner.copilotTmp ? { copilotTmp: runner.copilotTmp, tmp: runner.agentTmp } : {}), ...(runner.systemTmp ? { systemTmp: runner.systemTmp } : {}) }),
+    PENDULUM_PROBE_SCRIPT: CONFINEMENT_PROBE,
+    PENDULUM_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner), logs: join(runner.probeHome, "logs"), toolchain, relay, ...(runner.copilotTmp ? { copilotTmp: runner.copilotTmp, tmp: runner.agentTmp } : {}), ...(runner.systemTmp ? { systemTmp: runner.systemTmp } : {}) }),
   };
 }
 
 /** Before a probe, as the agent: its own COPILOT_HOME made afresh with the run's settings, no result, no planted file. */
 export async function resetProbe(runner, env = process.env) {
-  if (factoryPlanted(runner)) throw new GitRefusal("sandbox", "a file is in Factory's HOME for Copilot that Factory did not put there", { rule: "Factory's HOME for Copilot is writable", harness: "copilot" });
+  if (pendulumPlanted(runner)) throw new GitRefusal("sandbox", "a file is in Pendulum's HOME for Copilot that Pendulum did not put there", { rule: "Pendulum's HOME for Copilot is writable", harness: "copilot" });
   const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -p -m 700 -- "$1"; rm -f -- "$2" "$3"', "sh", runner.probeHome, join(runner.agentTmp, PROBE_RESULT), join(runner.agentHome, PROBE_PERSIST)], { cwd: runner.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", "Copilot's sandbox probe could not be prepared");
   await runnerToolchain(runner, env);
@@ -954,17 +954,17 @@ export async function resetProbe(runner, env = process.env) {
  * a broken rule of its own, and is removed.
  */
 export async function probeResult(runner, env = process.env) {
-  // As the agent: its home and the probe's COPILOT_HOME, which are its own. Factory's HOME and release: by Factory.
+  // As the agent: its home and the probe's COPILOT_HOME, which are its own. Pendulum's HOME and release: by Pendulum.
   const r = await exec("/bin/sh", ["-c", 'for p in "$2" "$3"; do if [ -e "$p" ] || [ -L "$p" ]; then rm -f -- "$p"; echo home; fi; done; cat -- "$1" 2>/dev/null; rm -f -- "$1"', "sh", join(runner.agentTmp, PROBE_RESULT), join(runner.agentHome, PROBE_PERSIST), join(runner.probeHome, PROBE_PERSIST)], { cwd: runner.agentHome, env });
   const lines = String(r.stdout).split("\n");
-  if (factoryPlanted(runner)) return { code: 4, said: "Factory's HOME for Copilot is writable" };
+  if (pendulumPlanted(runner)) return { code: 4, said: "Pendulum's HOME for Copilot is writable" };
   if (lines[0] === "home") return { code: 4, said: "the agent home is writable" };
   const code = /^\d+$/.test(lines[0] || "") ? Number(lines[0]) : null;
   return { code, said: lines[1] || "" };
 }
 
-/** Whether the probe's file is in Factory's HOME for Copilot or its release (read by Factory, which owns both). */
-const factoryPlanted = (runner) => {
+/** Whether the probe's file is in Pendulum's HOME for Copilot or its release (read by Pendulum, which owns both). */
+const pendulumPlanted = (runner) => {
   const found = [runner.home, runner.cacheHome].map((d) => join(d, PROBE_PERSIST)).filter((f) => !!lstatSync(f, { throwIfNoEntry: false }));
   for (const f of found) rmSync(f, { force: true });
   return found.length > 0;

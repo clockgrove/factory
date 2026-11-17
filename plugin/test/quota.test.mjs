@@ -52,12 +52,12 @@ test("quota: the dispatcher waits out the retry time; a Queued Objective that wa
 });
 
 test("sweep: the record's own sandbox is judged at once when its Objective closes; an unrecorded young one waits", () => {
-  const young = { id: "factory-aaa", state: "stopped", createdAt: iso(NOW - 5 * MIN), tags: {} };
-  const rec = { id: "factory-aaa", state: "stopped", stage: "review", at: iso(NOW - MIN), claim: "c1", home: "/vercel", collected: true };
+  const young = { id: "pendulum-aaa", state: "stopped", createdAt: iso(NOW - 5 * MIN), tags: {} };
+  const rec = { id: "pendulum-aaa", state: "stopped", stage: "review", at: iso(NOW - MIN), claim: "c1", home: "/vercel", collected: true };
   const base = { sandbox: young, issue: { state: "closed" }, state: null, record: rec, holds: false, now: NOW, idleMs: 7 * 86_400_000, graceMs: 15 * MIN };
   assert.deepEqual(sweepDecision(base), { destroy: "its Objective is closed", collect: false }, "a seven-minute Objective's sandbox goes when it closes");
   assert.equal(sweepDecision({ ...base, record: null }).keep, "created moments ago");
-  assert.equal(sweepDecision({ ...base, record: { ...rec, id: "factory-bbb" } }).keep, "created moments ago");
+  assert.equal(sweepDecision({ ...base, record: { ...rec, id: "pendulum-bbb" } }).keep, "created moments ago");
   assert.equal(sweepDecision({ ...base, holds: true }).keep, "a stage holds it", "never a running stage's");
   assert.equal(sweepDecision({ ...base, issue: { state: "open" }, state: "In review" }).keep, "the Objective is In review", "an open Objective keeps its stop snapshot");
 });
@@ -90,15 +90,15 @@ test("storage: one line of numbers; the adapter contract has storage", () => {
 
 test("workflow template: the sweep also runs when an Objective closes or its PR merges, in sandbox mode only; any closed issue ticks the dispatcher", () => {
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const sandbox = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", sandbox: "vercel", ci_workflow: "Quality", default_branch: "main" }));
-  const runner = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3" }));
-  // `unlabeled`: a removed factory:objective label (a person's stop) ticks the dispatcher, which leaves its PR a draft.
+  const sandbox = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", sandbox: "vercel", ci_workflow: "Quality", default_branch: "main" }));
+  const runner = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3" }));
+  // `unlabeled`: a removed pendulum:objective label (a person's stop) ticks the dispatcher, which leaves its PR a draft.
   assert.deepEqual(sandbox.on.issues.types, ["opened", "labeled", "unlabeled", "closed"]);
   assert.deepEqual(runner.on.issues.types, ["opened", "labeled", "unlabeled", "closed"]);
   const cond = sandbox.jobs.sweep.if;
-  assert.match(cond, /github\.event_name == 'issues' && github\.event\.action == 'closed' && contains\(join\(github\.event\.issue\.labels\.\*\.name, ','\), 'factory:objective'\)/);
-  assert.match(cond, /github\.event\.pull_request\.merged == true && startsWith\(github\.head_ref, 'factory\/'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
-  // A closed issue may have blocked an Objective (a plain issue fires no other event Factory hears): every route ticks.
+  assert.match(cond, /github\.event_name == 'issues' && github\.event\.action == 'closed' && contains\(join\(github\.event\.issue\.labels\.\*\.name, ','\), 'pendulum:objective'\)/);
+  assert.match(cond, /github\.event\.pull_request\.merged == true && startsWith\(github\.head_ref, 'pendulum\/'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
+  // A closed issue may have blocked an Objective (a plain issue fires no other event Pendulum hears): every route ticks.
   for (const wf of [sandbox, runner]) assert.match(wf.jobs.dispatch.if, /github\.event_name == 'issues' && \(github\.event\.action == 'closed' \|\|/);
   assert.doesNotMatch(runner.jobs.sweep?.if ?? "", /closed/, "no sweep job without a sandbox");
 });

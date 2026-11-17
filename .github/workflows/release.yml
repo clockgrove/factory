@@ -18,5 +18,5 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME}"
           notes="$(git tag -l --format='%(contents)' "$tag")"
-          [ -n "$notes" ] || notes="Factory ${tag#v}."
-          gh release create "$tag" --title "Factory ${tag#v}" --notes "$notes" --latest --verify-tag
+          [ -n "$notes" ] || notes="Pendulum ${tag#v}."
+          gh release create "$tag" --title "Pendulum ${tag#v}" --notes "$notes" --latest --verify-tag

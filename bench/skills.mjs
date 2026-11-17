@@ -55,18 +55,18 @@ export function recordSkills(pluginDir) {
 
 /**
  * Names an adopter repository has by its own conventions: a skill that names one means the repository it works in,
- * not Factory's checkout, even where the checkout has one too.
+ * not Pendulum's checkout, even where the checkout has one too.
  */
 const ADOPTER_NAMES = new Set([".github", ".agents", "AGENTS.md"]);
-/** A full link into Factory's repository: its ref, path and heading. */
-const FACTORY_LINK = /https:\/\/github\.com\/clockgrove\/factory\/(?:blob|tree)\/([^/\s]+)\/([^\s#)>`'"]+)(?:#([^\s)>`'"]+))?/g;
+/** A full link into Pendulum's repository: its ref, path and heading. */
+const PENDULUM_LINK = /https:\/\/github\.com\/clockgrove\/pendulum\/(?:blob|tree)\/([^/\s]+)\/([^\s#)>`'"]+)(?:#([^\s)>`'"]+))?/g;
 /** A path-shaped word: a `<placeholder>` (which may hold spaces) or any run of characters prose does not end a path with. */
 const WORD = /(?:<[^<>\s][^<>\n]*>|[^\s`'"()[\]{},;<>|*])+/g;
-/** The roots a skill may write a path from, and the tree each one names: the installed plugin, or a clone of Factory. */
+/** The roots a skill may write a path from, and the tree each one names: the installed plugin, or a clone of Pendulum. */
 const ROOTS = [
   ["${CLAUDE_PLUGIN_ROOT}/", "plugin"],
   ["<plugin root>/", "plugin"],
-  ["<factory clone>/", "checkout"],
+  ["<pendulum clone>/", "checkout"],
 ];
 /** GitHub's anchor for a heading. */
 const slug = (heading) => heading.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s/g, "-");
@@ -89,12 +89,12 @@ function textFiles(dir) {
  * Every reference in the plugin's skills and agent definitions to something an installed plugin does not hold. An install
  * copies the plugin directory alone (every marketplace entry is a git-subdir of `plugin`), so a skill can name:
  * - a path in the installed plugin, from its root (`${CLAUDE_PLUGIN_ROOT}/…` or `<plugin root>/…`), which must exist there;
- * - a path in a clone of Factory (`<factory clone>/…`), for a tool the plugin does not ship, which must exist in the checkout;
- * - a full link into Factory's repository at a release tag, to a file of the checkout and, with an anchor, one of its headings;
+ * - a path in a clone of Pendulum (`<pendulum clone>/…`), for a tool the plugin does not ship, which must exist in the checkout;
+ * - a full link into Pendulum's repository at a release tag, to a file of the checkout and, with an anchor, one of its headings;
  * - anything else in the repository it works in.
- * A path that starts with a top-level entry of Factory's checkout (`docs/`, `bench/`, `plugin/`, `README.md`), the bare
+ * A path that starts with a top-level entry of Pendulum's checkout (`docs/`, `bench/`, `plugin/`, `README.md`), the bare
  * name of a top-level file or of a file in `docs/`, or a top-level file's upper-case name without its extension (`README`)
- * names Factory's checkout instead, which an installed plugin does not have, unless it is a name every adopter has
+ * names Pendulum's checkout instead, which an installed plugin does not have, unless it is a name every adopter has
  * (ADOPTER_NAMES). Returns `{file, ref, why}` per reference, file relative to the checkout.
  */
 export function unshippedRefs(pluginDir) {
@@ -110,9 +110,9 @@ export function unshippedRefs(pluginDir) {
     const rel = relative(checkout, file).split(sep).join("/");
     const flag = (ref, why) => out.push({ file: rel, ref, why });
     let text = readFileSync(file, "utf8");
-    for (const [link, ref, path, anchor] of text.matchAll(FACTORY_LINK)) {
+    for (const [link, ref, path, anchor] of text.matchAll(PENDULUM_LINK)) {
       const target = join(checkout, path.replace(/\/$/, ""));
-      if (!/^v\d+\.\d+\.\d+$/.test(ref)) flag(link, "a link into Factory's repository pins a release tag (vX.Y.Z)");
+      if (!/^v\d+\.\d+\.\d+$/.test(ref)) flag(link, "a link into Pendulum's repository pins a release tag (vX.Y.Z)");
       else if (!existsSync(target)) flag(link, `the checkout has no ${path}`);
       else if (anchor && (statSync(target).isDirectory() || !readFileSync(target, "utf8").split("\n").some((l) => /^#{1,6}\s/.test(l) && slug(l.replace(/^#+\s+/, "")) === anchor))) flag(link, `${path} has no heading #${anchor}`);
     }
@@ -131,7 +131,7 @@ export function unshippedRefs(pluginDir) {
       }
       const first = word.split("/")[0];
       if (word.includes("/") ? top.has(first) && !ADOPTER_NAMES.has(first) : bare.has(word) && !ADOPTER_NAMES.has(word)) {
-        flag(word, "a file of Factory's checkout");
+        flag(word, "a file of Pendulum's checkout");
       }
     }
   }
@@ -139,16 +139,16 @@ export function unshippedRefs(pluginDir) {
 }
 
 /**
- * The stage skills Factory's own runs load: the worker's four, by the task card, and the reviewer's, by the review job,
- * its reviewer agents and the factory-review skill. No user asks for them, and one that fires in a user's session works
+ * The stage skills Pendulum's own runs load: the worker's four, by the task card, and the reviewer's, by the review job,
+ * its reviewer agents and the pendulum-review skill. No user asks for them, and one that fires in a user's session works
  * without the run around it (the reviewer's without the trust check and the posting step), so each is hidden in every
  * harness that can hide a skill, and says it is internal where none can (Copilot).
  */
-export const INTERNAL_SKILLS = ["factory-objective-plan", "factory-implement-split", "factory-prove-acceptance", "factory-deliver-pr", "factory-review-pr"];
+export const INTERNAL_SKILLS = ["pendulum-objective-plan", "pendulum-implement-split", "pendulum-prove-acceptance", "pendulum-deliver-pr", "pendulum-review-pr"];
 
 /** The one sentence, word for word, by which every skill that runs a plugin command finds the plugin in each harness. */
 export const PLUGIN_ROOT_SENTENCE =
-  "`<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `factory` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.";
+  "`<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.";
 
 /** A SKILL.md's frontmatter, parsed as the YAML 1.2 core schema reads it; null when it has none or it does not parse. */
 function frontmatter(text) {
@@ -225,7 +225,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
   const refs = unshippedRefs(plugin);
   if (refs.length) {
-    process.stderr.write(`skills name what an installed plugin does not hold (an install copies plugin/ alone):\n${refs.map((r) => `  ${r.file}: ${r.ref} (${r.why})`).join("\n")}\nWrite a plugin file from <plugin root>/, a tool the plugin does not ship from <factory clone>/ (and say up front that the skill needs a clone), and a page a person reads as a link at a release tag.\n`);
+    process.stderr.write(`skills name what an installed plugin does not hold (an install copies plugin/ alone):\n${refs.map((r) => `  ${r.file}: ${r.ref} (${r.why})`).join("\n")}\nWrite a plugin file from <plugin root>/, a tool the plugin does not ship from <pendulum clone>/ (and say up front that the skill needs a clone), and a page a person reads as a link at a release tag.\n`);
     process.exit(4);
   }
   const rules = skillRules(plugin);

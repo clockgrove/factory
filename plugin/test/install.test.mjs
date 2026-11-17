@@ -142,5 +142,5 @@ test("doctor: the lockfile row warns for each program the automatic install runs
   assert.equal(missing.fix, "install cargo in the setup command, or set install: to the command this repository needs (install: none skips)");
   writeFileSync(join(f.bin, "cargo"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   assert.equal((await row({})).status, "PASS");
-  assert.equal((await row({ FACTORY_INSTALL: "npm ci" })).detail, "npm ci", "a given command is listed as given");
+  assert.equal((await row({ PENDULUM_INSTALL: "npm ci" })).detail, "npm ci", "a given command is listed as given");
 });

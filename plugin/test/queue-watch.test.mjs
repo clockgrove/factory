@@ -11,11 +11,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// #2683: factory-scratch PR #468's queue commit hung in CI's setup step; the queue dropped it with checks_timed_out, and
+// #2683: pendulum-scratch PR #468's queue commit hung in CI's setup step; the queue dropped it with checks_timed_out, and
 // the `dequeued` run that would re-enqueue it was held for approval (its actor, github-merge-queue[bot], is an outside
 // contributor under all_external_contributors). Recovery must come from the queue watch, which no approval holds.
 
-const SELF = "factory-app[bot]";
+const SELF = "pendulum-app[bot]";
 const repo = { full: "o/r", owner: "o", name: "r" };
 const ACTIONS = { id: 15368, slug: "github-actions" };
 const HEAD = "a".repeat(40);
@@ -30,7 +30,7 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     removals: [], // timeline RemovedFromMergeQueueEvent nodes
     enqueued: [],
     dequeued: 0,
-    comments: { [PR]: [{ id: 100, user: { login: SELF }, body: `<!-- factory:${ISSUE}:mergeable:${HEAD} -->\nFactory: reviewed`, created_at: new Date(clock() - 3 * 3600_000).toISOString() }] },
+    comments: { [PR]: [{ id: 100, user: { login: SELF }, body: `<!-- pendulum:${ISSUE}:mergeable:${HEAD} -->\nPendulum: reviewed`, created_at: new Date(clock() - 3 * 3600_000).toISOString() }] },
     reviewedAt: new Date(clock() - 3 * 3600_000).toISOString(),
     timeout: 60, // the ruleset's check_response_timeout_minutes
     failEnqueue: 0, // enqueue calls GitHub answers with a 502
@@ -57,7 +57,7 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     const body = init.body ? JSON.parse(init.body) : null;
     let m;
     // The Objective's issue, open and labelled: the merge pass reads it before any merge (session.mjs mergeReadyOne).
-    if (method === "GET" && /\/issues\/\d+$/.test(u.split("?")[0])) return json(200, { number: Number(/(\d+)$/.exec(u.split("?")[0])[1]), state: "open", labels: [{ name: "factory:objective" }] });
+    if (method === "GET" && /\/issues\/\d+$/.test(u.split("?")[0])) return json(200, { number: Number(/(\d+)$/.exec(u.split("?")[0])[1]), state: "open", labels: [{ name: "pendulum:objective" }] });
     if (/\/graphql$/.test(u)) {
       const q = body.query;
       const pull = (x) => json(200, { data: { repository: { pullRequest: x } } });
@@ -66,7 +66,7 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
       if (q.includes("timelineItems")) return pull({ timelineItems: { nodes: s.removals } });
       if (q.includes("dequeuePullRequest")) {
         s.dequeued += 1;
-        drop("MANUAL", "factory-app", "Bot");
+        drop("MANUAL", "pendulum-app", "Bot");
         return json(200, { data: { dequeuePullRequest: { mergeQueueEntry: { id: "e" } } } });
       }
       if (q.includes("enqueuePullRequest")) {
@@ -111,8 +111,8 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
           { type: "required_status_checks", parameters: { required_status_checks: [{ context: "Quality", integration_id: ACTIONS.id }] } },
         ],
       });
-    if (method === "GET" && new RegExp(`/repos/o/r/pulls/${PR}$`).test(u)) return json(200, { number: PR, state: "open", draft: false, merged: false, node_id: "PR_21", title: "Objective 7", labels: [], head: { sha: HEAD, ref: `factory/${ISSUE}` }, base: { ref: "main" }, mergeable: true, mergeable_state: "clean" });
-    if (method === "GET" && /\/pulls\/\d+\/reviews/.test(u)) return json(200, [{ id: 1, user: { login: SELF }, body: `${marker(ISSUE, "review")}\nFactory reviewer`, submitted_at: s.reviewedAt }]);
+    if (method === "GET" && new RegExp(`/repos/o/r/pulls/${PR}$`).test(u)) return json(200, { number: PR, state: "open", draft: false, merged: false, node_id: "PR_21", title: "Objective 7", labels: [], head: { sha: HEAD, ref: `pendulum/${ISSUE}` }, base: { ref: "main" }, mergeable: true, mergeable_state: "clean" });
+    if (method === "GET" && /\/pulls\/\d+\/reviews/.test(u)) return json(200, [{ id: 1, user: { login: SELF }, body: `${marker(ISSUE, "review")}\nPendulum reviewer`, submitted_at: s.reviewedAt }]);
     if (method === "GET" && /\/pulls\/\d+\/comments/.test(u)) return json(200, []);
     if (method === "GET" && (m = /\/issues\/(\d+)\/comments/.exec(u))) return json(200, s.comments[m[1]] || []);
     if (method === "POST" && (m = /\/issues\/(\d+)\/comments$/.exec(u))) {
@@ -183,7 +183,7 @@ async function withGitHub(fake, fn) {
 
 // The Actions route: the job token reads Actions (actionsToken). The local route passes none.
 const merge = (report = {}, extra = {}) => mergeReadyOne(repo, { issue: ISSUE, prNumber: PR, queue: true, checkNames: ["Quality"], report, actionsToken: "job", ...extra }, { token: "t" });
-const requeues = (s) => (s.comments[ISSUE] || []).filter((c) => c.body.includes(`<!-- factory:${ISSUE}:requeue:`));
+const requeues = (s) => (s.comments[ISSUE] || []).filter((c) => c.body.includes(`<!-- pendulum:${ISSUE}:requeue:`));
 /**
  * A review stage read each red queue drop (FAILED_CHECKS) as no failure of the PR's own (#312: session.mjs queueRedOf):
  * its record says so, and the merge pass treats the drop as any other.
@@ -198,7 +198,7 @@ const readByReview = (fake, kind = "flaky") => {
 };
 const MIN = 60_000;
 /**
- * Moves every removal so far, Factory's records of them (their times and the queue's deadlines they keep) and every
+ * Moves every removal so far, Pendulum's records of them (their times and the queue's deadlines they keep) and every
  * job's times `ms` into the past: the next pass comes that much later.
  */
 const earlier = (fake, ms) => {
@@ -236,7 +236,7 @@ test("queue watch: a PR the queue drops after its CI started ticks the dispatche
 
     // That tick's merge pass hands the red run to the review stage first (#312); the review read it as a flake.
     assert.equal(await merge({}), "queue-red");
-    assert.deepEqual(fake.s.labels, ["-factory:review", "+factory:review"], "the review label back on: the review stage reads the failure");
+    assert.deepEqual(fake.s.labels, ["-pendulum:review", "+pendulum:review"], "the review label back on: the review stage reads the failure");
     assert.equal(fake.s.enqueued.length, 0);
     readByReview(fake);
     // Then the merge pass: enqueued again once, with the one line on the issue, and watched again.
@@ -282,13 +282,13 @@ test("hung queue check: tonight's case, a setup step normally ~1 min, is left at
     assert.deepEqual(w, { tick: true, pr: PR, stalled: true });
 
     // The merge pass takes it out (CI restarts on the new queue commit) and puts it back once, naming the stuck step
-    // and its times, and saying Factory, not the queue, took it out.
+    // and its times, and saying Pendulum, not the queue, took it out.
     const report = {};
     assert.equal(await merge(report), "queued");
     assert.equal(fake.s.dequeued, 1);
     assert.equal(fake.s.enqueued.length, 1);
     assert.equal(requeues(fake.s).length, 1);
-    assert.match(requeues(fake.s)[0].body, new RegExp(`Factory took PR #21 out of the merge queue \\(${HUNG_CODE}; no progress: \`Quality\` / \`Run scripts/ci/setup\\.sh\` running 16 min, normally ~1 min\\).*try 2`));
+    assert.match(requeues(fake.s)[0].body, new RegExp(`Pendulum took PR #21 out of the merge queue \\(${HUNG_CODE}; no progress: \`Quality\` / \`Run scripts/ci/setup\\.sh\` running 16 min, normally ~1 min\\).*try 2`));
 
     // It hangs again on the new queue commit: out again. Whether the first removal counts waits for its job, which is
     // still running before the queue's own deadline: the PR stays out, unwatched, and nothing Blocks yet.
@@ -313,7 +313,7 @@ test("hung queue check: a hung removal whose step and job then finished green be
   const fake = fakeGitHub();
   await withGitHub(fake, async () => {
     fake.s.history = Array.from({ length: 12 }, () => ({ "Run scripts/ci/setup.sh": MIN }));
-    // A cold cache: setup, normally ~1 min, runs 25; Factory takes the PR out and puts it back (try 2).
+    // A cold cache: setup, normally ~1 min, runs 25; Pendulum takes the PR out and puts it back (try 2).
     const first = Date.now() - 25 * MIN;
     fake.building("d".repeat(40), first);
     const job = fake.s.runs["d".repeat(40)][0].id;
@@ -350,7 +350,7 @@ test("hung queue check: a hung step that went green in a job that then failed, o
   await withGitHub(fake, async () => {
     fake.s.history = Array.from({ length: 12 }, () => ({ "Run scripts/ci/setup.sh": MIN }));
     // A changed lockfile: install runs cold (25 min), goes green, then the job's tests fail. The queue would have
-    // dropped that (failed_checks), so Factory's early removal is no free try.
+    // dropped that (failed_checks), so Pendulum's early removal is no free try.
     const first = Date.now() - 25 * MIN;
     fake.building("d".repeat(40), first);
     const job = fake.s.runs["d".repeat(40)][0].id;
@@ -416,7 +416,7 @@ test("hung queue check: a hung step still running at the next hung removal, then
     assert.equal(report.watch, true);
     assert.equal(fake.s.enqueued.length, 2);
     const notice = requeues(fake.s).find((c) => /try 3/.test(c.body));
-    assert.match(notice.body, /Factory took PR #21 out of the merge queue \(checks_hung; no progress: `Quality` \/ `Run scripts\/ci\/setup\.sh` running 20 min/);
+    assert.match(notice.body, /Pendulum took PR #21 out of the merge queue \(checks_hung; no progress: `Quality` \/ `Run scripts\/ci\/setup\.sh` running 20 min/);
   });
 });
 
@@ -490,7 +490,7 @@ test("hung queue check: progress decides, not the job's age; no history falls ba
 
 test("#423 hung queue check: the repository's step_stall_factor and step_stall_floor_minutes decide: a warm 6-minute build at 20 minutes is progress by default, hung at 2 x and 5 minutes", async () => {
   const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
-  const stall = resolveInputs({ env: { FACTORY_STEP_STALL_FACTOR: "2", FACTORY_STEP_STALL_FLOOR_MINUTES: "5" } }).stall;
+  const stall = resolveInputs({ env: { PENDULUM_STEP_STALL_FACTOR: "2", PENDULUM_STEP_STALL_FLOOR_MINUTES: "5" } }).stall;
   const fake = fakeGitHub();
   await withGitHub(fake, async () => {
     fake.s.history = Array.from({ length: 12 }, () => ({ "Run scripts/ci/setup.sh": MIN, "Run npm run build": 6 * MIN }));
@@ -544,7 +544,7 @@ test("hung queue check: a hung removal read back on a later pass keeps its code,
     assert.equal(await merge({}), "queued");
     // That job then failed: the removal counts.
     finish(fake, job, { step: "failure", stepAt: Date.now() });
-    // Factory's removal is on the timeline now, and its requeue comment holds the code. The queue then drops the PR.
+    // Pendulum's removal is on the timeline now, and its requeue comment holds the code. The queue then drops the PR.
     fake.drop("FAILED_CHECKS", "github-merge-queue", "Bot");
     readByReview(fake);
     const blocked = {};
@@ -554,7 +554,7 @@ test("hung queue check: a hung removal read back on a later pass keeps its code,
   });
 });
 
-test("hung queue check: an enqueue that fails after Factory took the PR out leaves it watched, and the next pass puts it back (#2683 F3)", async () => {
+test("hung queue check: an enqueue that fails after Pendulum took the PR out leaves it watched, and the next pass puts it back (#2683 F3)", async () => {
   const fake = fakeGitHub();
   await withGitHub(fake, async () => {
     fake.building("4".repeat(40), Date.now() - 52 * MIN);
@@ -597,7 +597,7 @@ test("queue drops: drops before the issue's last re-entry or Block, or before th
     fake.s.reviewedAt = ago(5 * 3600_000);
     fake.s.headAt = ago(5 * 3600_000);
     fake.s.removals = [queueDrop(ago(4 * 3600_000)), queueDrop(ago(3.5 * 3600_000))];
-    fake.s.timeline[ISSUE] = [labeled("factory:blocked", ago(3.4 * 3600_000)), labeled("factory:objective", ago(3 * 3600_000))];
+    fake.s.timeline[ISSUE] = [labeled("pendulum:blocked", ago(3.4 * 3600_000)), labeled("pendulum:objective", ago(3 * 3600_000))];
     readByReview(fake);
     const report = {};
     assert.equal(await merge(report), "queued", "the re-entry starts the count over: the new head is enqueued");
@@ -606,7 +606,7 @@ test("queue drops: drops before the issue's last re-entry or Block, or before th
 
     // The Block alone (no re-entry yet read) moves the count too, and so does a head committed after the drops.
     fake.s.entry = null;
-    fake.s.timeline[ISSUE] = [labeled("factory:blocked", ago(3.4 * 3600_000))];
+    fake.s.timeline[ISSUE] = [labeled("pendulum:blocked", ago(3.4 * 3600_000))];
     assert.equal(await merge({}), "queued");
     fake.s.entry = null;
     fake.s.timeline[ISSUE] = [];
@@ -621,7 +621,7 @@ test("queue drops: drops before the issue's last re-entry or Block, or before th
     // Two drops after the re-entry still Block.
     fake.s.entry = null;
     fake.s.headAt = ago(5 * 3600_000);
-    fake.s.timeline[ISSUE] = [labeled("factory:objective", ago(3 * 3600_000))];
+    fake.s.timeline[ISSUE] = [labeled("pendulum:objective", ago(3 * 3600_000))];
     fake.s.removals.push(queueDrop(ago(2 * 3600_000)), queueDrop(ago(3600_000)));
     readByReview(fake);
     const blocked = {};
@@ -696,8 +696,8 @@ test("doctor: the dequeue approval check runs only with a merge queue, and says 
       return json(404, { message: "Not Found" });
     };
     try {
-      const inputs = { repo: "o/r", objectiveLabel: "factory:objective", maintainers: [], notify: "", ciChecks: [], setup: "", validation: [], githubToken: "" };
-      const out = await githubChecks({ inputs, repo, token: "t", app: { appSlug: "factory-app", missing: [], extra: [] }, env: {} });
+      const inputs = { repo: "o/r", objectiveLabel: "pendulum:objective", maintainers: [], notify: "", ciChecks: [], setup: "", validation: [], githubToken: "" };
+      const out = await githubChecks({ inputs, repo, token: "t", app: { appSlug: "pendulum-app", missing: [], extra: [] }, env: {} });
       return { checks: out.filter((c) => c.name === "dequeue approval"), asked: reads.some((p) => p.endsWith("/fork-pr-contributor-approval")) };
     } finally {
       globalThis.fetch = real;
@@ -756,7 +756,7 @@ test("queue red: a red run on the queue's commit goes to the review stage once p
     fake.s.removals = [queueDrop(ago(5 * MIN))];
     assert.equal(await merge({}), "queue-red");
     assert.deepEqual(records(fake).map((r) => r.state), ["handed"]);
-    assert.deepEqual(fake.s.labels, ["-factory:review", "+factory:review"]);
+    assert.deepEqual(fake.s.labels, ["-pendulum:review", "+pendulum:review"]);
     assert.equal(fake.s.enqueued.length, 0, "nothing enqueued before the review stage read it");
     assert.match(fake.s.comments[ISSUE].at(-1).body, /the merge queue's run of PR #21's required checks failed \(failed_checks\) at [^;]+; the review stage reads whether the failure is the PR's own change\./);
     // Not read yet (the stage did not run): handed again, with the one record.
@@ -788,7 +788,7 @@ test("queue red: the review stage reads the PR's own change as one fix pass, han
     assert.equal(step.red.sha, sha);
     assert.equal(step.red.queue, true);
     assert.deepEqual(step.red.failures.map((f) => [f.command, f.code]), [["CI job Quality", 1]]);
-    assert.ok(step.red.failures[0].full.includes("AssertionError [ERR_ASSERTION]: 2 == 3"), "the job's whole log for $FACTORY_IN/checks/");
+    assert.ok(step.red.failures[0].full.includes("AssertionError [ERR_ASSERTION]: 2 == 3"), "the job's whole log for $PENDULUM_IN/checks/");
     assert.match(step.line, /^merge queue run red on ccccccc: Quality \(required check\): .+; the PR's own change, one fix pass \(the answer pass\)$/);
     const [rec] = records(fake);
     assert.equal(rec.state, "fixed");
@@ -803,7 +803,7 @@ test("queue red: the review stage reads the PR's own change as one fix pass, han
     assert.equal(await merge({}), "queue-red");
     const blocked = await reviewReads(fake, own);
     assert.equal(blocked.state, "blocked");
-    assert.match(blocked.reason, new RegExp(`^the merge queue's run on its commit ${again.slice(0, 7)} failed in this PR's own change \\(Quality \\(required check\\): .+\\) after Factory's fix pass, which made no progress: the same jobs fail with the same failure lines`));
+    assert.match(blocked.reason, new RegExp(`^the merge queue's run on its commit ${again.slice(0, 7)} failed in this PR's own change \\(Quality \\(required check\\): .+\\) after Pendulum's fix pass, which made no progress: the same jobs fail with the same failure lines`));
     assert.deepEqual(records(fake).map((r) => r.state), ["fixed", "blocked"]);
 
     // Another failure of the same job on a later drop: the decision model judges the fix pass before it; closer, it gets its fix pass.
@@ -918,9 +918,9 @@ test("queue red: the queue's fix passes go on while each makes progress, past tw
     const back = await reviewReads(fake, own, { progressCheck: check });
     assert.equal(back.state, "blocked");
     assert.equal(check.asked.length, 2);
-    assert.match(back.reason, /after Factory's fix pass, which made no progress: it brought back the red of the merge queue's run red at \S+: Quality, failing the same way, after the red it was handed \(the merge queue's run red at \S+: Quality\)/);
+    assert.match(back.reason, /after Pendulum's fix pass, which made no progress: it brought back the red of the merge queue's run red at \S+: Quality, failing the same way, after the red it was handed \(the merge queue's run red at \S+: Quality\)/);
     // A person re-applies the Objective label: the fixes before it are not this re-entry's.
-    fake.s.timeline[ISSUE] = [{ event: "labeled", label: { name: "factory:objective" }, created_at: ago(5 * MIN) }];
+    fake.s.timeline[ISSUE] = [{ event: "labeled", label: { name: "pendulum:objective" }, created_at: ago(5 * MIN) }];
     queueRed(fake, { sha: "4".repeat(40), id: 633, at: ago(4 * MIN), log: failureNo(0) });
     fake.s.removals.push(queueDrop(ago(3 * MIN)));
     assert.equal(await merge({}), "queue-red");
@@ -928,7 +928,7 @@ test("queue red: the queue's fix passes go on while each makes progress, past tw
   });
 });
 
-test("queue red: the decision model is given the before-red's failure lines and the fix pass's own commits; no answer Blocks as Factory's (#399 review)", async () => {
+test("queue red: the decision model is given the before-red's failure lines and the fix pass's own commits; no answer Blocks as Pendulum's (#399 review)", async () => {
   const fake = fakeGitHub();
   await withGitHub(fake, async () => {
     queueRed(fake, { sha: "1".repeat(40), id: 690, at: ago(40 * MIN), log: failureNo(0) });
@@ -948,8 +948,8 @@ test("queue red: the decision model is given the before-red's failure lines and 
     assert.match(asked[0], /After the fix pass:\n<<<BEGIN \w+>>>\nFailing: Quality\n\n[^<]*beta/);
     assert.match(asked[0], /own commits \(git log --stat, merges left out\):\n<<<BEGIN \w+>>>\nabc1234 fix the sum\n\n src\/sum\.js \| 2 \+-/);
     assert.equal(step.state, "blocked");
-    assert.equal(step.cause, "factory");
-    assert.match(step.reason, /after Factory's fix pass, which could not be judged for progress: the decision model \(perplexity\/pplx-decider-v1\.2\) gave no answer \(vendor\)/);
+    assert.equal(step.cause, "pendulum");
+    assert.match(step.reason, /after Pendulum's fix pass, which could not be judged for progress: the decision model \(perplexity\/pplx-decider-v1\.2\) gave no answer \(vendor\)/);
   });
 });
 
@@ -982,7 +982,7 @@ test("queue red: with no decision model, a new failure of the same job after a f
       states.push(await reviewReads(fake, own));
     }
     assert.deepEqual(states.map((x) => x.state), ["fixing", "blocked"]);
-    assert.match(states[1].reason, /after Factory's fix pass, which made no progress: the failing jobs changed without fewer of them failing and the rest passing, and no decision model can judge it;/);
+    assert.match(states[1].reason, /after Pendulum's fix pass, which made no progress: the failing jobs changed without fewer of them failing and the rest passing, and no decision model can judge it;/);
   });
 });
 
@@ -1038,7 +1038,7 @@ test("queue red: each try's end is recorded; tries whose pass never ran never co
     assert.deepEqual(records(fake).map((r) => [r.state, r.tries, r.ends]), [["handed", 4, ["idle"]]]);
     const blocked = await reviewReads(fake, own);
     assert.equal(blocked.state, "blocked");
-    assert.match(blocked.reason, /after Factory's fix pass that ran and committed nothing for it; fix it on the branch/);
+    assert.match(blocked.reason, /after Pendulum's fix pass that ran and committed nothing for it; fix it on the branch/);
   });
 });
 
@@ -1054,7 +1054,7 @@ test("queue red: a record from before try ends were kept still Blocks at two tri
     assert.equal(records(fake)[0].ends, null);
     const step = await reviewReads(fake, own);
     assert.equal(step.state, "blocked");
-    assert.match(step.reason, /after Factory's 2 fix passes that committed nothing for it/);
+    assert.match(step.reason, /after Pendulum's 2 fix passes that committed nothing for it/);
   });
 });
 
@@ -1074,7 +1074,7 @@ test("queue red: an answer pass that ended on an error (max turns) without commi
     const blocked = await reviewReads(fake, own);
     assert.equal(blocked.state, "blocked");
     assert.equal(blocked.cause, "work");
-    assert.match(blocked.reason, /after Factory's fix pass that ran and committed nothing for it/);
+    assert.match(blocked.reason, /after Pendulum's fix pass that ran and committed nothing for it/);
   });
 });
 
@@ -1118,7 +1118,7 @@ test("queue red: unreadable job logs on the queue's commit are no failure of the
 });
 
 test("queue drops: the Block's cause and advice follow what the review stage read the red drops as", async () => {
-  const cases = { unjudged: ["factory", /Whether the default branch fails the same way could not be judged \(the decision model gave no answer\)/], "unjudged-outage": ["outage", /could not be judged \(the decision model gave no answer: its vendor's outage\)/], infra: ["outage", /GitHub's side \(infra\); rerun the queue's jobs/], "not-started": ["outage", /GitHub's side \(not-started\)/], base: ["work", /The default branch fails the same way: fix it there/], flaky: ["work", /read the failure as a flake each time/], unclassified: ["work", /Fix that on the branch/] };
+  const cases = { unjudged: ["pendulum", /Whether the default branch fails the same way could not be judged \(the decision model gave no answer\)/], "unjudged-outage": ["outage", /could not be judged \(the decision model gave no answer: its vendor's outage\)/], infra: ["outage", /GitHub's side \(infra\); rerun the queue's jobs/], "not-started": ["outage", /GitHub's side \(not-started\)/], base: ["work", /The default branch fails the same way: fix it there/], flaky: ["work", /read the failure as a flake each time/], unclassified: ["work", /Fix that on the branch/] };
   for (const [kind, [cause, said]] of Object.entries(cases)) {
     const fake = fakeGitHub();
     await withGitHub(fake, async () => {

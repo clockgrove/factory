@@ -1,6 +1,6 @@
-// Factory's own files. Factory's temp directory is a fresh directory under a 700 one it owns, never a predictable
-// path in a shared /tmp; and every file Factory writes is opened with O_NOFOLLOW (and O_EXCL where it must be new),
-// so a symlink the harness planted where Factory writes is refused, never written through.
+// Pendulum's own files. Pendulum's temp directory is a fresh directory under a 700 one it owns, never a predictable
+// path in a shared /tmp; and every file Pendulum writes is opened with O_NOFOLLOW (and O_EXCL where it must be new),
+// so a symlink the harness planted where Pendulum writes is refused, never written through.
 import { chmodSync, closeSync, constants as C, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,22 +28,22 @@ export const writeOwn = (file, data) => write(file, data, C.O_CREAT | C.O_TRUNC)
 export const appendOwn = (file, data) => write(file, data, C.O_CREAT | C.O_APPEND);
 
 /**
- * Give this process its own temp directory: a mkdtemp directory with mode 700 under `base` (FACTORY_PRIVATE_DIR, which
+ * Give this process its own temp directory: a mkdtemp directory with mode 700 under `base` (PENDULUM_PRIVATE_DIR, which
  * local mode points at the Objective's directory no sandbox may write; else the runner's temp directory; else the
- * system's). TMPDIR is set to it for Factory's own files (the mirror, bundles, archives). It is removed when the
- * process exits, and one a killed process left is removed by the next (sweepOwned). Returns {factory, agent}: `agent`
+ * system's). TMPDIR is set to it for Pendulum's own files (the mirror, bundles, archives). It is removed when the
+ * process exits, and one a killed process left is removed by the next (sweepOwned). Returns {pendulum, agent}: `agent`
  * is the TMPDIR the stage started with, the one the harness and its commands keep.
  */
 export function privateTmp(env = process.env) {
   const agent = env.TMPDIR || tmpdir();
-  const base = env.FACTORY_PRIVATE_DIR || env.RUNNER_TEMP || tmpdir();
+  const base = env.PENDULUM_PRIVATE_DIR || env.RUNNER_TEMP || tmpdir();
   mkdirSync(base, { recursive: true, mode: 0o700 });
-  sweepOwned(base, /^factory-[A-Za-z0-9]{6}$/);
-  const factory = ownedTemp(base, "factory-");
-  chmodSync(factory, 0o700);
-  process.once("exit", () => dropOwned(factory));
-  env.TMPDIR = factory;
-  return { factory, agent };
+  sweepOwned(base, /^pendulum-[A-Za-z0-9]{6}$/);
+  const pendulum = ownedTemp(base, "pendulum-");
+  chmodSync(pendulum, 0o700);
+  process.once("exit", () => dropOwned(pendulum));
+  env.TMPDIR = pendulum;
+  return { pendulum, agent };
 }
 
 /** Whether process `pid` has ended: signal 0 finds no such process (EPERM means it runs as another user). */
@@ -132,7 +132,7 @@ const statOr = (p) => {
  * Clear what ended processes left in `base`: each directory whose name matches `names` and that this user owns, once
  * the pid in its `<dir>.pid` (ownedTemp) is gone and the pid file is over `minAgeMs` old. A directory whose pid is
  * alive is never touched (a reused pid only keeps a leftover longer). With `legacy`, a matching directory with no pid
- * file (made before Factory recorded holders) goes once it is over `legacyAgeMs` old, longer than any stage runs.
+ * file (made before Pendulum recorded holders) goes once it is over `legacyAgeMs` old, longer than any stage runs.
  * Returns the names removed.
  */
 export function sweepOwned(base, names, { legacy = false, minAgeMs = HOUR, legacyAgeMs = WEEK, now = Date.now(), gone = pidGone } = {}) {

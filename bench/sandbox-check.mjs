@@ -3,21 +3,21 @@
  * `node bench/sandbox-check.mjs [--harness srt,claude,codex,copilot] [--json FILE]`: local mode's sandbox bar, probed.
  *
  * Builds the settings local mode uses (plugin/scripts/lib/local.mjs) for a throwaway clone, runs one probe script
- * under srt (Factory's own commands) and under each harness's own sandbox, and checks every result against the
+ * under srt (Pendulum's own commands) and under each harness's own sandbox, and checks every result against the
  * bar: credential stores unreadable, writes only in the clone and the stage directories (the clone's hooks and
  * config, its harness configuration, the stage's bin and another stage's temp directory not), escapes looked for on the host itself, the allow-listed
  * host reachable (POST too) and others not, and no model key in the commands' environment. srt and Codex run the probe
  * directly; Claude and Copilot need one model call each, asked to run it. Before each harness starts, hooks, settings
  * and MCP servers are planted in the clone's harness configuration as if a command had got them there: the harness,
  * started with local mode's flags, must load none of them (Codex gets one `codex exec` start for this, which needs no
- * login), and Factory's pre-start clear must remove them (checked under srt). Likewise a command repoints the clone's git
+ * login), and Pendulum's pre-start clear must remove them (checked under srt). Likewise a command repoints the clone's git
  * (a commondir, a stray gitlink, a submodule's config) at config that runs a filter or an fsmonitor: after the pre-start
  * clear, neither each harness CLI's own git as it starts nor, under srt, the same git commands run here with local
  * mode's git env may run any of it. A command also tries, mid-run, to repoint .git/commondir or replace .git (a harness CLI
  * that runs git on the host after each tool call, as Copilot does, must not run what it planted), and on Linux a filter
  * put straight into the clone's .git/config (a guard that missed) must stay inside the harness's outer sandbox: no
  * credential store read, no write outside. After each run .git is replaced (as Copilot's sandbox lets a command do), and
- * the checks a stage and a harness start make must refuse it, and Factory's pre-start clear must keep the git state a
+ * the checks a stage and a harness start make must refuse it, and Pendulum's pre-start clear must keep the git state a
  * stage pinned while a change to it is refused. Under srt on Linux, the outer sandbox's own profile must reach no host
  * unix socket (one bound after the profile was made in an ssh-* directory under /tmp included) and write none of a
  * harness's settings, MCP config or install, nor make a new Claude Code project, and a harness's --version is probed in srt. Exit 1 on any result off the bar, with the run's last output when the probe did
@@ -42,35 +42,35 @@ const PLUGIN = resolve(dirname(fileURLToPath(import.meta.url)), "..", "plugin");
 const { values } = parseArgs({ options: { harness: { type: "string" }, json: { type: "string" }, agent: { type: "boolean" } } });
 
 // `--agent`: the agent uid's confinement where there is no systemd (a cloud sandbox VM; proc.mjs NAMESPACE_WRAP),
-// probed, with plain `sudo -u` as the negative control. It creates the factory-agent user and wipes its home, so it
-// runs only in a throwaway machine: FACTORY_CHECK_AGENT=1 must be set.
+// probed, with plain `sudo -u` as the negative control. It creates the pendulum-agent user and wipes its home, so it
+// runs only in a throwaway machine: PENDULUM_CHECK_AGENT=1 must be set.
 if (values.agent) process.exit(await agentCheck());
 
 async function agentCheck() {
-  if (process.env.FACTORY_CHECK_AGENT !== "1") {
-    console.log("agent check: set FACTORY_CHECK_AGENT=1 in a throwaway machine (it creates factory-agent and wipes its home)");
+  if (process.env.PENDULUM_CHECK_AGENT !== "1") {
+    console.log("agent check: set PENDULUM_CHECK_AGENT=1 in a throwaway machine (it creates pendulum-agent and wipes its home)");
     return 1;
   }
   const { prepareAgent } = await import("../plugin/scripts/lib/agent.mjs");
   const agent = await prepareAgent();
   console.log(`agent launcher: ${agent.launcher}`);
-  const secret = join(homedir(), ".factory-check-secret");
+  const secret = join(homedir(), ".pendulum-check-secret");
   writeFileSync(secret, "secret\n", { mode: 0o600 });
-  writeFileSync("/tmp/factory-check-host", "host\n");
-  process.env.FACTORY_CHECK_CANARY = "canary-in-factory-env";
-  // Each line: name=1 when the action worked. The agent may write only its home; nothing else of Factory's is in reach.
+  writeFileSync("/tmp/pendulum-check-host", "host\n");
+  process.env.PENDULUM_CHECK_CANARY = "canary-in-pendulum-env";
+  // Each line: name=1 when the action worked. The agent may write only its home; nothing else of Pendulum's is in reach.
   const probe = [
     "t() { if eval \"$2\" >/dev/null 2>&1; then echo \"$1=1\"; else echo \"$1=0\"; fi; }",
     "t 'write home' 'touch \"$HOME/x\"'",
-    "t 'write /usr/local' 'touch /usr/local/factory-check'",
-    "t 'write /var/tmp shared' 'touch /var/tmp/factory-check-agent && test -e /var/tmp/factory-check-agent'",
-    `t 'read Factory home' 'cat ${secret}'`,
-    "t 'see host /tmp' 'test -e /tmp/factory-check-host'",
-    `t 'read Factory environ' 'grep -q canary /proc/${process.pid}/environ'`,
+    "t 'write /usr/local' 'touch /usr/local/pendulum-check'",
+    "t 'write /var/tmp shared' 'touch /var/tmp/pendulum-check-agent && test -e /var/tmp/pendulum-check-agent'",
+    `t 'read Pendulum home' 'cat ${secret}'`,
+    "t 'see host /tmp' 'test -e /tmp/pendulum-check-host'",
+    `t 'read Pendulum environ' 'grep -q canary /proc/${process.pid}/environ'`,
     "t 'sudo' 'sudo -n true'",
     "(setsid sleep 300 >/dev/null 2>&1 &); echo left=1",
   ].join("\n");
-  const BAR = { "write home": true, "write /usr/local": false, "read Factory home": false, "see host /tmp": false, "read Factory environ": false, sudo: false, "process left behind": false };
+  const BAR = { "write home": true, "write /usr/local": false, "read Pendulum home": false, "see host /tmp": false, "read Pendulum environ": false, sudo: false, "process left behind": false };
   const read = (out) => Object.fromEntries(String(out).split("\n").map((l) => /^(.+)=([01])$/.exec(l.trim())).filter(Boolean).map((m) => [m[1], m[2] === "1"]));
   const left = async () => (await exec("/usr/bin/pgrep", ["-u", agent.user, "-f", "sleep 300"])).code === 0;
   const confined = read((await exec("/bin/bash", ["-c", probe], { cwd: agent.home })).stdout);
@@ -80,22 +80,22 @@ async function agentCheck() {
   const plain = read((await exec("/usr/bin/sudo", ["-n", "-u", agent.user, "--", "/bin/bash", "-c", probe], { cwd: "/" })).stdout);
   plain["process left behind"] = await left();
   await exec("/usr/bin/sudo", ["-n", "/usr/bin/pkill", "-KILL", "-u", agent.user]);
-  // The paths the agent owns, swapped for symlinks: its working directory into Factory's home (a 644 file in a 755
+  // The paths the agent owns, swapped for symlinks: its working directory into Pendulum's home (a 644 file in a 755
   // directory under the 700 home), and its temp directory onto a directory root owns. The wrapper must neither enter the
   // first nor touch the second; the controls replay the pattern it must not use (root enters or creates, then drops).
   const sudo = (args) => exec("/usr/bin/sudo", ["-n", ...args]);
-  const fdir = join(homedir(), "factory-check");
+  const fdir = join(homedir(), "pendulum-check");
   mkdirSync(fdir, { recursive: true, mode: 0o755 });
-  writeFileSync(join(fdir, "data.txt"), "factory-only\n", { mode: 0o644 });
-  await sudo(["/usr/bin/install", "-d", "-m", "755", "-o", "root", "-g", "root", "/opt/factory-check-target"]);
-  const owner = async () => (await exec("/usr/bin/stat", ["-c", "%U %a", "/opt/factory-check-target"])).stdout.trim();
+  writeFileSync(join(fdir, "data.txt"), "pendulum-only\n", { mode: 0o644 });
+  await sudo(["/usr/bin/install", "-d", "-m", "755", "-o", "root", "-g", "root", "/opt/pendulum-check-target"]);
+  const owner = async () => (await exec("/usr/bin/stat", ["-c", "%U %a", "/opt/pendulum-check-target"])).stdout.trim();
   await sudo(["/usr/bin/ln", "-sfn", fdir, join(agent.home, "evil")]);
   const viaCwd = await exec("/bin/cat", ["data.txt"], { cwd: join(agent.home, "evil") });
-  confined["cwd symlink into Factory home"] = viaCwd.code === 0 && viaCwd.stdout.includes("factory-only");
+  confined["cwd symlink into Pendulum home"] = viaCwd.code === 0 && viaCwd.stdout.includes("pendulum-only");
   const ctlCwd = await sudo(["/bin/sh", "-c", `cd ${join(agent.home, "evil")} && exec /usr/bin/setpriv --reuid=${agent.user} --regid=${agent.user} --clear-groups /bin/cat data.txt`]);
-  plain["cwd symlink into Factory home"] = ctlCwd.code === 0 && ctlCwd.stdout.includes("factory-only");
+  plain["cwd symlink into Pendulum home"] = ctlCwd.code === 0 && ctlCwd.stdout.includes("pendulum-only");
   await sudo(["/usr/bin/rm", "-rf", "--", agent.tmp]);
-  await sudo(["/usr/bin/ln", "-sfn", "/opt/factory-check-target", agent.tmp]);
+  await sudo(["/usr/bin/ln", "-sfn", "/opt/pendulum-check-target", agent.tmp]);
   const before = await owner();
   await exec("/bin/true", [], { cwd: agent.home });
   confined["tmp symlink honoured (root dir chowned)"] = (await owner()) !== before;
@@ -113,7 +113,7 @@ done > "$HOME/rw-mounts"
 if [ -s "$HOME/rw-mounts" ]; then echo "rw mount outside home and private tmp=1"; else echo "rw mount outside home and private tmp=0"; fi
 w=0
 for d in $(find / \( -path /proc -o -path /sys -o -path "$HOME" -o -path /tmp -o -path /var/tmp -o -path /dev/shm -o -path /run/lock \) -prune -o -type d -perm -0002 -print 2>/dev/null); do
-  if touch "$d/.factory-check" 2>/dev/null; then rm -f "$d/.factory-check"; w=1; echo "$d" >> "$HOME/ww-dirs"; fi
+  if touch "$d/.pendulum-check" 2>/dev/null; then rm -f "$d/.pendulum-check"; w=1; echo "$d" >> "$HOME/ww-dirs"; fi
 done
 echo "world-writable dir outside them=$w"
 if unshare -Ur true 2>/dev/null; then echo "user namespace=1"; else echo "user namespace=0"; fi
@@ -144,7 +144,7 @@ if curl -s -m 3 -o /dev/null http://127.0.0.1:23456/; then echo "vendor listener
   };
   confined["agent process outlives its killed worker"] = await orphan(true);
   plain["agent process outlives its killed worker"] = await orphan(false);
-  Object.assign(BAR, { "agent process outlives its killed worker": false, "cwd symlink into Factory home": false, "tmp symlink honoured (root dir chowned)": false, "rw mount outside home and private tmp": false, "world-writable dir outside them": false });
+  Object.assign(BAR, { "agent process outlives its killed worker": false, "cwd symlink into Pendulum home": false, "tmp symlink honoured (root dir chowned)": false, "rw mount outside home and private tmp": false, "world-writable dir outside them": false });
   // Recorded, not barred: what the kernel and the vendor allow every uid in the VM.
   for (const name of ["user namespace", "vendor listener 23456"]) console.log(`info agent ${name}: ${confined[name] ? "yes" : "no"}; without the wrapper: ${plain[name] ? "yes" : "no"}`);
 
@@ -155,8 +155,8 @@ if curl -s -m 3 -o /dev/null http://127.0.0.1:23456/; then echo "vendor listener
     console.log(`${ok ? "ok  " : "OFF "} agent ${name}: ${confined[name] ? "yes" : "no"} (bar: ${want ? "yes" : "no"}); without the wrapper: ${plain[name] ? "yes" : "no"}`);
   }
   // The control must show the wrapper doing the work: without it the agent sees the host's /tmp and leaves a process behind.
-  const control = plain["see host /tmp"] === true && plain["process left behind"] === true && plain["cwd symlink into Factory home"] === true && plain["tmp symlink honoured (root dir chowned)"] === true && plain["rw mount outside home and private tmp"] === true && plain["agent process outlives its killed worker"] === true;
-  console.log(`${control ? "ok  " : "OFF "} negative controls: plain sudo -u ${control ? "reaches" : "does NOT reach"} the host /tmp, leaves a process and sees rw mounts; root-cd-then-drop ${plain["cwd symlink into Factory home"] ? "reads" : "does NOT read"} Factory's file; root install -d ${plain["tmp symlink honoured (root dir chowned)"] ? "chowns" : "does NOT chown"} the symlink's target; a killed worker with no reap ${plain["agent process outlives its killed worker"] ? "leaves" : "does NOT leave"} the agent's command running`);
+  const control = plain["see host /tmp"] === true && plain["process left behind"] === true && plain["cwd symlink into Pendulum home"] === true && plain["tmp symlink honoured (root dir chowned)"] === true && plain["rw mount outside home and private tmp"] === true && plain["agent process outlives its killed worker"] === true;
+  console.log(`${control ? "ok  " : "OFF "} negative controls: plain sudo -u ${control ? "reaches" : "does NOT reach"} the host /tmp, leaves a process and sees rw mounts; root-cd-then-drop ${plain["cwd symlink into Pendulum home"] ? "reads" : "does NOT read"} Pendulum's file; root install -d ${plain["tmp symlink honoured (root dir chowned)"] ? "chowns" : "does NOT chown"} the symlink's target; a killed worker with no reap ${plain["agent process outlives its killed worker"] ? "leaves" : "does NOT leave"} the agent's command running`);
   return bad || !control ? 1 : 0;
 }
 const wanted = (values.harness || "srt,claude,codex,copilot").split(",").map((s) => s.trim()).filter(Boolean);
@@ -174,14 +174,14 @@ if (platform() === "linux") for (const p of sandboxStartProblems()) console.log(
 
 // The bar, per probe: true = must work, false = must not.
 const BAR = { "read credential store": false, "write clone": true, "git commit": true, "write .git/hooks": false, "write .git/config": false, "write .git/info/attributes": false, "write stage dir": true, "write stage bin": false, "escape to /tmp": false, "escape to home": false, "GET allowed host": true, "POST allowed host": true, "other host": false, "model key in env": false, "pnpm lock dir": true, "package caches": true, "write /tmp/claude": false, "clone walkable": true, "private TMPDIR": true, "write other stage": false, "plant harness config": false };
-// srt starts no harness: there Factory's pre-start clear is checked; a harness must load nothing planted.
+// srt starts no harness: there Pendulum's pre-start clear is checked; a harness must load nothing planted.
 // Linux: each harness runs in the outer sandbox local mode starts it in, which must contain what the harness itself runs.
 const outerOn = platform() === "linux";
 // Which harnesses get the outer sandbox on this host, as a stage decides it (lib/local.mjs outerProbe); reported.
 const outerMode = {};
 const outerModeOf = (h) => (outerMode[h] ??= outerProbe(h, { domains: LOCAL_DOMAINS }));
 // "rename .git" is barred on Linux, where no sandbox allows it (Copilot's binds .git apart, local.mjs copilotLocalSettings),
-// and reported elsewhere: Copilot's Seatbelt profile allows it, and Factory's git guard (local.mjs gitGuardScript) keeps the
+// and reported elsewhere: Copilot's Seatbelt profile allows it, and Pendulum's git guard (local.mjs gitGuardScript) keeps the
 // harness's own git off the replacement, which "planted mid-session git config run" checks; the .git pin then refuses the
 // next start ("replaced .git refused at next start").
 // "srt proxy direct": a command going straight to srt's proxy bridge (Copilot's commands see it as slirp4netns's host
@@ -214,7 +214,7 @@ const gitMarks = join(root, "gitmarks");
 mkdirSync(gitMarks);
 mkdirSync(bin, { recursive: true });
 mkdirSync(clone);
-// Factory's own git on the host here never reads what a probe planted in the clone's git directory.
+// Pendulum's own git on the host here never reads what a probe planted in the clone's git directory.
 const git = (...a) => execFileSync("git", ["-C", clone, "-c", "core.fsmonitor=false", "-c", "diff.ignoreSubmodules=all", ...a], { stdio: "ignore" });
 const id = ["-c", "user.name=t", "-c", "user.email=t@t"];
 git("init", "-q");
@@ -225,7 +225,7 @@ writeFileSync(join(clone, "sub", "f"), "x\n");
 execFileSync("git", ["-C", join(clone, "sub"), "add", "f"], { stdio: "ignore" });
 execFileSync("git", ["-C", join(clone, "sub"), ...id, "commit", "-qm", "sub"], { stdio: "ignore" });
 const subHead = execFileSync("git", ["-C", join(clone, "sub"), "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-// Factory's pre-start clear removes both; each harness's run starts from them again.
+// Pendulum's pre-start clear removes both; each harness's run starts from them again.
 const subGitFile = readFileSync(join(clone, "sub", ".git"), "utf8");
 const subModules = join(root, "modules-sub");
 git("update-index", "--add", "--cacheinfo", `160000,${subHead},sub`);
@@ -245,20 +245,20 @@ const initSha = execFileSync("git", ["-C", clone, "rev-parse", "HEAD"], { encodi
 const gitPin = join(root, "git-id");
 pinGitDir(clone, gitPin);
 mkdirSync(join(clone, ".git", "hooks"), { recursive: true });
-const canaryDir = join(homedir(), ".config", "factory");
+const canaryDir = join(homedir(), ".config", "pendulum");
 const canaryExisted = existsSync(canaryDir);
 mkdirSync(canaryDir, { recursive: true });
 const canary = join(canaryDir, `sandbox-check-${process.pid}`);
 writeFileSync(canary, "canary\n", { mode: 0o600 });
-const escapeTmp = join(tmpdir(), `factory-sbx-escape-${process.pid}`);
-// srt's and Claude Code's shared scratch directory: Factory denies writes there.
-const escapeShared = `/tmp/claude/factory-sbx-escape-${process.pid}`;
-const escapeHome = join(homedir(), `.factory-sbx-escape-${process.pid}`);
+const escapeTmp = join(tmpdir(), `pendulum-sbx-escape-${process.pid}`);
+// srt's and Claude Code's shared scratch directory: Pendulum denies writes there.
+const escapeShared = `/tmp/claude/pendulum-sbx-escape-${process.pid}`;
+const escapeHome = join(homedir(), `.pendulum-sbx-escape-${process.pid}`);
 
 // Paths the probe tries to write from inside each sandbox (a hook, settings, a skill or agent, MCP servers for each
 // harness): on the host afterwards, none may hold its token.
 const PLANT_PATHS = [".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/probe.sh", ".claude/skills/probe/SKILL.md", ".claude/agents/probe.md", ".codex/config.toml", ".codex/hooks.json", ".agents/skills/probe/SKILL.md", ".github/hooks/probe.json", ".github/copilot/settings.json", ".github/agents/probe.agent.md", ".github/skills/probe/SKILL.md", ".mcp.json"];
-const plantToken = `factory-sbx-plant-${process.pid}`;
+const plantToken = `pendulum-sbx-plant-${process.pid}`;
 
 // A command going straight to srt's proxy bridge at `addr` for a host srt's list has and the harness's list does not, with
 // srt's proxy credentials where the command's env still carries them (srt puts them in many variables; the harness may
@@ -316,7 +316,7 @@ r "write other stage" 'echo x > "${otherStage}/probe-file"'
 for p in ${PLANT_PATHS.join(" ")}; do (mkdir -p "$(dirname "${clone}/$p")" && printf '%s' "${plantToken}" > "${clone}/$p") 2>/dev/null; done
 sh -c 'echo x > "${escapeTmp}"' 2>/dev/null; sh -c 'echo x > "${escapeShared}"' 2>/dev/null; sh -c 'echo x > "${escapeHome}"' 2>/dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://github.com/); case "$code" in 2*|3*) ok=yes;; *) ok=no;; esac; printf 'GET allowed host\\t%s\\tHTTP %s\\n' "$ok" "$code" >> "$out"
-code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST https://api.github.com/repos/clockgrove/factory/issues); case "$code" in 401|404|422) ok=yes;; *) ok=no;; esac; printf 'POST allowed host\\t%s\\tHTTP %s\\n' "$ok" "$code" >> "$out"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST https://api.github.com/repos/clockgrove/pendulum/issues); case "$code" in 401|404|422) ok=yes;; *) ok=no;; esac; printf 'POST allowed host\\t%s\\tHTTP %s\\n' "$ok" "$code" >> "$out"
 r "other host" 'curl -sf -o /dev/null --max-time 10 https://example.com'
 ${bridgeProbe("10.0.2.2")}
 seen=""; for k in ${MODEL_SECRET_KEYS.join(" ")}; do eval "v=\\\${$k:-}"; [ -n "$v" ] && seen="$seen $k"; done
@@ -374,7 +374,7 @@ let gitErr = "";
 // commondir at a writable copy whose config runs a clean filter and an fsmonitor, a gitlink HEAD lacks whose .git file
 // points at a writable git directory with an fsmonitor, and an fsmonitor in HEAD's own submodule's config. A git on the
 // host that read any of it leaves a marker in gitMarks, which no sandbox may write; each harness CLI runs git there as it
-// starts. Factory's pre-start clear (as runHarness runs it) comes first, then the start.
+// starts. Pendulum's pre-start clear (as runHarness runs it) comes first, then the start.
 const gitPlant = join(root, "gitplant.sh");
 writeFileSync(gitPlant, `#!/bin/sh
 cd "${clone}" || exit 1
@@ -389,7 +389,7 @@ const srtCmd = join(root, "srt.json");
 writeFileSync(srtCmd, JSON.stringify(srtSettings({ domains, writable: [clone, ...addDirs], clone, readOnly })));
 const srtGit = join(root, "srt-git.json");
 writeFileSync(srtGit, JSON.stringify(srtSettings({ domains: [], writable: [clone, stageTmp], readOnly })));
-const srtEnv = () => ({ ...envFor("srt"), FACTORY_LOCAL_SRT: srtCmd, FACTORY_LOCAL_SRT_GIT: srtGit, FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs, clone, readOnly }) });
+const srtEnv = () => ({ ...envFor("srt"), PENDULUM_LOCAL_SRT: srtCmd, PENDULUM_LOCAL_SRT_GIT: srtGit, PENDULUM_LOCAL_SANDBOX: JSON.stringify({ addDirs, clone, readOnly }) });
 const plantGit = () => {
   if (!onPath("srt")) return [];
   const env = srtEnv();
@@ -442,12 +442,12 @@ const outerFor = (h, env = {}) => {
 const hostGit = () => {
   for (const a of [["status", "--short", "--ignore-submodules=dirty"], ["status", "--porcelain"], ["diff", initSha, "--no-ext-diff", "--no-textconv"]]) spawnSync("git", a, { cwd: clone, env: { ...process.env, ...HARNESS_GIT_ENV }, stdio: "ignore", timeout: 60_000 });
 };
-// Factory's git guard, first on each harness's PATH as local mode puts it (lib/harness.mjs).
+// Pendulum's git guard, first on each harness's PATH as local mode puts it (lib/harness.mjs).
 // In the stage's usage directory, as a stage keeps it: readable in every sandbox, writable in none.
 const gitBin = join(usage, "gitbin");
 mkdirSync(gitBin);
 writeFileSync(join(gitBin, "git"), gitGuardScript(realpathSync(execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim())), { mode: 0o755 });
-const guarded = (env) => ({ ...env, PATH: `${gitBin}:${env.PATH || ""}`, FACTORY_GIT_DIR: join(clone, ".git"), FACTORY_GIT_ID: String(lstatSync(join(clone, ".git")).ino) });
+const guarded = (env) => ({ ...env, PATH: `${gitBin}:${env.PATH || ""}`, PENDULUM_GIT_DIR: join(clone, ".git"), PENDULUM_GIT_ID: String(lstatSync(join(clone, ".git")).ino) });
 const midRow = () => {
   const ran = readdirSync(gitMarks).filter((f) => f.startsWith("midsession-"));
   return ran.length ? { ok: true, detail: `a git on the host ran what was planted during the run: ${ran.join(" ")}` } : { ok: false, detail: "" };
@@ -471,9 +471,9 @@ const missedRow = () => {
   return existsSync(join(gitMarks, "missed-guard-ran")) ? { ok: true, detail: "ran in the outer sandbox, contained" } : { ok: null, detail: "the harness's git never ran the filter" };
 };
 
-// Factory's git state across the pre-start clear (backend.mjs pinGitState after its git setup, then beforeHarness before
+// Pendulum's git state across the pre-start clear (backend.mjs pinGitState after its git setup, then beforeHarness before
 // each start): the clear must keep what the pin recorded. The negative control: .git/info/attributes written from
-// Factory's own git profile (which may write .git, where every command sandbox may not) must then be refused at the
+// Pendulum's own git profile (which may write .git, where every command sandbox may not) must then be refused at the
 // check, or the row proves nothing.
 const gitStateRow = async () => {
   const attr = join(clone, ".git", "info", "attributes");
@@ -488,7 +488,7 @@ const gitStateRow = async () => {
   const caught = checkGitState(clone);
   writeFileSync(attr, "");
   if (err || err2) return { ok: false, detail: `the clear failed: ${err || err2}` };
-  if (!wrote) return { ok: null, detail: "the control write from Factory's git profile did not land" };
+  if (!wrote) return { ok: null, detail: "the control write from Pendulum's git profile did not land" };
   return { ok: !kept && !!caught, detail: kept ? `after the clear alone: ${kept}` : caught ? "" : "the control change was not caught" };
 };
 
@@ -502,14 +502,14 @@ const why = (r) => {
 const runners = {
   srt: async () => {
     if (!onPath("srt")) return "srt not on PATH";
-    // Through the wrapper Factory's own commands use, so the probe sees what validation sees.
+    // Through the wrapper Pendulum's own commands use, so the probe sees what validation sees.
     const env = srtEnv();
     const [cmd, args] = BACKENDS.local.sandbox.command(["sh", probe], env);
     const r = spawnSync(cmd, args, { cwd: clone, env, ...captured, timeout: 120_000 });
     hostGit();
     extra["planted mid-session git config run"] = midRow();
     const landed = plantGit();
-    // Factory's pre-start clear, in its git profile as before every local harness start (backend.mjs beforeHarness).
+    // Pendulum's pre-start clear, in its git profile as before every local harness start (backend.mjs beforeHarness).
     const err = await clearClone();
     const left = Object.keys(PLANTS).filter((p) => p !== ".mcp.json" && lstatSync(join(clone, p), { throwIfNoEntry: false }));
     extra["planted config cleared"] = { ok: !err && !left.length, detail: err || (left.length ? `left: ${left.join(" ")}` : "") };
@@ -555,9 +555,9 @@ const runners = {
   },
   copilot: () => {
     if (!onPath("copilot")) return "copilot not on PATH";
-    const tokenFile = join(homedir(), ".config", "factory", "copilot-token");
+    const tokenFile = join(homedir(), ".config", "pendulum", "copilot-token");
     const token = process.env.COPILOT_GITHUB_TOKEN || (existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "");
-    if (!token) return "no Copilot token (COPILOT_GITHUB_TOKEN or ~/.config/factory/copilot-token)";
+    if (!token) return "no Copilot token (COPILOT_GITHUB_TOKEN or ~/.config/pendulum/copilot-token)";
     const home = join(root, "copilot-home");
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "settings.json"), JSON.stringify(copilotLocalSettings({ domains, clone, addDirs, readOnly })));
@@ -595,7 +595,7 @@ const replacedRow = async () => {
   }
   const local = { clone, addDirs, readOnly, gitId: readGitPin(gitPin), gitPin };
   const stage = gitDirChanged(clone, readGitPin(gitPin), gitPin);
-  const start = await BACKENDS.local.sandbox.beforeHarness({ ...srtEnv(), FACTORY_LOCAL_SANDBOX: JSON.stringify(local) }).then(() => "", (e) => e.message);
+  const start = await BACKENDS.local.sandbox.beforeHarness({ ...srtEnv(), PENDULUM_LOCAL_SANDBOX: JSON.stringify(local) }).then(() => "", (e) => e.message);
   return stage && /refusing/.test(start) ? { ok: true, detail: start.slice(0, 120) } : { ok: false, detail: `stage: ${stage || "accepted"}; start: ${start || "accepted"}` };
 };
 
@@ -613,9 +613,9 @@ const outerRows = () => {
   const sockDir = join(root, "agent");
   mkdirSync(sockDir, { recursive: true });
   const runDir = `/run/user/${process.getuid()}`;
-  const tmpSock = realpathSync(mkdtempSync(join(tmpdir(), "factory-sbx-sock-")));
-  const wslg = existsSync("/mnt/wslg") && spawnSync("test", ["-w", "/mnt/wslg"]).status === 0 ? [`/mnt/wslg/factory-sbx-${process.pid}.sock`] : [];
-  const socks = [join(sockDir, "agent.sock"), join(tmpSock, "s.sock"), ...wslg, ...(existsSync(runDir) ? [join(runDir, `factory-sbx-${process.pid}.sock`)] : [])];
+  const tmpSock = realpathSync(mkdtempSync(join(tmpdir(), "pendulum-sbx-sock-")));
+  const wslg = existsSync("/mnt/wslg") && spawnSync("test", ["-w", "/mnt/wslg"]).status === 0 ? [`/mnt/wslg/pendulum-sbx-${process.pid}.sock`] : [];
+  const socks = [join(sockDir, "agent.sock"), join(tmpSock, "s.sock"), ...wslg, ...(existsSync(runDir) ? [join(runDir, `pendulum-sbx-${process.pid}.sock`)] : [])];
   const server = spawn(process.execPath, ["-e", `const net=require("net");for(const p of process.argv.slice(1)){try{require("fs").rmSync(p,{force:true})}catch{};net.createServer((c)=>{c.on("error",()=>{});c.end("reached")}).listen(p)};setTimeout(()=>process.exit(0),90000)`, ...socks], { stdio: "ignore", detached: false });
   spawnSync("sh", ["-c", "sleep 1"]);
   // Each socket answers on the host, or the row proves nothing.
@@ -635,7 +635,7 @@ const outerRows = () => {
   const homeEnvOf = (h) => (h === "copilot" ? { COPILOT_HOME: join(root, "copilot-outer-home") } : {});
   // A listener started after the stage's profile was made, in an ssh-agent style directory under /tmp that was there
   // (empty) when it was made: unreachable in that profile, and reachable with the socket denies taken out (the control).
-  const lateDir = `/tmp/ssh-factory-sbx${process.pid}`;
+  const lateDir = `/tmp/ssh-pendulum-sbx${process.pid}`;
   mkdirSync(lateDir, { recursive: true });
   const late = ["claude", "codex", "copilot"].map((h) => {
     const settings = harnessOuterSettings({ harness: h, writable: [clone, stageTmp], clone, env: homeEnvOf(h), readOnly, bwrapPath: bwrapOf(h) });
@@ -748,7 +748,7 @@ const outerRows = () => {
   mkdirSync(vdir, { recursive: true });
   const fakeEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
   const v = sandboxedVersion("codex", vdir, { env: fakeEnv });
-  const sv = harnessVersion("codex", { ...fakeEnv, FACTORY_LOCAL: "1", TMPDIR: stageTmp });
+  const sv = harnessVersion("codex", { ...fakeEnv, PENDULUM_LOCAL: "1", TMPDIR: stageTmp });
   out["version probe sandboxed"] = { ok: v === "codex-cli 0.0.0" && sv === "codex-cli 0.0.0" && !existsSync(marker), detail: existsSync(marker) ? "ran on the host" : v !== "codex-cli 0.0.0" ? v || "no version read (probe)" : sv !== "codex-cli 0.0.0" ? sv || "no version read (stage)" : "" };
   return out;
 };
@@ -770,7 +770,7 @@ for (const name of wanted) {
   resetGit();
   git("reset", "-q", "--hard", initSha);
   rmSync(join(clone, "probe-file"), { force: true });
-  // A harness's own start: the clone's git repointed by a command, then Factory's pre-start clear, then the start.
+  // A harness's own start: the clone's git repointed by a command, then Pendulum's pre-start clear, then the start.
   [gitLanded, gitErr] = name === "srt" ? [[], ""] : [plantGit(), await clearClone()];
   plantConfig();
   extra = {};

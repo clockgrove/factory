@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Factory's image build (mode: image): the sandbox image every stage of a cloud-sandbox adopter starts from.
+// Pendulum's image build (mode: image): the sandbox image every stage of a cloud-sandbox adopter starts from.
 //   node scripts/image.mjs --repo OWNER/NAME --checkout DIR [--manual]
 // DIR is the job's checkout of the default branch's head. A fresh sandbox from the vendor's base image gets a clone of
 // that head (from a git bundle: no credential is ever in the sandbox, and origin is the plain https URL), runs the
 // repository's own setup command there as CI would, installs the dependency store with the same command the worker
 // uses and the three harness CLIs, and is kept as a snapshot: the sandbox stays, stopped, tagged with the repository
-// id, the head and the snapshot (the vendor's proof). The GitHub record is a marker comment the Factory App writes on
+// id, the head and the snapshot (the vendor's proof). The GitHub record is a marker comment the Pendulum App writes on
 // its image issue, with a token minted for that alone (issues: write on this repository); images beyond the newest
 // two are destroyed, found from the vendor's listing only. Runs on a push to the default branch (until today's builds
 // pass image_daily_minutes), on the first dispatcher tick of a UTC day that finds a build owed (lib/image.mjs
@@ -33,12 +33,12 @@ import { checkoutIo } from "./doctor.mjs";
 const BUILD_MS = 40 * 60_000;
 const VCPUS = 2;
 /** Every secret this process reads, gone from the environment once read (the vendor SDK runs in this process). */
-export const SECRET_ENV = new Set([...[...SECRET_INPUTS].map((n) => `FACTORY_INPUT_${n.toUpperCase()}`), "FACTORY_INPUT_VERCEL_TEAM_ID", "FACTORY_INPUT_VERCEL_PROJECT_ID", "FACTORY_APP_PRIVATE_KEY", "FACTORY_APP_TOKEN", "FACTORY_SECOND_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "VERCEL_TOKEN", "VERCEL_OIDC_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN"]);
+export const SECRET_ENV = new Set([...[...SECRET_INPUTS].map((n) => `PENDULUM_INPUT_${n.toUpperCase()}`), "PENDULUM_INPUT_VERCEL_TEAM_ID", "PENDULUM_INPUT_VERCEL_PROJECT_ID", "PENDULUM_APP_PRIVATE_KEY", "PENDULUM_APP_TOKEN", "PENDULUM_SECOND_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "VERCEL_TOKEN", "VERCEL_OIDC_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN"]);
 
-/** Factory's directory in the image, owned by the default user. */
+/** Pendulum's directory in the image, owned by the default user. */
 const PREPARE = `sudo install -d -m 755 -o "$(id -u)" -g "$(id -g)" ${IMAGE_DIR}`;
 /**
- * git-lfs and gh, from the base's apt (every vendor base Factory uses is Ubuntu), and what Claude Code's sandbox needs
+ * git-lfs and gh, from the base's apt (every vendor base Pendulum uses is Ubuntu), and what Claude Code's sandbox needs
  * (bubblewrap, socat, ripgrep: harness.mjs claudeRunner); each must answer --version.
  */
 export const BASE_PACKAGES = "set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; apt-get install -y -qq git-lfs gh libcap2-bin bubblewrap socat ripgrep >/dev/null; git lfs version; gh --version | head -1; bwrap --version; command -v socat";
@@ -53,7 +53,7 @@ const NO_CREDENTIALS = 'cd "$CHECKOUT"; ! git config --get-regexp "^(http\\..*ex
 /**
  * Privilege and configuration every stage would inherit from setup (root, the default branch's script), read as root:
  * taken before setup and after the harness CLIs, and any difference fails the build. Hashed whole: sudoers, the
- * preload list, the system and the default user's git config, the clone's git config and hooks (Factory's own git acts
+ * preload list, the system and the default user's git config, the clone's git config and hooks (Pendulum's own git acts
  * on them), /etc/environment, PAM, the harnesses' system config, and every setuid or setgid file. Listed: file
  * capabilities. Accounts are read for what grants privilege (uid 0, the privileged groups' members, accounts with a
  * password or an empty one), not hashed, so a package that adds its own system user (postgres) passes.
@@ -147,7 +147,7 @@ export async function buildImage({ adapter, base, bundle, repo, branch, sha, set
     let setupEnv = {};
     if (setup) {
       await step("setup", ["bash", "-c", setup], { cwd: checkout, env: { CI: "true", ...files } });
-      const local = mkdtempSync(join(tmpdir(), "factory-image-"));
+      const local = mkdtempSync(join(tmpdir(), "pendulum-image-"));
       try {
         const copies = { GITHUB_ENV: join(local, "env"), GITHUB_PATH: join(local, "path") };
         writeFileSync(copies.GITHUB_ENV, (await adapter.readFile(id, files.GITHUB_ENV)) ?? "");
@@ -162,7 +162,7 @@ export async function buildImage({ adapter, base, bundle, repo, branch, sha, set
       await step("install", ["bash", "-c", install], { cwd: checkout, env: { CI: "true", ...setupEnv } }).catch(async (e) => {
         // A program the automatic install runs that setup did not bring (lib/checkout.mjs installTools): named.
         const absent = [];
-        const has = (t) => adapter.run(id, { argv: ["bash", "-c", 'command -v -- "$1" >/dev/null', "factory-tool", t.tool], cwd: checkout, env: setupEnv, timeoutMs: 30_000 }).then((r) => r.exitCode === 0, () => true);
+        const has = (t) => adapter.run(id, { argv: ["bash", "-c", 'command -v -- "$1" >/dev/null', "pendulum-tool", t.tool], cwd: checkout, env: setupEnv, timeoutMs: 30_000 }).then((r) => r.exitCode === 0, () => true);
         for (const t of tools) if (!(await has(t))) absent.push(t);
         throw absent.length ? Object.assign(new Error(`${e.message}: ${absentTools(absent)}`), { step: e.step }) : e;
       });
@@ -177,7 +177,7 @@ export async function buildImage({ adapter, base, bundle, repo, branch, sha, set
     const all = privilegedChanges(privilegedBefore, await step("privileged config after setup", ["bash", "-c", PRIVILEGED], { user: "root", env: privileged, quiet: true }));
     const where = { home, checkout };
     const candidates = [...new Set(all.map(changePath).filter((p) => packageMayOwn(p, where)))];
-    const clean = new Set(candidates.length ? (await step("privileged files from packages", ["bash", "-c", PACKAGE_CLEAN, "factory-package-clean", ...candidates], { user: "root", quiet: true })).split("\n").filter(Boolean) : []);
+    const clean = new Set(candidates.length ? (await step("privileged files from packages", ["bash", "-c", PACKAGE_CLEAN, "pendulum-package-clean", ...candidates], { user: "root", quiet: true })).split("\n").filter(Boolean) : []);
     const changed = unexplainedChanges(all, clean, where);
     if (all.length > changed.length) log(`image: setup installed packages that bring privileged files (dpkg-owned, unmodified): ${[...clean].join(", ")}`);
     if (changed.length) {
@@ -247,21 +247,21 @@ export function harnessVersions(spec, { view = npmView } = {}) {
 /**
  * What this image job does about `head` in `checkout` (its clone of the default branch): the install command and the
  * INSTALLS entries it runs (`install`, `tools`), the harness CLIs' exact versions (`versions`, harnessVersions with
- * `view`), what a build now would be made from (`made`, imageMade with Factory's own digest, `factory`), whether the
+ * `view`), what a build now would be made from (`made`, imageMade with Pendulum's own digest, `pendulum`), whether the
  * head changes anything the current image is made from (`change`, imageChange: asked only of an image made the same
  * way, for a head it neither is nor covers), imageDecision's answer (`decision`), what to log (`notes`), and, when the
  * decision covers the head, what recordCover records (`cover`, with the owed job's own `attempt`). `builds`: the
  * record, newest first; `current`: the newest confirmed, ready image.
  */
-export async function imagePlan({ checkout, head, trigger, inputs, base, current, builds = [], attempt = null, todayMs = 0, factory = pluginDigest(), view, now = new Date(), env = process.env }) {
+export async function imagePlan({ checkout, head, trigger, inputs, base, current, builds = [], attempt = null, todayMs = 0, pendulum = pluginDigest(), view, now = new Date(), env = process.env }) {
   const install = installCommand(checkout, inputs.install);
   const tools = installTools(checkout, inputs.install);
   const versions = harnessVersions(inputs.harnessVersion, view ? { view } : {});
-  const made = imageMade({ setup: inputs.setup, install, versions, base, factory });
+  const made = imageMade({ setup: inputs.setup, install, versions, base, pendulum });
   const notes = [];
   if (!versions) notes.push(`the harness CLIs' versions for ${inputs.harnessVersion || "latest"} could not be read from the registry, so this head is not taken as unchanged`);
   const comparable = !!current && current.sha !== head && !!made && current.made === made && current.covers !== head;
-  if (current && current.sha !== head && made && current.made !== made) notes.push(`${current.sha.slice(0, 7)}'s image was built otherwise (setup, install, a harness CLI's version, the base image or Factory itself), or before Factory recorded how`);
+  if (current && current.sha !== head && made && current.made !== made) notes.push(`${current.sha.slice(0, 7)}'s image was built otherwise (setup, install, a harness CLI's version, the base image or Pendulum itself), or before Pendulum recorded how`);
   const change = comparable ? await imageChange(checkout, current.sha, head, { setup: inputs.setup, install, toolchainPaths: inputs.toolchainPaths, env }) : null;
   if (change) notes.push(change.unknown ?? (change.touched ? `${change.touched} changed since ${current.sha.slice(0, 7)}` : `nothing the image is made from changed since ${current.sha.slice(0, 7)}`));
   const decision = imageDecision({ trigger, refresh: inputs.imageRefresh, head, current, made, unchanged: !!change && !change.unknown && change.touched === null, maxAgeDays: inputs.imageMaxAgeDays, lastAttemptAt: builds[0]?.builtAt ?? null, todayMs, dailyMinutes: inputs.imageDailyMinutes, now });
@@ -333,8 +333,8 @@ async function main() {
   const adapter = await openSandbox(inputs.sandbox, { VERCEL_TOKEN: inputs.vercelToken, VERCEL_TEAM_ID: inputs.vercelTeamId, VERCEL_PROJECT_ID: inputs.vercelProjectId });
   inputs.vercelToken = "";
   const repoId = String(process.env.GITHUB_REPOSITORY_ID || repoData.id);
-  // Factory's own record (its App's comment) is trusted for minutes; a snapshot in it counts only where the vendor's
-  // listing in Factory's project confirms it (lib/image.mjs).
+  // Pendulum's own record (its App's comment) is trusted for minutes; a snapshot in it counts only where the vendor's
+  // listing in Pendulum's project confirms it (lib/image.mjs).
   const [{ builds }, vendor] = await Promise.all([listImages(repo, app), vendorImages(adapter, repoId)]);
   const verified = verifiedRecords(builds, vendor.images, adapter.name);
   const todayMs = todaysBuildMs(builds);
@@ -344,7 +344,7 @@ async function main() {
   for (const n of notes) log(`image: ${n}`);
   if (cover) await recordCover(repo, cover, app).catch((e) => log(`image: recording that ${head.slice(0, 7)} changes nothing failed (${e.status ?? String(e.message).slice(0, 120)})`));
   if (decision.skip) {
-    summary(`### Factory sandbox image\n\nSkipped: ${decision.skip}. Today's builds: ${(todayMs / 60_000).toFixed(1)} min.`);
+    summary(`### Pendulum sandbox image\n\nSkipped: ${decision.skip}. Today's builds: ${(todayMs / 60_000).toFixed(1)} min.`);
     return done("skipped", decision.skip);
   }
   if (decision.note) log(`image: ${decision.note}`);
@@ -366,7 +366,7 @@ async function main() {
   for (const i of prunableImages(vendor.images, current, verified)) {
     await adapter.destroy(i.source).then(() => log(`image: destroyed superseded image ${i.source} (${i.snapshot}) before the build`), (e) => log(`image: destroying ${i.source} failed (${e.code ?? e.message})`));
   }
-  const tmp = mkdtempSync(join(tmpdir(), "factory-bundle-"));
+  const tmp = mkdtempSync(join(tmpdir(), "pendulum-bundle-"));
   let bundle;
   try {
     execFileSync("git", ["-C", checkout, "bundle", "create", join(tmp, "repo.bundle"), "HEAD"], { stdio: ["ignore", "ignore", "inherit"] });
@@ -392,7 +392,7 @@ async function main() {
     const e = failure;
     log(`image: the build failed at ${e.step ?? "a vendor call"} (${e.code ?? "error"}): ${String(e.message).slice(0, 500)}`);
     await recordImage(repo, { vendor: inputs.sandbox, snapshot: null, sha: head, builtAt, buildMs: e.buildMs ?? 0 }, app).catch((x) => log(`image: recording the failure failed (${x.message.slice(0, 120)})`));
-    summary(`### Factory sandbox image\n\nThe build of \`${head.slice(0, 7)}\` failed at **${e.step ?? "a vendor call"}** after ${((e.buildMs ?? 0) / 1000).toFixed(0)} s.`);
+    summary(`### Pendulum sandbox image\n\nThe build of \`${head.slice(0, 7)}\` failed at **${e.step ?? "a vendor call"}** after ${((e.buildMs ?? 0) / 1000).toFixed(0)} s.`);
     done("failed", `image build failed at ${e.step ?? "a vendor call"} (${e.code ?? "error"})`);
     process.exitCode = 1;
     return;
@@ -425,14 +425,14 @@ async function main() {
   setOutput("snapshot", built.snapshot);
   setOutput("build_ms", String(built.buildMs));
   summary(
-    `### Factory sandbox image\n\n| | |\n| --- | --- |\n| Head | \`${head.slice(0, 7)}\` (${trigger}) |\n| Snapshot | \`${built.snapshot}\` from \`${base}\` |\n| Build | ${(built.buildMs / 1000).toFixed(1)} s, sandbox $${built.usd ?? "?"} |\n| Today's builds | ${(today / 60_000).toFixed(1)} min (merges stop at ${inputs.imageDailyMinutes}) |\n| Stored | ${gb} GB, $${built.usdPerMonth ?? "?"}/month |\n\nRecorded on Factory's image issue #${issue}.`,
+    `### Pendulum sandbox image\n\n| | |\n| --- | --- |\n| Head | \`${head.slice(0, 7)}\` (${trigger}) |\n| Snapshot | \`${built.snapshot}\` from \`${base}\` |\n| Build | ${(built.buildMs / 1000).toFixed(1)} s, sandbox $${built.usd ?? "?"} |\n| Today's builds | ${(today / 60_000).toFixed(1)} min (merges stop at ${inputs.imageDailyMinutes}) |\n| Stored | ${gb} GB, $${built.usdPerMonth ?? "?"}/month |\n\nRecorded on Pendulum's image issue #${issue}.`,
   );
   done("built");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
-    process.stderr.write(`[factory] image failed: ${e.message}\n`);
+    process.stderr.write(`[pendulum] image failed: ${e.message}\n`);
     process.exit(1);
   });
 }

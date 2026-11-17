@@ -64,10 +64,10 @@ test("negative control: the same writers as blind read-then-PATCH writes of one 
 });
 
 test("vendor booking: the launcher and the sweep booking one stage at once write one vendor comment, and never the progress comment", async () => {
-  process.env.RUNNER_TEMP = mkdtempSync(join(tmpdir(), "factory-book-"));
+  process.env.RUNNER_TEMP = mkdtempSync(join(tmpdir(), "pendulum-book-"));
   const claim = "0123456789ab";
-  const progress = `${marker(N, "progress", `work:9-${claim}`)}\nFactory work run 9-${claim}.\n- 03:00Z setup\n<!-- factory:spend {"usd":0.5} -->`;
-  const rec = { id: "factory-abc", vendor: "vercel", stage: "work", run: "9", claim, meter: { base: { wallMs: 0, activeCpuMs: 0 }, created: false, ceilingUsd: 0.3, stored: { ms: 0, bytes: null }, vcpus: 2 } };
+  const progress = `${marker(N, "progress", `work:9-${claim}`)}\nPendulum work run 9-${claim}.\n- 03:00Z setup\n<!-- pendulum:spend {"usd":0.5} -->`;
+  const rec = { id: "pendulum-abc", vendor: "vercel", stage: "work", run: "9", claim, meter: { base: { wallMs: 0, activeCpuMs: 0 }, created: false, ceilingUsd: 0.3, stored: { ms: 0, bytes: null }, vcpus: 2 } };
   const after = { wallMs: 120_000, activeCpuMs: 30_000, memoryMb: 4096, vcpus: 2 };
   for (let seed = 1; seed <= SEEDS; seed += 1) {
     const s = githubStore({ seed });
@@ -78,7 +78,7 @@ test("vendor booking: the launcher and the sweep booking one stage at once write
     assert.equal(vendorWrites.length, 1, `seed ${seed}: one booker wrote`);
     assert.equal(s.bodyOf(N, marker(N, "progress", `work:9-${claim}`)), progress, `seed ${seed}: the progress comment is the stage's alone`);
     const vendor = s.bodyOf(N, marker(N, "vendor", `work:9-${claim}`));
-    assert.match(vendor, /sandbox `factory-abc` stopped/);
+    assert.match(vendor, /sandbox `pendulum-abc` stopped/);
     const sum = [...s.comments.values()].reduce((t, c) => t + spendOf(c.body), 0);
     assert.ok(Math.abs(sum - (0.5 + a.vendor.usd)) < 1e-9, `seed ${seed}: the daily sum counts model and vendor once each`);
     assert.equal(a.vendor.usd, b.vendor.usd);

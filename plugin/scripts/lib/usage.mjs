@@ -77,7 +77,7 @@ export function priceStage(table, model, tokens, subAgents = []) {
 
 /**
  * The warning for a Codex model with no row in the price table, else null: its runs are unmetered, so `max_usd` cannot
- * stop them (Codex has no in-run cap; Factory checks dollars after each run), and `daily_usd` counts them only at an
+ * stop them (Codex has no in-run cap; Pendulum checks dollars after each run), and `daily_usd` counts them only at an
  * estimate (the stage's spend line, priced at the table's dearest rates, harness.mjs stageSpendSoFar); only a budget on
  * the provider's key bounds them. Doctor and the stage's progress comment say it.
  */
@@ -514,7 +514,7 @@ export const outageError = (r) => !!r && r.status === null && r.type === "server
 export const answeredError = (r) => !!r && r.status !== null && r.status >= 400 && r.status < 500;
 
 /**
- * Claude Code's per-model usage (`modelUsage` in a result, or in a transcript's cost-state line) as Factory's models,
+ * Claude Code's per-model usage (`modelUsage` in a result, or in a transcript's cost-state line) as Pendulum's models,
  * tokens and summed dollars; null when there is none. Cache writes and the per-model split are kept so cost reads by
  * component on the bench's scorecard.
  */
@@ -680,7 +680,7 @@ function claudeFirstRequest(lines) {
 const writeShare = (t) => (t?.written === null || t?.written === undefined || !t?.input ? null : Math.round((t.written / t.input) * 1000) / 1000);
 
 /**
- * What the cache did across one stage's runs, for the usage record: the TTL Factory asked for, the stage's cache-write
+ * What the cache did across one stage's runs, for the usage record: the TTL Pendulum asked for, the stage's cache-write
  * share (writes over all input tokens; null when the harness reports no writes), and, for each run that follows a CI
  * wait (a validation fix pass), the minutes waited and its first request's split (`first.unit` says whether the harness
  * reports a request, a turn, or nothing finer than the run). The setting is kept only if these writes drop.
@@ -783,7 +783,7 @@ export const COPILOT_CREDIT_USD = 0.01;
 
 /** The AI-credit states Copilot writes; anything else reads as `unknown` and is not priced. */
 const CREDIT_STATUS = /^(complete|partial|pending|unavailable)$/;
-/** A model name as Factory logs it: no newline, no `::` workflow command, nothing but a model id's characters. */
+/** A model name as Pendulum logs it: no newline, no `::` workflow command, nothing but a model id's characters. */
 const cleanModel = (name) => String(name ?? "").replace(/[^A-Za-z0-9._/-]/g, "").slice(0, 100) || null;
 const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$/;
 const nonNegative = (v) => (num(v) !== null && v >= 0 ? v : null);
@@ -837,7 +837,7 @@ function priceCredits({ nano, negative, status, tokens }, creditUsd) {
 /**
  * The running total a saved Copilot session last recorded (its `events.jsonl`'s last `session.shutdown` accounting
  * snapshot), in sinceSession's shape plus premium requests, AI credits and the session's start time; null when there
- * is none or it is not priced. The file is the harness's to write: clampTotal bounds it by what Factory recorded.
+ * is none or it is not priced. The file is the harness's to write: clampTotal bounds it by what Pendulum recorded.
  */
 export function copilotSessionTotal(text, creditUsd = COPILOT_CREDIT_USD) {
   const lines = String(text || "").split(/\r?\n/).filter((l) => l.includes('"session.shutdown"'));
@@ -849,10 +849,10 @@ export function copilotSessionTotal(text, creditUsd = COPILOT_CREDIT_USD) {
 }
 
 /**
- * A restored session's prior total, bounded field by field by what Factory itself recorded: the session's running
+ * A restored session's prior total, bounded field by field by what Pendulum itself recorded: the session's running
  * total in the saving stage's result.json (`sessionTotal`, which spans every stage the session ran in), else that
  * stage's own figures. A total the harness could edit never lowers the next pass's count below what was billed. Null
- * when Factory recorded no dollars, so nothing is subtracted.
+ * when Pendulum recorded no dollars, so nothing is subtracted.
  */
 export function clampTotal(seed, saved) {
   const recorded = saved?.sessionTotal && typeof saved.sessionTotal.usd === "number" ? { ...saved.sessionTotal, aiCredits: saved.sessionTotal.aiu } : saved;
@@ -978,7 +978,7 @@ const less = (a, b) => (a === null || a === undefined ? null : Math.max(0, a - (
 /**
  * Claude Code, Codex and Copilot report a resumed session's cost or tokens as the session's running total, so a pass
  * that resumes an earlier session is counted as its own share: the total minus the total that session had already
- * reported (in this process, or in its restored transcript or Factory's record of it). Turns are per process and stay.
+ * reported (in this process, or in its restored transcript or Pendulum's record of it). Turns are per process and stay.
  * Codex's first-turn cache split is that running total too, so it is counted the same way.
  */
 export function sinceSession(rec, prior) {

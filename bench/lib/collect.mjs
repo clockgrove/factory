@@ -16,22 +16,22 @@ import { basename } from "node:path";
 import { findFile } from "./gh.mjs";
 import { parseUsageText, sessionsOf } from "./cost.mjs";
 import { OBJECTIVE_LABEL } from "./objective.mjs";
-import { bySelf, factoryLogin } from "./phases.mjs";
+import { bySelf, pendulumLogin } from "./phases.mjs";
 
 const PER_PAGE = "per_page=100";
-const STATE_LABELS = ["factory:blocked", "factory:question", "factory:in-review", "factory:running"];
+const STATE_LABELS = ["pendulum:blocked", "pendulum:question", "pendulum:in-review", "pendulum:running"];
 const labelNames = (issue) => (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name));
 
 /** The artifact names the jobs upload (workflow-template.yml): the worker's, and the review job's. */
-export const WORK_ARTIFACT = (issue) => `factory-usage-${issue}`;
-export const REVIEW_ARTIFACT = (issue) => `factory-usage-${issue}-review`;
+export const WORK_ARTIFACT = (issue) => `pendulum-usage-${issue}`;
+export const REVIEW_ARTIFACT = (issue) => `pendulum-usage-${issue}-review`;
 
 /**
  * The Objectives worth a row: issues with the label that closed at or after
- * `since` (ISO date), plus open ones carrying a Factory state label (Blocked,
+ * `since` (ISO date), plus open ones carrying a Pendulum state label (Blocked,
  * Question, In review, Running), so the misses that never merged are rows too.
  * With `since`, also every issue whose label was removed at or after it (a
- * parked Objective, waiting on other work) and that Factory picked up then (a
+ * parked Objective, waiting on other work) and that Pendulum picked up then (a
  * state label applied at or after `since`): it ran and cost money, whatever its
  * labels are now, after the labelled ones.
  */
@@ -49,7 +49,7 @@ export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_L
 }
 
 /**
- * Issues that lost `label` at or after `since` and gained a Factory state label at or after it. The candidates are the
+ * Issues that lost `label` at or after `since` and gained a Pendulum state label at or after it. The candidates are the
  * issues updated at or after `since` that do not carry the label now (removing it updates the issue), less `skip`;
  * only each candidate's own events are read. The reads scale with the issues touched in the window, never with the
  * repository's PR and event traffic, and no ceiling cuts the list short.
@@ -85,8 +85,8 @@ async function listArtifacts(api, repoFull, issue) {
 }
 
 /**
- * The usage artifacts an ended Objective still owes, by name: for each stage kind Factory ran (a progress comment of
- * its own, `self` being factoryLogin's), that kind's artifact created at or after the kind's latest progress comment,
+ * The usage artifacts an ended Objective still owes, by name: for each stage kind Pendulum ran (a progress comment of
+ * its own, `self` being pendulumLogin's), that kind's artifact created at or after the kind's latest progress comment,
  * the stage's start. A stage uploads its artifact after it posts its exit (on the sandbox path a later launcher run
  * does), so a scorer that reads the Blocked label or the merge can be early: bench/drill.mjs waits until this is empty.
  * An Objective with no stage owes nothing.
@@ -94,7 +94,7 @@ async function listArtifacts(api, repoFull, issue) {
 export function usagePending(issue, comments, artifacts, { self }) {
   const latest = {};
   for (const c of comments || []) {
-    const kind = new RegExp(`^<!-- factory:${issue}:progress:(work|review)[:\\s-]`).exec(c.body || "")?.[1];
+    const kind = new RegExp(`^<!-- pendulum:${issue}:progress:(work|review)[:\\s-]`).exec(c.body || "")?.[1];
     if (kind && bySelf(c, self) && !(Date.parse(latest[kind]) >= Date.parse(c.created_at))) latest[kind] = c.created_at;
   }
   const name = { work: WORK_ARTIFACT(issue), review: REVIEW_ARTIFACT(issue) };
@@ -118,7 +118,7 @@ export async function awaitUsage(api, repoFull, issues, { ended = issues, waitMs
   const read = async (issue) => {
     try {
       const [timeline, comments, artifacts] = await Promise.all([api(`repos/${repoFull}/issues/${issue}/timeline?${PER_PAGE}`, { paginate: true }), api(`repos/${repoFull}/issues/${issue}/comments?${PER_PAGE}`, { paginate: true }), listArtifacts(api, repoFull, issue)]);
-      owed.set(issue, { pending: usagePending(issue, comments, artifacts, { self: factoryLogin(timeline) }), artifacts });
+      owed.set(issue, { pending: usagePending(issue, comments, artifacts, { self: pendulumLogin(timeline) }), artifacts });
     } catch (error) {
       owed.set(issue, { pending: [`unread (HTTP ${error.status || "?"})`], artifacts: owed.get(issue)?.artifacts ?? [] });
     }
@@ -184,21 +184,21 @@ async function jobsFor(api, repoFull, runIds) {
   return jobs;
 }
 
-/** The Factory workflow's file name in an adopter (workflow-template.yml is written there). */
-export const FACTORY_WORKFLOW = "factory.yml";
+/** The Pendulum workflow's file name in an adopter (workflow-template.yml is written there). */
+export const PENDULUM_WORKFLOW = "pendulum.yml";
 const RUNS_CAP = 1000;
-const JOB_ISSUE = /^(?:work|launch|merge tick) \((\d+)\)$|^review \(factory\/(\d+)\)$/;
+const JOB_ISSUE = /^(?:work|launch|merge tick) \((\d+)\)$|^review \(pendulum\/(\d+)\)$/;
 
 /**
- * The runs of Factory's workflow a person started (`workflow_dispatch`) or re-ran (attempt 2 and up) while the
+ * The runs of Pendulum's workflow a person started (`workflow_dispatch`) or re-ran (attempt 2 and up) while the
  * Objective was live: from its first Objective or Running label to its merge (or its close, or now). Bots' runs are
  * left out here already. Each is `{id, event, attempt, created_at, run_started_at, by, issues}`, `issues` being the
- * Objectives its jobs name (`work (N)`, `launch (N)`, `merge tick (N)`, `review (factory/N)`), empty for a run tied to
+ * Objectives its jobs name (`work (N)`, `launch (N)`, `merge tick (N)`, `review (pendulum/N)`), empty for a run tied to
  * none (a dispatcher tick). Throws when the runs cannot be read, or when GitHub's 1,000-run cap on a `created` filter
  * may have cut the list. A re-run of a run created before the first label is not listed (the filter is on creation).
  */
-export async function humanWorkflowRuns(api, repoFull, issueData, timeline, pulls, { workflow = FACTORY_WORKFLOW } = {}) {
-  const starts = (timeline || []).filter((e) => e.event === "labeled" && (e.label?.name === OBJECTIVE_LABEL || e.label?.name === "factory:running")).map((e) => Date.parse(e.created_at)).filter(Number.isFinite);
+export async function humanWorkflowRuns(api, repoFull, issueData, timeline, pulls, { workflow = PENDULUM_WORKFLOW } = {}) {
+  const starts = (timeline || []).filter((e) => e.event === "labeled" && (e.label?.name === OBJECTIVE_LABEL || e.label?.name === "pendulum:running")).map((e) => Date.parse(e.created_at)).filter(Number.isFinite);
   if (!starts.length) return [];
   const iso = (t) => new Date(t).toISOString().replace(/\.\d{3}Z$/, "Z");
   const from = iso(Math.min(...starts));
@@ -209,13 +209,13 @@ export async function humanWorkflowRuns(api, repoFull, issueData, timeline, pull
   try {
     pages = await api(`repos/${repoFull}/actions/workflows/${encodeURIComponent(workflow)}/runs?created=${encodeURIComponent(range)}&${PER_PAGE}`, { paginate: true });
   } catch (error) {
-    if (error.status === 404) return []; // no Factory workflow in this repository (local mode only): no run to start
+    if (error.status === 404) return []; // no Pendulum workflow in this repository (local mode only): no run to start
     throw error;
   }
   const runs = pages.flatMap((p) => (Array.isArray(p) ? p : p?.workflow_runs || []));
   // GitHub returns at most 1,000 runs for a `created` filter: past that, runs are lost silently, so none is taken as read.
   const total = pages.find((p) => !Array.isArray(p) && Number.isFinite(p?.total_count))?.total_count;
-  if (runs.length >= RUNS_CAP || (Number.isFinite(total) && total > runs.length)) throw new Error(`${total ?? runs.length} Factory workflow runs in the window: GitHub lists at most ${RUNS_CAP}`);
+  if (runs.length >= RUNS_CAP || (Number.isFinite(total) && total > runs.length)) throw new Error(`${total ?? runs.length} Pendulum workflow runs in the window: GitHub lists at most ${RUNS_CAP}`);
   const out = [];
   for (const r of runs) {
     const attempt = r.run_attempt ?? 1;
@@ -234,14 +234,14 @@ export async function humanWorkflowRuns(api, repoFull, issueData, timeline, pull
  * (lib/gh.mjs's downloadArtifact bound to a token) or is null offline.
  * `usage` is a list of records read from --usage <dir> when given.
  */
-export async function collectObjective(api, repoFull, issue, { download = null, usage = null, jobs: wantJobs = true, graphql = null, app = null, workflow = FACTORY_WORKFLOW } = {}) {
+export async function collectObjective(api, repoFull, issue, { download = null, usage = null, jobs: wantJobs = true, graphql = null, app = null, workflow = PENDULUM_WORKFLOW } = {}) {
   const base = `repos/${repoFull}`;
   const issueData = await api(`${base}/issues/${issue}`);
   const [issueTimeline, issueComments, pullsOpen, pullsClosed] = await Promise.all([
     api(`${base}/issues/${issue}/timeline?${PER_PAGE}`, { paginate: true }),
     api(`${base}/issues/${issue}/comments?${PER_PAGE}`, { paginate: true }),
-    api(`${base}/pulls?head=${encodeURIComponent(`${repoFull.split("/")[0]}:factory/${issue}`)}&state=open&${PER_PAGE}`, { paginate: true }),
-    api(`${base}/pulls?head=${encodeURIComponent(`${repoFull.split("/")[0]}:factory/${issue}`)}&state=closed&${PER_PAGE}`, { paginate: true }),
+    api(`${base}/pulls?head=${encodeURIComponent(`${repoFull.split("/")[0]}:pendulum/${issue}`)}&state=open&${PER_PAGE}`, { paginate: true }),
+    api(`${base}/pulls?head=${encodeURIComponent(`${repoFull.split("/")[0]}:pendulum/${issue}`)}&state=closed&${PER_PAGE}`, { paginate: true }),
   ]);
   const pulls = [];
   const pullDetails = {};
@@ -293,13 +293,13 @@ export async function collectObjective(api, repoFull, issue, { download = null, 
       jobs = null;
     }
   // The Actions run that launched each work stage (the run id its progress comment is keyed by): its event and creation
-  // are the stage's tick when the sandbox record does not show its launch (lib/phases.mjs dispatchLatency). Factory's
+  // are the stage's tick when the sandbox record does not show its launch (lib/phases.mjs dispatchLatency). Pendulum's
   // own progress comments only: anyone can paste a marker. A local loop's key is no Actions run.
   let stageRuns = null;
-  if (!labelNames(issueData).includes("factory:local")) {
+  if (!labelNames(issueData).includes("pendulum:local")) {
     stageRuns = {};
-    const self = factoryLogin(issueTimeline, app);
-    const ids = new Set(issueComments.filter((c) => bySelf(c, self)).map((c) => new RegExp(`^<!-- factory:${issue}:progress:work:(\\d{1,20})(?:-|\\s)`).exec(c.body || "")?.[1]).filter(Boolean));
+    const self = pendulumLogin(issueTimeline, app);
+    const ids = new Set(issueComments.filter((c) => bySelf(c, self)).map((c) => new RegExp(`^<!-- pendulum:${issue}:progress:work:(\\d{1,20})(?:-|\\s)`).exec(c.body || "")?.[1]).filter(Boolean));
     for (const id of ids) {
       try {
         const r = await api(`${base}/actions/runs/${id}`);

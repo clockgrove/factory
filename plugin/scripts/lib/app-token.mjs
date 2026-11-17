@@ -1,7 +1,7 @@
-// Mint a short-lived installation token from the adopter's Factory GitHub App.
+// Mint a short-lived installation token from the adopter's Pendulum GitHub App.
 // Node's crypto signs the RS256 JWT, so no dependency and no extra action is
-// needed; the same code serves the Action and `/factory doctor` on a laptop.
-// Factory never creates an App; it only verifies and uses the one it is given.
+// needed; the same code serves the Action and `/pendulum doctor` on a laptop.
+// Pendulum never creates an App; it only verifies and uses the one it is given.
 import { createSign } from "node:crypto";
 import { NetworkDown, OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, downFor, networkBack, quotaNow, spentCandidate, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
 
@@ -35,7 +35,7 @@ async function api(path, { token, method = "GET", body } = {}) {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "clockgrove-factory",
+      "User-Agent": "clockgrove-pendulum",
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -71,7 +71,7 @@ async function api(path, { token, method = "GET", body } = {}) {
  */
 async function rateLimitCount(token, resource) {
   try {
-    const r = await fetch(`${API}/rate_limit`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "clockgrove-factory" } });
+    const r = await fetch(`${API}/rate_limit`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "clockgrove-pendulum" } });
     return r.ok ? quotaNow(await r.json(), resource, r.headers.get("date")) : null;
   } catch {
     return null;
@@ -102,8 +102,8 @@ async function fetchOrNoAnswer(url, init) {
 }
 
 /**
- * The Factory App's repository permissions: the one list setup, doctor and the docs name (APP_PERMISSIONS_TEXT). Every
- * route fails without one of these: the writes Factory makes, and the reads of required checks (check runs and commit
+ * The Pendulum App's repository permissions: the one list setup, doctor and the docs name (APP_PERMISSIONS_TEXT). Every
+ * route fails without one of these: the writes Pendulum makes, and the reads of required checks (check runs and commit
  * statuses); metadata read comes with every App. Projects is checked apart (PROJECT_PERMISSION_KEYS).
  */
 export const APP_PERMISSIONS = Object.freeze({ contents: "write", pull_requests: "write", issues: "write", checks: "read", statuses: "read", metadata: "read" });
@@ -114,7 +114,7 @@ export const APP_PERMISSIONS = Object.freeze({ contents: "write", pull_requests:
 export const APP_OPTIONAL_PERMISSIONS = Object.freeze({ actions: "read" });
 /** Projects v2 is granted by the App's org/user "projects" permission; the installation reports it as `organization_projects`. */
 export const PROJECT_PERMISSION_KEYS = ["organization_projects", "projects"];
-/** The list as the docs and doctor say it (README, the factory-setup skill and doctor's lines carry this exact text). */
+/** The list as the docs and doctor say it (README, the pendulum-setup skill and doctor's lines carry this exact text). */
 export const APP_PERMISSIONS_TEXT = "contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); nothing else, never workflows";
 /** The list for a personal account's App, which needs no projects (permissionGaps `userAccount`, #199). */
 export const APP_PERMISSIONS_TEXT_USER = "contents, pull requests, issues: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); projects: not needed on a personal account (labels carry the state); nothing else, never workflows";
@@ -125,7 +125,7 @@ export function appPermissionsText({ userAccount = false } = {}) {
 
 /**
  * What a granted permission set lacks of APP_PERMISSIONS (a write counts for a read), and what it has beyond the list
- * and APP_OPTIONAL_PERMISSIONS, or above its level (checks:write where Factory reads): ["name:level", ...] each.
+ * and APP_OPTIONAL_PERMISSIONS, or above its level (checks:write where Pendulum reads): ["name:level", ...] each.
  * `userAccount`: the App is installed on a personal account, whose Projects board no GitHub App can reach (Projects is an
  * organization permission), so projects is not required there: the board is skipped and labels carry the state (#199).
  */
@@ -179,7 +179,7 @@ export const NOTICE_PERMISSIONS = { issues: "write" };
 
 /**
  * Local mode's notice token (#2522): local runs write as the operator's own login, and GitHub notifies no one of their
- * own @mention, so Blocked and Question notices post with the Factory App instead. Only local.mjs, the parent of every
+ * own @mention, so Blocked and Question notices post with the Pendulum App instead. Only local.mjs, the parent of every
  * stage, holds the App's key and calls this: an installation token for the one repository (`repositories` on the
  * access_tokens call) narrowed to NOTICE_PERMISSIONS, minted on first use and again near expiry, in memory only. A
  * token that came back for any other repository, or with more than issues write, is refused. `stale`: the token GitHub
@@ -210,7 +210,7 @@ export function noticeMinter({ appId, privateKey, owner, repo }) {
 
 /**
  * What the App's key on this box can do beyond notices: its installation's grants other than issues write and metadata
- * read. Narrowing at mint time limits Factory, not the key, which mints whatever the installation has, for every
+ * read. Narrowing at mint time limits Pendulum, not the key, which mints whatever the installation has, for every
  * installation of the App. Empty for a notice-only App.
  */
 export const noticeAppExtra = (installationPermissions = {}) =>
@@ -221,7 +221,7 @@ export const noticeAppExtra = (installationPermissions = {}) =>
 // A stage asks its parent for the notice token over Node's IPC channel (spawn stdio "ipc"), so the App's key never leaves the parent. Node opens that channel close-on-exec in the
 // stage and drops NODE_CHANNEL_FD from its env, so nothing the stage starts (the harness, the repository's commands)
 // inherits it (plugin/test/backend.test.mjs).
-const NOTICE_MESSAGE = "factory:notice-token";
+const NOTICE_MESSAGE = "pendulum:notice-token";
 
 /**
  * Parent side: answer `type` requests from `child` with `answer(message)`'s fields, or {error, status, reason,

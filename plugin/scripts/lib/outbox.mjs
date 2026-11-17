@@ -1,9 +1,9 @@
-// Factory's push. The harness commits in its own checkout and pushes nothing. Factory takes the branch as a git bundle
-// the agent writes to a pipe (in the agent's own sandbox), fetches it into a bare mirror only Factory can write (made
-// with mkdtemp under Factory's private temp directory, transfer.fsckObjects on), checks it there (protected paths, Git
-// LFS pointers and media), pushes it to refs/heads/factory/<issue> with an explicit lease on the head Factory last
+// Pendulum's push. The harness commits in its own checkout and pushes nothing. Pendulum takes the branch as a git bundle
+// the agent writes to a pipe (in the agent's own sandbox), fetches it into a bare mirror only Pendulum can write (made
+// with mkdtemp under Pendulum's private temp directory, transfer.fsckObjects on), checks it there (protected paths, Git
+// LFS pointers and media), pushes it to refs/heads/pendulum/<issue> with an explicit lease on the head Pendulum last
 // saw, and reads GitHub's head back. A refused or rejected push, or a head that is not the one pushed, is sticky: the
-// stage Blocks. Factory runs no git command of its own in the agent's checkout for this.
+// stage Blocks. Pendulum runs no git command of its own in the agent's checkout for this.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, constants as C, createReadStream, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
@@ -23,7 +23,7 @@ import { untarAsAgent } from "./untar.mjs";
 import { entriesProblem, patchTextProblem, rawEntries } from "./handover.mjs";
 import { hunkView, hunksOf } from "./kept.mjs";
 
-/** Why a push that carries a held secret is refused: Factory's own words, never the value. */
+/** Why a push that carries a held secret is refused: Pendulum's own words, never the value. */
 export const SECRET_PUSH_REASON = "the branch carries a worker secret's value (in a commit's change or message), so nothing was pushed: remove it from the branch's history and rotate the key (docs/PLAN.md, Worker secrets)";
 
 /** Whether `text` (a branch's patches and commit messages) carries any form of a held secret (inputs.mjs secretForms). */
@@ -38,7 +38,7 @@ export const SECRET_SCAN_MAX_BYTES = 536_000_000;
 /**
  * Why the commits in `range` may not be pushed for the held secrets, or null: every commit's change and message, a merge
  * commit's against its first parent (where a value its resolution adds would show). It fails closed: an unreadable or
- * truncated log refuses too. `git(args, opts)` runs git in Factory's mirror.
+ * truncated log refuses too. `git(args, opts)` runs git in Pendulum's mirror.
  */
 export async function secretScan(git, range, held = heldSecrets(), maxBytes = SECRET_SCAN_MAX_BYTES) {
   if (!held.length) return null;
@@ -48,7 +48,7 @@ export async function secretScan(git, range, held = heldSecrets(), maxBytes = SE
 }
 
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
-// The largest package.json whose `scripts` Factory compares (box.outside, the setup scripts' check on push); a larger one
+// The largest package.json whose `scripts` Pendulum compares (box.outside, the setup scripts' check on push); a larger one
 // cannot be read, so every script the commands run counts as changed.
 const PACKAGE_JSON_MAX = 1024 * 1024;
 /**
@@ -119,7 +119,7 @@ export const GIT_RETRY = { tries: 4, maxWaitMs: 60_000, exitReserveMs: 15 * 60_0
 
 /**
  * Run `cmd` and stream its stdout into a new file (O_EXCL, O_NOFOLLOW), at most `cap` bytes. Resolves
- * {code, stderr, bytes, over}. The bundle and LFS objects come through here: read as the agent, written as Factory.
+ * {code, stderr, bytes, over}. The bundle and LFS objects come through here: read as the agent, written as Pendulum.
  */
 export function pipeToFile(cmd, args, { cwd, env, file, cap }) {
   return new Promise((resolve, reject) => {
@@ -152,7 +152,7 @@ export function pipeToFile(cmd, args, { cwd, env, file, cap }) {
   });
 }
 
-/** sha256 and size of a file Factory owns. */
+/** sha256 and size of a file Pendulum owns. */
 function digest(file) {
   const fd = openSync(file, C.O_RDONLY | C.O_NOFOLLOW);
   try {
@@ -176,11 +176,11 @@ export function parsePointer(text) {
 }
 
 /**
- * The git credential helper for Factory's own network calls, as env config (so every git and git-lfs process in the
+ * The git credential helper for Pendulum's own network calls, as env config (so every git and git-lfs process in the
  * mirror has it, and nothing on disk does): no inherited helper, and for https://github.com only, the token from that
  * one process's env.
  */
-const HELPER = "!f() { echo username=x-access-token; echo \"password=$FACTORY_GIT_TOKEN\"; }; f";
+const HELPER = "!f() { echo username=x-access-token; echo \"password=$PENDULUM_GIT_TOKEN\"; }; f";
 /** Add [key, value] pairs to an env's GIT_CONFIG_* list. */
 export function addConfig(env, pairs) {
   let n = Number(env.GIT_CONFIG_COUNT) || 0;
@@ -194,7 +194,7 @@ export function addConfig(env, pairs) {
   return out;
 }
 
-export const credentialEnv = (token) => ({ GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "", GIT_CONFIG_KEY_1: "credential.https://github.com.helper", GIT_CONFIG_VALUE_1: HELPER, ...(token ? { FACTORY_GIT_TOKEN: token } : {}) });
+export const credentialEnv = (token) => ({ GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "", GIT_CONFIG_KEY_1: "credential.https://github.com.helper", GIT_CONFIG_VALUE_1: HELPER, ...(token ? { PENDULUM_GIT_TOKEN: token } : {}) });
 
 /**
  * The pack inside a bundle, indexed into `mirror` with `git index-pack --strict` (every object fsck-checked, whatever
@@ -237,7 +237,7 @@ async function indexBundle(file, git) {
     });
     pack.pipe(child.stdin);
   });
-  if (idx.code !== 0) throw commandFailed("the agent's bundle failed Factory's object check", idx);
+  if (idx.code !== 0) throw commandFailed("the agent's bundle failed Pendulum's object check", idx);
   // Every object the new commits reach is here now (index-pack checks the pack's own objects, this the rest).
   const all = await git(["rev-list", "--objects", "--missing=error", refs[0], ...(prereqs.length ? ["--not", ...prereqs] : [])]);
   if (all.code !== 0) throw new Error("the agent's bundle is missing objects its commits need");
@@ -245,10 +245,10 @@ async function indexBundle(file, git) {
 }
 
 /**
- * The stage's outbox for factory/<issue>. `remote` is the repository's URL (GitHub's https URL; a path in tests),
+ * The stage's outbox for pendulum/<issue>. `remote` is the repository's URL (GitHub's https URL; a path in tests),
  * `token()` the current write token (null for a remote that needs none), `agentEnv` the env the agent's commands run
  * with (its sandbox settings ride in it), `local` whether the local media cap applies, `deadlineAt` the stage's end (epoch
- * ms), which bounds every Git LFS hand-over, `readMaxBytes` the most Factory reads of one listing in its mirror (the
+ * ms), which bounds every Git LFS hand-over, `readMaxBytes` the most Pendulum reads of one listing in its mirror (the
  * hand-over's tree reads; tests lower it). The mirror holds only what
  * GitHub has and what the agent's bundles brought: nothing of any other clone on the machine.
  */
@@ -266,7 +266,7 @@ export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
 }
 
 async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = { paths: [], scripts: [], unresolved: [] }, toolchainPaths = [], setup = "", setupContext = {}, deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch, networkOrigin = originOf(remote) }) {
-  // Factory's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
+  // Pendulum's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
   // and no hook: it runs only here, never in the agent's checkout.
   const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
   const git = (args, opts = {}) => exec("git", ["-C", mirror, ...args], { env: gitEnv(), maxBytes: 64 * 1024 * 1024, ...opts });
@@ -274,7 +274,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   git.env = gitEnv;
   const must = async (args, opts) => {
     const r = await git(args, opts);
-    if (r.code !== 0) throw commandFailed(`git ${args[0]} in Factory's mirror failed`, r);
+    if (r.code !== 0) throw commandFailed(`git ${args[0]} in Pendulum's mirror failed`, r);
     return r.stdout.trim();
   };
   // The stage's real end: its work deadline plus the exit's reserve (GIT_RETRY).
@@ -314,7 +314,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
   const netMust = async (what, args) => {
     const r = await net(what, args);
-    if (r.code !== 0) throw commandFailed(`git ${args[0]} in Factory's mirror failed`, r);
+    if (r.code !== 0) throw commandFailed(`git ${args[0]} in Pendulum's mirror failed`, r);
     return r.stdout.trim();
   };
   // A git command as the agent, in its checkout and its sandbox.
@@ -330,7 +330,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (r.code !== 0) throw commandFailed("the branch on GitHub could not be read", r);
     return /^([0-9a-f]{40,64})\t/m.exec(r.stdout)?.[1] ?? "";
   };
-  // git cannot hold factory/<issue> beside factory/<issue>/<anything> (a ref is a file or a directory, not both): an
+  // git cannot hold pendulum/<issue> beside pendulum/<issue>/<anything> (a ref is a file or a directory, not both): an
   // earlier tool's branches under that name block every push. Found here, before any harness spend.
   const under = await net("ls-remote", ["ls-remote", "--heads", "origin", `${branch}/*`]);
   const colliding = under.code === 0 ? under.stdout.split("\n").map((l) => l.split("\t")[1]).filter(Boolean).map((r) => r.replace(/^refs\/heads\//, "")) : [];
@@ -342,7 +342,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   await netMust("fetch", ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`]);
   let expected = await serverHead(branch);
   if (expected) await netMust("fetch", ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-  // The default branch's head as Factory last fetched it: the stage's start, moved on by box.refresh (a re-fetch) and by
+  // The default branch's head as Pendulum last fetched it: the stage's start, moved on by box.refresh (a re-fetch) and by
   // catchUp (the tip it merged into the branch). Either way it is a head GitHub's default branch had.
   let base = await must(["rev-parse", `refs/remotes/origin/${defaultBranch}`]);
   // What this stage answers for starts at the head GitHub had before any harness ran.
@@ -357,7 +357,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     failed: false,
     error: "",
     errorKind: "",
-    // The Block's cause for a fix-scope refusal the fence check could not judge (`factory`, `outage`), else null.
+    // The Block's cause for a fix-scope refusal the fence check could not judge (`pendulum`, `outage`), else null.
     errorCause: null,
     // The fence check (fence-check.mjs openFenceCheck), set by the stage once its decider exists; null: none asked.
     fenceCheck: null,
@@ -365,9 +365,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     head: null,
     conflicts: [],
     git,
-    // The identity of the merge commits Factory makes in the mirror (catchUp); the stage sets its bot's.
-    author: { name: "factory[bot]", email: "factory[bot]@users.noreply.github.com" },
-    // Set by the last push: Factory's merge of the default branch ({default, paths}), a conflict with it, the raw text of
+    // The identity of the merge commits Pendulum makes in the mirror (catchUp); the stage sets its bot's.
+    author: { name: "pendulum[bot]", email: "pendulum[bot]@users.noreply.github.com" },
+    // Set by the last push: Pendulum's merge of the default branch ({default, paths}), a conflict with it, the raw text of
     // a rejected push (for the job log only), and whether the checkout took the merge.
     merged: null,
     conflict: null,
@@ -378,10 +378,10 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
   // New-branch conflicts with the default branch seen so far (catchUp): the second is refused.
   let conflicts = 0;
-  // The catch-up merges (catchUp) this outbox pushed, by commit id: a validated head that is one of them is Factory's
+  // The catch-up merges (catchUp) this outbox pushed, by commit id: a validated head that is one of them is Pendulum's
   // own merge, not the agent's change (box.caughtUp).
   const catchUps = new Set();
-  // A merge of Factory's the checkout could not take (box.synced false): {from: the agent's head it was made from, to:
+  // A merge of Pendulum's the checkout could not take (box.synced false): {from: the agent's head it was made from, to:
   // the merge pushed}. The next push builds on that merge instead of making a fresh one that would replace it.
   let unsynced = null;
   // `kind`: what refused it, for a caller that names it apart ("protected", "fix-scope", "lfs-quota": GitHub's Git LFS
@@ -396,7 +396,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * Take the agent's HEAD into the mirror as refs/heads/incoming (Factory's HEAD there). Returns its sha. A head the
+   * Take the agent's HEAD into the mirror as refs/heads/incoming (Pendulum's HEAD there). Returns its sha. A head the
    * mirror already has (GitHub's, or an earlier bundle's) needs no bundle; any other arrives in one.
    */
   const take = async () => {
@@ -426,14 +426,14 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
 
   /**
    * Hand the agent's checkout what the mirror has (the default branch, and the Objective's branch as GitHub has it, or
-   * `extra` commits Factory made) as a bundle on a pipe, fetched into its remote-tracking refs inside its sandbox.
-   * Factory never fetches into the checkout itself.
+   * `extra` commits Pendulum made) as a bundle on a pipe, fetched into its remote-tracking refs inside its sandbox.
+   * Pendulum never fetches into the checkout itself.
    */
   box.feed = async (extra = {}) => {
     const refs = [`refs/remotes/origin/${defaultBranch}`, ...(expected ? [`refs/remotes/origin/${branch}`] : [])];
     for (const [name, sha] of Object.entries(extra)) {
-      await must(["update-ref", `refs/factory/${name}`, sha]);
-      refs.push(`refs/factory/${name}`);
+      await must(["update-ref", `refs/pendulum/${name}`, sha]);
+      refs.push(`refs/pendulum/${name}`);
     }
     const known = (await exec(...agent(["rev-parse", "--verify", "-q", `refs/remotes/origin/${defaultBranch}^{commit}`]), { env: agentGitEnv })).stdout.trim();
     const nots = SHA.test(known) && (await git(["cat-file", "-e", `${known}^{commit}`])).code === 0 ? ["--not", known] : [];
@@ -441,13 +441,13 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     // Nothing new since what the checkout has: an empty bundle is refused, so the refs alone go over.
     if (bundle.code !== 0) bundle = await git(["bundle", "create", "-q", "-", ...refs], { encoding: "buffer", maxBytes: 4 * 1024 ** 3 });
     if (bundle.code !== 0) throw new Error(`the mirror could not bundle ${refs.join(", ")}`);
-    const script = 'f="$(mktemp)" && cat > "$f" && git -C "$1" fetch -q --no-tags --update-head-ok "$f" "+refs/remotes/origin/*:refs/remotes/origin/*" "+refs/factory/*:refs/factory/*"; rc=$?; rm -f "$f"; exit $rc';
+    const script = 'f="$(mktemp)" && cat > "$f" && git -C "$1" fetch -q --no-tags --update-head-ok "$f" "+refs/remotes/origin/*:refs/remotes/origin/*" "+refs/pendulum/*:refs/pendulum/*"; rc=$?; rm -f "$f"; exit $rc';
     const r = await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", script, "sh", checkout], agentGitEnv), { env: agentGitEnv, input: bundle.stdout });
     if (r.code !== 0) throw commandFailed("the checkout could not take the default branch", r);
     return base;
   };
 
-  /** A git command in the agent's checkout, in its sandbox (sandbox.git): what Factory needs done there, done as the agent. */
+  /** A git command in the agent's checkout, in its sandbox (sandbox.git): what Pendulum needs done there, done as the agent. */
   box.agentGit = (args, opts = {}) => exec(...agent(args), { env: agentGitEnv, ...opts });
   // One that moves HEAD or writes the working tree: no Git LFS smudge (lfs.mjs noSmudge); the media comes by lfsHandOver.
   const agentMove = (inner) => exec(...backend(agentGitEnv).sandbox.git(noSmudge(inner), agentGitEnv), { env: agentGitEnv });
@@ -455,7 +455,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   /**
    * Put the agent's checkout on the Objective's branch at `ref` (a ref feed handed over), exactly as that commit has it.
    * Local mode keeps one clone per Objective between stages and runs, so a resumed run meets what an earlier one left
-   * there: changed or staged files, untracked files the branch now tracks, a rebase it stopped. That is Factory's own
+   * there: changed or staged files, untracked files the branch now tracks, a rebase it stopped. That is Pendulum's own
    * working copy and nothing in it was pushed, so it is discarded (a rebase quit, the checkout forced) rather than
    * refusing the switch. Untracked files out of the branch's way stay (local.mjs prepareClone clears them at stage start).
    * Git LFS files are left as pointers (lfs.mjs noSmudge): the caller hands the media over next (lfsSetup, lfsHandOver).
@@ -482,7 +482,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
 
   /**
    * What a send-back's conflict pass left in the checkout, read before anything of it is pushed: why it is not the
-   * branch at `from` rebased onto `onto` (the default branch's head Factory's own rebase conflicted on), or "" when it
+   * branch at `from` rebased onto `onto` (the default branch's head Pendulum's own rebase conflicted on), or "" when it
    * is. Not: a rebase, merge or cherry-pick left in progress (HEAD is then the default branch plus some of the commits);
    * a head that does not contain `onto` (the conflict pass gave up); or the branch's change not kept in it (keptLeft,
    * on content; with no `judge`, a stage with no decider, commitsLeft first). Read on git's exit codes and fields only.
@@ -493,7 +493,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     box.rebaseNote = "";
     box.rebaseHead = "";
     const busy = await box.inProgress();
-    if (busy.code !== undefined) return `Factory could not check the checkout for a rebase left in progress (exit ${busy.code})`;
+    if (busy.code !== undefined) return `Pendulum could not check the checkout for a rebase left in progress (exit ${busy.code})`;
     if (busy.ops.length) return `the conflict pass left a ${busy.ops.join(" and ")} in progress`;
     let head;
     try {
@@ -511,7 +511,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       log(`rebase check: ${String(e?.message || e).slice(0, 200)}`);
       // Key-less, the commit match needs no merge-tree (a git before 2.40 included).
       if (!judge) return commitsLeft({ from, onto, head });
-      return `Factory could not compare the rebased branch with the branch before it${e?.why ? `: ${e.why}` : ""}`;
+      return `Pendulum could not compare the rebased branch with the branch before it${e?.why ? `: ${e.why}` : ""}`;
     }
     box.rebaseNote = open.undone?.length ? `the branch's commits changed ${listed(open.undone)} and undid it, yet the head changes ${open.undone.length > 1 ? "them" : "it"}: an extra change for the review, not a loss` : "";
     if (!open.paths.length) return "";
@@ -522,7 +522,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       return left ?? (await commitsLeft({ from, onto, head }));
     } catch (e) {
       log(`rebase check: ${String(e?.message || e).slice(0, 200)}`);
-      return judge ? "Factory could not compare the rebased branch with the branch before it" : commitsLeft({ from, onto, head });
+      return judge ? "Pendulum could not compare the rebased branch with the branch before it" : commitsLeft({ from, onto, head });
     }
   };
 
@@ -548,7 +548,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (!replayed.tree) throw await mergeTreeFailed(replayed.code);
     if (replayed.clean && replayed.tree === headTree) return { paths: [], undone: [] };
     // The replay as a commit on `onto`, so git merges it into the head like any branch.
-    const ident = { GIT_AUTHOR_NAME: "factory", GIT_AUTHOR_EMAIL: "factory@localhost", GIT_COMMITTER_NAME: "factory", GIT_COMMITTER_EMAIL: "factory@localhost" };
+    const ident = { GIT_AUTHOR_NAME: "pendulum", GIT_AUTHOR_EMAIL: "pendulum@localhost", GIT_COMMITTER_NAME: "pendulum", GIT_COMMITTER_EMAIL: "pendulum@localhost" };
     const commit = await git(["commit-tree", replayed.tree, "-p", onto, "-m", "replay"], { env: { ...gitEnv(), ...ident } });
     if (commit.code !== 0 || !SHA.test(commit.stdout.trim())) throw new Error(`git commit-tree exited ${commit.code}`);
     const merged = await replay(git, { from: onto, onto: head, theirs: commit.stdout.trim() });
@@ -823,10 +823,10 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         if (await inHead(c.id)) continue;
         lost.push(c.id);
       }
-      if (lost.length) return `the branch it left drops ${lost.length} of the Objective's commit(s) (${lost.map((id) => id.slice(0, 7)).join(", ")}); with an AI Gateway key Factory decides this on content`;
+      if (lost.length) return `the branch it left drops ${lost.length} of the Objective's commit(s) (${lost.map((id) => id.slice(0, 7)).join(", ")}); with an AI Gateway key Pendulum decides this on content`;
     } catch (e) {
       log(`rebase check: ${String(e?.message || e).slice(0, 200)}`);
-      return "Factory could not compare the rebased branch with the branch before it";
+      return "Pendulum could not compare the rebased branch with the branch before it";
     }
     return "";
   };
@@ -865,7 +865,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   box.block = (reason) => refuse(reason);
 
   /**
-   * Rebase the Objective's branch onto the default branch in a worktree of the mirror, with Factory's identity and no
+   * Rebase the Objective's branch onto the default branch in a worktree of the mirror, with Pendulum's identity and no
    * hooks. Returns the new commit, or null when it conflicts (the harness then resolves it in its checkout).
    */
   box.rebase = async ({ name, email }) => {
@@ -899,7 +899,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * The commits whose Git LFS media a git in the checkout can check out this stage: `head`, the default branch as the
    * checkout has it (`base`: a rebase or merge the harness runs, in a conflict pass or on its own, goes onto it), and the
    * branch's commits on GitHub beyond the default branch (a rebase replays each one). With all their objects in the
-   * checkout's store, no git there ever needs an LFS download, Factory's own or the harness's (#76).
+   * checkout's store, no git there ever needs an LFS download, Pendulum's own or the harness's (#76).
    */
   const workingSet = async (head) => {
     const own = expected ? (await git(["rev-list", expected, "--not", base])).stdout.split("\n") : [];
@@ -929,7 +929,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * The working set's media (workingSet) for a checkout Factory has moved (`head`: its rebase, its catch-up merge) or
+   * The working set's media (workingSet) for a checkout Pendulum has moved (`head`: its rebase, its catch-up merge) or
    * whose default branch moved (`head` null), after lfsSetup. The checkout's git config is never changed here: it is
    * pinned by then. {used: false} only when neither `head` nor the default branch routes files through LFS; else
    * {used: true, warning}, "" when the media arrived. Routing that arrived after the stage set up (the checkout has no
@@ -1022,7 +1022,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
 
   /**
    * The media of `revs`' trees for the checkout, all of it whatever its size. Only the objects its store lacks, matched
-   * by each pointer's oid and size, are handled: those the mirror lacks too are downloaded with Factory's token, then
+   * by each pointer's oid and size, are handled: those the mirror lacks too are downloaded with Pendulum's token, then
    * copied over; and (`checkout`) `git lfs checkout` runs. All within `timeoutMs` and the stage's end
    * (`deadlineAt`); what did arrive is handed over even when the download failed. A warning, or "".
    */
@@ -1040,7 +1040,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const absent = missing.filter((p) => mirrorSize(p.oid) !== p.size);
     if (absent.length && over()) warnings.push(NO_TIME);
     else if (absent.length) {
-      // Exactly the missing pointers, in a tree of Factory's own in the mirror: git-lfs fetches what a tree points to.
+      // Exactly the missing pointers, in a tree of Pendulum's own in the mirror: git-lfs fetches what a tree points to.
       const tree = await git(["mktree"], { input: absent.map((p) => `100644 blob ${p.blob}\t${p.oid}\n`).join("") });
       const { name, email } = box.author;
       const who = { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
@@ -1059,7 +1059,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (ship.length && over()) warnings.push(NO_TIME);
     else if (ship.length) {
       const tar = await exec("tar", ["-C", join(mirror, "lfs", "objects"), "--null", "-T", "-", "-cf", "-"], { encoding: "buffer", maxBytes: 8 * 1024 ** 3, input: `${ship.join("\0")}\0`, timeoutMs: ms() });
-      // The checkout's store, made as the agent; the objects unpacked into it as the agent by Factory's own unpacker
+      // The checkout's store, made as the agent; the objects unpacked into it as the agent by Pendulum's own unpacker
       // (untar.mjs: GNU tar cannot make nested directories in the agent's unit on Ubuntu 26.04, #102).
       const wrap = (inner) => backend(agentGitEnv).sandbox.git(inner, agentGitEnv);
       const store = tar.code === 0 && !tar.timedOut && !over() ? await exec(...wrap(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" && mkdir -p "$d" && printf "%s" "$d"', "sh", checkout]), { env: agentGitEnv, timeoutMs: ms() }) : { code: 1 };
@@ -1077,12 +1077,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * Put the checkout on Factory's own rebase `sha` (rebase mode, once pushed) with its media: pointer files first
+   * Put the checkout on Pendulum's own rebase `sha` (rebase mode, once pushed) with its media: pointer files first
    * (putOn), then the hand-over (lfsHandOver). {code, error, warning}.
    */
   box.putOnRebased = async (sha, opts = {}) => {
     await box.feed({ rebased: sha });
-    const on = await box.putOn("refs/factory/rebased");
+    const on = await box.putOn("refs/pendulum/rebased");
     if (on.code !== 0) return { ...on, warning: "" };
     return { ...on, warning: (await box.lfsHandOver(sha, opts)).warning };
   };
@@ -1091,26 +1091,26 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * The branch brought up to date with the default branch when GitHub's default changed a workflow file since `head`'s
    * base. GitHub refuses a token without the Workflows permission (the local token, the App) a branch whose workflow
    * files are a version no branch on GitHub has any more, which is what a run cut before such a change carries (#2579).
-   * Factory merges in its own mirror (git merge-tree, no worktree, no hooks) with its own identity. Returns {head} (no
+   * Pendulum merges in its own mirror (git merge-tree, no worktree, no hooks) with its own identity. Returns {head} (no
    * change), {head, merged} (the merge commit) or {head, conflict} (the merge conflicts; head unchanged). A default
    * branch that cannot be read or merged changes nothing: the push goes as it would have.
    */
   const catchUp = async (head) => {
-    // Read from the server each time (never a remote-tracking ref). Unmoved since Factory read it, only a head cut from
+    // Read from the server each time (never a remote-tracking ref). Unmoved since Pendulum read it, only a head cut from
     // an older default (a resumed branch) can lag behind it.
     const now = await serverHead(defaultBranch).catch(() => "");
     if (!SHA.test(now)) return { head };
     const has = async (c) => (await git(["cat-file", "-e", `${c}^{commit}`])).code === 0;
     let tip = now;
     if (!(await has(now))) {
-      if ((await net("fetch", ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/factory/default-now`])).code !== 0) return { head };
+      if ((await net("fetch", ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/pendulum/default-now`])).code !== 0) return { head };
       // It moved again between the read and the fetch: the fetched head, then.
-      if (!(await has(now))) tip = (await git(["rev-parse", "--verify", "-q", "refs/factory/default-now^{commit}"])).stdout.trim();
+      if (!(await has(now))) tip = (await git(["rev-parse", "--verify", "-q", "refs/pendulum/default-now^{commit}"])).stdout.trim();
     }
     if (!SHA.test(tip)) return { head };
     const mb = (await git(["merge-base", head, tip])).stdout.trim();
     // Nothing to merge (the branch already has the default), or nothing of the branch's own to merge it into: a merge
-    // there would be Factory's alone, a commit whose tree is the default branch's.
+    // there would be Pendulum's alone, a commit whose tree is the default branch's.
     if (!SHA.test(mb) || mb === tip || mb === head) return { head };
     const paths = (await names([mb, tip]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS_DIR));
     if (!paths.length) return { head };
@@ -1129,8 +1129,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * The agent's `head` on top of Factory's own unsynced merge (`unsynced`): the merge itself when the checkout made
-   * nothing since, else the agent's new commits merged onto it (merge-tree, Factory's identity), so the pushed branch
+   * The agent's `head` on top of Pendulum's own unsynced merge (`unsynced`): the merge itself when the checkout made
+   * nothing since, else the agent's new commits merged onto it (merge-tree, Pendulum's identity), so the pushed branch
    * only moves forward. Null when `head` is not built on what the merge was made from, or the merge conflicts: the
    * push then goes as it would have.
    */
@@ -1143,18 +1143,18 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (!SHA.test(tree)) return null;
     const { name, email } = box.author;
     const who = { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
-    return must(["commit-tree", tree, "-p", unsynced.to, "-p", head, "-m", `Merge the checkout's new commits into ${branch}\n\nThe checkout could not take Factory's merge of ${defaultBranch} (${unsynced.to.slice(0, 7)}).`], { env: { ...gitEnv(), ...who } });
+    return must(["commit-tree", tree, "-p", unsynced.to, "-p", head, "-m", `Merge the checkout's new commits into ${branch}\n\nThe checkout could not take Pendulum's merge of ${defaultBranch} (${unsynced.to.slice(0, 7)}).`], { env: { ...gitEnv(), ...who } });
   };
 
   /**
-   * Put the agent's checkout on `head`, Factory's merge (fast-forward only, in its sandbox, no hooks), so its next
+   * Put the agent's checkout on `head`, Pendulum's merge (fast-forward only, in its sandbox, no hooks), so its next
    * commits build on it. One that cannot (uncommitted edits in the way) is recorded in `unsynced`: the next push builds
    * on the merge (onUnsynced) rather than replacing it. `from`: the agent's head the merge was made from.
    */
   const sync = async (head, from) => {
     try {
       await box.feed({ merged: head });
-      box.synced = (await agentMove(["git", "-C", checkout, "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "-q", "refs/factory/merged"])).code === 0;
+      box.synced = (await agentMove(["git", "-C", checkout, "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "-q", "refs/pendulum/merged"])).code === 0;
     } catch {
       box.synced = false;
     }
@@ -1172,7 +1172,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * The worker's workflow hand-over as Factory publishes it (checkHandover), checked against the tree of the branch as
+   * The worker's workflow hand-over as Pendulum publishes it (checkHandover), checked against the tree of the branch as
    * GitHub has it (the default branch's when there is none): {ok: true, patch, files} or {ok: false, problem}.
    */
   box.handover = async (patch) => checkHandover(git, { patch, tree: expected || base, index: join(scratch, `handover-${Date.now()}.index`), against: expected ? branch : defaultBranch });
@@ -1216,7 +1216,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   let fence = null;
   const names = async (range) => {
     const r = await git(["diff", "--no-renames", "--no-relative", "--name-only", "-z", ...range, "--"]);
-    if (r.code !== 0) throw commandFailed("git diff in Factory's mirror failed", r);
+    if (r.code !== 0) throw commandFailed("git diff in Pendulum's mirror failed", r);
     return r.stdout.split("\0").filter(Boolean);
   };
 
@@ -1226,7 +1226,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * widen a later one's scope by editing the plan; `texts` (the issue, the decisions, the red's output, the review
    * comments) widen it at each call. `toolchain` (what the `setup` and `install` commands refer to, logic.mjs
    * setupPaths) counts as toolchain: the files they name, the package.json scripts they run, and, when they may run a
-   * file Factory cannot name, every file. Every later push is checked against it (box.outside). A fence that could not be set fails closed: every
+   * file Pendulum cannot name, every file. Every later push is checked against it (box.outside). A fence that could not be set fails closed: every
    * later push is refused, never let through unchecked. `lead` (the failing checks' lead lines) and `comments` (the review
    * comments the pass answers, [{path, line, body}]) are this pass's, for the fence check's question: each call replaces them.
    */
@@ -1309,7 +1309,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     };
   };
 
-  /** What the setup command runs (logic.mjs setupGuard), read on the default branch as Factory fetched it; null with no setup. */
+  /** What the setup command runs (logic.mjs setupGuard), read on the default branch as Pendulum fetched it; null with no setup. */
   let guardAtBase = null;
   box.setupFiles = async () => {
     if (!setup) return null;
@@ -1339,7 +1339,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   // The fence check's verdicts in this stage: a yes by file, diff and what the question was given (the failure lines, the
   // comments, the plan), so another red or comment asks again; a no by file and diff, so the same change is not asked
   // again; and how many noes each file had (after two, a new change to it is not asked about). What it said in the last
-  // reading of the fence: {judged: ["<path>: <why>"] (Factory's record), told: [...] (the same for the worker, without
+  // reading of the fence: {judged: ["<path>: <why>"] (Pendulum's record), told: [...] (the same for the worker, without
   // the model's confidence), undecided: [paths], cause, limited}.
   const allowed = new Set();
   const denied = new Map();
@@ -1428,7 +1428,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       verdict.told.push(v.told || v.why);
       if (v.undecided) {
         verdict.undecided.push(path);
-        verdict.cause = verdict.cause === "factory" || v.cause === "factory" ? "factory" : v.cause;
+        verdict.cause = verdict.cause === "pendulum" || v.cause === "pendulum" ? "pendulum" : v.cause;
       }
       if (v.limited) {
         verdict.limited = v.limited;
@@ -1437,7 +1437,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     }
     return refused.filter((p) => !goes.has(p));
   };
-  /** The Block's cause for `out`, still refused: the fence check's (`factory`, `outage`) when it gave no answer on every one of them, else null (the work's). */
+  /** The Block's cause for `out`, still refused: the fence check's (`pendulum`, `outage`) when it gave no answer on every one of them, else null (the work's). */
   const undecidedCause = (out) => (verdict.cause && out.length && out.every((p) => verdict.undecided.includes(p)) ? verdict.cause : null);
   box.fenceCause = undecidedCause;
   /** box.outside's toolchain files among `mine`, the branch's own changes since the fence started, to the head `h`. */
@@ -1465,7 +1465,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * Push the agent's HEAD to factory/<issue>. True when GitHub's head is now that commit (or already was); false with
+   * Push the agent's HEAD to pendulum/<issue>. True when GitHub's head is now that commit (or already was); false with
    * box.error set, and the outbox refuses every later push.
    */
   box.push = async ({ sha = null } = {}) => {
@@ -1474,7 +1474,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     await holdIfStopped();
     await box.beforePush?.();
     if (box.failed) return false;
-    // What this push did, never an earlier one's: Factory's merge, a conflict, GitHub's text, whether the checkout took it.
+    // What this push did, never an earlier one's: Pendulum's merge, a conflict, GitHub's text, whether the checkout took it.
     box.merged = null;
     box.conflict = null;
     box.detail = "";
@@ -1482,7 +1482,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     box.lfsWarning = "";
     let head;
     try {
-      // `sha`: a commit Factory made in the mirror itself (its own rebase); else the agent's HEAD, as a bundle.
+      // `sha`: a commit Pendulum made in the mirror itself (its own rebase); else the agent's HEAD, as a bundle.
       if (sha) {
         await must(["update-ref", "refs/heads/incoming", sha]);
         await must(["symbolic-ref", "HEAD", "refs/heads/incoming"]);
@@ -1491,7 +1491,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     } catch (e) {
       return refuse(e.message);
     }
-    // The agent's own head, before anything Factory merges into it.
+    // The agent's own head, before anything Pendulum merges into it.
     const agentHead = head;
     const onto = sha ? null : await onUnsynced(head).catch(() => null);
     if (onto) {
@@ -1501,18 +1501,18 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     }
     box.head = head;
     if (head === expected) {
-      // Nothing new beyond Factory's unsynced merge: the checkout is offered it again.
+      // Nothing new beyond Pendulum's unsynced merge: the checkout is offered it again.
       if (onto) await sync(head, agentHead);
       return true;
     }
     // A new branch with no commits of its own (a Question, nothing to change, a harness that stopped early): nothing goes
     // out, so the run reads as one that left no commits; never a branch that is only some older default-branch commit.
     if (!expected && (await git(["merge-base", "--is-ancestor", head, base])).code === 0) return true;
-    // Factory's merge of a default branch that changed a workflow file (catchUp). A new branch that conflicts with it is
+    // Pendulum's merge of a default branch that changed a workflow file (catchUp). A new branch that conflicts with it is
     // not pushed: the caller hands the conflict to the harness (the conflict prompt) and pushes again; a second conflict
     // is refused. An existing branch goes as it is, and its PR's conflict takes the send-back path.
     const caught = await catchUp(head).catch(() => ({ head }));
-    // The default branch moved and the checkout cannot take Factory's merge: the harness merges or rebases onto it
+    // The default branch moved and the checkout cannot take Pendulum's merge: the harness merges or rebases onto it
     // itself (the conflict pass), so its media is in the checkout's store first.
     if (caught.conflict) box.lfsWarning = (await box.lfsHandOver(null).catch(() => ({ warning: "Git LFS objects could not be handed to the checkout" }))).warning;
     if (caught.conflict && !expected) {
@@ -1575,14 +1575,14 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       log(why);
       throw new UsageLimitReached(verdict.limited, { since: Date.now(), label: "fence check" });
     }
-    // A refusal that stands only because the fence check gave no answer on every file still refused is Factory's (or its
+    // A refusal that stands only because the fence check gave no answer on every file still refused is Pendulum's (or its
     // vendor's outage), not the work's.
     if (outside.length) return refuse(fixScopeReason(outside, toolchain.unresolved, verdict.judged), { kind: "fix-scope", cause: undecidedCause(outside) });
     const plain = await plainLfsBlobs(mirror, base, { source: "HEAD", env: gitEnv() }).catch(() => []);
     if (plain.length) return refuse(`committed as plain git blobs though .gitattributes routes them to Git LFS: ${plain.slice(0, 5).join(", ")}`, { lfs: true });
     const media = await lfsMedia(head);
     if (media.objects.length) {
-      if (local && media.bytes > localMediaCapMb() * 1024 * 1024) return refuse(`the branch's Git LFS media is ${(media.bytes / 1024 / 1024).toFixed(1)} MB (${media.objects.length} object(s)), over the local limit of ${localMediaCapMb()} MB (FACTORY_LOCAL_MEDIA_MAX_MB)`, { lfs: true });
+      if (local && media.bytes > localMediaCapMb() * 1024 * 1024) return refuse(`the branch's Git LFS media is ${(media.bytes / 1024 / 1024).toFixed(1)} MB (${media.objects.length} object(s)), over the local limit of ${localMediaCapMb()} MB (PENDULUM_LOCAL_MEDIA_MAX_MB)`, { lfs: true });
       if (!(await lfsVersion())) return refuse("the branch carries Git LFS media and git-lfs is not installed here", { lfs: true });
       const gd = (await exec(...agent(["rev-parse", "--absolute-git-dir"]), { env: agentGitEnv })).stdout.trim();
       const bad = [];
@@ -1610,14 +1610,14 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (r.code !== 0 && !done) {
       const out = String(`${r.stdout}\n${r.stderr}`).split("\n");
       // GitHub's own text (the remote's URL, its `remote:` lines, ruleset or push-protection messages) is for the job
-      // log only: the Blocked reason is Factory's fixed text and codes (pushRefusal).
+      // log only: the Blocked reason is Pendulum's fixed text and codes (pushRefusal).
       box.detail = out.filter((l) => /rejected|error|fatal|!|workflow/.test(l)).join("; ").slice(0, 600);
       // GitHub's refusal of a workflow file the token may not write, read only from its own reason on this ref's
-      // porcelain line: named with its cause, in Factory's own words. Anything else is a plain refusal.
+      // porcelain line: named with its cause, in Pendulum's own words. Anything else is a plain refusal.
       if (out.some((l) => workflowScopeRefused(l, branch))) return refuse(workflowScopeReason({ branch, defaultBranch, ...(await workflowDrift(head).catch(() => ({}))) }));
       return refuse(pushRefusal({ branch, out, code: r.code }));
     }
-    // GitHub's head must now be exactly the commit Factory checked. Its reads lag a push at times: five reads over about
+    // GitHub's head must now be exactly the commit Pendulum checked. Its reads lag a push at times: five reads over about
     // 30 s (each ls-remote retried on its own network failures); past the stage's real end, still the first three.
     let now = "";
     for (let i = 0; i < 5; i += 1) {
@@ -1632,14 +1632,14 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     await dropAside();
     if (caught.merged) catchUps.add(head);
     await git(["update-ref", `refs/remotes/origin/${branch}`, head]);
-    // The agent's checkout takes Factory's merge, so its next commits build on it (sync). A push of a commit Factory
+    // The agent's checkout takes Pendulum's merge, so its next commits build on it (sync). A push of a commit Pendulum
     // made (`sha`, its rebase) leaves the checkout to the caller, which re-points it.
     if ((caught.merged || onto) && !sha) await sync(head, agentHead);
     else unsynced = null;
     return true;
   };
 
-  /** Whether `sha` is a catch-up merge (catchUp) this outbox made and pushed: Factory's own commit, never the agent's. */
+  /** Whether `sha` is a catch-up merge (catchUp) this outbox made and pushed: Pendulum's own commit, never the agent's. */
   box.caughtUp = (sha) => catchUps.has(sha);
 
   /** The branch as pushed: its commits beyond the default branch and the paths this stage changed (protected check). */
@@ -1654,8 +1654,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   /**
    * The whole branch as it stands, beyond what this stage checked: `files` the paths its PR changes (base...head, as
    * GitHub's PR diff reads them), and `foreign` the commits on base..start (the head GitHub had before this stage ran)
-   * that `vouched` (a head Factory recorded pushing there) does not hold: commits someone else pushed onto the branch,
-   * which no Factory check saw. -1 when `vouched` is not on the branch (it was rewritten since). A new branch has none.
+   * that `vouched` (a head Pendulum recorded pushing there) does not hold: commits someone else pushed onto the branch,
+   * which no Pendulum check saw. -1 when `vouched` is not on the branch (it was rewritten since). A new branch has none.
    */
   box.whole = async (vouched = "") => {
     const head = expected || base;
@@ -1669,7 +1669,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     return { files, foreign: Number(await must(["rev-list", "--count", start, "--not", ...nots])) || 0 };
   };
 
-  /** A clean tree of the default branch as GitHub has it, in Factory's own temp directory: where `setup` runs on Actions. */
+  /** A clean tree of the default branch as GitHub has it, in Pendulum's own temp directory: where `setup` runs on Actions. */
   box.defaultTree = async () => {
     const dir = join(scratch, "default-tree");
     if (!existsSync(dir)) await must(["worktree", "add", "-q", "--detach", dir, base]);
@@ -1704,7 +1704,7 @@ export async function replay(git, { from, onto, theirs }) {
 }
 
 /**
- * The tree a clean merge of `ours` and `theirs` has, computed by Factory in a scratch mirror (git merge-tree, no
+ * The tree a clean merge of `ours` and `theirs` has, computed by Pendulum in a scratch mirror (git merge-tree, no
  * worktree, no hooks), or null when they conflict or cannot be read. An update-branch head is accepted only when its
  * tree is exactly this: GitHub's own merge, with nothing edited in.
  */
@@ -1757,7 +1757,7 @@ export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
     return memo.get(key);
   };
   // commit-tree writes the trial merges' commits: a fixed identity and time, so the same inputs make the same commit.
-  const who = { GIT_AUTHOR_NAME: "factory", GIT_AUTHOR_EMAIL: "factory@localhost", GIT_COMMITTER_NAME: "factory", GIT_COMMITTER_EMAIL: "factory@localhost", GIT_AUTHOR_DATE: "@0 +0000", GIT_COMMITTER_DATE: "@0 +0000" };
+  const who = { GIT_AUTHOR_NAME: "pendulum", GIT_AUTHOR_EMAIL: "pendulum@localhost", GIT_COMMITTER_NAME: "pendulum", GIT_COMMITTER_EMAIL: "pendulum@localhost", GIT_AUTHOR_DATE: "@0 +0000", GIT_COMMITTER_DATE: "@0 +0000" };
   const env = () => addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...who, ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"]]);
   const git = (args) => exec("git", ["-C", dir, ...args], { env: env() });
   const must = async (args, what) => {
@@ -1855,7 +1855,7 @@ export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
 }
 
 /**
- * A scratch bare repository for a diff Factory makes outside a stage's mirror (local mode's post-review): it reads the
+ * A scratch bare repository for a diff Pendulum makes outside a stage's mirror (local mode's post-review): it reads the
  * object store `objects` (a clone's, as an alternate: none of that clone's config, hooks or refs is used, and no git
  * runs there) and fetches a commit it lacks from `remote` by id, as the mirror does. Returns {git, close}.
  */
@@ -1873,7 +1873,7 @@ export async function scratchHistory({ remote, token = () => null, objects = nul
 }
 
 /**
- * A workflow hand-over (handover.mjs) as Factory publishes it: the worker's `patch` really applied (`git apply --cached`)
+ * A workflow hand-over (handover.mjs) as Pendulum publishes it: the worker's `patch` really applied (`git apply --cached`)
  * to `tree` on a scratch `index`, the changes read back from git (`diff-index --raw -z --no-renames`) and held to
  * entriesProblem, and then git's own diff of those files (no renames, no external diff or textconv, no colour) held to
  * patchTextProblem. Only that regenerated diff is ever published or applied, never the worker's text, so whatever the

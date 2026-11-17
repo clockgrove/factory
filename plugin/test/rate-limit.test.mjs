@@ -108,8 +108,8 @@ async function faked(answer, fn, { token = false, count = null } = {}) {
   }
 }
 
-const limitLines = (lines) => lines.filter((l) => /\[factory\] network: GitHub's \S+ API rate limit/.test(l));
-const retryLines = (lines) => lines.filter((l) => /\[factory\] GitHub /.test(l));
+const limitLines = (lines) => lines.filter((l) => /\[pendulum\] network: GitHub's \S+ API rate limit/.test(l));
+const retryLines = (lines) => lines.filter((l) => /\[pendulum\] GitHub /.test(l));
 
 test("a waiting process: a spent primary limit waits to its reset for all callers, nothing sent meanwhile, a create sent again; one line in, one out", async () => {
   const start = Date.parse("2026-11-14T08:47:00Z");
@@ -123,7 +123,7 @@ test("a waiting process: a spent primary limit waits to its reset for all caller
       await new Promise((r) => setImmediate(r));
       assert.equal(held.length, 1, "one sleep, to the reset");
       // Callers that come while it waits, a create among them: not sent.
-      const later = [rest("repos/o/r/pulls?state=open&head=o:factory/7"), rest("repos/o/r/issues/7/comments", { method: "POST", body: { body: "progress" } })];
+      const later = [rest("repos/o/r/pulls?state=open&head=o:pendulum/7"), rest("repos/o/r/issues/7/comments", { method: "POST", body: { body: "progress" } })];
       await new Promise((r) => setImmediate(r));
       assert.equal(seen.length, 1, "no request goes to GitHub while the limit is spent");
       assert.equal(held.length, 1, "the later callers wait on the same sleep");
@@ -217,7 +217,7 @@ async function fakeGitHub(answer, { count = true } = {}) {
   return { seen, url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
 }
 
-const ISSUE = { number: 7, state: "open", labels: [{ name: "factory:objective" }], body: "" };
+const ISSUE = { number: 7, state: "open", labels: [{ name: "pendulum:objective" }], body: "" };
 
 /**
  * Run worker.mjs as its own process against `gh`. `virtual`: a preload makes the network waits and the client's retries
@@ -229,7 +229,7 @@ async function worker(gh, { env = {}, virtual = false } = {}) {
   const pre = join(root, "pre.mjs");
   writeFileSync(pre, `import { OUTAGE } from ${JSON.stringify(pathToFileURL(join(SCRIPTS, "lib", "network.mjs")).href)};\nimport { RETRY } from ${JSON.stringify(pathToFileURL(join(SCRIPTS, "lib", "github.mjs")).href)};\n${virtual ? "let ahead = 0;\nOUTAGE.now = RETRY.now = () => Date.now() + ahead;\nOUTAGE.sleep = RETRY.sleep = async (ms) => { ahead += Math.max(0, ms); };\n" : ""}`);
   const child = spawn(process.execPath, ["--import", pathToFileURL(pre).href, join(SCRIPTS, "worker.mjs"), "--repo", "o/r", "--issue", "7", "--checkout", join(root, "co"), "--usage-dir", join(root, "u")], {
-    env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, FACTORY_APP_TOKEN: "t", ...env },
+    env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, PENDULUM_APP_TOKEN: "t", ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let out = "";
@@ -245,7 +245,7 @@ test("worker.mjs, run for real on the local route: a reset 20 minutes ahead (pas
   // The quota stays spent: every request is refused.
   const gh = await fakeGitHub(() => [403, { message: "API rate limit exceeded for user ID 1." }, spentHeaders(reset)]);
   try {
-    const { code, out, result } = await worker(gh, { env: { FACTORY_LOCAL: "1" } });
+    const { code, out, result } = await worker(gh, { env: { PENDULUM_LOCAL: "1" } });
     assert.equal(code, 0, out);
     assert.equal(result?.exit, "paused", out);
     assert.equal(result.outage.code, RATE_LIMIT_SPENT);
@@ -306,13 +306,13 @@ test("worker.mjs, run for real off the local route: a reset past the stage's dea
     return null;
   });
   try {
-    const { out, result } = await worker(gh, { virtual: true, env: { FACTORY_INPUT_TIMEOUT_MINUTES: "5" } });
+    const { out, result } = await worker(gh, { virtual: true, env: { PENDULUM_INPUT_TIMEOUT_MINUTES: "5" } });
     assert.equal(result?.exit, "blocked", out);
     assert.ok(Math.abs(Date.parse(result.outage.reset) - reset) < 1500, result.outage.reset);
     assert.match(out, /waiting for the rate limit's reset at \S+ to write the Block/);
-    const notice = gh.seen.find((r) => r.method === "POST" && /\/issues\/7\/comments$/.test(r.url) && r.body.includes("factory:block"));
+    const notice = gh.seen.find((r) => r.method === "POST" && /\/issues\/7\/comments$/.test(r.url) && r.body.includes("pendulum:block"));
     assert.ok(notice, `${out}\n${gh.seen.map((r) => `${r.method} ${r.url} ${r.body.slice(0, 200)}`).join("\n")}`);
-    assert.match(JSON.parse(notice.body).body, /<!-- factory:block \{"cause":"provider-quota"\} -->/);
+    assert.match(JSON.parse(notice.body).body, /<!-- pendulum:block \{"cause":"provider-quota"\} -->/);
     assert.ok(JSON.parse(notice.body).body.includes(`is spent until ${result.outage.reset}`), notice.body);
     assert.doesNotMatch(out, /worker crashed/);
   } finally {
@@ -327,13 +327,13 @@ test("dispatch.mjs, run for real: a spent limit starts nothing, says so once, an
   const output = join(root, "out");
   writeFileSync(output, "");
   try {
-    const child = spawn(process.execPath, [join(SCRIPTS, "dispatch.mjs"), "--repo", "o/r"], { env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, FACTORY_APP_TOKEN: "t", GITHUB_OUTPUT: output }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [join(SCRIPTS, "dispatch.mjs"), "--repo", "o/r"], { env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, PENDULUM_APP_TOKEN: "t", GITHUB_OUTPUT: output }, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (c) => (out += c));
     child.stderr.on("data", (c) => (out += c));
     const code = await new Promise((r) => child.on("exit", r));
     assert.equal(code, 0, out);
-    const said = out.split("\n").filter((l) => /^\[factory\] GitHub's API rate limit is spent until \S+; no new stage starts until then$/.test(l));
+    const said = out.split("\n").filter((l) => /^\[pendulum\] GitHub's API rate limit is spent until \S+; no new stage starts until then$/.test(l));
     assert.equal(said.length, 1, out);
     assert.ok(Math.abs(Date.parse(/until (\S+);/.exec(said[0])[1]) - reset) < 1500, said[0]);
     assert.doesNotMatch(out, /dispatch failed/);
@@ -353,7 +353,7 @@ test("dispatch.mjs, run for real: a spent limit starts nothing, says so once, an
 async function tickWith(spentOn) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const start = Date.parse("2026-11-14T08:47:00Z");
-  const queued = { number: 5, state: "open", labels: [{ name: "factory:objective" }], body: "", updated_at: new Date(start).toISOString(), user: { login: "maintainer" } };
+  const queued = { number: 5, state: "open", labels: [{ name: "pendulum:objective" }], body: "", updated_at: new Date(start).toISOString(), user: { login: "maintainer" } };
   return faked(
     (req) => {
       if (spentOn(req)) return spent(start + 20 * 60_000);
@@ -365,7 +365,7 @@ async function tickWith(spentOn) {
       if (req.method === "GET" && req.path.endsWith("/user")) return json({ login: "maintainer", type: "User" });
       return json({ message: "Not Found" }, 404);
     },
-    async ({ lines, seen }) => ({ r: await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t", dryRun: true }), lines, seen }),
+    async ({ lines, seen }) => ({ r: await dispatch({ repo: "acme/app", objectiveLabel: "pendulum:objective", maxConcurrent: 2, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t", dryRun: true }), lines, seen }),
   );
 }
 

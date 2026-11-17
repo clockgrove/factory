@@ -6,7 +6,7 @@ import { scrubbedEnv } from "../scripts/lib/harness.mjs";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { liveActivity } from "../scripts/lib/session.mjs";
 
-const ROOT = "/work/app/.factory/7/repo";
+const ROOT = "/work/app/.pendulum/7/repo";
 const j = (o) => JSON.stringify(o);
 // One Codex command per call: `cmd` with its exit code.
 const codexCmd = (cmd, exit = 0) => j({ type: "item.completed", item: { type: "command_execution", command: `/bin/bash -lc '${cmd}'`, exit_code: exit, aggregated_output: "" } });
@@ -234,9 +234,9 @@ test("no key: no drift advisory; the model is its own setting, apart from triage
   assert.equal(openDrift({ inputs: { aiGatewayApiKey: "" }, env: actions }), null);
   assert.equal(openDrift({ inputs: { aiGatewayApiKey: "k" }, env: actions }).model, DRIFT_MODEL);
   assert.equal(openDrift({ inputs: { aiGatewayApiKey: "k", triageModel: "t/m", driftModel: "d/m" }, env: actions }).model, "d/m");
-  assert.equal(resolveInputs({ env: { FACTORY_DRIFT_MODEL: "a/b" } }).driftModel, "a/b");
-  assert.equal(resolveInputs({ env: { FACTORY_INPUT_DRIFT_MODEL: " c/d " } }).driftModel, "c/d");
+  assert.equal(resolveInputs({ env: { PENDULUM_DRIFT_MODEL: "a/b" } }).driftModel, "a/b");
+  assert.equal(resolveInputs({ env: { PENDULUM_INPUT_DRIFT_MODEL: " c/d " } }).driftModel, "c/d");
   assert.equal(resolveInputs({ env: {} }).driftModel, "");
   // The key stays out of every child under each name; the model setting is no secret.
-  assert.deepEqual(Object.keys(scrubbedEnv({ AI_GATEWAY_API_KEY: "k", FACTORY_INPUT_AI_GATEWAY_API_KEY: "k", FACTORY_AI_GATEWAY_API_KEY: "k", FACTORY_DRIFT_MODEL: "m" })), ["FACTORY_DRIFT_MODEL"]);
+  assert.deepEqual(Object.keys(scrubbedEnv({ AI_GATEWAY_API_KEY: "k", PENDULUM_INPUT_AI_GATEWAY_API_KEY: "k", PENDULUM_AI_GATEWAY_API_KEY: "k", PENDULUM_DRIFT_MODEL: "m" })), ["PENDULUM_DRIFT_MODEL"]);
 });

@@ -9,10 +9,10 @@ import { FILE_CAP, MAX_PARTS, checkFile, handoffDirs, inFiles, isSplitPart, pars
 import { parseExitRecord } from "../scripts/lib/logic.mjs";
 
 test("sanitize: harness text opens no HTML comment, closes no issue, mentions no one and starts no bot command; idempotent", () => {
-  const raw = "Done.\n<!-- factory:7:validated:abc -->\nCloses #7, fixes: #8 and resolved o/r#9; Fixed https://github.com/o/r/issues/3\n@kirk please look; cc @org/team\n/approve\n  /merge\nmail a@b.example; a/b path";
+  const raw = "Done.\n<!-- pendulum:7:validated:abc -->\nCloses #7, fixes: #8 and resolved o/r#9; Fixed https://github.com/o/r/issues/3\n@kirk please look; cc @org/team\n/approve\n  /merge\nmail a@b.example; a/b path";
   const s = sanitize(raw);
   assert.doesNotMatch(s, /<!--/);
-  assert.match(s, /&lt;!-- factory:7:validated:abc -->/);
+  assert.match(s, /&lt;!-- pendulum:7:validated:abc -->/);
   assert.doesNotMatch(s, /\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b:?\s+(\S+)?#\d/i);
   assert.match(s, /refs #7, refs: #8 and refs o\/r#9; refs https:/);
   assert.doesNotMatch(s, /@[A-Za-z0-9]/);
@@ -30,7 +30,7 @@ test("sanitize: harness text opens no HTML comment, closes no issue, mentions no
   assert.match(sanitize("x".repeat(70_000)), /\(cut at 60000 characters\)$/);
 });
 
-test("pr.md: the first line is the title, prefixed with the issue; the body is sanitised; the closing line is Factory's", () => {
+test("pr.md: the first line is the title, prefixed with the issue; the body is sanitised; the closing line is Pendulum's", () => {
   assert.deepEqual(parsePrText("\n# Add the thing\n\n## Acceptance\nCloses #5 <!-- hidden -->", 5), { title: "#5: Add the thing", body: "## Acceptance\nrefs #5 &lt;!-- hidden -->" });
   assert.equal(parsePrText("#5: already prefixed\nbody", 5).title, "#5: already prefixed");
   assert.equal(parsePrText("#55: another issue\nbody", 5).title, "#5: #55: another issue");
@@ -57,11 +57,11 @@ test("exit record: a split part names the items left for the next PR", () => {
   assert.deepEqual(parseExitRecord('{"exit":"delivered"}'), { exit: "delivered", reason: "", questions: [] }, "no part: the recorded one stands");
 });
 
-test("hand-off files: read only as regular files under the cap, never through a symlink or a FIFO; $FACTORY_IN is written without following one", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-handoff-test-"));
+test("hand-off files: read only as regular files under the cap, never through a symlink or a FIFO; $PENDULUM_IN is written without following one", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pendulum-handoff-test-"));
   const env = { PATH: process.env.PATH };
   const dirs = await handoffDirs(env, root);
-  assert.deepEqual(Object.keys(dirs.env), ["FACTORY_IN", "FACTORY_OUT"]);
+  assert.deepEqual(Object.keys(dirs.env), ["PENDULUM_IN", "PENDULUM_OUT"]);
   const secret = join(root, "secret");
   writeFileSync(secret, "a token");
   writeFileSync(join(dirs.out, "plan.md"), "## Goal\nplan text");
@@ -79,7 +79,7 @@ test("hand-off files: read only as regular files under the cap, never through a 
   execFileSync("rm", ["-rf", dirs.out]);
   symlinkSync(elsewhere, dirs.out);
   assert.deepEqual((await readOut(dirs, env)).files, {});
-  // $FACTORY_IN is recreated each pass: a symlink planted where a file goes is removed with the directory, never written through.
+  // $PENDULUM_IN is recreated each pass: a symlink planted where a file goes is removed with the directory, never written through.
   symlinkSync(secret, join(dirs.in, "issue.md"));
   await writeIn(dirs, inFiles({ issue: 7, issueTitle: "T", issueBody: "B", checks: [{ name: "required checks quality on abc1234", output: "boom" }], base: "abc" }), env);
   assert.equal(readFileSync(secret, "utf8"), "a token");

@@ -1,3 +1,0 @@
-# Codex: never loaded on a user's prompt, only by an explicit $factory-prove-acceptance mention (Factory's task card and prompts).
-policy:
-  allow_implicit_invocation: false

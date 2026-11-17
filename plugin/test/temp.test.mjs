@@ -1,4 +1,4 @@
-// Temp directories Factory makes (lib/fsafe.mjs): each is removed when its holder is done, and a killed holder's
+// Temp directories Pendulum makes (lib/fsafe.mjs): each is removed when its holder is done, and a killed holder's
 // leftover is cleared by the next sweep, never one a live process still holds.
 import { DEVELOPER_ENV, DEVELOPER_ENV_PREFIX } from "./temp.mjs";
 import assert from "node:assert/strict";
@@ -15,12 +15,12 @@ const HOUR = 3600_000;
 const age = (p, ms) => utimesSync(p, new Date(Date.now() - ms), new Date(Date.now() - ms));
 
 test("the test files run in a temp root of their own, held by their process", () => {
-  assert.match(tmpdir(), /\/factory-test-[A-Za-z0-9]{6}$/);
+  assert.match(tmpdir(), /\/pendulum-test-[A-Za-z0-9]{6}$/);
   assert.equal(readFileSync(`${tmpdir()}.pid`, "utf8"), `${process.pid}\n`);
 });
 
 test("#305: the test files run on a home of their own in that root, with no harness login or credential of the shell", () => {
-  assert.equal(homedir(), realpathSync(join(tmpdir(), "home")), "os.homedir(), and so ~/.config/factory, is the fake home's");
+  assert.equal(homedir(), realpathSync(join(tmpdir(), "home")), "os.homedir(), and so ~/.config/pendulum, is the fake home's");
   for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "COPILOT_GITHUB_TOKEN", "XDG_CONFIG_HOME"]) assert.ok(DEVELOPER_ENV.includes(k) && !(k in process.env), k);
   // What the code under test starts sees the same.
   const child = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify([require('os').homedir(), process.env.CLAUDE_CONFIG_DIR ?? null]))"], { encoding: "utf8" });
@@ -28,11 +28,11 @@ test("#305: the test files run on a home of their own in that root, with no harn
 });
 
 test("#318: no credential, SSH agent or local-mode setting of the shell reaches a test file", () => {
-  const shell = { VERCEL_TOKEN: "v", FACTORY_APP_TOKEN: "a", FACTORY_READ_TOKEN: "r", FACTORY_CODEX_GATEWAY_KEY: "g", FACTORY_INPUT_CODEX_API_KEY: "k", FACTORY_INPUT_CODEX_GATEWAY_KEY: "i", SSH_AUTH_SOCK: "/s", FACTORY_LOCAL: "1", FACTORY_LOCAL_TOKEN: "t", FACTORY_LOCAL_SANDBOX: "{}", FACTORY_LOCAL_MAX_CONCURRENT: "9" };
+  const shell = { VERCEL_TOKEN: "v", PENDULUM_APP_TOKEN: "a", PENDULUM_READ_TOKEN: "r", PENDULUM_CODEX_GATEWAY_KEY: "g", PENDULUM_INPUT_CODEX_API_KEY: "k", PENDULUM_INPUT_CODEX_GATEWAY_KEY: "i", SSH_AUTH_SOCK: "/s", PENDULUM_LOCAL: "1", PENDULUM_LOCAL_TOKEN: "t", PENDULUM_LOCAL_SANDBOX: "{}", PENDULUM_LOCAL_MAX_CONCURRENT: "9" };
   const code = `await import(${JSON.stringify(join(import.meta.dirname, "temp.mjs"))}); process.stdout.write(JSON.stringify(${JSON.stringify(Object.keys(shell))}.filter((k) => k in process.env)));`;
   const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: { ...process.env, ...shell }, encoding: "utf8" });
   assert.deepEqual(JSON.parse(r.stdout || "null"), [], r.stderr);
-  assert.ok(!("FACTORY_LOCAL_DB" in process.env) && !DEVELOPER_ENV.includes("FACTORY_LOCAL_DB") && DEVELOPER_ENV_PREFIX.test("FACTORY_LOCAL_DB"), "by prefix, not by name");
+  assert.ok(!("PENDULUM_LOCAL_DB" in process.env) && !DEVELOPER_ENV.includes("PENDULUM_LOCAL_DB") && DEVELOPER_ENV_PREFIX.test("PENDULUM_LOCAL_DB"), "by prefix, not by name");
 });
 
 test("ownedTemp records its holder beside the directory; dropOwned removes both", () => {
@@ -82,9 +82,9 @@ test("sweepOwned with legacy: a directory with no pid file goes only once it is 
 
 test("stageTemp: a stage's temp directory is owned, and making one clears what a killed loop left, never a live stage's", () => {
   const home = mkdtempSync(join(tmpdir(), "home-"));
-  const base = join(home, ".cache", "factory", "s");
+  const base = join(home, ".cache", "pendulum", "s");
   mkdirSync(base, { recursive: true });
-  // A stage directory from before Factory recorded owners, over a week old; a probe's left by a gone loop; a
+  // A stage directory from before Pendulum recorded owners, over a week old; a probe's left by a gone loop; a
   // live loop's stage directory; and a directory of the sandbox check's, not a stage's.
   mkdirSync(join(base, "12-legacy"));
   age(join(base, "12-legacy"), 400 * 24 * HOUR);
@@ -104,17 +104,17 @@ test("stageTemp: a stage's temp directory is owned, and making one clears what a
   assert.ok(!existsSync(dir) && !existsSync(`${dir}.pid`));
 });
 
-test("privateTmp: Factory's own temp directory is gone when its process ends, by a throw too, and a killed one's by the next", () => {
+test("privateTmp: Pendulum's own temp directory is gone when its process ends, by a throw too, and a killed one's by the next", () => {
   const base = mkdtempSync(join(tmpdir(), "private-"));
-  const env = { ...process.env, FACTORY_PRIVATE_DIR: base };
+  const env = { ...process.env, PENDULUM_PRIVATE_DIR: base };
   for (const code of [`const { privateTmp } = await import(${JSON.stringify(FSAFE)}); privateTmp(); process.stdout.write(process.env.TMPDIR);`, `const { privateTmp } = await import(${JSON.stringify(FSAFE)}); privateTmp(); throw new Error("boom");`]) {
     const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8" });
     assert.deepEqual(readdirSync(base), [], r.stderr);
   }
   // A killed process's directory: its pid is gone and its pid file is old, so the next privateTmp clears it.
-  mkdirSync(join(base, "factory-killed"));
-  writeFileSync(join(base, "factory-killed.pid"), "999999999\n");
-  age(join(base, "factory-killed.pid"), 2 * HOUR);
+  mkdirSync(join(base, "pendulum-killed"));
+  writeFileSync(join(base, "pendulum-killed.pid"), "999999999\n");
+  age(join(base, "pendulum-killed.pid"), 2 * HOUR);
   const r = spawnSync(process.execPath, ["--input-type=module", "-e", `const { privateTmp } = await import(${JSON.stringify(FSAFE)}); privateTmp();`], { env, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(readdirSync(base), []);

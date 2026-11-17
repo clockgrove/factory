@@ -4,8 +4,8 @@
 // - a work stage (a second label went on while it started) puts its Objective back to Queued, where the dispatcher holds
 //   it until one label or none is left, or, sent back with an open PR, to In review, where the dispatcher sends nothing
 //   back while two are on (dispatch.mjs);
-// - a review stage (its review label starts it with no pick) takes `factory:review` off the PR and records the wait on
-//   the PR (Factory's own comment, accountWaitMark). The dispatcher's tick puts the label back once one account label or
+// - a review stage (its review label starts it with no pick) takes `pendulum:review` off the PR and records the wait on
+//   the PR (Pendulum's own comment, accountWaitMark). The dispatcher's tick puts the label back once one account label or
 //   none is left (accountWaitResume), as after a third-party reviewer's wait (third-party-review.mjs), and the label
 //   starts the review stage again on its route.
 // A stage that met its account's usage limit while automatic account choice has another account free (route-holds.mjs,
@@ -15,7 +15,7 @@ import { addLabels, findPr, findProject, moveCard, removeLabel, rest, setStateLa
 import { REVIEW_LABEL, isSelf, marker } from "./logic.mjs";
 import { accountPin, routeTwoLine } from "./accounts.mjs";
 
-/** The wait record's marker, the first line of Factory's own comment on the PR. */
+/** The wait record's marker, the first line of Pendulum's own comment on the PR. */
 export const accountWaitMark = (issue) => marker(issue, "account-wait");
 
 /**
@@ -30,19 +30,19 @@ export async function waitOnAccounts({ repo, issue, stage, pr = null, two = null
   const prNumber = typeof pr === "object" && pr ? pr.number : pr;
   if (stage === "review" && prNumber) {
     // The record first: a label taken off with no record would wait for nothing.
-    const then = limit ? `The review goes on on another account: Factory puts \`${REVIEW_LABEL}\` back on this PR at its next tick.` : `The review waits; once one account label or none is left, Factory puts \`${REVIEW_LABEL}\` back on this PR and the review goes on.`;
-    await upsertComment(repo, prNumber, accountWaitMark(issue), `Factory: ${line}. ${then}`, opts);
+    const then = limit ? `The review goes on on another account: Pendulum puts \`${REVIEW_LABEL}\` back on this PR at its next tick.` : `The review waits; once one account label or none is left, Pendulum puts \`${REVIEW_LABEL}\` back on this PR and the review goes on.`;
+    await upsertComment(repo, prNumber, accountWaitMark(issue), `Pendulum: ${line}. ${then}`, opts);
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts);
     return limit ? `${line}; the review goes on on another account` : `${line}; the review waits for one to be left`;
   }
-  const open = typeof pr === "object" && pr ? pr : await findPr(repo, `factory/${issue}`, opts).catch(() => null);
+  const open = typeof pr === "object" && pr ? pr : await findPr(repo, `pendulum/${issue}`, opts).catch(() => null);
   const back = open && open.state !== "closed" && !open.draft ? "In review" : "Queued";
   await setStateLabel(repo, issue, back === "In review" ? "in-review" : null, opts);
   await moveCard(await findProject(repo, opts).catch(() => null), repo, issue, back, opts).catch(() => {});
   return limit ? `${line}; back to ${back}, to go on on another account` : `${line}; back to ${back} until one is left`;
 }
 
-/** The PR's account-wait record (accountWaitMark, Factory's own comment): {id, at} (its last write), or null. */
+/** The PR's account-wait record (accountWaitMark, Pendulum's own comment): {id, at} (its last write), or null. */
 export const accountWaitOf = (comments, issue) => {
   const c = [...(comments || [])].reverse().find((x) => isSelf(x) && String(x.body || "").startsWith(accountWaitMark(issue)));
   return c ? { id: c.id, at: c.updated_at || c.created_at || null } : null;

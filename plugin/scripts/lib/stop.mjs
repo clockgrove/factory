@@ -1,5 +1,5 @@
-// A person's stop of one Objective (docs/USAGE.md, "An Objective's lifecycle"): its `factory:objective` label removed,
-// its issue closed, or `factory:draft` applied (a draft never runs, its Objective label on or not); and its restart from the issue's current text (`factory:restart`), which stops a running stage
+// A person's stop of one Objective (docs/USAGE.md, "An Objective's lifecycle"): its `pendulum:objective` label removed,
+// its issue closed, or `pendulum:draft` applied (a draft never runs, its Objective label on or not); and its restart from the issue's current text (`pendulum:restart`), which stops a running stage
 // the same way before the dispatcher discards what the earlier run left (restartObjective). No tick, loop or relaunch picks a stopped Objective (they list only labelled, open issues); this
 // module is the rest of it: the cause read from the issue, the running stage's own stop (its watch on its issue, the
 // abort every harness pass of the stage listens to, its claim on the exit), and the tidy that leaves the Objective
@@ -26,17 +26,17 @@ export const STOP_TIDY_MS = 45_000;
 export const STOP_GRACE_MS = 10 * 60_000;
 
 /** The label a person applies to restart an Objective from its issue's current text, in any state. */
-export const RESTART_LABEL = "factory:restart";
+export const RESTART_LABEL = "pendulum:restart";
 /**
- * The label of a draft Objective: an issue Factory never runs (no dispatch, claim or spend, on any route) while it is
+ * The label of a draft Objective: an issue Pendulum never runs (no dispatch, claim or spend, on any route) while it is
  * on, even beside the Objective label. Starting a draft takes it off and applies the Objective label.
  */
-export const DRAFT_LABEL = "factory:draft";
+export const DRAFT_LABEL = "pendulum:draft";
 
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
 
 /**
- * Who may give a label's go (the Objective label re-applied, a draft started, `factory:restart`), since GitHub lets anyone
+ * Who may give a label's go (the Objective label re-applied, a draft started, `pendulum:restart`), since GitHub lets anyone
  * with triage access, and any App installed with issue write, apply labels: a person (a `User`, never a Bot or an App)
  * on the repository's writer list (github.mjs primeWriters, read once per process), a maintainer the workflow pins by
  * id, else one whose permission GitHub reads as write or more. Returns the check of an event's `actor`: true, false, or
@@ -54,22 +54,22 @@ export function labelTrust(repo, opts) {
   };
 }
 
-/** The marker of Factory's note that the go at `at` (a label event's time) on issue `n` was not taken (one per go). */
+/** The marker of Pendulum's note that the go at `at` (a label event's time) on issue `n` was not taken (one per go). */
 export const refusedMarker = (n, at) => marker(n, "relabel-refused", String(at || "").replace(/[^0-9TZ]/g, ""));
 
 /**
- * `trusted` (labelTrust) on the issue's timeline `events`: a go Factory's note there already refused (refusedMarker) is
+ * `trusted` (labelTrust) on the issue's timeline `events`: a go Pendulum's note there already refused (refusedMarker) is
  * refused again with no read, so a refusal holds for good and costs nothing at later ticks.
  */
 export function goTrust(events, n, trusted) {
   return async (actor, e) => (e && goNoted(events, n, e.created_at) ? false : trusted(actor, e));
 }
 
-/** Whether Factory's note that the go at `at` was not taken (refusedMarker) is on the issue's timeline `events`. */
+/** Whether Pendulum's note that the go at `at` was not taken (refusedMarker) is on the issue's timeline `events`. */
 export const goNoted = (events, n, at) => (events || []).some((e) => e?.event === "commented" && isSelf({ user: e.user ?? e.actor }) && (e.body || "").startsWith(refusedMarker(n, at)));
 
 /** The states a person's go (the Objective label re-applied) puts back to Queued: their labels, by the issue's timeline. */
-const REQUEUED_FROM = ["factory:blocked", "factory:question", "factory:in-review"];
+const REQUEUED_FROM = ["pendulum:blocked", "pendulum:question", "pendulum:in-review"];
 
 /**
  * Whether a person re-applied the Objective `label` (or started it from a draft: its DRAFT_LABEL taken off) after its last
@@ -141,7 +141,7 @@ export function objectiveReader({ read, list }) {
 }
 
 /** The stop's cause in words, for logs, the progress comment and the stage's exit reason (its exit is `stopped`). */
-export const stopText = (cause, label = "factory:objective") =>
+export const stopText = (cause, label = "pendulum:objective") =>
   cause === "closed" ? "the issue was closed" : cause === "restart" ? `\`${RESTART_LABEL}\` was applied` : cause === "draft" ? `\`${DRAFT_LABEL}\` was applied` : `\`${label}\` was removed`;
 
 // This process's stage: whether a stop was asked for (its cause), the abort its harness passes listen to, who ends it
@@ -255,7 +255,7 @@ export function watchObjective({ read, label, everyMs = STOP_POLL_MS, onStop }) 
 }
 
 /**
- * Leave the issue's Objective stopped: its open PR (`pr`, or the factory/<issue> branch's, found here when undefined) out
+ * Leave the issue's Objective stopped: its open PR (`pr`, or the pendulum/<issue> branch's, found here when undefined) out
  * of the merge queue and a draft without the review label, so nothing merges it and no review starts; and, unless the issue is closed (the
  * dispatcher's Done pass moves a closed one), no state label and its card in Queued, so re-applying the label starts it
  * again. Each step is tried whatever the one before did; returns the failures' messages (none: []).
@@ -269,7 +269,7 @@ export async function applyStop(repo, issue, { pr = undefined, closed = false, p
       failed.push(`${what}: ${String(e?.message || e).slice(0, 120)}`);
     }
   };
-  if (pr === undefined) pr = await findPr(repo, `factory/${issue}`, opts).catch((e) => (failed.push(`PR: ${String(e?.message || e).slice(0, 120)}`), null));
+  if (pr === undefined) pr = await findPr(repo, `pendulum/${issue}`, opts).catch((e) => (failed.push(`PR: ${String(e?.message || e).slice(0, 120)}`), null));
   if (pr?.number) {
     // Out of the merge queue first, where it waits (a draft cannot merge, and the queue never takes it back by itself).
     await step(`PR #${pr.number} out of the merge queue`, async () => {
@@ -303,7 +303,7 @@ export const restartMarker = (issue, at) => marker(issue, "restart", String(at).
 
 /** The fields of a restart record's comment (its JSON line), or null. */
 export function restartRecordOf(comment) {
-  const m = /^<!-- factory:\d+:restart:[0-9TZ]+ -->\n<!-- factory:restart (\{[^\n]*\}) -->/.exec(comment?.body || "");
+  const m = /^<!-- pendulum:\d+:restart:[0-9TZ]+ -->\n<!-- pendulum:restart (\{[^\n]*\}) -->/.exec(comment?.body || "");
   if (!m) return null;
   try {
     const v = JSON.parse(m[1]);
@@ -319,12 +319,12 @@ export function restartRecordOf(comment) {
  * last commit and the command that restores the branch. Written before the restart discards anything.
  */
 export const restartRecord = ({ issue, at, by = null, pr = null, head = null }) => {
-  const lost = [pr ? `pull request #${pr}, closed with its review (its commits and review stay readable there)` : "", head ? `the commits on \`factory/${issue}\`, whose branch is deleted (its last commit is ${head}; \`git push origin ${head}:refs/heads/factory/${issue}\` restores it)` : ""].filter(Boolean);
+  const lost = [pr ? `pull request #${pr}, closed with its review (its commits and review stay readable there)` : "", head ? `the commits on \`pendulum/${issue}\`, whose branch is deleted (its last commit is ${head}; \`git push origin ${head}:refs/heads/pendulum/${issue}\` restores it)` : ""].filter(Boolean);
   const discards = lost.length ? ` This restart discards the earlier work and the spend on it: ${lost.join(", and ")}.` : "";
-  return `<!-- factory:restart ${JSON.stringify({ at, ...(by ? { by } : {}), ...(pr ? { pr } : {}), ...(head ? { head } : {}) })} -->\nFactory restarted this Objective from the issue's current text (\`${RESTART_LABEL}\`, applied ${at}${by ? ` by ${by}` : ""}).${discards} The earlier plan and the comments from before the restart do not feed the restarted run; it starts from the default branch.`;
+  return `<!-- pendulum:restart ${JSON.stringify({ at, ...(by ? { by } : {}), ...(pr ? { pr } : {}), ...(head ? { head } : {}) })} -->\nPendulum restarted this Objective from the issue's current text (\`${RESTART_LABEL}\`, applied ${at}${by ? ` by ${by}` : ""}).${discards} The earlier plan and the comments from before the restart do not feed the restarted run; it starts from the default branch.`;
 };
 
-/** A restart Factory could not finish as asked (a ruleset keeps the branch): the dispatcher Blocks with `fix`. */
+/** A restart Pendulum could not finish as asked (a ruleset keeps the branch): the dispatcher Blocks with `fix`. */
 export class RestartRefused extends Error {
   constructor(message, fix) {
     super(message);
@@ -337,7 +337,7 @@ export class RestartRefused extends Error {
  * Restart the issue's Objective from its current text (`at`: when the restart label was applied, `by`: who applied it),
  * once no stage of it runs: the restart's record first (the PR and the branch's head an earlier try of this restart
  * recorded are kept, once they are gone); the earlier PR out of the merge queue and its review label off; the
- * factory/<issue> branch deleted, read back after a refusal (only a 404 is gone: a ruleset answers 422 and keeps it,
+ * pendulum/<issue> branch deleted, read back after a refusal (only a 404 is gone: a ruleset answers 422 and keeps it,
  * which throws RestartRefused, the PR untouched beyond that); the PR then commented with a link to the record and
  * closed (its history stays on it); the plan comment and a split's parts record retired (their markers renamed, their
  * text kept); and, unless another loop finished this restart meanwhile (its label already off), every state label off,
@@ -351,10 +351,10 @@ export async function restartObjective(repo, issue, { at, by = null, project = u
   if (!labelled(await getIssue(repo, issue, opts))) return { pr: null, head: null, finished: false };
   const comments = await listComments(repo, issue, opts);
   const prior = restartRecordOf(comments.find((c) => (c.body || "").startsWith(key) && trustedAuthor(c)));
-  const pr = await findPr(repo, `factory/${issue}`, opts);
-  const ref = `repos/${repo.full}/git/refs/heads/${encodeURIComponent(`factory/${issue}`).replace(/%2F/g, "/")}`;
+  const pr = await findPr(repo, `pendulum/${issue}`, opts);
+  const ref = `repos/${repo.full}/git/refs/heads/${encodeURIComponent(`pendulum/${issue}`).replace(/%2F/g, "/")}`;
   const headNow = () =>
-    rest(`repos/${repo.full}/git/ref/heads/${encodeURIComponent(`factory/${issue}`).replace(/%2F/g, "/")}`, opts).then(
+    rest(`repos/${repo.full}/git/ref/heads/${encodeURIComponent(`pendulum/${issue}`).replace(/%2F/g, "/")}`, opts).then(
       (r) => r?.object?.sha ?? null,
       (e) => {
         if (e.status === 404) return null;
@@ -376,14 +376,14 @@ export async function restartObjective(repo, issue, { at, by = null, project = u
       // Nothing was discarded: the record is retired (its marker renamed), so no reader takes it for a restart and drops
       // the plan, the parts record or the decisions from before it.
       const id = record?.id ?? comments.find((c) => (c.body || "").startsWith(key) && trustedAuthor(c))?.id;
-      if (id) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "PATCH", body: { body: `${marker(issue, "restart-undone", String(at).replace(/[^0-9TZ]/g, ""))}\nFactory could not restart this Objective: GitHub kept its branch \`factory/${issue}\`. Nothing was discarded.` } });
-      throw new RestartRefused(`the restart could not delete \`factory/${issue}\`: GitHub kept the branch (a ruleset that protects it refuses its deletion)`, `let Factory delete \`factory/*\` branches (the ruleset's bypass list, or a rule that leaves them out), or delete \`factory/${issue}\` yourself, then apply \`${RESTART_LABEL}\` again`);
+      if (id) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "PATCH", body: { body: `${marker(issue, "restart-undone", String(at).replace(/[^0-9TZ]/g, ""))}\nPendulum could not restart this Objective: GitHub kept its branch \`pendulum/${issue}\`. Nothing was discarded.` } });
+      throw new RestartRefused(`the restart could not delete \`pendulum/${issue}\`: GitHub kept the branch (a ruleset that protects it refuses its deletion)`, `let Pendulum delete \`pendulum/*\` branches (the ruleset's bypass list, or a rule that leaves them out), or delete \`pendulum/${issue}\` yourself, then apply \`${RESTART_LABEL}\` again`);
     }
   }
   // The PR the record names: GitHub closed it when its branch went, so a retry finds it closed and still comments on it.
   if (fields.pr) {
     const link = record?.html_url ? ` ([the restart](${record.html_url}))` : "";
-    await upsertComment(repo, fields.pr, marker(issue, "restarted", String(at).replace(/[^0-9TZ]/g, "")), `Factory: #${issue} was restarted from its current text${link}. This pull request is closed and its branch deleted; its commits and review stay here. The restarted run opens a new one.`, opts);
+    await upsertComment(repo, fields.pr, marker(issue, "restarted", String(at).replace(/[^0-9TZ]/g, "")), `Pendulum: #${issue} was restarted from its current text${link}. This pull request is closed and its branch deleted; its commits and review stay here. The restarted run opens a new one.`, opts);
     // Only an open PR is closed: one the merge queue merged before this retry stays as it is (closing it fails every tick).
     if ((await getPr(repo, fields.pr, opts))?.state === "open") await rest(`repos/${repo.full}/pulls/${fields.pr}`, { ...opts, method: "PATCH", body: { state: "closed" } });
   }
@@ -391,7 +391,7 @@ export async function restartObjective(repo, issue, { at, by = null, project = u
   // which also skip anything from before the restart).
   const retire = [
     [`${marker(issue, "plan")}`, `${marker(issue, "restarted-plan")}`],
-    [`<!-- factory:${issue}:parts `, `<!-- factory:${issue}:restarted-parts `],
+    [`<!-- pendulum:${issue}:parts `, `<!-- pendulum:${issue}:restarted-parts `],
   ];
   for (const c of comments) {
     const hit = retire.find(([from]) => (c.body || "").startsWith(from));

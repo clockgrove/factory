@@ -49,7 +49,7 @@ test("#261: a wall-clock Block names a PR under review as delivered, and the wor
   assert.equal(wallClockPr("work", null, null), null);
 });
 
-test("#261: only a failure before the stage's process starts is Factory's set-up of that stage", async () => {
+test("#261: only a failure before the stage's process starts is Pendulum's set-up of that stage", async () => {
   const dev = mkdtempSync(join(tmpdir(), "st-"));
   const local = Object.assign(Object.create(Local.prototype), { dev, harness: "claude", stopping: false, firstSetup: new Map(), children: new Set() });
   const clone = join(local.ws(8), "repo");
@@ -69,7 +69,7 @@ test("#261: only a failure before the stage's process starts is Factory's set-up
   chmodSync(join(bin, "srt"), 0o755);
   const caches = [join(dev, "pnpm"), join(dev, "bun")];
   for (const d of caches) mkdirSync(d);
-  local.stageEnv = (issue, usageDir, c, stageTmp) => ({ PATH: `${bin}:${process.env.PATH}`, FACTORY_LOCAL_SRT_GIT: join(dev, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1] });
+  local.stageEnv = (issue, usageDir, c, stageTmp) => ({ PATH: `${bin}:${process.env.PATH}`, PENDULUM_LOCAL_SRT_GIT: join(dev, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1] });
   local.children = {
     add(child) {
       child.kill("SIGKILL");

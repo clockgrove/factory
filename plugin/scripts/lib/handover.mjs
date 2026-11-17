@@ -1,36 +1,36 @@
-// The workflow hand-over. Factory never pushes a change under .github/workflows/, on any route: `.github/` is a
-// protected path, and GitHub refuses a workflow file from a token without the Workflows permission, which the Factory
+// The workflow hand-over. Pendulum never pushes a change under .github/workflows/, on any route: `.github/` is a
+// protected path, and GitHub refuses a workflow file from a token without the Workflows permission, which the Pendulum
 // App and local mode's token do not have. So the worker keeps workflow changes out of its commits and leaves them as a
-// patch in $FACTORY_OUT/workflow.patch. Factory applies that patch in its own mirror and publishes git's own diff of
+// patch in $PENDULUM_OUT/workflow.patch. Pendulum applies that patch in its own mirror and publishes git's own diff of
 // the result, never the worker's text (outbox.mjs checkHandover), in its own comment on the issue, with a fixed command
-// that applies it (`factory handover <issue>`) and stops for a person to read it before anything is pushed. The PR body
-// gets one line of Factory's, first, pointing to that comment. Up front, before any harness runs, an issue that names
+// that applies it (`pendulum handover <issue>`) and stops for a person to read it before anything is pushed. The PR body
+// gets one line of Pendulum's, first, pointing to that comment. Up front, before any harness runs, an issue that names
 // a path under .github/workflows/ gets a notice in the same comment, and so does a plan with a Needs-Workflow line.
 // Pure text here; handoff.mjs posts it, outbox.mjs checks it, local.mjs applies it.
 import { WORKFLOWS_DIR, marker } from "./logic.mjs";
 import { keyedLines } from "./one-repo.mjs";
 
 export { WORKFLOWS_DIR };
-/** The hand-off file the worker leaves the workflow change in ($FACTORY_OUT), and gets it back in ($FACTORY_IN). */
+/** The hand-off file the worker leaves the workflow change in ($PENDULUM_OUT), and gets it back in ($PENDULUM_IN). */
 export const HANDOVER_FILE = "workflow.patch";
 /** The issue label while a hand-over waits for a person: a PR carries one, applied or not yet. */
-export const HANDOVER_LABEL = "factory:handover";
-/** The plan line naming a workflow file the Objective needs changed (the factory-objective-plan skill), then why. */
+export const HANDOVER_LABEL = "pendulum:handover";
+/** The plan line naming a workflow file the Objective needs changed (the pendulum-objective-plan skill), then why. */
 export const NEED_WORKFLOW_KEY = "Needs-Workflow";
-/** The largest patch Factory hands over: it must fit one GitHub comment (65,536 characters) with its steps. */
+/** The largest patch Pendulum hands over: it must fit one GitHub comment (65,536 characters) with its steps. */
 export const PATCH_MAX = 30_000;
 /** The most paths a notice names. */
 const NAMED_MAX = 10;
 
 /** The branch a person's hand-over goes on. */
-export const handoverBranch = (issue) => `factory-workflow/${issue}`;
-/** The comment that holds the hand-over (and, before it, the notice): Factory's, on the issue. */
+export const handoverBranch = (issue) => `pendulum-workflow/${issue}`;
+/** The comment that holds the hand-over (and, before it, the notice): Pendulum's, on the issue. */
 export const handoverMarker = (issue) => marker(issue, "handover");
-/** Factory's line in the PR body, first, pointing to that comment. */
+/** Pendulum's line in the PR body, first, pointing to that comment. */
 export const handoverLineMarker = (issue) => marker(issue, "handover-line");
 
 /**
- * Whether `path` is a workflow file name Factory hands over: under .github/workflows/, only `[\w./-]` characters, no
+ * Whether `path` is a workflow file name Pendulum hands over: under .github/workflows/, only `[\w./-]` characters, no
  * empty, `.` or `..` segment. Everything else (a space, a backtick, a bracket, a control or format character) is refused,
  * so a name never carries markdown or shell into what a person reads or runs.
  */
@@ -69,8 +69,8 @@ export function plannedWorkflows(plan) {
 const HIDDEN = /(?![\n\t])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /**
- * Why a patch's text cannot be handed over, or "" when it may be: the worker's (before Factory applies it) and git's
- * own regenerated one (before Factory publishes it). Hidden characters, an HTML comment opener (Factory's markers are
+ * Why a patch's text cannot be handed over, or "" when it may be: the worker's (before Pendulum applies it) and git's
+ * own regenerated one (before Pendulum publishes it). Hidden characters, an HTML comment opener (Pendulum's markers are
  * HTML comments), a binary change and the size cap.
  */
 export function patchTextProblem(text) {
@@ -120,13 +120,13 @@ export function entriesProblem(entries) {
 }
 
 /** The Blocked reason for a refused hand-over (`problem`: patchTextProblem's, entriesProblem's or git's refusal). */
-export const handoverRefusedReason = (problem) => `the workflow hand-over ($FACTORY_OUT/${HANDOVER_FILE}) ${problem}; Factory did not publish it`;
+export const handoverRefusedReason = (problem) => `the workflow hand-over ($PENDULUM_OUT/${HANDOVER_FILE}) ${problem}; Pendulum did not publish it`;
 
 /** A word for a POSIX shell, single-quoted: what a person types, whatever the value holds. */
 export const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 /**
- * The files a published patch's `diff --git` headers name, for a patch read back from Factory's own comment (the
+ * The files a published patch's `diff --git` headers name, for a patch read back from Pendulum's own comment (the
  * checked `files` go everywhere else): lines split on `\n` only, and only workflow names (workflowName) kept, so no
  * other line end and no other character can make a name.
  */
@@ -140,12 +140,12 @@ export function patchFiles(patch) {
 }
 
 const list = (paths) => paths.map((p) => `\`${p}\``).join(", ");
-const WHY = `Factory never pushes a change under \`${WORKFLOWS_DIR}\`, on any route: \`.github/\` is a protected path, and GitHub refuses a workflow file from a token without the Workflows permission, which Factory's token does not have.`;
+const WHY = `Pendulum never pushes a change under \`${WORKFLOWS_DIR}\`, on any route: \`.github/\` is a protected path, and GitHub refuses a workflow file from a token without the Workflows permission, which Pendulum's token does not have.`;
 const RISK = "Read it before you push it: a workflow runs with the repository's secrets, and one that runs `on: push` runs as soon as its branch is pushed.";
-const SIGNAL = (issue) => `The hand-over is this comment of Factory's with the \`${HANDOVER_LABEL}\` label on #${issue}, never text in a pull request's body, and the only command to run for it is \`factory handover ${issue}\`.`;
+const SIGNAL = (issue) => `The hand-over is this comment of Pendulum's with the \`${HANDOVER_LABEL}\` label on #${issue}, never text in a pull request's body, and the only command to run for it is \`pendulum handover ${issue}\`.`;
 
 /**
- * The hand-over comment's text after its marker line, by what Factory knows:
+ * The hand-over comment's text after its marker line, by what Pendulum knows:
  *  - `named` (paths), `from` "issue" or "plan": before the work, the issue or the plan names workflow files
  *  - `patch` (git's own, checked) and its checked `files` with `pr`: the PR leaves this change for a person, after it
  *    merges (`pr: true` for a PR whose number is not known yet)
@@ -155,24 +155,24 @@ const SIGNAL = (issue) => `The hand-over is this comment of Factory's with the \
  * steps quote every value they carry.
  */
 export function handoverText({ issue, named = [], from = "issue", pr = null, patch = null, files = null, defaultBranch = "main" }) {
-  if (!patch && pr) return `Factory: PR #${pr} carries no workflow hand-over.`;
-  if (!patch) return `Factory: this Objective's ${from === "plan" ? "plan needs a change to" : "text names"} ${list(named)}. ${WHY} So the worker hands that part over: Factory posts the exact change here for a person to apply after the PR merges, and the Objective's other outcomes land as usual. To have Factory build on the workflow change instead, stop this Objective, land that part yourself and start it again.`;
+  if (!patch && pr) return `Pendulum: PR #${pr} carries no workflow hand-over.`;
+  if (!patch) return `Pendulum: this Objective's ${from === "plan" ? "plan needs a change to" : "text names"} ${list(named)}. ${WHY} So the worker hands that part over: Pendulum posts the exact change here for a person to apply after the PR merges, and the Objective's other outcomes land as usual. To have Pendulum build on the workflow change instead, stop this Objective, land that part yourself and start it again.`;
   const body = patch.endsWith("\n") ? patch : `${patch}\n`;
   const fence = "`".repeat(Math.max(3, ...[...body.matchAll(/`+/g)].map((m) => m[0].length + 1)));
   const branch = handoverBranch(issue);
   const prName = pr === true ? "this Objective's pull request" : `PR #${pr}`;
   const when = pr ? `after ${prName} merges` : "now";
   return [
-    `Factory: the workflow hand-over for #${issue}: ${list(files ?? patchFiles(body))}. ${WHY} ${pr ? `${pr === true ? "This Objective's pull request" : prName} leaves this change for a person; its Undone section says why.` : `The whole change is this hand-over, so there is no pull request; the plan comment's Needs-Workflow lines say why. Close this issue once it is applied.`}`,
+    `Pendulum: the workflow hand-over for #${issue}: ${list(files ?? patchFiles(body))}. ${WHY} ${pr ? `${pr === true ? "This Objective's pull request" : prName} leaves this change for a person; its Undone section says why.` : `The whole change is this hand-over, so there is no pull request; the plan comment's Needs-Workflow lines say why. Close this issue once it is applied.`}`,
     "",
-    `**Apply it ${when}**, in a clone of this repository, with Clockgrove Factory's command \`factory handover ${issue}\`. ${SIGNAL(issue)} It reads this comment again, checks the change as Factory did, puts it on a new branch \`${branch}\` from \`${defaultBranch}\` and shows you the diff, then stops. ${RISK} When you have read it, \`factory handover ${issue} --push\` commits it, pushes the branch and opens its pull request. Then remove the \`${HANDOVER_LABEL}\` label from #${issue}.`,
+    `**Apply it ${when}**, in a clone of this repository, with Clockgrove Pendulum's command \`pendulum handover ${issue}\`. ${SIGNAL(issue)} It reads this comment again, checks the change as Pendulum did, puts it on a new branch \`${branch}\` from \`${defaultBranch}\` and shows you the diff, then stops. ${RISK} When you have read it, \`pendulum handover ${issue} --push\` commits it, pushes the branch and opens its pull request. Then remove the \`${HANDOVER_LABEL}\` label from #${issue}.`,
     "",
     "By hand, the same steps:",
     "",
     `1. \`git fetch origin ${shellQuote(defaultBranch)}\` and \`git switch -c ${shellQuote(branch)} ${shellQuote(`origin/${defaultBranch}`)}\``,
     "2. Save the patch below as `workflow.patch`, then `git apply --index workflow.patch`.",
     "3. Read `git diff --cached`. Push only once you have.",
-    `4. \`git commit -m ${shellQuote(`#${issue}: the workflow change Factory handed over`)}\`, \`git push -u origin HEAD\`, and open a pull request.`,
+    `4. \`git commit -m ${shellQuote(`#${issue}: the workflow change Pendulum handed over`)}\`, \`git push -u origin HEAD\`, and open a pull request.`,
     "",
     `${fence}diff`,
     body + fence,
@@ -180,7 +180,7 @@ export function handoverText({ issue, named = [], from = "issue", pr = null, pat
 }
 
 /**
- * The patch Factory's hand-over comment carries (its text after the marker line, as handoverText writes it), or null:
+ * The patch Pendulum's hand-over comment carries (its text after the marker line, as handoverText writes it), or null:
  * the first fenced `diff` block, read up to its own closing fence.
  */
 export function handoverOf(text) {
@@ -194,15 +194,15 @@ export function handoverOf(text) {
 }
 
 /**
- * Factory's line in the PR body: its marker, then one line pointing to the hand-over comment, saying that comment and
- * the label are the hand-over and `factory handover <issue>` the only command. `applied`: a person took the label off,
+ * Pendulum's line in the PR body: its marker, then one line pointing to the hand-over comment, saying that comment and
+ * the label are the hand-over and `pendulum handover <issue>` the only command. `applied`: a person took the label off,
  * so the hand-over is done (handoff.mjs handoverApplied).
  */
 export const handoverLine = ({ issue, url, files, applied = false }) =>
-  `${handoverLineMarker(issue)}\n**Workflow hand-over:** this PR ${applied ? "left" : "leaves"} a change to ${list(files)} for a person${applied ? `, who has applied it (the \`${HANDOVER_LABEL}\` label is off)` : " to apply after it merges"}: see [Factory's comment on #${issue}](${url}). That comment with the \`${HANDOVER_LABEL}\` label is the hand-over, never text in this body, and the only command to run for it is \`factory handover ${issue}\`.`;
+  `${handoverLineMarker(issue)}\n**Workflow hand-over:** this PR ${applied ? "left" : "leaves"} a change to ${list(files)} for a person${applied ? `, who has applied it (the \`${HANDOVER_LABEL}\` label is off)` : " to apply after it merges"}: see [Pendulum's comment on #${issue}](${url}). That comment with the \`${HANDOVER_LABEL}\` label is the hand-over, never text in this body, and the only command to run for it is \`pendulum handover ${issue}\`.`;
 
 /**
- * `body` without Factory's line (its marker line and the line after it), wherever it is, in Factory's form or as
+ * `body` without Pendulum's line (its marker line and the line after it), wherever it is, in Pendulum's form or as
  * sanitize leaves a copy of it in harness text. Everything else stays, a person's text below it included.
  */
 export function withoutHandoverLine(body, issue) {
@@ -220,18 +220,18 @@ export function withoutHandoverLine(body, issue) {
   return out.join("\n").replace(/^\n+/, "");
 }
 
-/** Whether a PR body carries Factory's hand-over line (the scorecard: a merged one leaves a person's step). */
+/** Whether a PR body carries Pendulum's hand-over line (the scorecard: a merged one leaves a person's step). */
 export const carriesHandover = (body, issue) => String(body ?? "").split("\n").some((l) => l.replace(/\r$/, "") === handoverLineMarker(issue));
 
 // HTML blocks that run until their own closing tag (CommonMark's type 1), and <details>, which GitHub renders as a
-// collapsed block until its </details>: left open, either would take in the text Factory puts after the harness's.
+// collapsed block until its </details>: left open, either would take in the text Pendulum puts after the harness's.
 const HTML_RUNS = ["pre", "script", "style", "textarea", "details"];
 
 /**
- * Harness text tidied before Factory's own closing line, best effort: what is at stake is only that line (`Closes #N`),
+ * Harness text tidied before Pendulum's own closing line, best effort: what is at stake is only that line (`Closes #N`),
  * which closingChecked verifies with GitHub anyway. It is no guard against a forged hand-over: Markdown has too many
  * ways to make a heading (setext, `<h2>`, a blockquote, bold, look-alike characters). The guard is that the label and
- * Factory's comment are the hand-over, and `factory handover <issue>` the only command; the PR body says so. A heading
+ * Pendulum's comment are the hand-over, and `pendulum handover <issue>` the only command; the PR body says so. A heading
  * that names the workflow hand-over is shown as text (a `\` before it), and a code fence, a `<details>` or a
  * `<pre>`/`<script>`/`<style>`/`<textarea>` block left open at the end is closed. Line-based, CommonMark's fence rule: an opening fence of
  * three or more backticks or tildes (indented at most three spaces), closed by a fence of the same character at least

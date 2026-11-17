@@ -57,7 +57,7 @@ else process.kill(process.pid, "SIGKILL");
 `;
 
 async function pass(plan, opts = {}, { command = QUALIFY } = {}) {
-  const bin = mkdtempSync(join(tmpdir(), "factory-bg-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-bg-"));
   const state = join(bin, "state");
   mkdirSync(state);
   writeFileSync(join(state, "refuse401.jsonl"), refused401);
@@ -109,7 +109,7 @@ test("runHarness: a session that ended with its result while a task was still li
 test("runHarness: a session stopped as hung on its background job is told the job made no progress and to rerun it only if needed", async () => {
   const { rec, calls } = await pass(["bg-hang", "ok"], { idleMs: 300 });
   assert.equal(calls.length, 2);
-  assert.match(calls[1].input, /made no CPU or I\/O progress for a whole \d+-minute window, so Factory stopped your session as hung/);
+  assert.match(calls[1].input, /made no CPU or I\/O progress for a whole \d+-minute window, so Pendulum stopped your session as hung/);
   assert.match(calls[1].input, /only if its result is still needed, once you know why it made no progress; a server or watcher you left running needs no rerun/);
   assert.equal(rec.jobReruns, 1);
 });

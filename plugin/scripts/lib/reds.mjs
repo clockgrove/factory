@@ -19,9 +19,9 @@ export function capped(text, cap = RED_FILE_CAP) {
   return s.length <= cap ? s : `(the first ${s.length - cap} characters are cut; the rest is the end of the file)\n${s.slice(-cap)}`;
 }
 
-/** The newest head of the PR that Factory recorded as validation green (its validated marker), or null. */
+/** The newest head of the PR that Pendulum recorded as validation green (its validated marker), or null. */
 export function lastGreenHead(comments, issue) {
-  const re = new RegExp(`<!-- factory:${issue}:validated:([0-9a-f]{40}) -->`);
+  const re = new RegExp(`<!-- pendulum:${issue}:validated:([0-9a-f]{40}) -->`);
   let best = null;
   for (const c of comments || []) {
     const m = re.exec(c?.body || "");
@@ -114,7 +114,7 @@ export function evidenceText({ branch, job, evidence, lines }) {
  * head points at the change, session.mjs baseJudge; else the signature alone), else null;
  * `baseUndecided` ({cause, said, limited?}) when a judgement that could have made it so got no answer; `evidence` is
  * what the base's newest runs of it show (baseEvidence), for the prompt. `green` is the PR's last green head; `diff` the
- * two-dot diff from it to `sha`, made by `diffOf(from, to)` (Factory's own mirror) or, when the red head descends from
+ * two-dot diff from it to `sha`, made by `diffOf(from, to)` (Pendulum's own mirror) or, when the red head descends from
  * it, GitHub's compare; `diffError` says why there is none.
  * With `sinceGreen` false (a merge queue commit, no head of the PR) neither is read: `green` and `diff` are null.
  * `token` reads the repository and the PR; `actionsToken` the job logs and jobs.
@@ -166,7 +166,7 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
     const match = aggregate ? { base: false, said: "", undecided: null } : await baseMatch({ id: r.id, name: r.name, sig, step: () => stepOf(r.id), window: failureWindow(log, job), label: `job ${r.id}, on the head ${short(sha)}` }, runs, same ?? sameBySignature);
     const base = match.base ? { sha: runs[0].sha, said: match.said, exact: match.exact } : null;
     const u = match.undecided;
-    const baseUndecided = u ? { cause: u.cause || "factory", said: u.said, ...(u.limited ? { limited: u.limited } : {}) } : null;
+    const baseUndecided = u ? { cause: u.cause || "pendulum", said: u.said, ...(u.limited ? { limited: u.limited } : {}) } : null;
     jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000, job), sig, base, baseUndecided, aggregate, evidence: baseEvidence(runs) });
   }
   // A red required check whose run has other failing jobs: its workflow file at the run's head says which of them it
@@ -262,7 +262,7 @@ export function leadJobs(jobs) {
 const COMPARE_FILES_CAP = 300;
 
 /**
- * The two-dot diff green..sha: Factory's mirror first (a diff too large for it throws, so it falls through); GitHub's
+ * The two-dot diff green..sha: Pendulum's mirror first (a diff too large for it throws, so it falls through); GitHub's
  * compare only when sha descends from green (then it is the same), made from the comparison's file list (its diff media
  * type refuses one over 300 files; the list stops there, and the diff then says it is incomplete).
  */
@@ -301,7 +301,7 @@ export const baseFailureReason = (detail) => {
 /**
  * A red that would be all base failures (allOnBase) but for jobs whose same-failure judgement got no answer
  * (`baseUndecided`): {cause, why, limited?}, the Block's cause (`outage` when every such judgement met its vendor's
- * outage, else `factory`), why, and the stage harness's usage limit that stopped one. Null otherwise, and when a job is
+ * outage, else `pendulum`), why, and the stage harness's usage limit that stopped one. Null otherwise, and when a job is
  * the change's (judged not the same failure) or one was left out.
  */
 export function undecidedOnBase(detail) {
@@ -310,7 +310,7 @@ export function undecidedOnBase(detail) {
   const open = jobs.filter((j) => !j.base && !j.aggregate);
   if (!open.length || !open.every((j) => j.baseUndecided)) return null;
   const limited = open.find((j) => j.baseUndecided.limited)?.baseUndecided.limited ?? null;
-  const cause = !limited && open.every((j) => j.baseUndecided.cause === "outage") ? "outage" : "factory";
+  const cause = !limited && open.every((j) => j.baseUndecided.cause === "outage") ? "outage" : "pendulum";
   const names = open.map((j) => j.name).join(", ");
   return { cause, why: `whether ${detail.branch} fails ${names} the same way could not be judged: the same-failure check got ${open.map((j) => j.baseUndecided.said).join("; ")}`, ...(limited ? { limited } : {}) };
 }

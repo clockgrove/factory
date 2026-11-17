@@ -1,6 +1,6 @@
-// The cloud-sandbox adapter contract (docs/ADAPTERS.md). Every vendor that hosts a sandbox for Factory sits behind this
+// The cloud-sandbox adapter contract (docs/ADAPTERS.md). Every vendor that hosts a sandbox for Pendulum sits behind this
 // one shape, so a second vendor is one new module beside sandbox-vercel.mjs and an entry in ADAPTERS, not a refactor.
-// The sandbox's id and its tags are the only vendor-side state Factory relies on; everything else lives in GitHub.
+// The sandbox's id and its tags are the only vendor-side state Pendulum relies on; everything else lives in GitHub.
 // This module is pure: it validates specs and names errors, and loads a vendor module (and its SDK) only on open.
 
 /**
@@ -20,7 +20,7 @@
  * @property {Rates} rates  The list rates every cost below is computed from.
  * @property {(node: string) => string} baseImage  The vendor's image an image build starts from, for a Node.js version.
  * @property {{ networkAllowList: boolean, users: boolean, stopKeepsFiles: boolean, autoResume: boolean }} capabilities
- * @property {(spec: CreateSpec) => Promise<{ id: string, expiresAt: string | null }>} create  A running sandbox; `id` is what Factory records, `expiresAt` when the vendor ends its session.
+ * @property {(spec: CreateSpec) => Promise<{ id: string, expiresAt: string | null }>} create  A running sandbox; `id` is what Pendulum records, `expiresAt` when the vendor ends its session.
  *   A `timeoutMs` past the plan's session cap is refused `invalid` (HTTP 400), with `limitMs` the cap when the vendor's answer states it.
  * @property {(id: string, spec: RunSpec) => Promise<RunResult>} run  Output streams to the callbacks as it arrives.
  * @property {(id: string, name: string) => Promise<{ name: string, home: string }>} addUser  An unprivileged user: no sudo, its own home.

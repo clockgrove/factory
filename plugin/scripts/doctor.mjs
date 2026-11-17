@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Factory doctor: the checks under "Doctor" in PLAN.md, each PASS, WARN or FAIL
+// Pendulum doctor: the checks under "Doctor" in PLAN.md, each PASS, WARN or FAIL
 // with the fix. Changes nothing.
 //   node scripts/doctor.mjs [--repo OWNER/NAME] [--checkout CLONE] [--json] [--probe] [--run-setup] [--local] [--verbose]
-//   (`factory doctor` runs it with --local; without --repo, the repository is the clone's origin remote)
-// Runs from the plugin (`/factory doctor`) and, through jobChecks(), as the first
+//   (`pendulum doctor` runs it with --local; without --repo, the repository is the clone's origin remote)
+// Runs from the plugin (`/pendulum doctor`) and, through jobChecks(), as the first
 // step of every worker job, where a FAIL Blocks the Objective with that line.
 import { homedir, platform } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -15,11 +15,11 @@ import { PLUGIN_ROOT, installCommand, installTools } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, claudeLocalCheck, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { TOOLCHAIN_RULE, claudeEnvText, localPackageManager, localToolchain, localTools, packageManagerOf, pinnedVersion, prepareCopilotHome, repositoryTools, stageCommands } from "./lib/copilot-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
-import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
+import { preparePendulumHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { FACTORY_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -61,7 +61,7 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 /** The `claude credential` row of a repository on `credential: plan` (docs/INSTALL.md, Claude on your subscription). */
 const PLAN_ROW = {
   detail: "credential: plan: Claude stages run on your subscription's CLAUDE_CODE_OAUTH_TOKEN secret",
-  fix: "plan limits assume ordinary individual use: use it only on your own repository, never for a product; Factory does not check whose repository it is (docs/INSTALL.md, Claude on your subscription)",
+  fix: "plan limits assume ordinary individual use: use it only on your own repository, never for a product; Pendulum does not check whose repository it is (docs/INSTALL.md, Claude on your subscription)",
 };
 
 export async function credentialChecks({ inputs: asked, env: given = process.env, probe = false, local = backend(given).name === "local" }) {
@@ -120,15 +120,15 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
     const gateway = inputs.codexGatewayKey;
     // A ChatGPT login never runs on GitHub Actions or the cloud sandbox (harness.mjs CODEX_LOGIN_REFUSED, #267).
-    if (env.GITHUB_ACTIONS && [gateway, key].some(chatgptLogin)) out.push(FAIL("codex credential", "the Codex credential is a ChatGPT login (an auth.json or its access token), not an API key", "OpenAI advises an API key for CI: set CODEX_API_KEY or FACTORY_CODEX_GATEWAY_KEY to one, or run that account in local mode"));
+    if (env.GITHUB_ACTIONS && [gateway, key].some(chatgptLogin)) out.push(FAIL("codex credential", "the Codex credential is a ChatGPT login (an auth.json or its access token), not an API key", "OpenAI advises an API key for CI: set CODEX_API_KEY or PENDULUM_CODEX_GATEWAY_KEY to one, or run that account in local mode"));
     else if (gateway) {
-      if (env.FACTORY_CODEX_GATEWAY_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_GATEWAY_KEY) out.push(WARN("codex credential", "FACTORY_CODEX_GATEWAY_KEY is a job-level variable", "pass it as the codex_gateway_key input so only the harness child sees it"));
-      else out.push(PASS("codex credential", `FACTORY_CODEX_GATEWAY_KEY present, step-scoped: Codex runs through the Vercel AI Gateway${key ? "; CODEX_API_KEY is set too and goes unused (the gateway key wins)" : ""}`));
+      if (env.PENDULUM_CODEX_GATEWAY_KEY && env.GITHUB_ACTIONS && !env.PENDULUM_INPUT_CODEX_GATEWAY_KEY) out.push(WARN("codex credential", "PENDULUM_CODEX_GATEWAY_KEY is a job-level variable", "pass it as the codex_gateway_key input so only the harness child sees it"));
+      else out.push(PASS("codex credential", `PENDULUM_CODEX_GATEWAY_KEY present, step-scoped: Codex runs through the Vercel AI Gateway${key ? "; CODEX_API_KEY is set too and goes unused (the gateway key wins)" : ""}`));
       // Unused, but a job-level CODEX_API_KEY is still in the job's environment for every step.
-      if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable (unused: the gateway key wins)", "remove it from the job's env, or pass it as the codex_api_key input"));
+      if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.PENDULUM_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable (unused: the gateway key wins)", "remove it from the job's env, or pass it as the codex_api_key input"));
       if (probe) out.push(await gatewayKeyProbe(gateway));
-    } else if (!key) out.push(FAIL("codex credential", "no Codex credential: FACTORY_CODEX_GATEWAY_KEY and CODEX_API_KEY absent", "gh secret set FACTORY_CODEX_GATEWAY_KEY (a Vercel AI Gateway key with a budget) or CODEX_API_KEY; the action passes it to the harness step only"));
-    else if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable", "pass it as the codex_api_key input so only the harness child sees it"));
+    } else if (!key) out.push(FAIL("codex credential", "no Codex credential: PENDULUM_CODEX_GATEWAY_KEY and CODEX_API_KEY absent", "gh secret set PENDULUM_CODEX_GATEWAY_KEY (a Vercel AI Gateway key with a budget) or CODEX_API_KEY; the action passes it to the harness step only"));
+    else if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.PENDULUM_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable", "pass it as the codex_api_key input so only the harness child sees it"));
     else out.push(PASS("codex credential", "CODEX_API_KEY present, step-scoped"));
   }
   if (h === "copilot") {
@@ -152,9 +152,9 @@ export function defaultsCheck(inputs) {
 /**
  * The limits a person owns in force (#423, inputs.mjs OWNER_LIMITS), from the settings as a stage reads them (`inputs`,
  * resolveInputs): one PASS; in local mode with the local stage's settings (`stage`, local.mjs baseEnv's) the two local
- * ones as well, and a WARN when the outage bound (FACTORY_LOCAL_OUTAGE_HOURS) is not under the claim pause
+ * ones as well, and a WARN when the outage bound (PENDULUM_LOCAL_OUTAGE_HOURS) is not under the claim pause
  * (claim_pause_hours), so the dispatcher's Block would come first and name a quiet claim rather than the outage, or when
- * the in-place wait (FACTORY_LOCAL_WAIT_MINUTES) is not under the outage bound, so a stage that waits it out ends paused
+ * the in-place wait (PENDULUM_LOCAL_WAIT_MINUTES) is not under the outage bound, so a stage that waits it out ends paused
  * already past the bound and is Blocked at once. The wait's own maximum keeps it under the least claim pause.
  */
 export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
@@ -172,8 +172,8 @@ export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
   const own = local ? localLimits(stage) : null;
   if (own) lines.push(`a local stage waits in place ${min(own.waitMs)}, and an Objective paused on one outage Blocks after ${h(own.outageMs)}`);
   const rows = [PASS("owner limits", `${lines.join("; ")} (the settings in docs/INSTALL.md and docs/LOCAL.md)`)];
-  if (own && own.waitMs >= own.outageMs) rows.push(WARN("owner limits", `FACTORY_LOCAL_WAIT_MINUTES (${min(own.waitMs)}) is not under FACTORY_LOCAL_OUTAGE_HOURS (${h(own.outageMs)}), so a stage that waits out an outage in place ends paused past the outage bound and is Blocked at once`, "lower FACTORY_LOCAL_WAIT_MINUTES under FACTORY_LOCAL_OUTAGE_HOURS, or raise FACTORY_LOCAL_OUTAGE_HOURS"));
-  if (own && own.outageMs >= inputs.claimPauseMs) rows.push(WARN("owner limits", `FACTORY_LOCAL_OUTAGE_HOURS (${h(own.outageMs)}) is not under claim_pause_hours (${h(inputs.claimPauseMs)}), so a long outage meets the dispatcher's Block for a quiet claim first, which does not name the outage`, "lower FACTORY_LOCAL_OUTAGE_HOURS under claim_pause_hours, or raise claim_pause_hours"));
+  if (own && own.waitMs >= own.outageMs) rows.push(WARN("owner limits", `PENDULUM_LOCAL_WAIT_MINUTES (${min(own.waitMs)}) is not under PENDULUM_LOCAL_OUTAGE_HOURS (${h(own.outageMs)}), so a stage that waits out an outage in place ends paused past the outage bound and is Blocked at once`, "lower PENDULUM_LOCAL_WAIT_MINUTES under PENDULUM_LOCAL_OUTAGE_HOURS, or raise PENDULUM_LOCAL_OUTAGE_HOURS"));
+  if (own && own.outageMs >= inputs.claimPauseMs) rows.push(WARN("owner limits", `PENDULUM_LOCAL_OUTAGE_HOURS (${h(own.outageMs)}) is not under claim_pause_hours (${h(inputs.claimPauseMs)}), so a long outage meets the dispatcher's Block for a quiet claim first, which does not name the outage`, "lower PENDULUM_LOCAL_OUTAGE_HOURS under claim_pause_hours, or raise claim_pause_hours"));
   return rows;
 }
 
@@ -184,43 +184,43 @@ export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
 export function gatewayRelayChecks({ inputs, env = process.env, which = whichSync }) {
   // An AI Gateway key under any other name (another case, or a gateway key's value): withheld from the worker.
   const values = parseSecretValues(inputs.workerSecretValues);
-  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (src) => values.get(src) ?? (env.GITHUB_ACTIONS ? undefined : env[src]), factoryKey: "" });
+  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (src) => values.get(src) ?? (env.GITHUB_ACTIONS ? undefined : env[src]), pendulumKey: "" });
   const odd = unrelayedGatewayKeys(ws.env);
-  const out = odd.length ? [WARN("gateway relay", `${odd.map(nameLabel).join(", ")}: an AI Gateway key under a name other than ${RELAYED_NAME}, so the worker never gets it (a gateway key is only ever relayed)`, `opt the key in as ${RELAYED_NAME}=SOURCE, the one name Factory relays`)] : [];
+  const out = odd.length ? [WARN("gateway relay", `${odd.map(nameLabel).join(", ")}: an AI Gateway key under a name other than ${RELAYED_NAME}, so the worker never gets it (a gateway key is only ever relayed)`, `opt the key in as ${RELAYED_NAME}=SOURCE, the one name Pendulum relays`)] : [];
   if (!parseWorkerSecrets(inputs.workerSecrets).entries.some((e) => e.name === RELAYED_NAME)) return out;
   const missing = ["bwrap", "socat"].filter((b) => !which(b, { PATH: SAFE_PATH }) && !(env.GITHUB_ACTIONS ? null : which(b, env)));
-  return [...out, missing.length ? WARN("gateway relay", `${RELAYED_NAME} is relayed through a forwarder in each command's sandbox, which needs ${missing.join(" and ")} here: every stage Blocks before its run`, `install ${missing.map((b) => (b === "bwrap" ? "bubblewrap" : b)).join(" ")} (the Action does on GitHub's hosted runners)`) : PASS("gateway relay", `${RELAYED_NAME} stays in Factory's process; the worker's shell gets a relay token and FACTORY_GATEWAY_URL, and each call counts against max_usd`)];
+  return [...out, missing.length ? WARN("gateway relay", `${RELAYED_NAME} is relayed through a forwarder in each command's sandbox, which needs ${missing.join(" and ")} here: every stage Blocks before its run`, `install ${missing.map((b) => (b === "bwrap" ? "bubblewrap" : b)).join(" ")} (the Action does on GitHub's hosted runners)`) : PASS("gateway relay", `${RELAYED_NAME} stays in Pendulum's process; the worker's shell gets a relay token and PENDULUM_GATEWAY_URL, and each call counts against max_usd`)];
 }
 
 /**
  * The worker secrets (lib/worker-secrets.mjs), when `worker_secrets` names any: each refused entry, each SOURCE with no
- * value here and each value equal to Factory's own AI Gateway key (compared in constant time, in this process; the worker
+ * value here and each value equal to Pendulum's own AI Gateway key (compared in constant time, in this process; the worker
  * withholds it) is a WARN; else one PASS naming what reaches the worker's shell. Values: `worker_secret_values` (a job,
  * a stage), else, off Actions, this shell's variables (a developer's doctor run for local mode). Names only, never a value.
  */
-/** The FACTORY_LOCAL_ENV names that are a worker secret's NAME or SOURCE (`spec`, worker_secrets). */
+/** The PENDULUM_LOCAL_ENV names that are a worker secret's NAME or SOURCE (`spec`, worker_secrets). */
 export function localEnvWorkerNames(spec, localEnv) {
   const named = new Set(parseWorkerSecrets(spec).entries.flatMap((e) => [e.name, e.source]));
   return String(localEnv || "").split(/[\s,]+/).filter((n) => n && named.has(n));
 }
 
-export function workerSecretChecks({ inputs, env = process.env, factoryKey = () => triageKey({ inputs, env }) }) {
+export function workerSecretChecks({ inputs, env = process.env, pendulumKey = () => triageKey({ inputs, env }) }) {
   if (!String(inputs.workerSecrets || "").trim()) return [];
   const values = parseSecretValues(inputs.workerSecretValues);
-  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s) ?? (env.GITHUB_ACTIONS ? undefined : env[s]), factoryKey: factoryKey() });
+  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s) ?? (env.GITHUB_ACTIONS ? undefined : env[s]), pendulumKey: pendulumKey() });
   const out = [];
-  for (const r of ws.refused) out.push(WARN("worker secrets", `refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`, "remove it from worker_secrets (FACTORY_WORKER_SECRETS); pass a key of its own as NAME=SOURCE"));
-  if (ws.missing.length) out.push(WARN("worker secrets", `no value here for ${ws.missing.map(nameLabel).join(", ")}`, "on Actions and in a cloud sandbox add a SOURCE=value line for each to the repository secret FACTORY_WORKER_SECRET_VALUES (the workflow passes it as worker_secret_values); in local mode export each in the shell that runs factory serve"));
-  if (ws.factoryKey.length) out.push(WARN("worker secrets", `${ws.factoryKey.map(nameLabel).join(", ")}: the same value as Factory's own AI Gateway key, so the worker does not get it`, "give the worker a dedicated key with a budget of its own (docs/PLAN.md, Worker secrets); Factory's AI_GATEWAY_API_KEY stays Factory's"));
+  for (const r of ws.refused) out.push(WARN("worker secrets", `refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`, "remove it from worker_secrets (PENDULUM_WORKER_SECRETS); pass a key of its own as NAME=SOURCE"));
+  if (ws.missing.length) out.push(WARN("worker secrets", `no value here for ${ws.missing.map(nameLabel).join(", ")}`, "on Actions and in a cloud sandbox add a SOURCE=value line for each to the repository secret PENDULUM_WORKER_SECRET_VALUES (the workflow passes it as worker_secret_values); in local mode export each in the shell that runs pendulum serve"));
+  if (ws.pendulumKey.length) out.push(WARN("worker secrets", `${ws.pendulumKey.map(nameLabel).join(", ")}: the same value as Pendulum's own AI Gateway key, so the worker does not get it`, "give the worker a dedicated key with a budget of its own (docs/PLAN.md, Worker secrets); Pendulum's AI_GATEWAY_API_KEY stays Pendulum's"));
   const given = ws.entries.filter((e) => ws.env[e.name] !== undefined);
-  // FACTORY_LOCAL_ENV naming a worker secret would hand it to every local stage's every command (lib/local.mjs
+  // PENDULUM_LOCAL_ENV naming a worker secret would hand it to every local stage's every command (lib/local.mjs
   // localBaseEnv leaves such names out; the warning says why the stage does not get it).
-  const shared = localEnvWorkerNames(inputs.workerSecrets, env.FACTORY_LOCAL_ENV);
-  if (shared.length) out.push(WARN("worker secrets", `FACTORY_LOCAL_ENV names ${shared.map(nameLabel).join(", ")}, a worker secret: local mode leaves it out of every stage's environment, so only the worker's shell gets it`, "remove it from FACTORY_LOCAL_ENV; worker_secrets alone opts it in"));
-  // Factory redacts and masks only values of eight characters or more (inputs.mjs secretForms): a shorter one would mask
+  const shared = localEnvWorkerNames(inputs.workerSecrets, env.PENDULUM_LOCAL_ENV);
+  if (shared.length) out.push(WARN("worker secrets", `PENDULUM_LOCAL_ENV names ${shared.map(nameLabel).join(", ")}, a worker secret: local mode leaves it out of every stage's environment, so only the worker's shell gets it`, "remove it from PENDULUM_LOCAL_ENV; worker_secrets alone opts it in"));
+  // Pendulum redacts and masks only values of eight characters or more (inputs.mjs secretForms): a shorter one would mask
   // ordinary text, so it goes unprotected.
   const short = given.filter((e) => ws.env[e.name].length < 8);
-  if (short.length) out.push(WARN("worker secrets", `${short.map((e) => nameLabel(e.name)).join(", ")}: a value under 8 characters, which Factory cannot redact or mask in what it posts, stores or pushes`, "use a real key: a gateway key is far longer"));
+  if (short.length) out.push(WARN("worker secrets", `${short.map((e) => nameLabel(e.name)).join(", ")}: a value under 8 characters, which Pendulum cannot redact or mask in what it posts, stores or pushes`, "use a real key: a gateway key is far longer"));
   if (given.length && !out.length) out.push(PASS("worker secrets", `${given.map(secretLabel).join(", ")} reach the worker's shell; any code it runs can spend them, so each must be a dedicated key with a budget`));
   return out;
 }
@@ -235,7 +235,7 @@ export async function copilotWriteProbe({ repo, token }) {
   if (!repo) return FAIL("copilot token", "no repository to probe", "run doctor with --repo");
   // Each is checked for permission before its body (git/refs, for one, validates the body first: not a probe).
   const probe = (path, method = "POST") => rest(`repos/${repo}/${path}`, { token, method, body: {} }).then(() => 201, (e) => e.status || 0);
-  const got = { issues: await probe("issues"), "pull requests": await probe("pulls"), contents: await probe("contents/.factory-write-probe", "PUT") };
+  const got = { issues: await probe("issues"), "pull requests": await probe("pulls"), contents: await probe("contents/.pendulum-write-probe", "PUT") };
   const writes = Object.entries(got).filter(([, st]) => st === 422 || st === 201).map(([k]) => k);
   if (writes.length) return FAIL("copilot token", `the Copilot token can write ${writes.join(", ")} in ${repo}`, "use a fine-grained token with only the Copilot Requests permission and no repository access");
   const unclear = Object.entries(got).filter(([, st]) => st !== 403 && st !== 404);
@@ -254,8 +254,8 @@ export async function gatewayKeyProbe(key, { fetchFn = fetch } = {}) {
   } catch {
     status = 0;
   }
-  if (status === 200) return PASS("codex gateway key", "the Vercel AI Gateway accepts FACTORY_CODEX_GATEWAY_KEY (its Codex model list, no charge)");
-  if (status === 401 || status === 403) return FAIL("codex gateway key", `the Vercel AI Gateway refused FACTORY_CODEX_GATEWAY_KEY (HTTP ${status})`, "make a new AI Gateway key in the Vercel team that holds the credits, then gh secret set FACTORY_CODEX_GATEWAY_KEY");
+  if (status === 200) return PASS("codex gateway key", "the Vercel AI Gateway accepts PENDULUM_CODEX_GATEWAY_KEY (its Codex model list, no charge)");
+  if (status === 401 || status === 403) return FAIL("codex gateway key", `the Vercel AI Gateway refused PENDULUM_CODEX_GATEWAY_KEY (HTTP ${status})`, "make a new AI Gateway key in the Vercel team that holds the credits, then gh secret set PENDULUM_CODEX_GATEWAY_KEY");
   return WARN("codex gateway key", status ? `the gateway's model list answered HTTP ${status}` : "the gateway did not answer", "run doctor --probe again; an Objective would fail the same way if it persists");
 }
 
@@ -305,47 +305,47 @@ export function neededSecrets(inputs, accounts = "") {
     const names = declared.ok && declared.accounts[h].length ? declared.accounts[h] : h === inputs.harness ? [h] : [];
     for (const name of names) for (const n of ROUTE_SECRETS[h][kind(h)]) cred.push(Array.isArray(n) ? n.map((x) => `${x}${routeSecretSuffix(name, h)}`) : `${n}${routeSecretSuffix(name, h)}`);
   }
-  return ["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY", ...cred];
+  return ["PENDULUM_APP_ID", "PENDULUM_APP_PRIVATE_KEY", ...cred];
 }
 
 /**
- * The accounts a repository declares for GitHub Actions and the cloud sandbox (FACTORY_ACCOUNTS in its workflow file,
+ * The accounts a repository declares for GitHub Actions and the cloud sandbox (PENDULUM_ACCOUNTS in its workflow file,
  * lib/accounts.mjs routeAccounts, #267): none, a FAIL naming why the declaration cannot be used, or a PASS naming each
- * harness's accounts and how a stage's account is picked (`auto`: FACTORY_AUTO_ACCOUNT, #268; a value that is neither 1
+ * harness's accounts and how a stage's account is picked (`auto`: PENDULUM_AUTO_ACCOUNT, #268; a value that is neither 1
  * nor 0 is a WARN, and leaves it off). Names only; secretChecks checks each one's secret by name.
  */
 export function routeAccountChecks(accounts = "", auto = "") {
   const d = routeAccounts(accounts);
-  if (!d.ok) return [FAIL("accounts", d.problem, 'set FACTORY_ACCOUNTS in .github/workflows/factory.yml to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]} (docs/INSTALL.md, Several accounts)')];
-  const setting = routeAutoSetting({ FACTORY_AUTO_ACCOUNT: auto });
-  const warn = setting.problem ? [WARN("automatic account choice", setting.problem, "set FACTORY_AUTO_ACCOUNT in .github/workflows/factory.yml to 1 (on) or 0 (off) (docs/INSTALL.md, Several accounts)")] : [];
+  if (!d.ok) return [FAIL("accounts", d.problem, 'set PENDULUM_ACCOUNTS in .github/workflows/pendulum.yml to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]} (docs/INSTALL.md, Several accounts)')];
+  const setting = routeAutoSetting({ PENDULUM_AUTO_ACCOUNT: auto });
+  const warn = setting.problem ? [WARN("automatic account choice", setting.problem, "set PENDULUM_AUTO_ACCOUNT in .github/workflows/pendulum.yml to 1 (on) or 0 (off) (docs/INSTALL.md, Several accounts)")] : [];
   if (!d.declared) return warn;
   const each = Object.entries(d.accounts).filter(([, l]) => l.length).map(([h, l]) => `${h}: ${l.join(", ")} (default ${l[0]})`);
-  const how = setting.on ? "the one a trusted factory:account:<name> label pins, else a free one by automatic account choice (FACTORY_AUTO_ACCOUNT)" : "its harness's default or the one a trusted factory:account:<name> label pins";
+  const how = setting.on ? "the one a trusted pendulum:account:<name> label pins, else a free one by automatic account choice (PENDULUM_AUTO_ACCOUNT)" : "its harness's default or the one a trusted pendulum:account:<name> label pins";
   return [PASS("accounts", `${each.join("; ")}: on GitHub Actions and the cloud sandbox each stage runs on one, ${how}, and gets only that account's secrets`), ...warn];
 }
 /**
- * Factory's account holds issue (lib/route-holds.mjs, #268), with automatic account choice on and accounts declared: a
- * WARN for more than one (only the oldest locked one is read; Factory retires the rest at its next usage limit) or an
+ * Pendulum's account holds issue (lib/route-holds.mjs, #268), with automatic account choice on and accounts declared: a
+ * WARN for more than one (only the oldest locked one is read; Pendulum retires the rest at its next usage limit) or an
  * unlocked one (on GitHub Actions its holds count for nothing), a PASS otherwise. `self`: the App's bot login when known,
  * else any bot's issue with the title counts. One labelled issues query; a failed read is a WARN.
  */
 export async function holdsIssueChecks({ repo, opts = {}, accounts = "", auto = "", self = null }) {
-  if (!routeAutoSetting({ FACTORY_AUTO_ACCOUNT: auto }).on || !routeAccounts(accounts).declared) return [];
+  if (!routeAutoSetting({ PENDULUM_AUTO_ACCOUNT: auto }).on || !routeAccounts(accounts).declared) return [];
   let list;
   try {
     list = (await rest(`repos/${repo.full}/issues?labels=${encodeURIComponent(HOLDS_LABEL)}&state=all&sort=created&direction=asc&per_page=100`, opts)) || [];
   } catch (e) {
-    return [WARN("account holds", `could not read Factory's holds issue (${String(e.message).slice(0, 100)})`, "run doctor with a token that can read the repository's issues")];
+    return [WARN("account holds", `could not read Pendulum's holds issue (${String(e.message).slice(0, 100)})`, "run doctor with a token that can read the repository's issues")];
   }
   const key = (l) => String(l ?? "").toLowerCase();
   const ours = list.filter((i) => !i.pull_request && i.title === HOLDS_TITLE && (self ? key(i.user?.login) === key(self) : i.user?.type === "Bot")).sort((a, b) => a.number - b.number);
-  if (!ours.length) return [PASS("account holds", "no holds issue yet: Factory opens it, closed and locked, at the first usage limit on an account")];
+  if (!ours.length) return [PASS("account holds", "no holds issue yet: Pendulum opens it, closed and locked, at the first usage limit on an account")];
   const out = [];
-  if (ours.length > 1) out.push(WARN("account holds", `${ours.length} holds issues (${ours.map((i) => `#${i.number}`).join(", ")}): only the oldest locked one is read`, "leave them: Factory retitles and closes the others at its next usage limit"));
+  if (ours.length > 1) out.push(WARN("account holds", `${ours.length} holds issues (${ours.map((i) => `#${i.number}`).join(", ")}): only the oldest locked one is read`, "leave them: Pendulum retitles and closes the others at its next usage limit"));
   const open = ours.filter((i) => i.locked !== true);
   if (open.length) out.push(WARN("account holds", `${open.map((i) => `#${i.number}`).join(", ")} is not locked, so on GitHub Actions its holds count for nothing`, `lock it: gh issue lock ${open[0].number} --reason resolved`));
-  return out.length ? out : [PASS("account holds", `#${ours[0].number}, Factory's own and locked`)];
+  return out.length ? out : [PASS("account holds", `#${ours[0].number}, Pendulum's own and locked`)];
 }
 const secretName = (n) => (Array.isArray(n) ? n.join(" or ") : n);
 
@@ -401,9 +401,9 @@ export function secretReferences(text) {
 /**
  * The workflow file's secret references (secretReferences): a FAIL for any expression that reads `secrets` by a
  * computed name or whole, since GitHub then sends every repository and organization secret to a job that runs
- * model-written code; with accounts declared (its env block's FACTORY_ACCOUNTS) or rendered, a FAIL when its jobs were
+ * model-written code; with accounts declared (its env block's PENDULUM_ACCOUNTS) or rendered, a FAIL when its jobs were
  * rendered for other accounts (an account step's `rendered_accounts`, accounts.mjs routeAccountsText) or do not name a
- * declared account's secret (routeCredentialSecrets): a re-render is needed after every change to FACTORY_ACCOUNTS.
+ * declared account's secret (routeCredentialSecrets): a re-render is needed after every change to PENDULUM_ACCOUNTS.
  */
 export function workflowSecretChecks(text) {
   let doc;
@@ -417,7 +417,7 @@ export function workflowSecretChecks(text) {
   const rerender = "re-render the workflow with this release's setup (setup --apply workflow, docs/INSTALL.md, Upgrade), merge it, then run doctor";
   if (dynamic.length) out.push(FAIL("workflow secrets", `${dynamic.length} expression(s) read secrets by a computed name or whole (${dynamic[0].slice(0, 120)}), so GitHub sends every repository and organization secret to the jobs that hold them, model-written code's included`, `${rerender}: it names each secret by its fixed name`));
   else out.push(PASS("workflow secrets", "every secret is named by its fixed name, so a job gets only the secrets it names"));
-  const raw = doc.env?.FACTORY_ACCOUNTS;
+  const raw = doc.env?.PENDULUM_ACCOUNTS;
   const accounts = raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
   const declared = routeAccounts(accounts);
   const steps = Object.values(doc.jobs || {}).flatMap((j) => (Array.isArray(j?.steps) ? j.steps : [])).filter((st) => st?.with?.mode === "account");
@@ -426,7 +426,7 @@ export function workflowSecretChecks(text) {
   const want = routeAccountsText(accounts);
   const missing = declared.declared ? [...new Set(Object.keys(ROUTE_CREDENTIAL_INPUTS).flatMap((k) => routeCredentialSecrets(k, declared).map((x) => x.secret)))].filter((n) => !names.has(n)) : [];
   const stale = !steps.length || rendered.some((r) => r !== want);
-  if (missing.length || stale) out.push(FAIL("workflow accounts", `${declared.declared ? "FACTORY_ACCOUNTS declares other accounts than" : "FACTORY_ACCOUNTS declares none, but"} the workflow's jobs were rendered for${missing.length ? `: they do not name ${missing.join(", ")}` : ""}, so a stage on ${declared.declared ? "a declared account" : "any account"} gets no credential and Blocks`, rerender));
+  if (missing.length || stale) out.push(FAIL("workflow accounts", `${declared.declared ? "PENDULUM_ACCOUNTS declares other accounts than" : "PENDULUM_ACCOUNTS declares none, but"} the workflow's jobs were rendered for${missing.length ? `: they do not name ${missing.join(", ")}` : ""}, so a stage on ${declared.declared ? "a declared account" : "any account"} gets no credential and Blocks`, rerender));
   else if (declared.declared) out.push(PASS("workflow accounts", "the jobs name each declared account's secrets by name and pass a stage only its account's"));
   return out;
 }
@@ -480,10 +480,10 @@ export function appPermissionChecks(app) {
   // A personal account's App needs no projects (#199), so its list names none.
   const need = appPermissionsText({ userAccount: app.userAccount === true });
   out.push(app.missing?.length ? FAIL("app permissions", `missing ${app.missing.join(", ")}`, `edit the App's repository permissions (${need}) and accept the new permissions on the installation`) : PASS("app permissions", `${app.appSlug}: ${need}`));
-  // Workflows write would let a branch change the workflow its own review job runs, including whom Factory trusts.
+  // Workflows write would let a branch change the workflow its own review job runs, including whom Pendulum trusts.
   // A warning, not a Block: an installed App with it keeps working until a person turns it off.
-  if (app.extra?.some((p) => /workflow/i.test(p))) out.push(WARN("app permissions", `the App can write workflows (extra: ${app.extra.join(", ")})`, "turn the App's workflows permission off: a worker branch could change the workflow its review runs, and with it whom Factory trusts"));
-  else if (app.extra?.length) out.push(WARN("app permissions", `extra permissions granted: ${app.extra.join(", ")}`, `remove them; Factory needs ${need}`));
+  if (app.extra?.some((p) => /workflow/i.test(p))) out.push(WARN("app permissions", `the App can write workflows (extra: ${app.extra.join(", ")})`, "turn the App's workflows permission off: a worker branch could change the workflow its review runs, and with it whom Pendulum trusts"));
+  else if (app.extra?.length) out.push(WARN("app permissions", `extra permissions granted: ${app.extra.join(", ")}`, `remove them; Pendulum needs ${need}`));
   return out;
 }
 
@@ -510,10 +510,10 @@ export async function rerunProbeCheck({ repo, token }) {
 }
 
 /**
- * The ref the workflow's first `uses: clockgrove/factory@<ref>` calls (a step's, or a job's), read from the parsed YAML,
+ * The ref the workflow's first `uses: clockgrove/pendulum@<ref>` calls (a step's, or a job's), read from the parsed YAML,
  * so a commented-out line is not one and a quoted value is; "" when there is none or the file does not parse.
  */
-export function factoryRef(text) {
+export function pendulumRef(text) {
   let doc;
   try {
     doc = parseYaml(String(text ?? ""));
@@ -523,7 +523,7 @@ export function factoryRef(text) {
   const jobs = doc && typeof doc.jobs === "object" ? Object.values(doc.jobs || {}) : [];
   for (const job of jobs) {
     for (const node of [job, ...(Array.isArray(job?.steps) ? job.steps : [])]) {
-      const ref = /^clockgrove\/factory@(\S+)$/.exec(typeof node?.uses === "string" ? node.uses.trim() : "")?.[1];
+      const ref = /^clockgrove\/pendulum@(\S+)$/.exec(typeof node?.uses === "string" ? node.uses.trim() : "")?.[1];
       if (ref) return ref;
     }
   }
@@ -535,26 +535,26 @@ export const releaseOf = (ref) => /^v(\d+)\.(\d+)\.(\d+)$/.exec(String(ref || ""
 
 /** Update commands for the plugin, per harness: each marketplace is named `clockgrove` (README, Install). */
 export const PLUGIN_UPDATE =
-  "update the plugin, then start a new session: Claude Code `claude plugin marketplace update clockgrove && claude plugin update factory@clockgrove`; Codex `codex plugin marketplace upgrade clockgrove && codex plugin add factory@clockgrove`; Copilot `copilot plugin update factory@clockgrove`";
+  "update the plugin, then start a new session: Claude Code `claude plugin marketplace update clockgrove && claude plugin update pendulum@clockgrove`; Codex `codex plugin marketplace upgrade clockgrove && codex plugin add pendulum@clockgrove`; Copilot `copilot plugin update pendulum@clockgrove`";
 
 /**
  * The installed plugin (this process's, `version`) against the release the workflow pins: a session's skills and
- * scripts, and local mode's stages, are the plugin's, so one older than the pin follows an older Factory than the Action
+ * scripts, and local mode's stages, are the plugin's, so one older than the pin follows an older Pendulum than the Action
  * runs. WARN when older, PASS otherwise; null when the workflow pins no `vX.Y.Z` release (a commit, a floating tag).
  */
-export function pluginVersionCheck(text, version = FACTORY_VERSION) {
-  const pin = releaseOf(factoryRef(text));
+export function pluginVersionCheck(text, version = PENDULUM_VERSION) {
+  const pin = releaseOf(pendulumRef(text));
   const have = releaseOf(`v${version}`);
   if (!pin || !have) return null;
   const i = have.findIndex((n, k) => n !== pin[k]);
   const pinned = `v${pin.join(".")}`;
-  if (i < 0 || have[i] > pin[i]) return PASS("plugin version", `the installed plugin is v${version}; the workflow pins clockgrove/factory@${pinned}`);
-  return WARN("plugin version", `the installed plugin is v${version}, older than clockgrove/factory@${pinned}, which the workflow pins: a session's skills and local mode's stages run the older release`, PLUGIN_UPDATE);
+  if (i < 0 || have[i] > pin[i]) return PASS("plugin version", `the installed plugin is v${version}; the workflow pins clockgrove/pendulum@${pinned}`);
+  return WARN("plugin version", `the installed plugin is v${version}, older than clockgrove/pendulum@${pinned}, which the workflow pins: a session's skills and local mode's stages run the older release`, PLUGIN_UPDATE);
 }
 
 /**
  * Which decider this repository's stages use (lib/decider.mjs): the AI Gateway's decision models with a usable key, else
- * the stage's own harness on its login (decision_route auto), else none. A PASS each way; a local key file Factory
+ * the stage's own harness on its login (decision_route auto), else none. A PASS each way; a local key file Pendulum
  * refuses (any code but no-key) is a WARN, since the gateway was meant.
  */
 export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
@@ -564,20 +564,20 @@ export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
   if (kind.name === "ai-gateway") return PASS("decision calls", `the AI Gateway's decision models (triage ${inputs.triageModel || TRIAGE_MODEL}, drift ${inputs.driftModel || DRIFT_MODEL})`);
   const harness = inputs.harness ? `the stage's own harness (${inputs.harness})` : "the stage's own harness";
   const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check): no AI Gateway key (${kind.code})`;
-  if (kind.code !== "no-key") return WARN("decision calls", text, "fix ~/.config/factory/ai-gateway-key as docs/LOCAL.md says (a regular file, chmod 600, in a ~/.config/factory no harness can read), or remove it");
+  if (kind.code !== "no-key") return WARN("decision calls", text, "fix ~/.config/pendulum/ai-gateway-key as docs/LOCAL.md says (a regular file, chmod 600, in a ~/.config/pendulum no harness can read), or remove it");
   return PASS("decision calls", text);
 }
 
 /**
  * The finding check (lib/finding-check.mjs) as doctor says it: on wherever a decision call runs (deciderKind: the
  * gateway's model, or the stage's harness); with none (decision_route off, or gateway with no key) a WARN, since
- * Factory's reply then answers a reviewer finding unjudged.
+ * Pendulum's reply then answers a reviewer finding unjudged.
  */
 export function findingCheckRow({ inputs, env = process.env, home } = {}) {
   const kind = deciderKind({ inputs, env, ...(home ? { home } : {}) });
   if (kind.name === "ai-gateway") return PASS("finding check", "an AI Gateway key: the decision model judges each answer to a reviewer finding before its thread is resolved");
   if (kind.name === "harness") return PASS("finding check", "the stage's own harness judges each answer to a reviewer finding before its thread is resolved");
-  return WARN("finding check", `off (${kind.code}): reviewer findings are not judged; Factory's reply answers each one`, kind.route === "off" ? "set decision_route to auto (INSTALL.md)" : env.GITHUB_ACTIONS ? "pass an AI_GATEWAY_API_KEY secret as the workflow's ai_gateway_api_key, or set decision_route to auto (PLAN.md, Red-check triage)" : "save an AI Gateway key in ~/.config/factory/ai-gateway-key (LOCAL.md, step 4), or set decision_route to auto");
+  return WARN("finding check", `off (${kind.code}): reviewer findings are not judged; Pendulum's reply answers each one`, kind.route === "off" ? "set decision_route to auto (INSTALL.md)" : env.GITHUB_ACTIONS ? "pass an AI_GATEWAY_API_KEY secret as the workflow's ai_gateway_api_key, or set decision_route to auto (PLAN.md, Red-check triage)" : "save an AI Gateway key in ~/.config/pendulum/ai-gateway-key (LOCAL.md, step 4), or set decision_route to auto");
 }
 
 /**
@@ -595,17 +595,17 @@ export function contentsAccess(perms) {
 }
 
 /**
- * The job token row: whether every job of factory.yml is read-only on repository contents, from the parsed workflow. A
+ * The job token row: whether every job of pendulum.yml is read-only on repository contents, from the parsed workflow. A
  * job's own `permissions:` replaces the top level's (GitHub's rule); a job with neither gets the repository's default
  * token, which doctor does not count on (the default is a setting outside the file).
  */
 export function jobTokenCheck(text) {
-  const fix = "set permissions: contents: read (or none) at the top of factory.yml and in every job that sets its own; writes go through the App";
+  const fix = "set permissions: contents: read (or none) at the top of pendulum.yml and in every job that sets its own; writes go through the App";
   let doc;
   try {
     doc = parseYaml(text);
   } catch (e) {
-    return FAIL("job token", `could not read the workflow's permissions: ${e.message}`, "fix factory.yml's YAML");
+    return FAIL("job token", `could not read the workflow's permissions: ${e.message}`, "fix pendulum.yml's YAML");
   }
   const top = contentsAccess(doc?.permissions);
   const jobs = doc?.jobs && typeof doc.jobs === "object" && !Array.isArray(doc.jobs) ? Object.entries(doc.jobs) : [];
@@ -620,10 +620,10 @@ export function jobTokenCheck(text) {
   return bad.length ? FAIL("job token", `a job's token may write repository contents: ${bad.join("; ")}`, fix) : PASS("job token", "every job's token reads repository contents at most");
 }
 
-export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.FACTORY_ACCOUNTS }) {
+export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.PENDULUM_ACCOUNTS }) {
   const out = [];
   if (!token && env.GITHUB_ACTIONS) {
-    out.push(FAIL("app token", "no installation token", "set FACTORY_APP_ID and FACTORY_APP_PRIVATE_KEY secrets and pass them as app_id / app_private_key"));
+    out.push(FAIL("app token", "no installation token", "set PENDULUM_APP_ID and PENDULUM_APP_PRIVATE_KEY secrets and pass them as app_id / app_private_key"));
     return out;
   }
   // A developer's run: the job mints the App token, so here the secrets are checked by name (the repository's and the
@@ -631,7 +631,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   if (!token) out.push(...(await secretChecks({ inputs, repo, accounts })));
   else if (app?.appSlug) {
     out.push(...appPermissionChecks(app));
-  } else if (token) out.push(PASS("app token", backend().name === "local" ? "local mode's token for this repository; permissions not verified" : "FACTORY_APP_TOKEN supplied; permissions not verified"));
+  } else if (token) out.push(PASS("app token", backend().name === "local" ? "local mode's token for this repository; permissions not verified" : "PENDULUM_APP_TOKEN supplied; permissions not verified"));
   // Local red-check triage (the gateway's model with a key, else the stage's harness) reruns flaky reds with this token:
   // doctor checks it may (not in a stage), unless no decision call runs (decision_route off, or gateway with no key).
   if (local && !job && token && deciderKind({ inputs, env }).name !== "off") out.push(await probeRerun({ repo, token }));
@@ -649,17 +649,17 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   // The job token: read-only on code. Visible only inside Actions, through the workflow file.
   if (text !== null) {
     out.push(jobTokenCheck(text));
-    // A pin older than local mode does not know factory:local, so its jobs would also run Objectives a local loop holds.
-    const pin = releaseOf(factoryRef(text));
+    // A pin older than local mode does not know pendulum:local, so its jobs would also run Objectives a local loop holds.
+    const pin = releaseOf(pendulumRef(text));
     if (pin) {
       const [maj, min, pat] = pin;
       const old = maj === 0 && (min < 7 || (min === 7 && pat < 14));
-      out.push(old ? FAIL("factory pin", `the workflow calls clockgrove/factory@v${pin.join(".")}, older than v0.7.14`, "pin the latest release; older Actions run Objectives labelled factory:local too") : PASS("factory pin", `clockgrove/factory@v${pin.join(".")}`));
+      out.push(old ? FAIL("pendulum pin", `the workflow calls clockgrove/pendulum@v${pin.join(".")}, older than v0.7.14`, "pin the latest release; older Actions run Objectives labelled pendulum:local too") : PASS("pendulum pin", `clockgrove/pendulum@v${pin.join(".")}`));
     }
     // A session's skills and scripts are the installed plugin's, not the Action's: in a job they are the same tree.
     const plugin = job ? null : pluginVersionCheck(text);
     if (plugin) out.push(plugin);
-    if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/factory:factory-review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the factory:review label guard", "the review job must be guarded by the label the App applies"));
+    if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/pendulum:pendulum-review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the pendulum:review label guard", "the review job must be guarded by the label the App applies"));
     out.push(mergeTickCheck(text, env, { job }));
     const vars = varsInputCheck(text);
     if (vars) out.push(vars);
@@ -695,7 +695,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   if (queue) out.push(...approvalPolicyCheck(await rest(`repos/${repo.full}/actions/permissions/fork-pr-contributor-approval`, { token: inputs.githubToken || token }).catch((e) => ({ error: e.status || "error" }))));
   out.push(checks.length ? PASS("required checks", checks.join(", ")) : FAIL("required checks", `none required on ${branch}`, "require the CI workflow's checks: setup --apply protection --ci-checks <names>"));
   // The merge queue squashes with the repository's defaults: the branch's commit messages would land on the default
-  // branch, where a closing keyword in one closes that issue. Factory's own merge sets its message itself.
+  // branch, where a closing keyword in one closes that issue. Pendulum's own merge sets its message itself.
   const squash = [repoData.squash_merge_commit_title, repoData.squash_merge_commit_message];
   if (queue && ((squash[0] && squash[0] !== "PR_TITLE") || (squash[1] && !["PR_BODY", "BLANK"].includes(squash[1])))) out.push(FAIL("squash message", `squash commits default to ${squash.join(" and ")}`, "setup --apply protection sets them to the PR's title and body (Settings > General > Pull Requests > Allow squash merging: Default to pull request title and description)"));
   // Listing workflows needs `actions: read`: the job token's (workflow-template.yml), never the App's.
@@ -719,7 +719,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     if (!names) out.push(WARN("ci workflow name", "could not list workflows to check the workflow_run filter", "give the job token actions: read"));
     else out.push(missing.length ? FAIL("ci workflow name", `workflow_run waits for ${missing.join(", ")}, which no workflow is named`, "re-run setup --apply workflow --sandbox <vendor> --ci-workflow <your CI workflow's name>") : PASS("ci workflow name", `workflow_run waits for ${wanted.join(", ")}`));
   }
-  if (ci.factoryParses === false) out.push(FAIL("workflow file", "GitHub cannot parse .github/workflows/factory.yml (it lists the file by its path, not its name) and runs none of it", "fix its YAML; quote a value that holds \": \", such as validation commands marked parallel:"));
+  if (ci.pendulumParses === false) out.push(FAIL("workflow file", "GitHub cannot parse .github/workflows/pendulum.yml (it lists the file by its path, not its name) and runs none of it", "fix its YAML; quote a value that holds \": \", such as validation commands marked parallel:"));
 
   const label = await rest(`repos/${repo.full}/labels/${encodeURIComponent(inputs.objectiveLabel)}`, { token }).catch(() => null);
   out.push(label ? PASS("label", inputs.objectiveLabel) : FAIL("label", `${inputs.objectiveLabel} missing`, "setup --apply labels"));
@@ -730,9 +730,9 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   // (an empty list), and labels carry the state either way.
   // A personal account's board is out of every GitHub App's reach (Projects is an organization permission): no board,
   // labels carry the state (#199).
-  if (!project && repoData.owner?.type === "User") out.push(WARN("project board", "a repository a user owns has no board Factory can move: labels carry each Objective's state", "none needed; move the repository to an organization for the board"));
+  if (!project && repoData.owner?.type === "User") out.push(WARN("project board", "a repository a user owns has no board Pendulum can move: labels carry each Objective's state", "none needed; move the repository to an organization for the board"));
   else if (!project && backend().name === "local") out.push(WARN("project board", "not visible to the local token; cards will not move and labels carry the state", "grant the token the organisation's Projects read and write permission to move cards"));
-  else if (!project) out.push(FAIL("project board", "no Factory project linked to the repository", "setup --apply project"));
+  else if (!project) out.push(FAIL("project board", "no Pendulum project linked to the repository", "setup --apply project"));
   else {
     const names = (project.field?.options || []).map((o) => o.name);
     const missing = COLUMNS.filter((c) => !names.includes(c));
@@ -746,7 +746,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
       const u = await rest(`users/${encodeURIComponent(m.login)}`, { token }).catch(() => null);
       pins.push(u?.id ? `${u.login}#${u.id}` : `${m.login}#<id>`);
     }
-    out.push(WARN("maintainers", `named without a user id, so not trusted: ${unpinned.map((m) => m.login).join(", ")}`, `write each as login#id in FACTORY_NOTIFY and FACTORY_MAINTAINERS: ${pins.join(", ")} (an id outlives a rename; a login renamed away could be registered by anyone)`));
+    out.push(WARN("maintainers", `named without a user id, so not trusted: ${unpinned.map((m) => m.login).join(", ")}`, `write each as login#id in PENDULUM_NOTIFY and PENDULUM_MAINTAINERS: ${pins.join(", ")} (an id outlives a rename; a login renamed away could be registered by anyone)`));
   }
   if (inputs.notify) {
     const perm = await collaboratorPermission(repo, inputs.notify, { token });
@@ -760,7 +760,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
  * Branch code runs in CI, so CI's own token must not write: the repository's default workflow token is read-only, and no
  * workflow that runs on `pull_request`, `pull_request_target` or `merge_group` asks for contents, pull-requests, issues
  * or actions write. Each workflow is parsed (lib/yaml.mjs); one doctor cannot read, or cannot parse, FAILs. When the
- * default cannot be read with this token, every such workflow must set read-only permissions itself. Factory's own
+ * default cannot be read with this token, every such workflow must set read-only permissions itself. Pendulum's own
  * workflow is the exception: it runs branch code only as the agent uid, which cannot read the job's env.
  */
 export async function workflowTokenChecks({ repo, token }) {
@@ -778,14 +778,14 @@ export async function workflowTokenChecks({ repo, token }) {
   }
   const bad = [];
   for (const w of list) {
-    // Factory's own workflow; GitHub's dynamic ones (code scanning's default setup), which are no file in the repository.
-    if (/(^|\/)factory\.ya?ml$/.test(w.path) || /^dynamic\//.test(w.path)) continue;
+    // Pendulum's own workflow; GitHub's dynamic ones (code scanning's default setup), which are no file in the repository.
+    if (/(^|\/)pendulum\.ya?ml$/.test(w.path) || /^dynamic\//.test(w.path)) continue;
     let doc;
     try {
       doc = parseYaml(String(await rest(`repos/${repo.full}/contents/${w.path}`, { token, raw: "Accept: application/vnd.github.raw+json" })));
     } catch (e) {
       // Listed but not on the default branch (it ran from a branch once): nothing runs from it on the default branch, and
-      // a branch Factory pushes cannot add one (.github/ is a protected path).
+      // a branch Pendulum pushes cannot add one (.github/ is a protected path).
       if (e.status === 404) continue;
       bad.push(`${w.path} (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)})`);
       continue;
@@ -832,7 +832,7 @@ export function containerRunner(label) {
 }
 
 /**
- * Factory's runner jobs need Linux: the agent launcher wants systemd-run, or unshare with cgroup v2 (runnerChecks).
+ * Pendulum's runner jobs need Linux: the agent launcher wants systemd-run, or unshare with cgroup v2 (runnerChecks).
  * Linux here is GitHub's ubuntu-* images, a label that names linux, or a self-hosted label list that includes linux;
  * not a container-only runner, and not a label that cannot be read.
  */
@@ -866,7 +866,7 @@ function jobsOf(doc) {
 }
 
 /**
- * The CI runner Factory's work and review jobs should use: among the CI workflow's Linux jobs, the one that runs the
+ * The CI runner Pendulum's work and review jobs should use: among the CI workflow's Linux jobs, the one that runs the
  * setup command or a validation command, else a required check's job, else (when the Linux runners differ) one pinned
  * to an image version rather than a `-latest` alias, else the first. Container-only runners and labels that cannot
  * be read are not Linux jobs (linuxRunner). `ci`: ciWorkflowTriggers's result. Null when the CI has no Linux job with
@@ -887,17 +887,17 @@ export function ciRunner(ci, { commands = [], checks = [] } = {}) {
 }
 
 /**
- * Factory's runner-path jobs (work, review) run the repository's setup command, so they need the runner its CI uses:
+ * Pendulum's runner-path jobs (work, review) run the repository's setup command, so they need the runner its CI uses:
  * `ubuntu-latest` moves to a new image under them while a pinned CI keeps passing (#2600). A warning: the owner may
  * pick another runner on purpose. It also warns on a container-only runner and on a runner label it cannot read
  * (either side). Nothing to compare in sandbox mode (no runner jobs) or when the CI has no Linux job with a literal
  * runner. `ci` is the workflow that makes the required checks, else the one on pull_request (githubChecks): a render
  * made with setup's `--ci-workflow NAME` is compared against that workflow, not NAME. `hints`: ciRunner's.
  */
-export function runnerMatchCheck(factoryText, ci, hints = {}) {
+export function runnerMatchCheck(pendulumText, ci, hints = {}) {
   let jobs;
   try {
-    jobs = parseYaml(factoryText)?.jobs || {};
+    jobs = parseYaml(pendulumText)?.jobs || {};
   } catch {
     return null;
   }
@@ -922,7 +922,7 @@ export function runnerMatchCheck(factoryText, ci, hints = {}) {
 }
 
 /**
- * Find a workflow (other than factory.yml) with pull_request and merge_group triggers, or with `name`, the workflow of
+ * Find a workflow (other than pendulum.yml) with pull_request and merge_group triggers, or with `name`, the workflow of
  * that name, or with `checks` (the required checks' names), each check's makers by event (checkWorkflows). Each
  * workflow's `on:` is read from its parsed YAML (workflowEvents). `jobs`: its jobs (workflowJobs).
  * `unread`: the workflows that could not be read or parsed here, whose triggers are unknown (each with its reason).
@@ -938,10 +938,10 @@ export async function ciWorkflowTriggers(repo, opts, { name = "", checks = [] } 
   let found = null;
   const unread = [];
   // GitHub lists a workflow file it cannot parse under its path instead of its name, and runs nothing from it.
-  const factory = list.find((w) => /(^|\/)factory\.ya?ml$/.test(w.path));
-  const factoryParses = factory ? factory.name !== factory.path : null;
+  const pendulum = list.find((w) => /(^|\/)pendulum\.ya?ml$/.test(w.path));
+  const pendulumParses = pendulum ? pendulum.name !== pendulum.path : null;
   for (const w of list) {
-    if (/factory\.ya?ml$/.test(w.path) || w.state !== "active") continue;
+    if (/pendulum\.ya?ml$/.test(w.path) || w.state !== "active") continue;
     const named = Boolean(name) && w.name === name;
     if (name && !named) continue;
     let doc = null;
@@ -958,11 +958,11 @@ export async function ciWorkflowTriggers(repo, opts, { name = "", checks = [] } 
     const events = workflowEvents(doc);
     const mg = events.includes("merge_group");
     if (events.includes("pull_request") || named) {
-      found = { found: true, name: w.name, path: w.path, mergeGroup: mg, jobs: doc ? jobsOf(doc) : [], factoryParses };
+      found = { found: true, name: w.name, path: w.path, mergeGroup: mg, jobs: doc ? jobsOf(doc) : [], pendulumParses };
       if (mg || named) return { ...found, unread };
     }
   }
-  return found ? { ...found, unread } : { found: false, factoryParses, unread };
+  return found ? { ...found, unread } : { found: false, pendulumParses, unread };
 }
 
 /** Whether a workflow job (workflowJobs) makes the check `name`: its own name, a matrix leg's, or a called workflow's job. */
@@ -973,7 +973,7 @@ const PR_EVENTS = ["pull_request", "pull_request_target"];
 
 /**
  * ciWorkflowTriggers with the required checks known, decided per check: `byCheck` holds, for each of `checks`, the
- * workflows (other than factory.yml) with a job that makes it (makesCheck), split by the events they run on: `pr` (on
+ * workflows (other than pendulum.yml) with a job that makes it (makesCheck), split by the events they run on: `pr` (on
  * pull_request or pull_request_target), `mg` (on merge_group) and `other` (neither: a release, a schedule), each a list
  * of {name, path}. A workflow on other events never counts as making a check a pull request or the queue gets. `unread`:
  * the workflows that could not be read or parsed, any of which could make any check. `found`, `name`, `path` and `jobs`
@@ -981,14 +981,14 @@ const PR_EVENTS = ["pull_request", "pull_request_target"];
  * merge_group: no later workflow can change the row.
  */
 async function checkWorkflows(repo, opts, list, checks) {
-  const factory = list.find((w) => /(^|\/)factory\.ya?ml$/.test(w.path));
-  const factoryParses = factory ? factory.name !== factory.path : null;
+  const pendulum = list.find((w) => /(^|\/)pendulum\.ya?ml$/.test(w.path));
+  const pendulumParses = pendulum ? pendulum.name !== pendulum.path : null;
   const unread = [];
   const byCheck = checks.map((check) => ({ check, pr: [], mg: [], other: [] }));
   const prMakers = [];
   for (const w of list) {
     if (byCheck.every((c) => c.pr.length && c.mg.length)) break;
-    if (/factory\.ya?ml$/.test(w.path) || w.state !== "active") continue;
+    if (/pendulum\.ya?ml$/.test(w.path) || w.state !== "active") continue;
     let doc;
     try {
       doc = parseYaml(String(await rest(`repos/${repo.full}/contents/${w.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" })));
@@ -1014,7 +1014,7 @@ async function checkWorkflows(repo, opts, list, checks) {
     }
     if (makes && onPr) prMakers.push({ ...me, jobs });
   }
-  return { found: prMakers.length > 0, name: prMakers.map((w) => w.name).join(", "), path: prMakers.map((w) => w.path).join(", "), paths: prMakers.map((w) => w.path), jobs: prMakers.flatMap((w) => w.jobs), factoryParses, unread, checks, byCheck };
+  return { found: prMakers.length > 0, name: prMakers.map((w) => w.name).join(", "), path: prMakers.map((w) => w.path).join(", "), paths: prMakers.map((w) => w.path), jobs: prMakers.flatMap((w) => w.jobs), pendulumParses, unread, checks, byCheck };
 }
 
 /**
@@ -1101,7 +1101,7 @@ export function mergeTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
 }
 
 /**
- * Whether every Factory step of the installed workflow passes the repository's variables (`vars: ${{ toJSON(vars) }}`,
+ * Whether every Pendulum step of the installed workflow passes the repository's variables (`vars: ${{ toJSON(vars) }}`,
  * workflow-template.yml): without it the Action's jobs have no variable layer (#284, inputs.mjs applyVariables), and a
  * variable that applies in local mode does not apply there. WARN naming the re-render; null for a file that does not parse.
  */
@@ -1113,18 +1113,18 @@ export function varsInputCheck(text) {
     return null;
   }
   const jobs = doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {};
-  const steps = Object.values(jobs).flatMap((j) => (Array.isArray(j?.steps) ? j.steps : [])).filter((st) => /^clockgrove\/factory@/.test(String(st?.uses ?? "")));
+  const steps = Object.values(jobs).flatMap((j) => (Array.isArray(j?.steps) ? j.steps : [])).filter((st) => /^clockgrove\/pendulum@/.test(String(st?.uses ?? "")));
   if (!steps.length) return null;
   const without = steps.filter((st) => !String(st?.with?.vars ?? "").includes("toJSON(vars)")).length;
-  if (!without) return PASS("variables input", "every Factory step passes the repository's variables");
-  return WARN("variables input", `${without} of the workflow's ${steps.length} Factory steps pass${without === 1 ? "es" : ""} no vars, so the repository's FACTORY_* variables do not apply on Actions there`, "re-run setup --apply workflow and commit the result");
+  if (!without) return PASS("variables input", "every Pendulum step passes the repository's variables");
+  return WARN("variables input", `${without} of the workflow's ${steps.length} Pendulum steps pass${without === 1 ? "es" : ""} no vars, so the repository's PENDULUM_* variables do not apply on Actions there`, "re-run setup --apply workflow and commit the result");
 }
 
 /**
  * Whether the installed workflow carries the dispatcher's own ticks (workflow-template.yml): any issue closing (it may
  * block an Objective), the wake job (a stage's lease end, a quota retry, the UTC day's turn, one retry), and with a
  * sandbox the launch job's tick on its own failure, the sweep's own wakes (sweep-wake, image-wake) and the dispatcher's
- * owed image build (image_owed), and, with third-party reviewers named, an App's review on a Factory PR
+ * owed image build (image_owed), and, with third-party reviewers named, an App's review on a Pendulum PR
  * (pull_request_review, filtered to a Bot reviewer), which resumes a review stage that ended waiting for one. A workflow rendered before them leaves those waits to GitHub's cron,
  * which fires late or not at all. FAIL from a person's doctor run; WARN inside a run, as mergeTickCheck.
  */
@@ -1140,10 +1140,10 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
   // The sweep's wake armed by the sweep or the image job: a `<job>-wake` job ticking with that job's deadline, and the sweep running on that tick.
   const ownWake = (name) => {
     const w = jobs[`${name}-wake`];
-    return !!w && String(w.needs) === name && /gh workflow run factory\.yml -f wake=/.test(String(w.steps?.[0]?.run || "")) && /inputs\.wake/.test(String(jobs.sweep?.if || "")) && /steps\.f\.outputs\.wake_at/.test(String(jobs[name]?.outputs?.wake_at || ""));
+    return !!w && String(w.needs) === name && /gh workflow run pendulum\.yml -f wake=/.test(String(w.steps?.[0]?.run || "")) && /inputs\.wake/.test(String(jobs.sweep?.if || "")) && /steps\.f\.outputs\.wake_at/.test(String(jobs[name]?.outputs?.wake_at || ""));
   };
   const owedBuild = /steps\.f\.outputs\.image_owed/.test(String(jobs.dispatch?.outputs?.image_owed || "")) && /needs\.dispatch\.outputs\.image_owed/.test(String(jobs.image?.if || ""));
-  const ticks = (j) => (jobs[j]?.steps || []).some((s) => /gh workflow run factory\.yml/.test(s?.run || "") && /steps\.f\.outcome != 'success'/.test(String(s?.if || "")) && /exit == 'deferred'/.test(String(s?.if || "")));
+  const ticks = (j) => (jobs[j]?.steps || []).some((s) => /gh workflow run pendulum\.yml/.test(s?.run || "") && /steps\.f\.outcome != 'success'/.test(String(s?.if || "")) && /exit == 'deferred'/.test(String(s?.if || "")));
   const missing = [
     ...((on?.issues?.types || []).map(String).includes("closed") && /action == 'closed' \|\|/.test(String(jobs.dispatch?.if || "")) ? [] : ["a dispatcher tick on a closed issue"]),
     ...(jobs.wake && on?.workflow_dispatch?.inputs?.wake ? [] : ["the wake job"]),
@@ -1157,9 +1157,9 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
   return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died, a review waiting for a third-party reviewer, a sandbox left to sweep or an image build an earlier day left, stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
 }
 
-/** Whether the workflow names third-party reviewers: FACTORY_THIRD_PARTY_REVIEWERS in its env block, or `third_party_reviewers` on a step. */
+/** Whether the workflow names third-party reviewers: PENDULUM_THIRD_PARTY_REVIEWERS in its env block, or `third_party_reviewers` on a step. */
 const thirdPartyNamed = (doc, jobs) =>
-  !!String(doc?.env?.FACTORY_THIRD_PARTY_REVIEWERS ?? "").trim() || Object.values(jobs).some((j) => (j?.steps || []).some((st) => !!String(st?.with?.third_party_reviewers ?? "").trim()));
+  !!String(doc?.env?.PENDULUM_THIRD_PARTY_REVIEWERS ?? "").trim() || Object.values(jobs).some((j) => (j?.steps || []).some((st) => !!String(st?.with?.third_party_reviewers ?? "").trim()));
 
 /**
  * On a private repository the wake jobs sleep only to the short waits (a quota retry, a read retry, the sweep's minutes):
@@ -1188,15 +1188,15 @@ export function approvalPolicyCheck(read) {
   return [PASS("dequeue approval", `the approval policy for outside contributors (${policy}) does not hold the merge queue's dequeued run`)];
 }
 
-/** The running workflow's path in the repository (Actions names it), else Factory's own. */
+/** The running workflow's path in the repository (Actions names it), else Pendulum's own. */
 function workflowPath(env) {
   const m = /\/(\.github\/workflows\/[^@]+)@/.exec(env.GITHUB_WORKFLOW_REF || "");
-  return m ? m[1] : ".github/workflows/factory.yml";
+  return m ? m[1] : ".github/workflows/pendulum.yml";
 }
 
-/** The Factory ref a workflow calls (a release tag, or a commit shortened), or "". */
+/** The Pendulum ref a workflow calls (a release tag, or a commit shortened), or "". */
 const pinOf = (text) => {
-  const ref = factoryRef(text);
+  const ref = pendulumRef(text);
   return /^[0-9a-f]{40}$/.test(ref) ? ref.slice(0, 7) : ref;
 };
 
@@ -1224,7 +1224,7 @@ export async function workflowText({ repo, branch, token, env = process.env, roo
   const checks = [];
   if (!env.GITHUB_ACTIONS && local !== null && local !== remote) {
     const [here, there] = [pinOf(local), pinOf(remote)];
-    checks.push(WARN("workflow copy", `this clone's ${path} differs from ${branch} on GitHub${here !== there ? ` (it pins ${here || "no Factory ref"}, GitHub ${there || "no Factory ref"})` : ""}; the checks read GitHub's`, `pull ${branch} into this clone: local mode reads its settings from the clone's copy`));
+    checks.push(WARN("workflow copy", `this clone's ${path} differs from ${branch} on GitHub${here !== there ? ` (it pins ${here || "no Pendulum ref"}, GitHub ${there || "no Pendulum ref"})` : ""}; the checks read GitHub's`, `pull ${branch} into this clone: local mode reads its settings from the clone's copy`));
   }
   return { text: remote, checks };
 }
@@ -1253,7 +1253,7 @@ export function systemBash(env = process.env, checkout = null) {
 }
 
 /**
- * Bash's own parse of `command` with the flags Factory runs it with (`bash -n`: read, never executed), from `/`, with
+ * Bash's own parse of `command` with the flags Pendulum runs it with (`bash -n`: read, never executed), from `/`, with
  * extglob on (a command may turn it on before the line that uses it, which a parse never runs). Null when it parses;
  * else {refused: true, message: bash's error} when bash refused it, or {refused: false, message} when bash could not
  * parse it here (none found, it did not start, or it ran out of time).
@@ -1388,10 +1388,10 @@ async function commandType(name, { cwd, env }) {
  */
 export async function commandCheck(row, command, { checkout, env = process.env, missing, pass = "" }) {
   const syntax = await shellSyntax(command, { env, checkout });
-  if (syntax?.refused) return FAIL(row, `${command}: bash cannot parse it (${syntax.message})`, `fix the ${row} command: Factory runs it with bash -eo pipefail -c`);
+  if (syntax?.refused) return FAIL(row, `${command}: bash cannot parse it (${syntax.message})`, `fix the ${row} command: Pendulum runs it with bash -eo pipefail -c`);
   if (syntax) return WARN(row, `${command}: not parsed here (${syntax.message})`, "run doctor where bash runs");
   const read = firstCommand(command);
-  if (read.error) return WARN(row, `${command}: bash parses it but doctor's parser does not (${read.error}), so its first command is not looked up`, "nothing to fix if it runs; report it to Factory");
+  if (read.error) return WARN(row, `${command}: bash parses it but doctor's parser does not (${read.error}), so its first command is not looked up`, "nothing to fix if it runs; report it to Pendulum");
   if (!read.first) return PASS(row, `${command}${pass}`);
   const name = read.first.name;
   if (!fixedWord(name)) return WARN(row, `${command}: its first command, ${name.text}, is not a fixed word, so doctor cannot look it up`, `nothing to fix if it runs; a fixed command name lets doctor check it`);
@@ -1416,7 +1416,7 @@ export async function repositoryChecks({ inputs, checkout, env = process.env, ru
   else if (noTool.length) out.push(WARN("lockfile", `${lockfiles}; ${noTool.map((i) => `${i.tool} is not found here`).join(", ")}, so every stage's install fails unless setup installs it`, `install ${noTool.map((i) => i.tool).join(" and ")} in the setup command, or set install: to the command this repository needs (install: none skips)`));
   else out.push(PASS("lockfile", auto.length ? lockfiles : install));
   for (const cmd of inputs.validation.map(commandText)) out.push(await commandCheck("validation", cmd, { checkout, env, missing: "setup may install it" }));
-  if (!inputs.validation.length) out.push(WARN("validation", "no validation commands", "set validation: so Factory has a feedback loop"));
+  if (!inputs.validation.length) out.push(WARN("validation", "no validation commands", "set validation: so Pendulum has a feedback loop"));
   if (inputs.setup) {
     if (runSetup) {
       const r = await exec("bash", ["-eo", "pipefail", "-c", inputs.setup], { cwd: checkout, env, timeoutMs: 20 * 60_000 });
@@ -1529,18 +1529,18 @@ const listed = (xs, n = 6) => `${xs.slice(0, n).join(", ")}${xs.length > n ? ` a
  * there. What it may run that cannot be named (a variable, a substitution's output, a glob, a shell reading a pipe, remote
  * code), in the command or a package.json script it runs, cannot be protected at all. FAIL on either, in a job too: the
  * run Blocks before such a setup runs. The rest of what it runs (setupGuard `files` and `scripts`) needs no entry:
- * Factory refuses a push that changes any of it (outbox.mjs). What the `install` command may run that cannot be named
+ * Pendulum refuses a push that changes any of it (outbox.mjs). What the `install` command may run that cannot be named
  * is a WARN: every file then counts as toolchain to a fix pass (logic.mjs fixScopeRefused).
  */
 export async function setupFilesCheck({ inputs, checkout, list = protectedPaths(inputs.protectedAdditions), env = process.env }) {
   const out = [];
   const install = inputs.install && inputs.install !== "auto" && inputs.install !== "none" ? commandRefs(inputs.install, { env, roots: [checkout] }).unresolved : [];
-  if (install.length) out.push(WARN("install files", `the install command runs ${listed(install)}, which Factory cannot resolve to repository files, so a fix pass may change no file its scope does not name`, "name each file literally in the install command, or move the command into a script file"));
+  if (install.length) out.push(WARN("install files", `the install command runs ${listed(install)}, which Pendulum cannot resolve to repository files, so a fix pass may change no file its scope does not name`, "name each file literally in the install command, or move the command into a script file"));
   if (!inputs.setup) return out;
   const { files, guard } = await setupRuns(inputs.setup, checkout, env);
-  if (guard.unresolved.length) return [FAIL("setup files", `the setup command runs ${listed(guard.unresolved, 4)}, which Factory cannot resolve to repository files, so it cannot keep a worker from changing what runs as the runner beside the App's key`, "name each file the setup runs literally (bash scripts/ci/setup.sh), or move the command into a script file in the repository; setup --apply workflow then protects it"), ...out];
+  if (guard.unresolved.length) return [FAIL("setup files", `the setup command runs ${listed(guard.unresolved, 4)}, which Pendulum cannot resolve to repository files, so it cannot keep a worker from changing what runs as the runner beside the App's key`, "name each file the setup runs literally (bash scripts/ci/setup.sh), or move the command into a script file in the repository; setup --apply workflow then protects it"), ...out];
   const bare = unprotectedFiles(files, list);
-  if (bare.length) return [FAIL("setup files", `the setup command runs ${bare.join(", ")} as the runner, beside the App's key, and no protected path covers it: a worker's merged change to it would run there`, `add ${bare.map((f) => `/${f}`).join(", ")} to protected_paths (FACTORY_PROTECTED_PATHS in .github/workflows/factory.yml; a leading / protects it at the root only); setup --apply workflow adds it`), ...out];
+  if (bare.length) return [FAIL("setup files", `the setup command runs ${bare.join(", ")} as the runner, beside the App's key, and no protected path covers it: a worker's merged change to it would run there`, `add ${bare.map((f) => `/${f}`).join(", ")} to protected_paths (PENDULUM_PROTECTED_PATHS in .github/workflows/pendulum.yml; a leading / protects it at the root only); setup --apply workflow adds it`), ...out];
   const guarded = guard.files.filter((f) => !files.includes(f));
   const scripts = guard.scripts.map((x) => `${x.pkg === "*" ? "any package.json" : x.pkg} scripts.${x.name}`);
   const parts = [...(files.length ? [`${files.join(", ")} protected`] : []), ...(guarded.length ? [`a push changing ${listed(guarded)} is refused`] : []), ...(scripts.length ? [`and one changing ${listed(scripts)}`] : [])];
@@ -1564,11 +1564,11 @@ export async function runnerChecks({ inputs, env = process.env }) {
   // systemd-run, which GitHub's hosted runners have.
   if (env.GITHUB_ACTIONS) {
     const s = await exec("/usr/bin/sudo", ["-n", "/usr/bin/true"], { env: { PATH: "/usr/bin:/bin" } }).catch(() => ({ code: 1 }));
-    out.push(s.code === 0 ? PASS("sudo", "passwordless sudo for the agent uid") : FAIL("sudo", `sudo -n fails on this ${selfHosted ? "self-hosted " : ""}runner`, "give the runner's user passwordless sudo (Factory creates the factory-agent user and runs the harness as it)"));
+    out.push(s.code === 0 ? PASS("sudo", "passwordless sudo for the agent uid") : FAIL("sudo", `sudo -n fails on this ${selfHosted ? "self-hosted " : ""}runner`, "give the runner's user passwordless sudo (Pendulum creates the pendulum-agent user and runs the harness as it)"));
     const launcher = await agentLauncher();
     out.push(launcher ? PASS("agent launcher", launcher === "systemd" ? "systemd-run (a transient unit per command)" : "unshare, setpriv and a cgroup v2 group (no systemd here)") : FAIL("agent launcher", "neither systemd-run nor unshare with a cgroup v2 hierarchy", "run on a runner with systemd, or a Linux machine with util-linux and cgroup v2"));
     const home = await agentHomeProblem();
-    out.push(home ? FAIL("agent home", home, `remove that user or give it the home ${AGENT_HOME}: Factory wipes that path before each job`) : PASS("agent home", `${AGENT_USER} at ${AGENT_HOME}`));
+    out.push(home ? FAIL("agent home", home, `remove that user or give it the home ${AGENT_HOME}: Pendulum wipes that path before each job`) : PASS("agent home", `${AGENT_USER} at ${AGENT_HOME}`));
   }
   out.push(gitCheck(await onPath("git"), await gitVersion()));
   out.push(...(await claudeSandboxChecks({ inputs, env })));
@@ -1576,7 +1576,7 @@ export async function runnerChecks({ inputs, env = process.env }) {
 }
 
 /**
- * git where Factory runs: present, and at least MERGE_BASE_GIT, which `git merge-tree --merge-base` needs (the rebase
+ * git where Pendulum runs: present, and at least MERGE_BASE_GIT, which `git merge-tree --merge-base` needs (the rebase
  * check of a send-back's conflict pass, and what a review reads after a rebase). `version` from outbox.mjs gitVersion.
  */
 export function gitCheck(present, version) {
@@ -1596,9 +1596,9 @@ const RUNNER_SANDBOX = {
 };
 
 /** The one-time admin step a self-hosted Ubuntu runner needs for Claude Code's sandbox (the Action applies it only on GitHub's hosted runners). */
-export const APPARMOR_ADMIN_STEP = "once, as an admin on the runner host: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile factory-bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/factory-bwrap && sudo apparmor_parser -r /etc/apparmor.d/factory-bwrap; where `sudo grep unpriv_bwrap /sys/kernel/security/apparmor/profiles` finds Ubuntu's bwrap-userns-restrict profile, also: sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict && sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/ (docs/PLAN.md, Credentials and billing)";
+export const APPARMOR_ADMIN_STEP = "once, as an admin on the runner host: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile pendulum-bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/pendulum-bwrap && sudo apparmor_parser -r /etc/apparmor.d/pendulum-bwrap; where `sudo grep unpriv_bwrap /sys/kernel/security/apparmor/profiles` finds Ubuntu's bwrap-userns-restrict profile, also: sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict && sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/ (docs/PLAN.md, Credentials and billing)";
 /** Copilot's sandbox makes its namespaces with util-linux unshare, which its bwrap joins: the grant is unshare's. */
-export const APPARMOR_UNSHARE_STEP = "once, as an admin on the runner host: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile factory-unshare /usr/bin/unshare flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/factory-unshare && sudo apparmor_parser -r /etc/apparmor.d/factory-unshare; where `sudo grep -E 'unpriv_(bwrap|unshare)' /sys/kernel/security/apparmor/profiles` finds Ubuntu's bwrap-userns-restrict or unshare-userns-restrict profile, also unload and disable it: sudo apparmor_parser -R /etc/apparmor.d/<name> && sudo ln -s /etc/apparmor.d/<name> /etc/apparmor.d/disable/ (docs/PLAN.md, Credentials and billing)";
+export const APPARMOR_UNSHARE_STEP = "once, as an admin on the runner host: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile pendulum-unshare /usr/bin/unshare flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/pendulum-unshare && sudo apparmor_parser -r /etc/apparmor.d/pendulum-unshare; where `sudo grep -E 'unpriv_(bwrap|unshare)' /sys/kernel/security/apparmor/profiles` finds Ubuntu's bwrap-userns-restrict or unshare-userns-restrict profile, also unload and disable it: sudo apparmor_parser -R /etc/apparmor.d/<name> && sudo ln -s /etc/apparmor.d/<name> /etc/apparmor.d/disable/ (docs/PLAN.md, Credentials and billing)";
 
 /**
  * Every harness on Actions and in a cloud sandbox runs its commands in its own bubblewrap sandbox (harness.mjs
@@ -1616,7 +1616,7 @@ export async function claudeSandboxChecks({ inputs, env = process.env, local = b
   const out = [];
   const dropped = droppedDomains(input("allowed_domains", { env }));
   if (dropped.length) out.push(WARN("allowed_domains", `not host names, so ${sb.name}'s sandbox does not allow them: ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path or IP address"));
-  if (!(env.GITHUB_ACTIONS || env.FACTORY_STAGE_SANDBOX === "1")) return out;
+  if (!(env.GITHUB_ACTIONS || env.PENDULUM_STAGE_SANDBOX === "1")) return out;
   const pkgs = sb.bins.map(([, pkg]) => pkg).join(" ");
   const missing = [];
   for (const [bin, pkg] of sb.bins) {
@@ -1635,16 +1635,16 @@ export async function claudeSandboxChecks({ inputs, env = process.env, local = b
     // Copilot's sandbox makes its namespaces with unshare and bubblewrap joins them: the grant is unshare's, and Ubuntu's
     // restricting profiles (bwrap-userns-restrict, unshare-userns-restrict from 25.04) must not be loaded.
     const copilot = h === "copilot";
-    const granted = copilot ? /^factory-unshare /m.test(loaded) : /^factory-bwrap /m.test(loaded);
+    const granted = copilot ? /^pendulum-unshare /m.test(loaded) : /^pendulum-bwrap /m.test(loaded);
     const blocks = (restricted && !granted) || /^unpriv_bwrap /m.test(loaded) || (copilot && /^unpriv_unshare /m.test(loaded));
     const step = copilot ? APPARMOR_UNSHARE_STEP : APPARMOR_ADMIN_STEP;
-    out.push(blocks ? FAIL(`${h} sandbox: apparmor`, `AppArmor keeps ${copilot ? "unshare" : "bwrap"} from making the user namespaces ${sb.name}'s sandbox needs on this self-hosted runner, and the Action changes no host-wide setting off GitHub's hosted runners`, step) : PASS(`${h} sandbox: apparmor`, restricted ? `the ${copilot ? "factory-unshare profile lets unshare" : "factory-bwrap profile lets bwrap"} make user namespaces` : "no user-namespace restriction"));
+    out.push(blocks ? FAIL(`${h} sandbox: apparmor`, `AppArmor keeps ${copilot ? "unshare" : "bwrap"} from making the user namespaces ${sb.name}'s sandbox needs on this self-hosted runner, and the Action changes no host-wide setting off GitHub's hosted runners`, step) : PASS(`${h} sandbox: apparmor`, restricted ? `the ${copilot ? "pendulum-unshare profile lets unshare" : "pendulum-bwrap profile lets bwrap"} make user namespaces` : "no user-namespace restriction"));
   }
   // Codex's and Copilot's sandboxes, started once where the job runs (the stage checks again as the agent before every start).
   const starter = start ?? (h === "codex" ? codexSandboxStart : h === "copilot" ? copilotSandboxStart : null);
   const r = starter && (h === "codex" || h === "copilot") && !missing.length ? await starter(env) : null;
   if (r) {
-    const fix = env.RUNNER_ENVIRONMENT === "self-hosted" ? (h === "copilot" ? APPARMOR_UNSHARE_STEP : APPARMOR_ADMIN_STEP) : h === "copilot" ? "give unshare unprivileged user and network namespaces (on Ubuntu the factory-unshare AppArmor profile, which the Action loads on GitHub's hosted runners), and slirp4netns /dev/net/tun and an iptables that can add an IPv6 table (the cloud sandbox's start sees to both)" : "give bwrap unprivileged user and network namespaces (on Ubuntu the factory-bwrap AppArmor profile, which the Action loads on GitHub's hosted runners)";
+    const fix = env.RUNNER_ENVIRONMENT === "self-hosted" ? (h === "copilot" ? APPARMOR_UNSHARE_STEP : APPARMOR_ADMIN_STEP) : h === "copilot" ? "give unshare unprivileged user and network namespaces (on Ubuntu the pendulum-unshare AppArmor profile, which the Action loads on GitHub's hosted runners), and slirp4netns /dev/net/tun and an iptables that can add an IPv6 table (the cloud sandbox's start sees to both)" : "give bwrap unprivileged user and network namespaces (on Ubuntu the pendulum-bwrap AppArmor profile, which the Action loads on GitHub's hosted runners)";
     out.push(r.ok ? PASS(`${h} sandbox: start`, `${sb.name}'s sandbox starts and confines here`) : FAIL(`${h} sandbox: start`, `${sb.name}'s sandbox does not start here: ${r.reason}`, fix));
   }
   // A held session put back as the agent, as every resumed stage does (lib/untar.mjs), where the agent exists.
@@ -1655,7 +1655,7 @@ export async function claudeSandboxChecks({ inputs, env = process.env, local = b
 
 /**
  * A held session's round trip where the job runs, as the agent in its temp directory: a nested directory archived with
- * tar, as Factory captures a session (claude-runner.mjs archiveSession), and unpacked into a fresh directory, as every
+ * tar, as Pendulum captures a session (claude-runner.mjs archiveSession), and unpacked into a fresh directory, as every
  * reset puts one back (untar.mjs). {ok, reason}, or null before the agent exists.
  */
 async function sessionRestoreStart(env = process.env) {
@@ -1664,14 +1664,14 @@ async function sessionRestoreStart(env = process.env) {
   const dir = `${agent.tmp}/session-restore-check`;
   const opts = { cwd: agent.tmp, env: scrubbedEnv(env) };
   try {
-    const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -p -- "$1/from/s1/checkpoints" "$1/to"; echo factory > "$1/from/s1/checkpoints/index.md"', "sh", dir], opts);
+    const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -p -- "$1/from/s1/checkpoints" "$1/to"; echo pendulum > "$1/from/s1/checkpoints/index.md"', "sh", dir], opts);
     if (made.code !== 0) return { ok: false, reason: `the check could not be set up: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}` };
     const tar = await tarAsAgent(`${dir}/from`, ["s1/checkpoints/index.md"], opts);
     if (tar.code !== 0) return { ok: false, reason: `a session could not be archived as the agent: ${String(tar.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${tar.code}`}` };
     const put = await untarAsAgent(tar.stdout, `${dir}/to`, opts);
     if (put.code !== 0) return { ok: false, reason: String(put.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${put.code}` };
     const got = await exec("/bin/cat", [`${dir}/to/s1/checkpoints/index.md`], opts);
-    return got.code === 0 && String(got.stdout).trim() === "factory" ? { ok: true } : { ok: false, reason: "the unpacked session is not what was archived" };
+    return got.code === 0 && String(got.stdout).trim() === "pendulum" ? { ok: true } : { ok: false, reason: "the unpacked session is not what was archived" };
   } finally {
     await exec("/bin/rm", ["-rf", "--", dir], opts).catch(() => {});
   }
@@ -1722,7 +1722,7 @@ async function copilotSandboxStart(env = process.env) {
 
 /**
  * The runner `doctor --probe` runs Codex with where the agent uid exists: the run's own sandbox and start-up (a fresh
- * CODEX_HOME, Factory's HOME), around a throwaway directory in the agent's temp directory. Null elsewhere.
+ * CODEX_HOME, Pendulum's HOME), around a throwaway directory in the agent's temp directory. Null elsewhere.
  */
 async function probeRunner(env = process.env) {
   const agent = agentUser();
@@ -1730,7 +1730,7 @@ async function probeRunner(env = process.env) {
   const clone = `${agent.tmp}/codex-probe`;
   await exec("/bin/mkdir", ["-p", clone], { cwd: agent.tmp });
   const runner = { ...codexRunner({ harness: "codex", agent, clone, env }), present: new Set() };
-  await prepareFactoryHome(CODEX_RUNNER_HOME, "Codex");
+  await preparePendulumHome(CODEX_RUNNER_HOME, "Codex");
   await resetCodexState(runner, scrubbedEnv(env));
   await realRoots({ fix: [runner.agentTmp, ...runner.caches], check: [clone] }, runner.agentHome, scrubbedEnv(env));
   return runner;
@@ -1744,12 +1744,12 @@ async function apparmorProfiles() {
 
 /**
  * Local mode writes as the operator, and GitHub notifies no one of their own @mention: when that login is the notify
- * user, a Blocked or Question reaches no one unless the Factory App posts it (#2522). `notice`: an App is configured.
+ * user, a Blocked or Question reaches no one unless the Pendulum App posts it (#2522). `notice`: an App is configured.
  */
 export function noticeChecks({ inputs, notice, local = backend().name === "local", self = selfLogin() }) {
   if (!local || !inputs.notify) return [];
-  if (notice) return [PASS("notices", "posted as the Factory App, so the @mention notifies")];
-  if (self && self === inputs.notify.toLowerCase()) return [WARN("notices", `local notices post as @${inputs.notify}, the notify user, and GitHub notifies no one of their own @mention`, "set FACTORY_LOCAL_APP_ID and FACTORY_LOCAL_APP_KEY (the Factory App's id and the path of its private key under ~/.config/factory) so notices post as the App")];
+  if (notice) return [PASS("notices", "posted as the Pendulum App, so the @mention notifies")];
+  if (self && self === inputs.notify.toLowerCase()) return [WARN("notices", `local notices post as @${inputs.notify}, the notify user, and GitHub notifies no one of their own @mention`, "set PENDULUM_LOCAL_APP_ID and PENDULUM_LOCAL_APP_KEY (the Pendulum App's id and the path of its private key under ~/.config/pendulum) so notices post as the App")];
   return [];
 }
 
@@ -1817,8 +1817,8 @@ export function packageDirs(checkout) {
 /**
  * What in a checkout says its checks use a Postgres server, one phrase each. Structure only, never a command's or a
  * script's text: a package.json of the root or a declared workspace (packageDirs) that depends on a Postgres client
- * package (PG_CLIENTS), a CI job under .github/workflows (Factory's own workflow aside) with a service container whose
- * image is a Postgres server (PG_IMAGES), and FACTORY_LOCAL_DB_INIT in Factory's workflow env, which is for local
+ * package (PG_CLIENTS), a CI job under .github/workflows (Pendulum's own workflow aside) with a service container whose
+ * image is a Postgres server (PG_IMAGES), and PENDULUM_LOCAL_DB_INIT in Pendulum's workflow env, which is for local
  * mode's database only. Only Node clients and CI service containers are detected. Runs on the developer's own checkout
  * only, never on an agent's clone.
  */
@@ -1833,7 +1833,7 @@ export function databaseSignals(checkout, wf = readWorkflowEnv(checkout)) {
   }
   let workflows = [];
   try {
-    workflows = readdirSync(join(checkout, ".github", "workflows"), { withFileTypes: true }).filter((d) => d.isFile() && /\.ya?ml$/.test(d.name) && !/^factory\.ya?ml$/.test(d.name)).map((d) => d.name).sort();
+    workflows = readdirSync(join(checkout, ".github", "workflows"), { withFileTypes: true }).filter((d) => d.isFile() && /\.ya?ml$/.test(d.name) && !/^pendulum\.ya?ml$/.test(d.name)).map((d) => d.name).sort();
   } catch {}
   for (const name of workflows) {
     const rel = `.github/workflows/${name}`;
@@ -1852,43 +1852,43 @@ export function databaseSignals(checkout, wf = readWorkflowEnv(checkout)) {
       }
     }
   }
-  if (wf.FACTORY_LOCAL_DB_INIT) out.push("the workflow sets FACTORY_LOCAL_DB_INIT");
+  if (wf.PENDULUM_LOCAL_DB_INIT) out.push("the workflow sets PENDULUM_LOCAL_DB_INIT");
   return out;
 }
 
 /**
  * Local mode's sandboxes have no route to the machine's services, so a validation command that needs Postgres fails
- * there unless FACTORY_LOCAL_DB=1 gives it a throwaway one (#2601). WARNs when the checkout declares a Postgres server
- * (databaseSignals) and FACTORY_LOCAL_DB is off; when FACTORY_LOCAL_VALIDATION is set, the WARN names the commands it
- * still runs locally, since only the owner knows whether one of them needs the database. On macOS FACTORY_LOCAL_DB=1
+ * there unless PENDULUM_LOCAL_DB=1 gives it a throwaway one (#2601). WARNs when the checkout declares a Postgres server
+ * (databaseSignals) and PENDULUM_LOCAL_DB is off; when PENDULUM_LOCAL_VALIDATION is set, the WARN names the commands it
+ * still runs locally, since only the owner knows whether one of them needs the database. On macOS PENDULUM_LOCAL_DB=1
  * is not supported, so it WARNs there too. `env` wins over the workflow's env block `wf`, as in the local loop. Nothing to
  * say when the checkout declares no database. For the developer's own checkout (local.mjs init, doctor --local).
  */
 export function localDatabaseChecks({ checkout, env = process.env, wf = readWorkflowEnv(checkout), os = platform() }) {
   const pick = (k) => env[k] ?? wf[k];
   const darwin = os === "darwin";
-  if (pick("FACTORY_LOCAL_DB") === "1") {
-    if (!darwin) return [PASS("local database", "FACTORY_LOCAL_DB=1: each validation command gets a throwaway Postgres")];
-    return [WARN("local database", "FACTORY_LOCAL_DB=1 is set, but it is for Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it, and a run with it set (in this shell or the workflow env) does not start", "unset FACTORY_LOCAL_DB on macOS (in this shell and the workflow env) and list only the validation commands that need no database in FACTORY_LOCAL_VALIDATION")];
+  if (pick("PENDULUM_LOCAL_DB") === "1") {
+    if (!darwin) return [PASS("local database", "PENDULUM_LOCAL_DB=1: each validation command gets a throwaway Postgres")];
+    return [WARN("local database", "PENDULUM_LOCAL_DB=1 is set, but it is for Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it, and a run with it set (in this shell or the workflow env) does not start", "unset PENDULUM_LOCAL_DB on macOS (in this shell and the workflow env) and list only the validation commands that need no database in PENDULUM_LOCAL_VALIDATION")];
   }
   const signals = databaseSignals(checkout, wf);
   if (!signals.length) return [];
   const shown = signals.length > 3 ? [...signals.slice(0, 3), `${signals.length - 3} more`] : signals;
-  const uses = `this repository uses Postgres (${shown.join("; ")}) and FACTORY_LOCAL_DB is off`;
-  const db = "set FACTORY_LOCAL_DB=1 (a throwaway Postgres per validation command; needs the Postgres server binaries, initdb and pg_ctl)";
-  const local = comma(pick("FACTORY_LOCAL_VALIDATION")).map(commandText);
+  const uses = `this repository uses Postgres (${shown.join("; ")}) and PENDULUM_LOCAL_DB is off`;
+  const db = "set PENDULUM_LOCAL_DB=1 (a throwaway Postgres per validation command; needs the Postgres server binaries, initdb and pg_ctl)";
+  const local = comma(pick("PENDULUM_LOCAL_VALIDATION")).map(commandText);
   if (local.length) {
-    const fix = `confirm none of those needs Postgres, and leave out of FACTORY_LOCAL_VALIDATION any that does (the required checks run it on GitHub)${darwin ? "" : `, or ${db}`}`;
-    return [WARN("local database", `${uses}; FACTORY_LOCAL_VALIDATION still runs ${local.join(", ")} locally, in sandboxes with no route to this machine's services`, fix)];
+    const fix = `confirm none of those needs Postgres, and leave out of PENDULUM_LOCAL_VALIDATION any that does (the required checks run it on GitHub)${darwin ? "" : `, or ${db}`}`;
+    return [WARN("local database", `${uses}; PENDULUM_LOCAL_VALIDATION still runs ${local.join(", ")} locally, in sandboxes with no route to this machine's services`, fix)];
   }
-  const fix = darwin ? "list only the validation commands that need no database in FACTORY_LOCAL_VALIDATION (FACTORY_LOCAL_DB=1, a throwaway Postgres per command, runs on Linux and WSL2 only)" : `${db}, or list only the commands that need no database in FACTORY_LOCAL_VALIDATION`;
+  const fix = darwin ? "list only the validation commands that need no database in PENDULUM_LOCAL_VALIDATION (PENDULUM_LOCAL_DB=1, a throwaway Postgres per command, runs on Linux and WSL2 only)" : `${db}, or list only the commands that need no database in PENDULUM_LOCAL_VALIDATION`;
   return [WARN("local database", `${uses}: local mode's sandboxes have no route to this machine's services, so a validation command that needs the database fails and the run Blocks after a fix pass`, fix)];
 }
 
 /**
  * The notice App's reach (#2522), from a notice mint, for the record: the key on this box mints whatever its
- * installation grants (Factory's own App: contents and pull requests write too), while the notice token Factory mints
- * is narrowed to issues write. Informational: using Factory's own App for local notices is a supported choice.
+ * installation grants (Pendulum's own App: contents and pull requests write too), while the notice token Pendulum mints
+ * is narrowed to issues write. Informational: using Pendulum's own App for local notices is a supported choice.
  */
 export function noticeAppCheck(minted) {
   const extra = noticeAppExtra(minted?.installationPermissions);
@@ -1909,14 +1909,14 @@ export async function jobChecks({ inputs, repo, token, app, checkout, notice = f
 }
 
 /**
- * Local mode: each FACTORY_* name the workflow's env block sets that is no setting (inputs.mjs WORKFLOW_SETTINGS) is a
- * WARN. Local mode leaves it out of every stage: the workflow file is repository content, and such a name is Factory's
+ * Local mode: each PENDULUM_* name the workflow's env block sets that is no setting (inputs.mjs WORKFLOW_SETTINGS) is a
+ * WARN. Local mode leaves it out of every stage: the workflow file is repository content, and such a name is Pendulum's
  * own control (#119).
  */
 export function workflowEnvChecks(wf = {}) {
   const { dropped } = workflowSettings(wf);
   if (!dropped.length) return [];
-  return [WARN("workflow env", `.github/workflows/factory.yml sets ${dropped.join(", ")}, which ${dropped.length === 1 ? "is" : "are"} no Factory setting: local mode ignores ${dropped.length === 1 ? "it" : "them"}`, "remove them from the workflow's env block; the settings are the Action's inputs as FACTORY_<INPUT> and the FACTORY_LOCAL_* ones in docs/LOCAL.md")];
+  return [WARN("workflow env", `.github/workflows/pendulum.yml sets ${dropped.join(", ")}, which ${dropped.length === 1 ? "is" : "are"} no Pendulum setting: local mode ignores ${dropped.length === 1 ? "it" : "them"}`, "remove them from the workflow's env block; the settings are the Action's inputs as PENDULUM_<INPUT> and the PENDULUM_LOCAL_* ones in docs/LOCAL.md")];
 }
 
 /** The commands a local stage runs for the repository in `checkout` (copilot-runner.mjs stageCommands), install resolved. */
@@ -1937,7 +1937,7 @@ const localCommands = (checkout, env) => {
  */
 export function localToolchainRows({ checkout, env = process.env, commands = localCommands(checkout, env), os = platform(), run = (bin) => execFileSync(bin, ["--version"], { cwd: "/", env: { PATH: SAFE_PATH }, encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] }) }) {
   const out = [];
-  const off = [join(checkout, ".factory"), stageTmpBase()];
+  const off = [join(checkout, ".pendulum"), stageTmpBase()];
   const node = localToolchain({ path: env.PATH || "", off });
   if (!node) out.push(FAIL("node", "no node on PATH", "install Node.js, or activate your version manager in this shell"));
   else {
@@ -1970,7 +1970,7 @@ export function localToolchainRows({ checkout, env = process.env, commands = loc
 /**
  * Local mode with Claude Code on Linux: its sandbox's start and confinement (`claude sandbox: start`), by the probe every
  * local Claude Code stage runs first (harness.mjs claudeLocalCheck), around a throwaway clone (this checkout's package.json
- * only) in a directory of Factory's own, with the stage's toolchain and outer sandbox as a stage gets them.
+ * only) in a directory of Pendulum's own, with the stage's toolchain and outer sandbox as a stage gets them.
  */
 export async function claudeLocalStart({ checkout, env = process.env, commands = localCommands(checkout, env), check = claudeLocalCheck }) {
   const ws = mkdtempSync(join(dirname(stageTmpBase()), "doctor-"));
@@ -1983,18 +1983,18 @@ export async function claudeLocalStart({ checkout, env = process.env, commands =
     await exec("git", ["init", "-q", clone], { env: { PATH: env.PATH || SAFE_PATH } });
     // What resolves the stage's tools (package.json's packageManager and scripts, the version pins), nothing else.
     for (const f of ["package.json", ".tool-versions", "mise.toml", ".mise.toml", ".python-version", ".ruby-version"]) if (existsSync(join(checkout, f))) copyFileSync(join(checkout, f), join(clone, f));
-    const tools = localTools({ harness: "claude", clone, commands, path: env.PATH || "", off: [ws, join(checkout, ".factory"), dirname(tmp)], usageDir: usage });
+    const tools = localTools({ harness: "claude", clone, commands, path: env.PATH || "", off: [ws, join(checkout, ".pendulum"), dirname(tmp)], usageDir: usage });
     const gitBin = join(usage, "gitbin");
     mkdirSync(gitBin);
     writeFileSync(join(gitBin, "git"), gitGuardScript(realpathSync(whichSync("git"))), { mode: 0o755 });
     const claudeEnv = tools.lead.length ? join(usage, "claude-env.sh") : null;
     if (claudeEnv) writeFileSync(claudeEnv, claudeEnvText([gitBin, ...tools.lead]), { mode: 0o644 });
-    const domains = [...LOCAL_DOMAINS, ...String(env.FACTORY_LOCAL_DOMAINS || "").split(/[\s,]+/).filter(Boolean)];
+    const domains = [...LOCAL_DOMAINS, ...String(env.PENDULUM_LOCAL_DOMAINS || "").split(/[\s,]+/).filter(Boolean)];
     const outerOn = outerProbe("claude", { domains, env }).on;
     const outer = outerOn ? join(ws, "outer.json") : null;
     if (outer) writeFileSync(outer, JSON.stringify(harnessOuterSettings({ harness: "claude", domains, writable: [clone, tmp, corepack, join(usage, "harness")], clone, env, install: harnessInstall(whichSync("claude")) })));
     const local = { clone, addDirs: [corepack, tmp], cacheDirs: [corepack], readDirs: [usage], readOnly: [usage], domains, gitBin, toolchain: tools.probe, readable: tools.readable, ...(claudeEnv ? { claudeEnv } : {}) };
-    const runEnv = { ...localBaseEnv(env), TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, FACTORY_USAGE_DIR: usage, COREPACK_HOME: corepack, COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", NODE_USE_ENV_PROXY: "1" };
+    const runEnv = { ...localBaseEnv(env), TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, PENDULUM_USAGE_DIR: usage, COREPACK_HOME: corepack, COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", NODE_USE_ENV_PROXY: "1" };
     await check(local, outer, runEnv);
     return PASS("claude sandbox: start", `its sandbox starts and confines here, and runs ${[tools.probe?.node ? "node" : "", tools.probe?.pm || ""].filter(Boolean).join(" and ") || "its commands"}`);
   } catch (e) {
@@ -2010,9 +2010,9 @@ export async function claudeLocalStart({ checkout, env = process.env, commands =
  * none there, or when this working tree's settings differ from it (local mode uses the default branch's).
  */
 export function workflowSourceChecks(working, committed) {
-  if (committed.noClone) return [WARN("workflow source", "not checked: doctor runs outside a clone of the repository, so it cannot read the default branch's .github/workflows/factory.yml (serve reads it from its own clone)", "run doctor --local from the repository's clone to check the settings local mode uses")];
-  if (committed.parseError) return [WARN("workflow source", `local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so serve, run and review do not start`, `fix the YAML on ${committed.branch} (the error names the line), through a pull request`)];
-  if (committed.error) return [WARN("workflow source", `local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`, "merge the workflow into the default branch (factory:setup writes it)")];
+  if (committed.noClone) return [WARN("workflow source", "not checked: doctor runs outside a clone of the repository, so it cannot read the default branch's .github/workflows/pendulum.yml (serve reads it from its own clone)", "run doctor --local from the repository's clone to check the settings local mode uses")];
+  if (committed.parseError) return [WARN("workflow source", `local mode reads its settings from the default branch's .github/workflows/pendulum.yml: ${committed.error}, so serve, run and review do not start`, `fix the YAML on ${committed.branch} (the error names the line), through a pull request`)];
+  if (committed.error) return [WARN("workflow source", `local mode reads its settings from the default branch's .github/workflows/pendulum.yml: ${committed.error}, so it uses none`, "merge the workflow into the default branch (pendulum:setup writes it)")];
   const [line] = workflowDriftLines(working, committed);
   return line ? [WARN("workflow source", line, `commit the change to ${committed.branch}; local mode never reads a working tree's workflow`)] : [];
 }
@@ -2027,7 +2027,7 @@ export function workflowSourceChecks(working, committed) {
 export function localLoginChecks({ inputs, env = process.env, local, home = homedir() }) {
   if (!local || env.GITHUB_ACTIONS) return [];
   const h = inputs.harness;
-  // A Copilot stage's home is one Factory makes for the Objective, which holds no login.
+  // A Copilot stage's home is one Pendulum makes for the Objective, which holds no login.
   const exposed = h === "copilot" ? [] : loginsExposedBy(h, env, home);
   const linked = h === "copilot" ? [] : ownLoginProblems(h, env, home);
   if (exposed.length || linked.length) return [...linked.map((l) => WARN("harness logins", `${l.path}: a login file of the ${h} login stages run on, which leads into another login (${l.real}), so its harness would read that login; serve refuses each stage (login-link)`, "make that login's files its own (no link into another login folder)")), ...exposed.map((e) => WARN("harness logins", `${e.path}: a harness login inside the ${h} harness's home ${e.home}, which its outer sandbox can write, so that sandbox can read it`, "move that login out of the harness's home, or point CLAUDE_CONFIG_DIR or CODEX_HOME at a folder of its own"))];
@@ -2038,9 +2038,9 @@ export function localLoginChecks({ inputs, env = process.env, local, home = home
 }
 
 /**
- * Local mode: the machine's stage budget every Factory loop here shares (lib/machine.mjs), its limits in force
+ * Local mode: the machine's stage budget every Pendulum loop here shares (lib/machine.mjs), its limits in force
  * (machineLimits), who holds its slots (pid, repository, issue and stage), and the machine's load now, with whether loops
- * here hold new starts on it. A budget setting or limit that cannot be used, a FACTORY_LOCAL_MAX_CONCURRENT above the
+ * here hold new starts on it. A budget setting or limit that cannot be used, a PENDULUM_LOCAL_MAX_CONCURRENT above the
  * budget (`env`: this shell's over the workflow's) and a saturated machine are WARNs. `settings`: what a local stage
  * reads (doctorSettings `stage`), for the guess when machine.json sets none. Read only: doctor removes no slot. `home`
  * and `proc` are a test's own.
@@ -2054,18 +2054,18 @@ export function machineChecks({ env = process.env, local, home = homedir(), proc
   const sat = saturation(pressure, limits.pressure);
   const problems = limits.problems.filter((p) => p !== budget.problem);
   // The guess: machine.json's, else the repository's guess_hours, as a local stage reads it (`settings`, serve's baseEnv).
-  const repoGuess = guessHoursMs(settings.FACTORY_GUESS_HOURS) !== null;
+  const repoGuess = guessHoursMs(settings.PENDULUM_GUESS_HOURS) !== null;
   const inForce = { ...limits, guessMs: limits.from.guess === "setting" ? limits.guessMs : resolveInputs({ env: settings }).guessMs };
-  const set = `the pressure limits from ${limits.from.pressure === "setting" ? limits.file : `Factory's defaults (set them in ${limits.file})`}, the guess from ${limits.from.guess === "setting" ? limits.file : repoGuess ? "the repository's FACTORY_GUESS_HOURS" : "Factory's default"}`;
+  const set = `the pressure limits from ${limits.from.pressure === "setting" ? limits.file : `Pendulum's defaults (set them in ${limits.file})`}, the guess from ${limits.from.guess === "setting" ? limits.file : repoGuess ? "the repository's PENDULUM_GUESS_HOURS" : "Pendulum's default"}`;
   const what = (h) => h.pid === undefined ? `a holder whose record cannot be read yet (${h.file})` : `pid ${h.pid} ${h.repo || "(no repository)"} ${h.issue ? `#${h.issue}` : h.pr ? `PR #${h.pr}` : "(starting)"}${h.stage ? ` ${h.stage}` : ""}`;
   const from = budget.from === "setting" ? budget.file : `from its ${budget.cpus} CPU threads and ${Math.round(budget.memBytes / 2 ** 30)} GB: a quarter of the threads, at most one per 8 GB; set it in ${budget.file}`;
-  const cap = loopCap(env.FACTORY_LOCAL_MAX_CONCURRENT, budget.stages);
+  const cap = loopCap(env.PENDULUM_LOCAL_MAX_CONCURRENT, budget.stages);
   return [
-    ...(cap > budget.stages ? [WARN("FACTORY_LOCAL_MAX_CONCURRENT", `${cap} is above this machine's stage budget of ${budget.stages}, which every Factory loop here shares, so a loop runs at most ${budget.stages}`, `to run more stages on this machine, raise the budget: write {"stages": ${cap}} to ${budget.file}; else lower FACTORY_LOCAL_MAX_CONCURRENT to ${budget.stages} or less`)] : []),
-    budget.problem ? WARN("machine budget", `${budget.problem}, so local mode uses ${budget.stages} stage(s), from this machine's size`, `write {"stages": N} to ${budget.file}, N a positive whole number`) : PASS("machine budget", `${budget.stages} stage(s) at once on this machine, shared by every Factory loop here (${from})`),
-    problems.length ? WARN("machine limits", `${problems.join("; ")}, so Factory's defaults stand for those; in force: ${limitsLine(inForce)}`, `correct ${limits.file}: "pressure" takes cpu_psi, load, memory_psi and available_gb, and "guess_hours" a list of hours, each a number above 0 and at most ${GUESS_MAX_HOURS}`) : PASS("machine limits", `${limitsLine(inForce)}; ${set}`),
+    ...(cap > budget.stages ? [WARN("PENDULUM_LOCAL_MAX_CONCURRENT", `${cap} is above this machine's stage budget of ${budget.stages}, which every Pendulum loop here shares, so a loop runs at most ${budget.stages}`, `to run more stages on this machine, raise the budget: write {"stages": ${cap}} to ${budget.file}; else lower PENDULUM_LOCAL_MAX_CONCURRENT to ${budget.stages} or less`)] : []),
+    budget.problem ? WARN("machine budget", `${budget.problem}, so local mode uses ${budget.stages} stage(s), from this machine's size`, `write {"stages": N} to ${budget.file}, N a positive whole number`) : PASS("machine budget", `${budget.stages} stage(s) at once on this machine, shared by every Pendulum loop here (${from})`),
+    problems.length ? WARN("machine limits", `${problems.join("; ")}, so Pendulum's defaults stand for those; in force: ${limitsLine(inForce)}`, `correct ${limits.file}: "pressure" takes cpu_psi, load, memory_psi and available_gb, and "guess_hours" a list of hours, each a number above 0 and at most ${GUESS_MAX_HOURS}`) : PASS("machine limits", `${limitsLine(inForce)}; ${set}`),
     PASS("machine slots", `${holders.length} of ${budget.stages} held${holders.length ? `: ${holders.map(what).join("; ")}` : ""}`),
-    sat ? WARN("machine load", `${pressureLine(pressure)}: saturated (${sat.why}), so the loops here hold new starts; a loop that holds no stage still starts one`, "wait for the load to fall, or end work outside Factory on this machine") : PASS("machine load", `${pressureLine(pressure)}: loops here start stages as the budget allows`),
+    sat ? WARN("machine load", `${pressureLine(pressure)}: saturated (${sat.why}), so the loops here hold new starts; a loop that holds no stage still starts one`, "wait for the load to fall, or end work outside Pendulum on this machine") : PASS("machine load", `${pressureLine(pressure)}: loops here start stages as the budget allows`),
   ];
 }
 
@@ -2115,7 +2115,7 @@ export function cliLoggedIn(account, env = process.env) {
 export const copilotTokenWorks = (token) => rest("user", { token }).then(() => true, (e) => (e.status === 401 || e.status === 403 ? false : null));
 
 /**
- * Local mode: each account this machine declares (lib/accounts.mjs, ~/.config/factory/accounts.json), named by its name
+ * Local mode: each account this machine declares (lib/accounts.mjs, ~/.config/pendulum/accounts.json), named by its name
  * alone, never a path. A declaration serve would refuse is a FAIL per account, with why. Else, per account: its folder
  * owner-only (a WARN), its login hidden from every sandbox (credentialPaths covers its login files) and in no home another
  * account's harness may write (loginsExposedBy), and its login working (`loggedIn`, `tokenWorks`: seams for the tests).
@@ -2124,7 +2124,7 @@ export const copilotTokenWorks = (token) => rest("user", { token }).then(() => t
 export async function localAccountChecks({ env = process.env, local, home = homedir(), checkout = null, loggedIn = cliLoggedIn, tokenWorks = copilotTokenWorks }) {
   if (!local || env.GITHUB_ACTIONS) return [];
   const loaded = loadAccounts({ home, env, roots: sandboxRoots(checkout, home) });
-  const fix = "fix that entry in ~/.config/factory/accounts.json (docs/LOCAL.md, Accounts); serve refuses to start and each stage Blocks until then";
+  const fix = "fix that entry in ~/.config/pendulum/accounts.json (docs/LOCAL.md, Accounts); serve refuses to start and each stage Blocks until then";
   if (!loaded.ok) return loaded.problems.map((p) => FAIL(`account ${p.account}`, p.why, fix));
   if (!loaded.declared) return [PASS("accounts", "none declared: each harness runs on its one login (claude, codex, copilot)")];
   const all = Object.values(loaded.accounts).flat();
@@ -2150,16 +2150,16 @@ export async function localAccountChecks({ env = process.env, local, home = home
 }
 
 /**
- * Local mode with Codex or Copilot: each FACTORY_LOCAL_DOMAINS entry that is no host name (a loopback name, an IP address,
+ * Local mode with Codex or Copilot: each PENDULUM_LOCAL_DOMAINS entry that is no host name (a loopback name, an IP address,
  * host:port) is a WARN. serve leaves it out of their sandbox policies: Copilot drops its whole network policy for a
  * host:port entry (#106), and Codex's proxy ignores the port and admits every port of the host (#108).
  */
 export function localDomainChecks({ inputs, env = process.env, local }) {
   if (!local || !["codex", "copilot"].includes(inputs.harness)) return [];
-  const dropped = sandboxDroppedHosts([env.FACTORY_LOCAL_DOMAINS || ""]);
+  const dropped = sandboxDroppedHosts([env.PENDULUM_LOCAL_DOMAINS || ""]);
   if (!dropped.length) return [];
   const why = inputs.harness === "copilot" ? "Copilot drops its whole network policy for such an entry" : "Codex's proxy ignores the port and would admit every port of the host";
-  return [WARN("FACTORY_LOCAL_DOMAINS", `not host names, so ${inputs.harness === "copilot" ? "Copilot's" : "Codex's"} sandbox does not allow them (serve leaves them out: ${why}): ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path, IP address or localhost")];
+  return [WARN("PENDULUM_LOCAL_DOMAINS", `not host names, so ${inputs.harness === "copilot" ? "Copilot's" : "Codex's"} sandbox does not allow them (serve leaves them out: ${why}): ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path, IP address or localhost")];
 }
 
 /**
@@ -2168,7 +2168,7 @@ export function localDomainChecks({ inputs, env = process.env, local }) {
  * `--checkout`, or in local mode from a clone, it is read as local mode does, from the default branch's committed
  * workflow (#122), else from the checkout; without either, from the default branch's committed workflow through
  * GitHub's contents API with `token` (else the developer's gh login). Only its settings, as local mode takes them
- * (#119): any other FACTORY_* name there is repository content. The repository's variables go over it, listed with
+ * (#119): any other PENDULUM_* name there is repository content. The repository's variables go over it, listed with
  * `varsToken` (local mode's token in local mode, as serve lists them; a token that may not is a WARN with the fix, and
  * the workflow's values stand); this shell wins over both. GitHub's copy unreadable: the checkout's copy if there is
  * one, and one WARN naming the harness that leaves. `committed`: local mode's read of the clone (local.mjs
@@ -2187,7 +2187,7 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
       else {
         variables = r.vars;
         const org = organizationVariablesLine(await organizationVariableNames(repo, { token: varsToken }));
-        if (org) checks.push(WARN("organization variables", org, "set Factory's variables on the repository (gh variable set FACTORY_<NAME> --repo OWNER/NAME) and delete the organization's"));
+        if (org) checks.push(WARN("organization variables", org, "set Pendulum's variables on the repository (gh variable set PENDULUM_<NAME> --repo OWNER/NAME) and delete the organization's"));
       }
     } catch (e) {
       checks.push(WARN("repository variables", `not read (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)}), so the checks take the workflow's values`, "run doctor again"));
@@ -2202,7 +2202,7 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
     return { wf, committed: from, env: merged, stage, inputs: resolveInputs({ args, env: merged }), layers, checks: [...more, ...checks] };
   };
   if (env.GITHUB_ACTIONS || args.checkout || (committed && !committed.noClone)) return settle(committed ? committed.wf : readWorkflowEnv(checkout), committed);
-  const path = ".github/workflows/factory.yml";
+  const path = ".github/workflows/pendulum.yml";
   try {
     return settle(workflowEnv(String(await rest(`repos/${repo.full}/contents/${path}`, { token, raw: "Accept: application/vnd.github.raw+json" }))), null);
   } catch (e) {
@@ -2213,14 +2213,14 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
       return s;
     }
     const status = e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80);
-    s.checks.unshift(WARN("workflow settings", `${path} could not be read from the default branch on GitHub (${status}), so the checks take ${here ? `${checkout}'s copy` : "no workflow's settings"} and assume harness ${s.inputs.harness}`, "merge the workflow into the default branch (factory:setup writes it) and give the token contents: read, or pass --checkout with a clone of the repository"));
+    s.checks.unshift(WARN("workflow settings", `${path} could not be read from the default branch on GitHub (${status}), so the checks take ${here ? `${checkout}'s copy` : "no workflow's settings"} and assume harness ${s.inputs.harness}`, "merge the workflow into the default branch (pendulum:setup writes it) and give the token contents: read, or pass --checkout with a clone of the repository"));
     return s;
   }
 }
 
-/** doctor's flags (lib/inputs.mjs readFlags: `--dir` is `--checkout`, as on `factory`). */
+/** doctor's flags (lib/inputs.mjs readFlags: `--dir` is `--checkout`, as on `pendulum`). */
 export const DOCTOR_FLAGS = { repo: { value: "OWNER/NAME" }, checkout: { value: "CLONE" }, json: "bool", probe: "bool", "run-setup": "bool", local: "bool", verbose: "bool" };
-const DOCTOR_USAGE = "usage: node scripts/doctor.mjs [--repo OWNER/NAME] [--checkout CLONE] [--json] [--probe] [--run-setup] [--local] [--verbose]\n  without --repo, the repository is the clone's origin remote (the clone in --checkout, else here); --verbose names every setting left at Factory's defaults\n";
+const DOCTOR_USAGE = "usage: node scripts/doctor.mjs [--repo OWNER/NAME] [--checkout CLONE] [--json] [--probe] [--run-setup] [--local] [--verbose]\n  without --repo, the repository is the clone's origin remote (the clone in --checkout, else here); --verbose names every setting left at Pendulum's defaults\n";
 
 /**
  * doctor's command line, checked before any check runs: {help} for --help or -h anywhere, else its flags. Throws an
@@ -2237,15 +2237,15 @@ export function doctorArgs(argv) {
 
 /**
  * Each effective setting and the layer it came from (#284, inputs.mjs settingLayers), as one row, the ones left at
- * Factory's defaults named only with `verbose`; and a WARN naming the repository variables that are ignored: a setting
- * only the reviewed workflow file sets, no setting at all, or a value Factory would not take as given.
+ * Pendulum's defaults named only with `verbose`; and a WARN naming the repository variables that are ignored: a setting
+ * only the reviewed workflow file sets, no setting at all, or a value Pendulum would not take as given.
  */
 export function settingsRows(layers, { verbose = true } = {}) {
   const lines = layerLines({ values: layers.values, from: layers.from }, { defaults: verbose });
   const ignored = ignoredLines(layers);
-  const more = verbose ? "" : "; --verbose names the ones left at Factory's defaults too";
+  const more = verbose ? "" : "; --verbose names the ones left at Pendulum's defaults too";
   return [
-    PASS("settings", lines.length ? `each over the one below (Factory's defaults, the workflow, the repository's variables, this machine)${more}:\n       ${lines.join("\n       ")}` : `every one at Factory's defaults${more}`),
+    PASS("settings", lines.length ? `each over the one below (Pendulum's defaults, the workflow, the repository's variables, this machine)${more}:\n       ${lines.join("\n       ")}` : `every one at Pendulum's defaults${more}`),
     ...(ignored.length ? [WARN("repository variables", ignored.join("; "), "delete or correct those variables; a setting only the workflow file sets goes in its env block, through a pull request")] : []),
   ];
 }
@@ -2268,7 +2268,7 @@ async function main() {
   const found = !process.env.GITHUB_ACTIONS && local ? committedWorkflowEnv(checkout) : null;
   // The repository and the App's credentials doctorSettings reads GitHub with: this shell's, else the local workflow's.
   const pre = resolveInputs({ args, env: process.env.GITHUB_ACTIONS ? process.env : { ...workflowSettings(found ? found.wf : readWorkflowEnv(checkout)).kept, ...process.env } });
-  // No --repo (nor GITHUB_REPOSITORY): the clone's origin, as `factory serve` finds it.
+  // No --repo (nor GITHUB_REPOSITORY): the clone's origin, as `pendulum serve` finds it.
   const repo = repoOf(pre.repo || cloneRepo(checkout));
   let token = pre.appToken || null;
   let app = null;
@@ -2311,10 +2311,10 @@ async function main() {
   if (local) results.push(...workflowEnvChecks(wf));
   if (local) results.push(...localToolchainRows({ checkout, env: process.env, commands: localCommands(checkout, env) }));
   if (local && inputs.harness === "claude" && platform() === "linux") results.push(await claudeLocalStart({ checkout, commands: localCommands(checkout, env) }));
-  if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
+  if (app?.error) results.push(FAIL("app token", app.error, "check PENDULUM_APP_ID, the private key, and that the App is installed on this repository"));
   // The accounts for GitHub Actions and the cloud sandbox: the workflow's own env block (never a variable), as its jobs read it.
-  const accounts = process.env.GITHUB_ACTIONS ? process.env.FACTORY_ACCOUNTS : wf.FACTORY_ACCOUNTS;
-  const autoAccount = process.env.GITHUB_ACTIONS ? process.env.FACTORY_AUTO_ACCOUNT : wf.FACTORY_AUTO_ACCOUNT;
+  const accounts = process.env.GITHUB_ACTIONS ? process.env.PENDULUM_ACCOUNTS : wf.PENDULUM_ACCOUNTS;
+  const autoAccount = process.env.GITHUB_ACTIONS ? process.env.PENDULUM_AUTO_ACCOUNT : wf.PENDULUM_AUTO_ACCOUNT;
   if (!local) results.push(...routeAccountChecks(accounts, autoAccount));
   if (!local) results.push(...(await holdsIssueChecks({ repo, opts: token ? { token } : {}, accounts, auto: autoAccount, self: app?.appSlug ? `${app.appSlug}[bot]` : selfLogin() })));
   results.push(...(await githubChecks({ inputs, repo, token, app, local, accounts })));
@@ -2333,7 +2333,7 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
-    process.stderr.write(`[factory] doctor failed: ${e.message}\n`);
+    process.stderr.write(`[pendulum] doctor failed: ${e.message}\n`);
     process.exit(2);
   });
 }

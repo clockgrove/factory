@@ -1,7 +1,7 @@
 {
-  "name": "factory-plugin",
+  "name": "pendulum-plugin",
   "private": true,
-  "description": "Runtime dependencies of Factory's optional adapters. Nothing else in the plugin needs an install.",
+  "description": "Runtime dependencies of Pendulum's optional adapters. Nothing else in the plugin needs an install.",
   "dependencies": {
     "@vercel/sandbox": "3.9.1"
   },

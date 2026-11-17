@@ -1,21 +1,21 @@
-// A repository's third-party reviewers (`third_party_reviewers`): reviewer Apps outside Factory (Greptile's
+// A repository's third-party reviewers (`third_party_reviewers`): reviewer Apps outside Pendulum (Greptile's
 // `greptile-apps[bot]`, say), named by login. Their review is part of the PR's review: the review stage waits for each
 // one's review of the head its own reviewer read, within a bound, then its answer pass handles their line comments as it
-// handles Factory's reviewer's. Their text is untrusted review input: sanitised like harness text, marked as theirs in
+// handles Pendulum's reviewer's. Their text is untrusted review input: sanitised like harness text, marked as theirs in
 // the answer pass's prompt, and never instructions. With none named, nothing here runs.
 //
 // The wait holds nothing: a stage whose named reviewer has not reviewed the head yet records the wait on the PR (its
 // wait record: the head, the logins, GitHub's time of the record) and ends `waiting`, its review label taken off. The
 // dispatcher's tick, on every route (the Action's, a cloud sandbox's, `serve`'s), puts the label back once that review
 // exists or the bound has passed (waitState), and the label starts the review stage again as it always does. That stage
-// finds Factory's own review already posted, so no reviewer pass runs again, and goes on to the answer pass.
+// finds Pendulum's own review already posted, so no reviewer pass runs again, and goes on to the answer pass.
 import { addLabels, listComments, objectiveLabeledAt, removeLabel, rest, setStateLabel } from "./github.mjs";
 import { sanitize } from "./handoff.mjs";
 import { THIRD_PARTY_WAIT_MAX_MINUTES, log } from "./inputs.mjs";
 import { CODE_SCANNING, REVIEW_LABEL, isSelf, selfLogin, trustedAuthor } from "./logic.mjs";
 
 /**
- * How long Factory waits for a named reviewer's review of the head, from its wait record, by default (the
+ * How long Pendulum waits for a named reviewer's review of the head, from its wait record, by default (the
  * third_party_wait_minutes setting; Greptile takes 10 to 15 minutes).
  */
 export const THIRD_PARTY_WAIT_MS = 20 * 60_000;
@@ -29,8 +29,8 @@ const key = (login) => String(login ?? "").trim().replace(/^@/, "").toLowerCase(
 const LOGIN = /^[a-z0-9](?:[a-z0-9-]{0,38})(?:\[bot\])?$/;
 
 /**
- * The named reviewers Factory waits for and answers: each valid login once, lower-cased. A name that is no login, or
- * one of Factory's own (`own`: the reviewer's App and the login Factory posts as), is refused: Factory's own review is
+ * The named reviewers Pendulum waits for and answers: each valid login once, lower-cased. A name that is no login, or
+ * one of Pendulum's own (`own`: the reviewer's App and the login Pendulum posts as), is refused: Pendulum's own review is
  * handled already, and its comments must never read as a stranger's.
  */
 export function thirdPartyReviewers(names = [], own = []) {
@@ -45,12 +45,12 @@ export function thirdPartyReviewers(names = [], own = []) {
   return { logins, refused };
 }
 
-// Code scanning (logic.mjs CODE_SCANNING): Factory answers its comments as it answers a named reviewer's, on every
+// Code scanning (logic.mjs CODE_SCANNING): Pendulum answers its comments as it answers a named reviewer's, on every
 // repository and with no setting, and never waits for it: its comments come from a check run, not a review of the head.
 export { CODE_SCANNING };
 
 /**
- * The reviewers outside Factory whose line comments the answer pass handles and whose answered threads Factory resolves:
+ * The reviewers outside Pendulum whose line comments the answer pass handles and whose answered threads Pendulum resolves:
  * the named ones (`names`, thirdPartyReviewers) and code scanning.
  */
 export const answeredReviewers = (names = []) => [...new Set([...thirdPartyReviewers(names).logins, CODE_SCANNING])];
@@ -65,7 +65,7 @@ export const namedReviewer = (item, logins = []) => (logins.length ? (logins.fin
 export const thirdPartyComment = (c, from) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line ?? null, body: sanitize(c.body, { max: THIRD_PARTY_TEXT_MAX }), from });
 
 /**
- * The comments that hold the stage's exit (decideExit's unanswered count): every one of Factory's own, and a named
+ * The comments that hold the stage's exit (decideExit's unanswered count): every one of Pendulum's own, and a named
  * reviewer's only when the answer pass was given it (`given`, ids). One that came after the wait is left for the next
  * review: the stage went on without it.
  */
@@ -88,18 +88,18 @@ export function reviewedHead(reviews, sha, logins) {
 const readReviews = (repo, prNumber, opts) => rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true }).catch(() => null);
 
 /** The wait record's first line starts with this; JSON follows on the same line. */
-const WAIT_MARK = (issue) => `<!-- factory:${Number(issue)}:third-party `;
+const WAIT_MARK = (issue) => `<!-- pendulum:${Number(issue)}:third-party `;
 const LOGINS_MAX = 10;
 
 /** The wait record's body: the head, the logins waited for and the bound in minutes, then a line for people. */
 export function waitBody(issue, { sha, logins, at, waitMs = THIRD_PARTY_WAIT_MS }) {
   const minutes = waitMs / 60_000;
   const data = JSON.stringify({ sha, logins: logins.slice(0, LOGINS_MAX), at, minutes }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
-  return `${WAIT_MARK(issue)}${data} -->\nFactory: waiting up to ${Number(minutes.toFixed(1))} min for ${logins.join(", ")} to review ${String(sha).slice(0, 7)}; the review goes on once that review is posted, or then without it.`;
+  return `${WAIT_MARK(issue)}${data} -->\nPendulum: waiting up to ${Number(minutes.toFixed(1))} min for ${logins.join(", ")} to review ${String(sha).slice(0, 7)}; the review goes on once that review is posted, or then without it.`;
 }
 
 /**
- * The PR's wait record, the newest by Factory itself or by someone who can push (trustedAuthor: a local loop writes as
+ * The PR's wait record, the newest by Pendulum itself or by someone who can push (trustedAuthor: a local loop writes as
  * its developer, so the Action's dispatcher and another developer's loop read its record too): {id, sha, logins, since,
  * updatedAt, own, waitMs}, or null. `waitMs` is the bound the stage that wrote it had (third_party_wait_minutes), at
  * most THIRD_PARTY_WAIT_MAX_MINUTES whatever the record says: it only tells the dispatcher, serve and run when to wake
@@ -136,7 +136,7 @@ const dropWait = (repo, wait, opts) => (wait ? rest(`repos/${repo.full}/issues/c
 /**
  * Before a review stage ends `waiting`: what the dispatcher needs to resume it. The PR's review label comes off (a
  * label left on would start nothing again), and the Objective is In review, the only state the dispatcher resumes: an
- * Objective whose Question a person answered by marking its PR ready still carries `factory:question`, which goes now,
+ * Objective whose Question a person answered by marking its PR ready still carries `pendulum:question`, which goes now,
  * as the review's own exit would take it off (`labels`, the issue's as the stage read them). {ok} when the stage may
  * end; otherwise {ok: false, why}, with the review label back on, and the stage goes on without the wait.
  */
@@ -148,8 +148,8 @@ export async function waitEnd({ repo, issue, prNumber, labels = [], token }) {
     log(`review label: ${String(e?.message || e).slice(0, 120)}`);
     return { ok: false, why: "the review label could not be taken off" };
   }
-  const states = (labels || []).map((l) => (typeof l === "string" ? l : l?.name)).filter((n) => /^factory:(running|blocked|question|in-review)$/.test(n || ""));
-  if (states.length === 1 && states[0] === "factory:in-review") return { ok: true };
+  const states = (labels || []).map((l) => (typeof l === "string" ? l : l?.name)).filter((n) => /^pendulum:(running|blocked|question|in-review)$/.test(n || ""));
+  if (states.length === 1 && states[0] === "pendulum:in-review") return { ok: true };
   try {
     await setStateLabel(repo, issue, "in-review", opts);
     return { ok: true };
@@ -176,7 +176,7 @@ export function thirdPartyLine({ reviewed, missing }, sha, boundMs) {
 }
 
 /**
- * The review stage's step before its answer pass: the named reviewers (`names`, the setting; `own`, Factory's logins)
+ * The review stage's step before its answer pass: the named reviewers (`names`, the setting; `own`, Pendulum's logins)
  * and, unless `skip` (the cap is spent: no answer pass runs), whether to go on now. It reads the PR's reviews and its
  * wait record once each. Every named reviewer has reviewed `sha`, or the record for `sha` is past its bound (`waitMs`,
  * the third_party_wait_minutes setting, from GitHub's time of the record): the stage goes on, says so on its progress
@@ -190,7 +190,7 @@ export function thirdPartyLine({ reviewed, missing }, sha, boundMs) {
 export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], own = async () => [], skip = false, progress, token, now = Date.now, waitMs = THIRD_PARTY_WAIT_MS } = {}) {
   if (!names.length) return { logins: [], wait: null };
   const { logins, refused } = thirdPartyReviewers(names, await own());
-  if (refused.length) log(`third_party_reviewers: ${refused.join(", ")} left out (no login, or Factory's own)`);
+  if (refused.length) log(`third_party_reviewers: ${refused.join(", ")} left out (no login, or Pendulum's own)`);
   // No wait here (the cap spent: no answer pass runs): a record an earlier stage left goes, so it holds no later merge.
   if (!logins.length || skip) {
     await clearWait({ repo, issue, prNumber, token });
@@ -198,11 +198,11 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
   }
   const opts = { token };
   const head = String(sha).slice(0, 7);
-  // Factory's own login unknown: its record could not be told from a pasted one, so a stage started again would post a
+  // Pendulum's own login unknown: its record could not be told from a pasted one, so a stage started again would post a
   // new record with a new bound every time. No wait.
   if (!selfLogin()) {
     await clearWait({ repo, issue, prNumber, token });
-    await progress(`third-party review: Factory's own login is unknown, so its wait record could not be read back; going on without waiting`);
+    await progress(`third-party review: Pendulum's own login is unknown, so its wait record could not be read back; going on without waiting`);
     return { logins, wait: null };
   }
   const seen = reviewedHead(await readReviews(repo, prNumber, opts), sha, logins);

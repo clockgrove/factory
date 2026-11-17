@@ -7,7 +7,7 @@
 // through the one decision interface (decider.mjs, docs/ADAPTERS.md), on red-check triage's key, model setting and
 // confidence floor: only `closer` at the floor (confidenceFloor) or more is progress, so a model that keeps answering `closer` is
 // bounded by max_usd and the wall clock alone. No decider is no progress; a decider that gives no answer leaves the
-// judgement unmade, which ends the loop as Factory's (or the outage's), never as the work's. This runs in Factory's own
+// judgement unmade, which ends the loop as Pendulum's (or the outage's), never as the work's. This runs in Pendulum's own
 // process, never in a harness. The failure lines and the diff go in delimited, as data.
 import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
@@ -118,7 +118,7 @@ export const NO_DECIDER = (off = "") => `the failing jobs changed without fewer 
 /** The judge with no decider wired: the exact checks, and what they cannot tell is no progress. */
 export const exactJudge = async ({ before, after, seen = [] }) => redProgress(before, after, seen) ?? { progress: false, why: NO_DECIDER() };
 
-/** The decider's codes that are its vendor's outage (adapters/decider.mjs DECIDER_ERRORS): the judgement's Block is `outage`, any other `factory`. */
+/** The decider's codes that are its vendor's outage (adapters/decider.mjs DECIDER_ERRORS): the judgement's Block is `outage`, any other `pendulum`. */
 const OUTAGE_ERRORS = new Set(["unavailable", "rate_limited"]);
 
 /** What the decision model is given: each red's failing names and failure lines, and the pass's own commits' --stat (`diff`; null: unread). */
@@ -141,7 +141,7 @@ export function progressInput({ before, after, diff }, tag = randomBytes(8).toSt
  * or `route-off`). `seen`: the stage's reds, one list for every validation loop the check is passed to (validationLoop
  * adds each red it reads). judge({before, after, seen, diff}) resolves {progress, why} and never throws: the exact
  * checks (redProgress) first, then the question; with the check off, `not_closer`, or `closer` under the floor (`min`), no
- * progress. No answer is `undecided`, with the Block's `cause` (`outage` for the vendor's outage, else `factory`); the
+ * progress. No answer is `undecided`, with the Block's `cause` (`outage` for the vendor's outage, else `pendulum`); the
  * stage harness's usage limit that stopped the question is `limited` too: the caller ends the stage on it
  * (harness.mjs UsageLimitReached).
  */
@@ -163,7 +163,7 @@ export function openProgressCheck({ inputs = {}, env = process.env, home = homed
     if (a?.verdict === "not_closer") return { progress: false, why: `the decision model (${model}) judged it no closer to green${conf ? ` at ${conf}` : ""}` };
     const limited = ask.limited?.() ?? null;
     const error = a?.error || "no_answer";
-    return { progress: false, undecided: true, cause: OUTAGE_ERRORS.has(error) && !limited ? "outage" : "factory", why: `the decision model (${model}) gave no answer (${error})`, ...(limited ? { limited } : {}) };
+    return { progress: false, undecided: true, cause: OUTAGE_ERRORS.has(error) && !limited ? "outage" : "pendulum", why: `the decision model (${model}) gave no answer (${error})`, ...(limited ? { limited } : {}) };
   };
   return { model, off: ask.off, judge, seen: [] };
 }

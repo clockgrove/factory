@@ -12,7 +12,7 @@ RETRY.sleep = async () => {};
 // with PR #12) and play the worker's part between them: its rebase record and its push.
 
 const REPO = "acme/app";
-const SELF = "factory-app[bot]";
+const SELF = "pendulum-app[bot]";
 const sha = (c) => c.repeat(40);
 const ago = (ms) => new Date(Date.now() - ms).toISOString();
 const HOUR = 3600_000;
@@ -22,12 +22,12 @@ function world({ queue = false } = {}) {
   const state = {
     main: sha("d"),
     queued: 0,
-    pr: { number: 12, state: "open", draft: false, merged: false, node_id: "PR_12", title: "Objective 7", labels: [], head: { sha: sha("0"), ref: "factory/7" }, base: { ref: "main" }, mergeable: false, mergeable_state: "dirty" },
+    pr: { number: 12, state: "open", draft: false, merged: false, node_id: "PR_12", title: "Objective 7", labels: [], head: { sha: sha("0"), ref: "pendulum/7" }, base: { ref: "main" }, mergeable: false, mergeable_state: "dirty" },
     comments: { 7: [], 12: [] },
     writes: [],
   };
   let id = 100;
-  const issue = { number: 7, state: "open", labels: ["factory:objective", "factory:in-review"].map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } };
+  const issue = { number: 7, state: "open", labels: ["pendulum:objective", "pendulum:in-review"].map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } };
   const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
@@ -46,7 +46,7 @@ function world({ queue = false } = {}) {
     if (method === "GET" && p === "/rulesets") return json(queue ? [{ id: 1, target: "branch", enforcement: "active" }] : []);
     if (method === "GET" && p === "/rulesets/1") return json({ conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "merge_queue" }] });
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
-    if (method === "GET" && /^\/issues\/7\/timeline$/.test(p)) return state.timelineStatus ? json({ message: "Server Error" }, state.timelineStatus) : json([{ event: "labeled", label: { name: "factory:objective" }, created_at: ago(30 * HOUR) }]);
+    if (method === "GET" && /^\/issues\/7\/timeline$/.test(p)) return state.timelineStatus ? json({ message: "Server Error" }, state.timelineStatus) : json([{ event: "labeled", label: { name: "pendulum:objective" }, created_at: ago(30 * HOUR) }]);
     if (method === "PUT" && p === "/pulls/12/update-branch") return state.updateStatus ? json({ message: "refused" }, state.updateStatus) : json({ message: "Updating pull request branch." }, 202);
     if (method === "GET" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) return json(state.comments[m[1]] || []);
     if (method === "POST" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) {
@@ -78,14 +78,14 @@ function world({ queue = false } = {}) {
 async function tick(w, more = {}) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const realFetch = globalThis.fetch;
-  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
+  const saved = Object.fromEntries(["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
   process.env.GITHUB_API_URL = "https://github.test";
-  delete process.env.FACTORY_LOCAL;
-  delete process.env.FACTORY_LOCAL_ALL;
+  delete process.env.PENDULUM_LOCAL;
+  delete process.env.PENDULUM_LOCAL_ALL;
   globalThis.fetch = w.fetch;
   const from = w.state.writes.length;
   try {
-    const r = await dispatch({ repo: REPO, objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, autoMerge: true, notify: "", ...more }, { token: "t" });
+    const r = await dispatch({ repo: REPO, objectiveLabel: "pendulum:objective", maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, autoMerge: true, notify: "", ...more }, { token: "t" });
     const writes = w.state.writes.slice(from);
     return { r, writes, blocked: writes.find((x) => x.startsWith("POST /issues/7/comments") && x.includes(marker(7, "blocked").replace(/ -->$/, ""))) };
   } finally {
@@ -177,7 +177,7 @@ test(`#243: the bound: ${REBASE_LIMIT} rebases in 24 h, then the next conflict B
 
 test("#402: the repository's rebase_limit is the bound: its notices count to it and the next conflict Blocks naming it", async () => {
   const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
-  const { rebaseLimit } = resolveInputs({ env: { FACTORY_REBASE_LIMIT: "2" } });
+  const { rebaseLimit } = resolveInputs({ env: { PENDULUM_REBASE_LIMIT: "2" } });
   assert.equal(rebaseLimit, 2);
   const w = world();
   const bases = ["e", "f", "1"].map(sha);
@@ -243,7 +243,7 @@ test("#243: send-backs that cannot be counted (the issue's timeline unread) hold
   assert.match((await tick(w)).blocked, /rebased 5 times in 24 h/, "read again: the bound");
 });
 
-test("#243: only Factory's own markers and records count: a writer's pasted ones are neither rebases toward the bound nor a stuck base", async () => {
+test("#243: only Pendulum's own markers and records count: a writer's pasted ones are neither rebases toward the bound nor a stuck base", async () => {
   const w = world();
   const writer = { user: { login: "maintainer", type: "User" }, created_at: new Date().toISOString() };
   for (let n = 0; n < REBASE_LIMIT; n += 1) w.state.comments[12].push({ ...writer, id: n + 1, body: `${marker(7, "rebase", sha(String(n + 1)))}\npasted` });

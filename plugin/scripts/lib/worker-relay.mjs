@@ -1,12 +1,12 @@
 // The gateway relay for a stage (#97): opened when the worker secrets carry the AI Gateway key (lib/gateway-relay.mjs
 // RELAYED_NAME), wherever the stage runs. The key stays in this process; the worker's shell gets the relay's token in its
-// place and the relay's address in FACTORY_GATEWAY_URL (harness.mjs). Never falls back to handing the key over: where the
+// place and the relay's address in PENDULUM_GATEWAY_URL (harness.mjs). Never falls back to handing the key over: where the
 // relay cannot reach the harness's commands, the stage Blocks before the run.
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { backend } from "./backend.mjs";
-import { prepareFactoryHome } from "./claude-runner.mjs";
+import { preparePendulumHome } from "./claude-runner.mjs";
 import { CALL_LOG, GATEWAY_KEY_SHAPE, RELAYED_NAME, openRelay, setActiveRelay } from "./gateway-relay.mjs";
 import { nameLabel } from "./worker-secrets.mjs";
 import { holdSecrets, log } from "./inputs.mjs";
@@ -14,11 +14,11 @@ import { SAFE_PATH, agentUser, exec, processRecord, whichSync } from "./proc.mjs
 import { copilotRelayExtra, copilotRelayShimIn, localCopilotRelayShim, writeRelayShim } from "./relay-shim.mjs";
 import { COPILOT_RUNNER_HOME, bakeCopilotRelay, copilotRunnerLayout } from "./copilot-runner.mjs";
 
-/** The relay's directory on a runner and in a cloud sandbox: Factory's user owns it, the agent may only pass through. */
-export const RELAY_RUNNER_DIR = "/var/lib/factory-relay";
+/** The relay's directory on a runner and in a cloud sandbox: Pendulum's user owns it, the agent may only pass through. */
+export const RELAY_RUNNER_DIR = "/var/lib/pendulum-relay";
 
 /**
- * A Copilot stage's start on a runner: the shared relay shim an earlier Factory left in `runnerDir` (one per host, which
+ * A Copilot stage's start on a runner: the shared relay shim an earlier Pendulum left in `runnerDir` (one per host, which
  * concurrent stages overwrote and a crashed one left behind) is removed; each stage's own is in its relay directory.
  */
 export function dropSharedCopilotRelay(runnerDir = RELAY_RUNNER_DIR) {
@@ -34,7 +34,7 @@ export const localRelayDir = (usageDir) => join(usageDir, "relay");
 
 /**
  * Where the relay's socket goes when its directory is under the stage's usage directory (locally, and in a developer's
- * own session): a short directory of the stage's own, `/tmp/factory-relay-<uid>/<12 hex>`. A Unix socket's path is
+ * own session): a short directory of the stage's own, `/tmp/pendulum-relay-<uid>/<12 hex>`. A Unix socket's path is
  * limited (107 bytes on Linux, 103 on macOS) and the usage directory's grows with the checkout's path, the issue and the
  * stage's name. Its name is a hash of the usage directory. Locally the loop makes it (handSocketDir) before it writes
  * local mode's outer sandbox, which names it as the one socket directory it keeps reachable (local.mjs
@@ -50,18 +50,18 @@ export function relaySocketDir(usageDir, { uid = process.getuid?.() ?? 0, root =
   } catch {
     // made below, or refused there
   }
-  return join(base, `factory-relay-${uid}`, createHash("sha256").update(resolve(usageDir)).digest("hex").slice(0, 12));
+  return join(base, `pendulum-relay-${uid}`, createHash("sha256").update(resolve(usageDir)).digest("hex").slice(0, 12));
 }
 
 /** The env name that carries the socket's directory the loop made for a local stage (handSocketDir) to the stage. */
-export const RELAY_SOCKET_DIR_ENV = "FACTORY_RELAY_SOCKET_DIR";
+export const RELAY_SOCKET_DIR_ENV = "PENDULUM_RELAY_SOCKET_DIR";
 /** The file in a stage's usage directory naming the socket's directory the loop made for it, and the loop (handSocketDir). */
 export const SOCKET_DIR_RECORD = "relay-socket.json";
 
 /**
  * The directory the socket's directories go in (RELAY_SOCKET_ROOT), resolved: refused (throws, naming why) unless it is
  * a directory owned by root (`rootUid`; a test's stand-in its own) with the sticky bit. Every user writes it, and only the
- * sticky bit keeps another from renaming this user's directory there between Factory's checks and its `listen`, which
+ * sticky bit keeps another from renaming this user's directory there between Pendulum's checks and its `listen`, which
  * would put the socket, and the commands' calls with their token, in a directory of theirs.
  */
 export function checkSocketRoot(root = RELAY_SOCKET_ROOT, { rootUid = 0 } = {}) {
@@ -106,11 +106,11 @@ function checkOwnDir(d, uid) {
 }
 
 /**
- * The levels of a socket's directory under the resolved root `real`: [`factory-relay-<uid>`, `<12 hex>`] for
- * relaySocketDir's, [`factory-relay-<uid>-XXXXXX`] for the private fallback (stageSocketDir); null for any other path.
+ * The levels of a socket's directory under the resolved root `real`: [`pendulum-relay-<uid>`, `<12 hex>`] for
+ * relaySocketDir's, [`pendulum-relay-<uid>-XXXXXX`] for the private fallback (stageSocketDir); null for any other path.
  */
 function socketDirLevels(dir, real, uid) {
-  const own = `${real}/factory-relay-${uid}`;
+  const own = `${real}/pendulum-relay-${uid}`;
   if (dir.startsWith(`${own}/`) && /^[0-9a-f]{12}$/.test(dir.slice(own.length + 1))) return [own, dir];
   if (dir.startsWith(`${own}-`) && /^[A-Za-z0-9]{6}$/.test(dir.slice(own.length + 1))) return [dir];
   return null;
@@ -159,8 +159,8 @@ export function confirmSocketDir(socketPath, checked, opts = {}) {
 
 /**
  * The socket's directory for a stage: relaySocketDir's, made by makeSocketDir; when that is refused (another user made
- * `factory-relay-<uid>` first, or it fails a check) and `fallback`, a private one of the stage's own made by mkdtemp in the
- * root instead (`factory-relay-<uid>-XXXXXX`, mode 700, a name no one can take first). Returns {dir, refused}: `refused`
+ * `pendulum-relay-<uid>` first, or it fails a check) and `fallback`, a private one of the stage's own made by mkdtemp in the
+ * root instead (`pendulum-relay-<uid>-XXXXXX`, mode 700, a name no one can take first). Returns {dir, refused}: `refused`
  * the per-user directory's refusal when the fallback was taken. Throws when the root is refused (checkSocketRoot), which
  * no fallback there escapes, or the per-user directory is refused without `fallback`.
  */
@@ -170,7 +170,7 @@ export function stageSocketDir(usageDir, { uid = process.getuid?.() ?? 0, root =
     return { dir: makeSocketDir(relaySocketDir(usageDir, { uid, root: real }), { uid }), refused: null };
   } catch (e) {
     if (!fallback) throw e;
-    return { dir: mkdtempSync(join(real, `factory-relay-${uid}-`)), refused: String(e?.message || e) };
+    return { dir: mkdtempSync(join(real, `pendulum-relay-${uid}-`)), refused: String(e?.message || e) };
   }
 }
 
@@ -260,15 +260,15 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   const sandboxed = local || !!agent;
   const bwrap = sandboxed ? which("bwrap", { PATH: SAFE_PATH }) || (local ? which("bwrap", env) : null) : null;
   const socat = sandboxed ? which("socat", { PATH: SAFE_PATH }) || (local ? which("socat", env) : null) : null;
-  if (sandboxed && (!bwrap || !socat)) return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} needs ${[!bwrap && "bwrap", !socat && "socat"].filter(Boolean).join(" and ")} on this machine (it starts a forwarder in each command's sandbox); install it (sudo apt-get install -y bubblewrap socat), then re-apply factory:objective` });
+  if (sandboxed && (!bwrap || !socat)) return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} needs ${[!bwrap && "bwrap", !socat && "socat"].filter(Boolean).join(" and ")} on this machine (it starts a forwarder in each command's sandbox); install it (sudo apt-get install -y bubblewrap socat), then re-apply pendulum:objective` });
   let dir;
   let group = null;
   let chgrp = null;
   if (agent && !local) {
-    // A directory of the stage's own under Factory's (made once per machine, the agent may only pass through), removed
+    // A directory of the stage's own under Pendulum's (made once per machine, the agent may only pass through), removed
     // with its socket and shim when the stage ends (closeWorkerRelay).
     try {
-      if (!existsSync(runnerDir)) await prepareFactoryHome(runnerDir, "The gateway relay");
+      if (!existsSync(runnerDir)) await preparePendulumHome(runnerDir, "The gateway relay");
     } catch (e) {
       return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: ${String(e?.message || e).slice(0, 200)}` });
     }
@@ -336,7 +336,7 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   else if (sandboxed) relay.shimDir = writeRelayShim(join(dir, "bin"), { bwrap, socat, socket: relay.socketPath, port: relay.port });
   holdSecrets([relay.token]);
   setActiveRelay(relay);
-  log(`gateway relay: ${RELAYED_NAME} stays in Factory's process; the worker's shell gets a relay token in its place and the relay's address in FACTORY_GATEWAY_URL, and each call counts against max_usd`);
+  log(`gateway relay: ${RELAYED_NAME} stays in Pendulum's process; the worker's shell gets a relay token in its place and the relay's address in PENDULUM_GATEWAY_URL, and each call counts against max_usd`);
   return out({ shell: { ...rest, [RELAYED_NAME]: relay.token }, relay, blocked: null });
 }
 

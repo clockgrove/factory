@@ -1,6 +1,6 @@
-// #350: code written after Factory's review pass (the work stage answering a Question, a maintainer's push, an answer
+// #350: code written after Pendulum's review pass (the work stage answering a Question, a maintainer's push, an answer
 // pass that applied maintainers' decisions) gets a review pass on those commits before the merge; a pure rebase of the
-// reviewed head does not. Decided on trees in Factory's real mirror (outbox.mjs), against a real origin, on every route:
+// reviewed head does not. Decided on trees in Pendulum's real mirror (outbox.mjs), against a real origin, on every route:
 // the review stage (review.mjs) and the worker's rebase (worker.mjs) run the same on Actions, the cloud sandbox and locally.
 import "./temp.mjs";
 import assert from "node:assert/strict";
@@ -21,11 +21,11 @@ import { ANSWER_INPUT_BYTES, ANSWER_QUESTION, answerCovered, answerDecider, answ
 const ROOT = join(import.meta.dirname, "..", "..");
 RETRY.sleep = async () => {};
 const quiet = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
-const SELF = "factory-app[bot]";
+const SELF = "pendulum-app[bot]";
 
-/** An origin (serving any commit by its id, as GitHub does) with main, and a clone where factory/7 is worked. */
+/** An origin (serving any commit by its id, as GitHub does) with main, and a clone where pendulum/7 is worked. */
 function repos() {
-  const root = mkdtempSync(join(tmpdir(), "factory-350-"));
+  const root = mkdtempSync(join(tmpdir(), "pendulum-350-"));
   const origin = join(root, "origin.git");
   const work = join(root, "work");
   const run = (...a) => execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...quiet } }).trim();
@@ -41,12 +41,12 @@ function repos() {
   put("other.txt", "a\n");
   run("commit", "-q", "-m", "base");
   run("push", "-q", "origin", "HEAD:main");
-  run("checkout", "-q", "-b", "factory/7");
-  // The work stage's PR: the head Factory's reviewer read.
+  run("checkout", "-q", "-b", "pendulum/7");
+  // The work stage's PR: the head Pendulum's reviewer read.
   put("app.txt", "one\ntwo reviewed\nthree\n");
   put("feature.txt", "reviewed feature\n");
   run("commit", "-q", "-m", "the work");
-  run("push", "-q", "origin", "HEAD:factory/7");
+  run("push", "-q", "origin", "HEAD:pendulum/7");
   const reviewed = run("rev-parse", "HEAD");
   /** main moves on: a sibling merged. */
   const mainMoves = (file, text) => {
@@ -55,22 +55,22 @@ function repos() {
     put(file, text);
     run("commit", "-q", "-m", `main changes ${file}`);
     run("push", "-q", "origin", "HEAD:main");
-    run("checkout", "-q", "factory/7");
+    run("checkout", "-q", "pendulum/7");
     return run("rev-parse", "main");
   };
   const push = () => {
-    run("push", "-q", "-f", "origin", "HEAD:factory/7");
+    run("push", "-q", "-f", "origin", "HEAD:pendulum/7");
     return run("rev-parse", "HEAD");
   };
   return { root, origin, work, run, put, reviewed, mainMoves, push };
 }
 
-const review = (sha, at = "2026-11-15T10:00:00Z") => ({ id: 1, user: { login: SELF, type: "Bot" }, author_association: "NONE", body: "<!-- factory:7:review -->\nFactory reviewer: one comment-only pass, 1 comment(s).", commit_id: sha, submitted_at: at });
-const record = (sha, at, answer = false) => ({ id: 2, user: { login: SELF, type: "Bot" }, body: `<!-- factory:7:covered:${sha}${answer ? ":answer" : ""} -->\nFactory: covered.`, created_at: at, updated_at: at });
+const review = (sha, at = "2026-11-15T10:00:00Z") => ({ id: 1, user: { login: SELF, type: "Bot" }, author_association: "NONE", body: "<!-- pendulum:7:review -->\nPendulum reviewer: one comment-only pass, 1 comment(s).", commit_id: sha, submitted_at: at });
+const record = (sha, at, answer = false) => ({ id: 2, user: { login: SELF, type: "Bot" }, body: `<!-- pendulum:7:covered:${sha}${answer ? ":answer" : ""} -->\nPendulum: covered.`, created_at: at, updated_at: at });
 
-/** Factory's own mirror of the branch as GitHub has it now (outbox.mjs), for `fn`. */
+/** Pendulum's own mirror of the branch as GitHub has it now (outbox.mjs), for `fn`. */
 async function inMirror(r, fn) {
-  const box = await openOutbox({ branch: "factory/7", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, protectedList: [], base: r.root });
+  const box = await openOutbox({ branch: "pendulum/7", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, protectedList: [], base: r.root });
   try {
     return await fn(box);
   } finally {
@@ -78,7 +78,7 @@ async function inMirror(r, fn) {
   }
 }
 
-/** The review stage's decision, in Factory's own mirror of the branch as GitHub has it now. */
+/** The review stage's decision, in Pendulum's own mirror of the branch as GitHub has it now. */
 const scopeNow = (r, { reviews, comments = [] }) => inMirror(r, (box) => reviewScope(box.git, { reviews, comments, issue: 7, base: box.base, head: box.expected() }));
 
 /** GitHub for PR 12 over `state` ({head, reviews, lineComments, comments}), recording the writes. */
@@ -96,7 +96,7 @@ async function withGitHub(state, fn) {
       state.writes.push(`${method} ${p}${init.body ? ` ${JSON.parse(init.body).labels?.join(",") ?? ""}` : ""}`.trim());
       return json({});
     }
-    if (p === "/pulls/12") return json({ number: 12, head: { sha: state.head, ref: "factory/7" }, base: { ref: "main" } });
+    if (p === "/pulls/12") return json({ number: 12, head: { sha: state.head, ref: "pendulum/7" }, base: { ref: "main" } });
     if (p === "/pulls/12/reviews") return json(state.reviews || []);
     if (p === "/pulls/12/comments") return json(state.lineComments || []);
     if (p === "/issues/12/comments") return json(state.comments || []);
@@ -213,7 +213,7 @@ test("#350: a rebase with new work: the pass reads the new work, not the default
   }
 });
 
-test("#350: the head covered is the later of Factory's last review and its own covered record; nobody else's record counts", async () => {
+test("#350: the head covered is the later of Pendulum's last review and its own covered record; nobody else's record counts", async () => {
   const r = repos();
   setSelf(SELF);
   try {
@@ -224,14 +224,14 @@ test("#350: the head covered is the later of Factory's last review and its own c
     const reviews = [review(r.reviewed, "2026-11-15T10:00:00Z")];
     const comments = [record(answered, "2026-11-15T10:20:00Z")];
     assert.deepEqual(await scopeNow(r, { reviews, comments }), { head: answered, first: false, covered: true, since: answered, diff: null, answer: false });
-    // A pasted record (a writer's or anyone's) is no record of Factory's.
+    // A pasted record (a writer's or anyone's) is no record of Pendulum's.
     const pasted = [{ ...comments[0], user: { login: "kirk", type: "User" }, author_association: "OWNER" }];
     assert.equal((await scopeNow(r, { reviews, comments: pasted })).covered, false);
-    assert.deepEqual(coveredHead({ reviews, comments: [{ ...comments[0], body: comments[0].body.replace("factory:7", "factory:8") }], issue: 7 }), { sha: r.reviewed, at: "2026-11-15T10:00:00Z", answer: false }, "another issue's record");
+    assert.deepEqual(coveredHead({ reviews, comments: [{ ...comments[0], body: comments[0].body.replace("pendulum:7", "pendulum:8") }], issue: 7 }), { sha: r.reviewed, at: "2026-11-15T10:00:00Z", answer: false }, "another issue's record");
     // A later review (a pass on the commits since) is what covers from then on.
     assert.deepEqual(coveredHead({ reviews: [...reviews, review(answered, "2026-11-15T11:00:00Z")], comments: [record(r.reviewed, "2026-11-15T10:30:00Z")], issue: 7 }), { sha: answered, at: "2026-11-15T11:00:00Z", answer: false });
     assert.equal(coveredHead({ reviews, comments: [record(r.reviewed, "2026-11-15T10:30:00Z", true)], issue: 7 }).answer, true, "the answer-bound record");
-    // No Factory review at all: the first pass.
+    // No Pendulum review at all: the first pass.
     assert.deepEqual(await scopeNow(r, { reviews: [] }), { head: answered, first: true, covered: false, since: null, diff: null, answer: false });
   } finally {
     setSelf(null);
@@ -272,7 +272,7 @@ test("#350: a maintainer's push during the stage is neither read nor covered by 
       const rescope = (head) => reviewScope(box.git, { reviews, comments: [], issue: 7, base: box.base, head });
       const scope = await rescope(box.expected());
       assert.equal(scope.head, m1);
-      // M2 lands on GitHub while the reviewer runs: Factory's checkout, and what the reviewer reads, stay on M1.
+      // M2 lands on GitHub while the reviewer runs: Pendulum's checkout, and what the reviewer reads, stay on M1.
       r.put("m2.txt", "m2\n");
       r.run("commit", "-q", "-m", "m2");
       const m2 = r.push();
@@ -280,11 +280,11 @@ test("#350: a maintainer's push during the stage is neither read nor covered by 
       assert.deepEqual([read.head, read.since], [m1, r.reviewed]);
       assert.deepEqual(files(read.reviewDiff), ["m1.txt"]);
       assert.deepEqual(files(read.diff), ["app.txt", "feature.txt", "m1.txt"], "the comments are fitted to the PR at M1");
-      // Before the review goes up, GitHub's head is not Factory's: nothing is posted and the review label goes back on.
+      // Before the review goes up, GitHub's head is not Pendulum's: nothing is posted and the review label goes back on.
       const gh = { head: m2 };
       assert.equal(await withGitHub(gh, () => headMovedFrom({ repo: REPO, prNumber: 12, own: box.expected(), token: { token: "t" } })), m2);
-      assert.ok(gh.writes.some((w) => w.startsWith("DELETE /issues/12/labels/")) && gh.writes.at(-1) === "POST /issues/12/labels factory:review", gh.writes.join("\n"));
-      // A review on M1 (where it goes up when the head is still Factory's) covers M1 only: the next stage reads M2.
+      assert.ok(gh.writes.some((w) => w.startsWith("DELETE /issues/12/labels/")) && gh.writes.at(-1) === "POST /issues/12/labels pendulum:review", gh.writes.join("\n"));
+      // A review on M1 (where it goes up when the head is still Pendulum's) covers M1 only: the next stage reads M2.
       const next = await scopeNow(r, { reviews: [...reviews, review(read.head, "2026-11-15T11:00:00Z")] });
       assert.equal(next.covered, false);
       assert.deepEqual(files(next.diff), ["m2.txt"]);
@@ -295,7 +295,7 @@ test("#350: a maintainer's push during the stage is neither read nor covered by 
   }
 });
 
-test("#350: Factory's fix passes move the head the review reads (before the reviewer) but not the one it goes up on (after it)", async () => {
+test("#350: Pendulum's fix passes move the head the review reads (before the reviewer) but not the one it goes up on (after it)", async () => {
   const r = repos();
   setSelf(SELF);
   try {
@@ -314,7 +314,7 @@ test("#350: Factory's fix passes move the head the review reads (before the revi
       assert.deepEqual(files(read.reviewDiff), ["app.txt", "m1.txt"]);
     });
     // A fix pass after the reviewer (the red the checks beside it showed), published before the review goes up: the
-    // head on GitHub is Factory's, so the review goes up on the head it read, and the fix is the review's answer.
+    // head on GitHub is Pendulum's, so the review goes up on the head it read, and the fix is the review's answer.
     r.put("app.txt", "one\ntwo reviewed\nthree fixed again\n");
     r.run("commit", "-q", "-m", "fix pass after the reviewer");
     const after = r.push();
@@ -341,20 +341,20 @@ test("#350: Factory's fix passes move the head the review reads (before the revi
 test("#350: a clean pass on new commits leaves the earlier review's unanswered findings to answer", async () => {
   setSelf(SELF);
   try {
-    const own = (id, sha) => ({ id, user: { login: SELF, type: "Bot" }, author_association: "NONE", body: "<!-- factory:7:review -->\nFactory reviewer", commit_id: sha, submitted_at: "2026-11-15T10:00:00Z" });
+    const own = (id, sha) => ({ id, user: { login: SELF, type: "Bot" }, author_association: "NONE", body: "<!-- pendulum:7:review -->\nPendulum reviewer", commit_id: sha, submitted_at: "2026-11-15T10:00:00Z" });
     const gh = {
       head: "c".repeat(40),
       // Stage 1's review on a, with a finding nobody answered; stage 2's pass on the commits since, clean (its placeholder).
       reviews: [own(1, "a".repeat(40)), own(2, "b".repeat(40))],
       lineComments: [
         { id: 11, pull_request_review_id: 1, path: "app.txt", line: 2, user: { login: SELF, type: "Bot" }, body: "acceptance A: two is wrong" },
-        { id: 21, pull_request_review_id: 2, path: "m1.txt", line: 1, user: { login: SELF, type: "Bot" }, body: `${PLACEHOLDER_MARKER}\nFactory reviewer: no findings; the pass ran and returned nothing line-tied.` },
+        { id: 21, pull_request_review_id: 2, path: "m1.txt", line: 1, user: { login: SELF, type: "Bot" }, body: `${PLACEHOLDER_MARKER}\nPendulum reviewer: no findings; the pass ran and returned nothing line-tied.` },
       ],
     };
     const open = await withGitHub(gh, () => unaddressedReviewComments(REPO, 12, SELF, { token: "t", reviewIds: new Set([1, 2]), thirdParty: [] }));
     assert.deepEqual(open.map((c) => c.id), [11]);
     assert.deepEqual(answerList(open, { placeholder: true, first: false }).map((c) => c.id), [11], "the earlier finding is still answered");
-    assert.deepEqual(answerList(open, { placeholder: true, first: true }), [], "a clean first review has nothing of Factory's to answer");
+    assert.deepEqual(answerList(open, { placeholder: true, first: true }), [], "a clean first review has nothing of Pendulum's to answer");
   } finally {
     setSelf(null);
   }
@@ -475,7 +475,7 @@ test("#367: the answer to a review pass on held commits is gated too; held again
   try {
     for (const second of ["held", "covered", "no key"]) {
       // Stage 1: the review read `reviewed`; the answer pass wrote A, which the gate holds.
-      r.run("checkout", "-q", "-B", "factory/7", r.reviewed);
+      r.run("checkout", "-q", "-B", "pendulum/7", r.reviewed);
       r.put("app.txt", `one\ntwo answered (${second})\nthree\n`);
       r.run("commit", "-q", "-m", "answer");
       const a = r.push();
@@ -585,7 +585,7 @@ test("#367: the answer gate's input fences the diff and the checks so their text
 });
 
 test("#367: a red a fix pass turned green is still what that pass was asked to fix (validationLoop's given)", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-367-"));
+  const root = mkdtempSync(join(tmpdir(), "pendulum-367-"));
   try {
     // A fake Codex fix pass: one turn that writes the fix into the checkout.
     mkdirSync(join(root, "bin"));
@@ -645,8 +645,8 @@ test("#350: the pass on the commits since is told so, and its review says so", (
   assert.doesNotMatch(f, /judge every acceptance entry/, "the foundation pass judges no entry");
   const diff = "diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-a\n+b\n";
   const post = reviewPost({ issue: 7, review: { comments: [], acceptance: [] }, diff, since });
-  assert.match(post.body, /^Factory reviewer: one comment-only pass on the commits since 4ac21cf, 1 comment\(s\)\.$/m);
-  assert.match(reviewPost({ issue: 7, review: { comments: [], acceptance: [] }, diff }).body, /^Factory reviewer: one comment-only pass, 1 comment\(s\)\.$/m);
+  assert.match(post.body, /^Pendulum reviewer: one comment-only pass on the commits since 4ac21cf, 1 comment\(s\)\.$/m);
+  assert.match(reviewPost({ issue: 7, review: { comments: [], acceptance: [] }, diff }).body, /^Pendulum reviewer: one comment-only pass, 1 comment\(s\)\.$/m);
 });
 
 test("#350: the worker's rebase keeps the review only for a rebase of the covered head (its stage wiring)", () => {
@@ -719,5 +719,5 @@ test("#350: a moved head honours a stop before the review label goes back on", a
   const moved = await withGitHub(gh, () => headMovedFrom({ repo: REPO, prNumber: 12, own: "a".repeat(40), token: { token: "t" }, before: async () => order.push("stop check") }));
   assert.equal(moved, gh.head);
   assert.deepEqual(order, ["stop check"]);
-  assert.equal(gh.writes.at(-1), "POST /issues/12/labels factory:review");
+  assert.equal(gh.writes.at(-1), "POST /issues/12/labels pendulum:review");
 });

@@ -1,5 +1,5 @@
-// Factory's bubblewrap shim for the gateway relay (#97, lib/gateway-relay.mjs). Claude Code's and Codex's sandboxes start
-// every command with the `bwrap` they find first on PATH; Factory puts this shim there, in a directory the agent cannot
+// Pendulum's bubblewrap shim for the gateway relay (#97, lib/gateway-relay.mjs). Claude Code's and Codex's sandboxes start
+// every command with the `bwrap` they find first on PATH; Pendulum puts this shim there, in a directory the agent cannot
 // write. For a command's sandbox (a call with --unshare-net: the command gets a network namespace of its own) it starts a
 // forwarder in that namespace, on its own 127.0.0.1:<port>, to the relay's Unix socket, then runs the command exactly as
 // the harness asked. Nothing else changes: the harness's network policy, its proxy and its seccomp filter are untouched,
@@ -54,7 +54,7 @@ export function relayShimScript({ bwrap, socat, socket, port, extra = [] }) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("the relay shim needs a port");
   const arity = Object.entries(BWRAP_ARITY).map(([n, opts]) => `    ${opts.join("|")}) n=${n} ;;`).join("\n");
   return `#!/bin/bash -p
-# Factory's bwrap shim (plugin/scripts/lib/relay-shim.mjs): a forwarder to the gateway relay in each command's network
+# Pendulum's bwrap shim (plugin/scripts/lib/relay-shim.mjs): a forwarder to the gateway relay in each command's network
 # namespace; every other call runs as given.
 real=${sq(bwrap)}
 args=("$@"); i=0; net=""; a0=""; sep=-1
@@ -86,7 +86,7 @@ export const copilotRelayExtra = (socketDir) => ["--ro-bind", socketDir, socketD
 
 /**
  * Where a stage's relay shim for Copilot goes: in the stage's own relay directory (worker-relay.mjs), which only
- * Factory's user writes and which goes when the stage ends. Its path is baked into Copilot's own shim for the stage
+ * Pendulum's user writes and which goes when the stage ends. Its path is baked into Copilot's own shim for the stage
  * (copilot-runner.mjs bwrapShim), never read from an environment.
  */
 export const copilotRelayShimIn = (relayDir) => `${relayDir}/copilot/bwrap`;
@@ -109,4 +109,4 @@ export function writeRelayShim(dir, opts) {
  * through the forwarder, which must answer with this relay's probe id. Exit 0 with `ok`, else 4 with what it saw.
  */
 export const relayProbeCommand = (port, probeId) =>
-  `out=$(exec 3<>/dev/tcp/127.0.0.1/${port} && printf 'GET ${RELAY_PING} HTTP/1.0\\r\\n\\r\\n' >&3 && cat <&3) 2>/dev/null; case "$out" in *"factory-relay ${probeId}"*) echo ok ;; *) echo "no relay on 127.0.0.1:${port}"; exit 4 ;; esac`;
+  `out=$(exec 3<>/dev/tcp/127.0.0.1/${port} && printf 'GET ${RELAY_PING} HTTP/1.0\\r\\n\\r\\n' >&3 && cat <&3) 2>/dev/null; case "$out" in *"pendulum-relay ${probeId}"*) echo ok ;; *) echo "no relay on 127.0.0.1:${port}"; exit 4 ;; esac`;

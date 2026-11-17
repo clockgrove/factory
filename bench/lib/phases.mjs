@@ -1,6 +1,6 @@
-// phases.mjs: minutes per phase of an Objective, and each run's dispatch latency, read from Factory's progress comments.
+// phases.mjs: minutes per phase of an Objective, and each run's dispatch latency, read from Pendulum's progress comments.
 //
-// Each run (work, review) edits one `<!-- factory:N:progress:... -->` comment with a line per
+// Each run (work, review) edits one `<!-- pendulum:N:progress:... -->` comment with a line per
 // phase: `- HH:MMZ <phase>`. The minutes between consecutive lines belong to the earlier line's
 // phase. Categories: firstSetup (a local Objective's first stage on a machine: the clone, whose seconds its line
 // carries, and the cold install), setup (setup, install), model (harness, fix runs, reviewer, answer passes,
@@ -9,7 +9,7 @@
 // phase of the line before it, so the overlap's minutes are in neither model nor ciWait.
 import { sandboxRecord } from "../../plugin/scripts/lib/logic.mjs";
 
-const MARK = (issue) => `<!-- factory:${issue}:progress`;
+const MARK = (issue) => `<!-- pendulum:${issue}:progress`;
 const LINE = /^- (\d\d):(\d\d)Z (.*)$/gm;
 
 export function phaseOf(text) {
@@ -47,37 +47,37 @@ export function phaseMinutes(comments, issue) {
 // The latest one since the previous run's pickup counts; a run with none (a cron sweep's recovery)
 // has no latency.
 //
-// A work stage can wait for a concurrency slot (FACTORY_MAX_CONCURRENT): it is then started by a later tick, not by
+// A work stage can wait for a concurrency slot (PENDULUM_MAX_CONCURRENT): it is then started by a later tick, not by
 // the Objective's own event. That tick is the run's: the sandbox record's launch entry for the run, else the Actions
 // run that launched it (collect.mjs `stageRuns`: its creation). Only a tick that frees a slot for another Objective
-// makes the gap a slot wait (SLOT_TICKS): a Factory PR merged (the dispatcher runs on a merged factory/ PR only, and
+// makes the gap a slot wait (SLOT_TICKS): a Pendulum PR merged (the dispatcher runs on a merged pendulum/ PR only, and
 // the Objective's own merge ends it), or a `workflow_dispatch` tick (a worker or review job's end on the runner path;
 // a stage stopped, or an answered Question requeued, on the sandbox path; a manual run). A `workflow_dispatch` tick
 // the Objective's own stages explain is not one: its own review's end (the review job's tick, or the launcher's after
 // the review's sandbox stopped, starting the fix pass: a tick at most OWN_TICK_MS after the review's last progress
-// write; a later one is another Objective's) or an answered Question (a person's comment, or Factory's unlabel of
-// factory:question that the launcher's requeue for the answer makes just before its tick). Any
+// write; a later one is another Objective's) or an answered Question (a person's comment, or Pendulum's unlabel of
+// pendulum:question that the launcher's requeue for the answer makes just before its tick). Any
 // other later tick, such as the cron recovering a lost or replaced dispatcher run, or a stage's end
 // (`repository_dispatch`) starting the Objective's next stage, stays in dispatch seconds from the Objective's own
 // trigger and is named as `tickEvent`. A review takes no slot.
 //
-// No tick is a slot wait when the Objective was already picked between its own trigger and the tick: Factory labelled
+// No tick is a slot wait when the Objective was already picked between its own trigger and the tick: Pendulum labelled
 // it Running in between, or the sandbox record shows a failed start of the stage there. A dispatcher run that really
 // waited for a slot applies Running only after its own tick. If the label came off again (a launch that failed with a
 // transient code sends a work stage back to Queued), the gap is named `requeued`; if it stayed on (a launch lost with
 // no record entry, which the dispatcher's sweep launches again on a later tick), `relaunched`. Either way the slot was
 // held or free, and the gap stays in dispatch seconds.
-const HOLDING = new Set(["factory:blocked", "factory:question", "factory:in-review"]);
+const HOLDING = new Set(["pendulum:blocked", "pendulum:question", "pendulum:in-review"]);
 const SLOT_TICKS = new Set(["pull_request", "workflow_dispatch"]);
 const OWN_TICK_MS = 5 * 60_000;
 function triggerAt(ev) {
   switch (ev.event) {
     case "labeled":
-      return ev.label?.name === "factory:running" ? null : ev.created_at;
+      return ev.label?.name === "pendulum:running" ? null : ev.created_at;
     case "unlabeled":
       return HOLDING.has(ev.label?.name) ? ev.created_at : null;
     case "commented":
-      return (ev.body || "").includes("<!-- factory:") || ev.user?.type === "Bot" ? null : ev.created_at;
+      return (ev.body || "").includes("<!-- pendulum:") || ev.user?.type === "Bot" ? null : ev.created_at;
     case "reopened":
     case "ready_for_review":
       return ev.created_at;
@@ -95,7 +95,7 @@ function progressRuns(comments, issue) {
     // A run that only logged `exit: skipped` was a duplicate trigger (ready_for_review beside the label) and did no work.
     .filter((c) => !/^- \d\d:\d\dZ exit: skipped/m.test(c.body) || /^- \d\d:\d\dZ (?!exit:)/m.test(c.body))
     .map((c) => {
-      const m = /^<!-- factory:\d+:progress:(\w+):?([A-Za-z0-9-]*)/.exec(c.body);
+      const m = /^<!-- pendulum:\d+:progress:(\w+):?([A-Za-z0-9-]*)/.exec(c.body);
       return { stage: m?.[1] ?? "?", run: /^(\d{1,20})(?:-|$)/.exec(m?.[2] ?? "")?.[1] ?? null, at: Date.parse(c.created_at), comment: c };
     })
     .sort((a, b) => a.at - b.at);
@@ -103,15 +103,15 @@ function progressRuns(comments, issue) {
 
 const loginKey = (l) => String(l ?? "").trim().replace(/^@/, "").toLowerCase();
 /**
- * Factory's own login, the plugin's `isSelf`: `given` (score.mjs --app), else the App that applied `factory:running`
- * to the issue (the dispatcher's label; a person's is not an App's). Null when neither is known: nothing is Factory's.
+ * Pendulum's own login, the plugin's `isSelf`: `given` (score.mjs --app), else the App that applied `pendulum:running`
+ * to the issue (the dispatcher's label; a person's is not an App's). Null when neither is known: nothing is Pendulum's.
  */
-export function factoryLogin(timeline, given = null) {
+export function pendulumLogin(timeline, given = null) {
   if (given) return loginKey(given);
-  const e = (timeline || []).find((x) => x?.event === "labeled" && x.label?.name === "factory:running" && x.actor?.type === "Bot" && /\[bot\]$/i.test(x.actor?.login ?? ""));
+  const e = (timeline || []).find((x) => x?.event === "labeled" && x.label?.name === "pendulum:running" && x.actor?.type === "Bot" && /\[bot\]$/i.test(x.actor?.login ?? ""));
   return e ? loginKey(e.actor.login) : null;
 }
-/** Whether a comment is Factory's own (its login is `self`, from factoryLogin). */
+/** Whether a comment is Pendulum's own (its login is `self`, from pendulumLogin). */
 export const bySelf = (comment, self) => !!self && loginKey(comment?.user?.login) === self;
 
 /**
@@ -119,7 +119,7 @@ export const bySelf = (comment, self) => !!self && loginKey(comment?.user?.login
  * entry's `eventAt`, else (an entry written before launchers recorded it) its `at` less its `latencyMs`. That fallback
  * reads late: the launcher stamps `at` after the stage started and after any lost stage's usage and vendor booking,
  * while `latencyMs` ends at the stage start, so it understates the dispatch by that gap (0.3 s in the wave-5 drill;
- * seconds when a lost stage's usage is collected). Factory's own comments only (`self`, from factoryLogin), merged as
+ * seconds when a lost stage's usage is collected). Pendulum's own comments only (`self`, from pendulumLogin), merged as
  * the plugin merges them (logic.mjs sandboxRecord): a start whose launcher's write never came is the stage's entry.
  */
 export function launchesOf(comments, issue, self) {
@@ -183,7 +183,7 @@ export function stageLastWrite(comment) {
  * for a run no event explains; `slotWaitSeconds` is null where no tick is known (a review, or a run whose launch is
  * unrecorded); `from` says what the run was timed from: its own trigger, or the launch record's or the Actions run's
  * tick; `tickEvent` names the event of a later tick that started the run (null when its own trigger did, or no tick
- * is known). `app`: Factory's login when known (score.mjs --app); else factoryLogin reads it from the timeline.
+ * is known). `app`: Pendulum's login when known (score.mjs --app); else pendulumLogin reads it from the timeline.
  */
 export function dispatchLatency(collected, issue, { app = null } = {}) {
   const runs = progressRuns(collected.issueComments, issue);
@@ -192,13 +192,13 @@ export function dispatchLatency(collected, issue, { app = null } = {}) {
     .map((e) => ({ ...e, at: e.at ? Date.parse(e.at) : NaN }))
     .filter((e) => Number.isFinite(e.at))
     .sort((a, b) => a.at - b.at);
-  const self = factoryLogin(collected.issueTimeline, app);
+  const self = pendulumLogin(collected.issueTimeline, app);
   const launches = launchesOf(collected.issueComments, issue, self);
   const failed = failedStartsOf(collected.issueComments, issue, self);
-  // Factory's own Running label on the issue: [applied, removed] spans (removed Infinity while it stays).
+  // Pendulum's own Running label on the issue: [applied, removed] spans (removed Infinity while it stays).
   const picks = [];
   for (const ev of [...(collected.issueTimeline || [])].sort((a, b) => Date.parse(a?.created_at) - Date.parse(b?.created_at))) {
-    if (ev?.label?.name !== "factory:running" || !self || loginKey(ev.actor?.login) !== self) continue;
+    if (ev?.label?.name !== "pendulum:running" || !self || loginKey(ev.actor?.login) !== self) continue;
     const t = Date.parse(ev.created_at);
     if (ev.event === "labeled" && Number.isFinite(t)) picks.push([t, Infinity]);
     else if (ev.event === "unlabeled" && picks.length && picks.at(-1)[1] === Infinity) picks.at(-1)[1] = t;
@@ -209,7 +209,7 @@ export function dispatchLatency(collected, issue, { app = null } = {}) {
     const run = r.run ? collected.stageRuns?.[r.run] : null;
     return run && Number.isFinite(Date.parse(run.created_at)) ? { at: Date.parse(run.created_at), event: String(run.event ?? ""), from: "launching run" } : null;
   };
-  // Picked between its trigger and the tick: Factory's Running label applied in between (whether it came off again, a
+  // Picked between its trigger and the tick: Pendulum's Running label applied in between (whether it came off again, a
   // transient failed start, or stayed on, a lost launch the dispatcher relaunched), or a failed start in between.
   // `relaunched` when the latest such pick still held Running at the tick, `requeued` otherwise; null when not picked.
   const pickedBefore = (r, tick, trigger) => {
@@ -224,12 +224,12 @@ export function dispatchLatency(collected, issue, { app = null } = {}) {
     const end = lastWrite(previous.comment);
     return end === null || tick.at <= end + OWN_TICK_MS;
   };
-  // An answered Question: the trigger is a person's comment, or Factory's own unlabel of factory:question (the
+  // An answered Question: the trigger is a person's comment, or Pendulum's own unlabel of pendulum:question (the
   // launcher's requeue for the answer, which comes before its tick), or any unlabel of it after a person's comment
   // since the previous run. The launcher's workflow_dispatch tick then is the Objective's own.
   const answered = (trigger, since) =>
     trigger.kind === "commented" ||
-    (trigger.kind === "unlabeled" && trigger.label === "factory:question" && ((!!self && trigger.actor === self) || events.some((e) => e.kind === "commented" && e.at > since && e.at <= trigger.at)));
+    (trigger.kind === "unlabeled" && trigger.label === "pendulum:question" && ((!!self && trigger.actor === self) || events.some((e) => e.kind === "commented" && e.at > since && e.at <= trigger.at)));
   // Whether the tick freed a slot for this run, rather than following from the Objective's own stages or trigger.
   const freedSlot = (tick, previous, trigger, since) => SLOT_TICKS.has(tick.event) && !(tick.event === "workflow_dispatch" && (reviewTick(tick, previous) || answered(trigger, since)));
   let prev = -Infinity;

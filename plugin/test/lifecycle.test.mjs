@@ -79,13 +79,13 @@ for (const sig of ["SIGTERM", "SIGHUP"]) {
 
 /** A detached "harness" carrying `tag` in its environment, as exec's group runs do. */
 function harness(tag) {
-  const child = spawn("sleep", ["60"], { detached: true, stdio: "ignore", env: { ...process.env, FACTORY_RUN_TAG: tag } });
+  const child = spawn("sleep", ["60"], { detached: true, stdio: "ignore", env: { ...process.env, PENDULUM_RUN_TAG: tag } });
   child.unref();
   return child;
 }
 /** A process group whose leader has exited while a member lives (a daemonised process); the member's pid. */
 function leaderless(tag = null) {
-  const r = spawnSync("setsid", ["sh", "-c", "sleep 60 </dev/null >/dev/null 2>&1 & echo $!; echo $$"], { encoding: "utf8", env: tag ? { ...process.env, FACTORY_RUN_TAG: tag } : process.env });
+  const r = spawnSync("setsid", ["sh", "-c", "sleep 60 </dev/null >/dev/null 2>&1 & echo $!; echo $$"], { encoding: "utf8", env: tag ? { ...process.env, PENDULUM_RUN_TAG: tag } : process.env });
   const [member, leader] = r.stdout.trim().split("\n").map(Number);
   return { member, leader };
 }
@@ -179,17 +179,17 @@ test("liveStage: a recorded stage counts while it is the same process", () => {
   assert.equal(liveStage(ws), null);
 });
 
-const pr = (o = {}) => ({ number: 5, state: "open", draft: false, labels: [{ name: "factory:review" }], head: { ref: "factory/7" }, ...o });
+const pr = (o = {}) => ({ number: 5, state: "open", draft: false, labels: [{ name: "pendulum:review" }], head: { ref: "pendulum/7" }, ...o });
 const issue = (...labels) => ({ number: 7, labels: labels.map((name) => ({ name })) });
 
 test("stageFor: the stage an Objective's state calls for", () => {
-  assert.equal(stageFor({ pr: pr(), issue: issue("factory:in-review") }), "review");
-  assert.equal(stageFor({ pr: pr(), issue: issue("factory:running") }), "review");
-  assert.equal(stageFor({ pr: null, issue: issue("factory:running") }), "work");
-  assert.equal(stageFor({ pr: pr({ draft: true }), issue: issue("factory:running") }), "work");
-  assert.equal(stageFor({ pr: pr({ labels: [] }), issue: issue("factory:in-review") }), "merge");
-  assert.equal(stageFor({ pr: pr({ draft: true }), issue: issue("factory:question") }), null);
-  assert.equal(stageFor({ pr: null, issue: issue("factory:objective") }), null);
+  assert.equal(stageFor({ pr: pr(), issue: issue("pendulum:in-review") }), "review");
+  assert.equal(stageFor({ pr: pr(), issue: issue("pendulum:running") }), "review");
+  assert.equal(stageFor({ pr: null, issue: issue("pendulum:running") }), "work");
+  assert.equal(stageFor({ pr: pr({ draft: true }), issue: issue("pendulum:running") }), "work");
+  assert.equal(stageFor({ pr: pr({ labels: [] }), issue: issue("pendulum:in-review") }), "merge");
+  assert.equal(stageFor({ pr: pr({ draft: true }), issue: issue("pendulum:question") }), null);
+  assert.equal(stageFor({ pr: null, issue: issue("pendulum:objective") }), null);
   assert.equal(stageFor({ pr: null, issue: null }), null);
 });
 
@@ -210,15 +210,15 @@ function loop() {
 const reads = (p, i) => ({ findPr: async () => p, getIssue: async () => i });
 const failing = () => Promise.reject(new Error("HTTP 502"));
 
-test("factory run starts where the Objective stands, as serve's resume does", async () => {
+test("pendulum run starts where the Objective stands, as serve's resume does", async () => {
   const cases = [
-    [pr(), issue("factory:in-review"), false, [["review", 7, 5, false]]],
-    [pr(), issue("factory:running"), true, [["review", 7, 5, true]]],
-    [null, issue("factory:running"), false, [["work", 7, false]]],
-    [pr({ labels: [] }), issue("factory:in-review"), true, [["merge", 7, 5]]],
-    [pr({ labels: [] }), issue("factory:in-review"), false, []],
-    [null, issue("factory:objective"), false, [["work", 7, false]]],
-    [pr({ draft: true, labels: [] }), issue("factory:objective"), true, [["work", 7, true]]],
+    [pr(), issue("pendulum:in-review"), false, [["review", 7, 5, false]]],
+    [pr(), issue("pendulum:running"), true, [["review", 7, 5, true]]],
+    [null, issue("pendulum:running"), false, [["work", 7, false]]],
+    [pr({ labels: [] }), issue("pendulum:in-review"), true, [["merge", 7, 5]]],
+    [pr({ labels: [] }), issue("pendulum:in-review"), false, []],
+    [null, issue("pendulum:objective"), false, [["work", 7, false]]],
+    [pr({ draft: true, labels: [] }), issue("pendulum:objective"), true, [["work", 7, true]]],
   ];
   for (const [p, i, wait, want] of cases) {
     const { l, ran } = loop();
@@ -228,24 +228,24 @@ test("factory run starts where the Objective stands, as serve's resume does", as
   }
 });
 
-test("factory run starts nothing when it cannot tell where the Objective stands", async () => {
+test("pendulum run starts nothing when it cannot tell where the Objective stands", async () => {
   // A PR read that keeps failing, on an In-review Objective: retried, then refused, never a work pass.
   let tries = 0;
   const { l, ran } = loop();
-  await assert.rejects(l.runIssue(7, { waitMs: 1, gh: { findPr: () => (tries++, failing()), getIssue: async () => issue("factory:in-review") } }), /reading the open PR of factory\/7 failed 3 times .*nothing was started/);
+  await assert.rejects(l.runIssue(7, { waitMs: 1, gh: { findPr: () => (tries++, failing()), getIssue: async () => issue("pendulum:in-review") } }), /reading the open PR of pendulum\/7 failed 3 times .*nothing was started/);
   assert.equal(tries, 3);
   await assert.rejects(l.runIssue(7, { waitMs: 1, gh: { findPr: async () => null, getIssue: failing } }), /reading issue #7 failed/);
   // A read that fails once and then answers is used.
   let once = 0;
-  await l.runIssue(7, { waitMs: 1, gh: { findPr: () => (once++ ? Promise.resolve(pr()) : failing()), getIssue: async () => issue("factory:in-review") } });
+  await l.runIssue(7, { waitMs: 1, gh: { findPr: () => (once++ ? Promise.resolve(pr()) : failing()), getIssue: async () => issue("pendulum:in-review") } });
   assert.deepEqual(ran, [["review", 7, 5, false]]);
   // A closed issue: nothing to run.
   ran.length = 0;
-  await assert.rejects(l.runIssue(7, { gh: reads(null, { ...issue("factory:objective"), state: "closed" }) }), /closed/);
+  await assert.rejects(l.runIssue(7, { gh: reads(null, { ...issue("pendulum:objective"), state: "closed" }) }), /closed/);
   // A stage of it still running on this machine (its loop gone): not a second one beside it.
   mkdirSync(join(l.ws(7), "usage-work-1"), { recursive: true });
   writeFileSync(join(l.ws(7), "usage-work-1", STAGE_RECORD), JSON.stringify(processRecord()));
-  await assert.rejects(l.runIssue(7, { gh: reads(null, issue("factory:running")) }), /a stage of this Objective is running on this machine \(pid \d+\)/);
+  await assert.rejects(l.runIssue(7, { gh: reads(null, issue("pendulum:running")) }), /a stage of this Objective is running on this machine \(pid \d+\)/);
   assert.deepEqual(ran, []);
 });
 
@@ -262,28 +262,28 @@ test("the command line is checked before anything runs", () => {
   assert.doesNotMatch(usageText(), /--dir/);
 });
 
-test("factory and factory-db answer --help and refuse a bad flag before doing anything", { skip: process.platform === "win32" }, () => {
-  const factory = (...a) => spawnSync(process.execPath, [join(bin, "factory"), ...a], { encoding: "utf8", timeout: 30_000 });
+test("pendulum and pendulum-db answer --help and refuse a bad flag before doing anything", { skip: process.platform === "win32" }, () => {
+  const pendulum = (...a) => spawnSync(process.execPath, [join(bin, "pendulum"), ...a], { encoding: "utf8", timeout: 30_000 });
   for (const a of [["--help"], ["-h"], ["serve", "--help"], ["run", "12", "-h"]]) {
-    const r = factory(...a);
+    const r = pendulum(...a);
     assert.equal(r.status, 0, a.join(" "));
     assert.match(r.stdout, /^usage:/, a.join(" "));
   }
   for (const a of [["serve", "--bogus"], ["serve", "--interval"], ["serve", "--interval", "abc"], ["run", "--wait"], []]) {
-    const r = factory(...a);
+    const r = pendulum(...a);
     assert.equal(r.status, 64, a.join(" "));
     assert.match(r.stderr, /usage:/, a.join(" "));
   }
-  const db = (...a) => spawnSync("bash", [join(bin, "factory-db"), ...a], { encoding: "utf8", timeout: 30_000 });
+  const db = (...a) => spawnSync("bash", [join(bin, "pendulum-db"), ...a], { encoding: "utf8", timeout: 30_000 });
   for (const a of ["--help", "-h"]) {
     const r = db(a);
     assert.equal(r.status, 0, a);
-    assert.match(r.stdout, /^usage: factory-db/);
+    assert.match(r.stdout, /^usage: pendulum-db/);
   }
   for (const a of [["--bogus"], []]) {
     const r = db(...a);
     assert.equal(r.status, 2, a.join(" "));
-    assert.match(r.stderr, /usage: factory-db/);
+    assert.match(r.stderr, /usage: pendulum-db/);
   }
 });
 
@@ -301,7 +301,7 @@ test("the process readers parse what /proc, ps and sysctl print", () => {
   // ps -A -o pid=,pgid=
   assert.deepEqual(groupMembers("  101   100\n  100   100\n  202   200\n\n x y\n", 100), [101, 100]);
   // An environment holds the tag exactly, from /proc (NUL-separated) or ps eww (spaces); never a longer value.
-  const mark = `FACTORY_RUN_TAG=${"a".repeat(24)}`;
+  const mark = `PENDULUM_RUN_TAG=${"a".repeat(24)}`;
   assert.ok(holdsMark(`PATH=/bin\0${mark}\0HOME=/h\0`, mark));
   assert.ok(holdsMark(`  4242 sleep 60 PATH=/bin ${mark} HOME=/h`, mark));
   assert.ok(!holdsMark(`sleep ${mark}b`, mark));

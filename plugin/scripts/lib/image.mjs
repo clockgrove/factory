@@ -1,9 +1,9 @@
 // The adopter's sandbox image (docs/ADAPTERS.md, "Sandbox image"). A build job runs the adopter's own setup command
 // in a fresh sandbox beside a clone at the default branch's head, installs the dependency store and the harness CLIs,
 // and snapshots it. Two records, each checked against the other:
-// - GitHub's, the index: one marker comment written by the Factory App on Factory's own image issue (label
-//   `factory:image`), the newest builds first. Only Factory's own login's issue and comment count (isSelf).
-// - The vendor's, the proof: the sandbox each image came from stays in Factory's own project, stopped, tagged with this
+// - GitHub's, the index: one marker comment written by the Pendulum App on Pendulum's own image issue (label
+//   `pendulum:image`), the newest builds first. Only Pendulum's own login's issue and comment count (isSelf).
+// - The vendor's, the proof: the sandbox each image came from stays in Pendulum's own project, stopped, tagged with this
 //   repository's id, the head and the snapshot id. A snapshot is used or deleted only when that listing shows it.
 // Paths inside the image are constants, never read from a record.
 import { createHash } from "node:crypto";
@@ -12,18 +12,18 @@ import { findRecordIssue, getRepo, listComments, onDefaultBranch, openRecordIssu
 import { IMAGE_MAX_AGE_DAYS } from "./inputs.mjs";
 import { WAKE_SLACK_MS, dependencyFile, guardCovers, isSelf, marker, toolchainFile } from "./logic.mjs";
 
-/** The label on Factory's image issue (a hint to find it; anyone with triage can remove it) and its exact title. */
-export const IMAGE_LABEL = "factory:image";
-export const IMAGE_TITLE = "Factory: sandbox image";
+/** The label on Pendulum's image issue (a hint to find it; anyone with triage can remove it) and its exact title. */
+export const IMAGE_LABEL = "pendulum:image";
+export const IMAGE_TITLE = "Pendulum: sandbox image";
 /** The refresh settings: `merge` builds on every push to the default branch until today's builds pass the daily minutes, then the nightly build takes over; `nightly` builds on the nightly schedule only. */
 export const REFRESH = Object.freeze(["merge", "nightly"]);
 /** The nightly build's cron (UTC): the workflow template's second schedule, matched by the image job's `if:`. */
 export const NIGHTLY_CRON = "41 10 * * *";
 const NIGHTLY_UTC = { h: 10, m: 41 };
-/** The image sandbox's tag holding the repository id; with `factory=image`, `sha=<head>` and the adapter's `snapshot=<id>`. */
-export const IMAGE_TAG = "factory-image";
-/** Where the image keeps Factory's files, the clone and what setup exported. */
-export const IMAGE_DIR = "/opt/factory";
+/** The image sandbox's tag holding the repository id; with `pendulum=image`, `sha=<head>` and the adapter's `snapshot=<id>`. */
+export const IMAGE_TAG = "pendulum-image";
+/** Where the image keeps Pendulum's files, the clone and what setup exported. */
+export const IMAGE_DIR = "/opt/pendulum";
 /** Images a build keeps per repository, the newest by the vendor's clock (the one it made and the one before). */
 export const KEEP = 2;
 /**
@@ -44,7 +44,7 @@ const DIGEST = /^[0-9a-f]{64}$/;
 /** The image's paths, from constants and the repository's name: the clone and the JSON of what setup exported. */
 export const imagePaths = (repo) => ({ checkout: `${IMAGE_DIR}/${repo.name}`, envFile: `${IMAGE_DIR}/setup-env.json` });
 /** The tags a build sandbox is created with (the adapter adds `snapshot` when it is kept as an image). */
-export const imageTags = (repoId, sha) => ({ factory: "image", [IMAGE_TAG]: String(repoId), sha });
+export const imageTags = (repoId, sha) => ({ pendulum: "image", [IMAGE_TAG]: String(repoId), sha });
 
 /**
  * One build in the record, checked field by field; null when it is not one. `made`: imageMade's digest of the
@@ -82,12 +82,12 @@ export function coverHead(builds, { source, head, attempt = null }) {
 /**
  * The digest of what the image is made from outside the repository's tree: the setup command, the install command, the
  * exact version of each harness CLI it installs (`versions`, package to version: `harness_version` resolved, `latest`
- * included), the vendor's base image and Factory's own build code (`factory`, the plugin's digest: an image another
- * Factory built is built again once). A build records it (`made`); a change to any of them builds again. Null when the
+ * included), the vendor's base image and Pendulum's own build code (`pendulum`, the plugin's digest: an image another
+ * Pendulum built is built again once). A build records it (`made`); a change to any of them builds again. Null when the
  * versions are not known (`versions` null), so nothing is taken as unchanged.
  */
-export const imageMade = ({ setup = "", install = "", versions = null, base = "", factory = "" }) =>
-  versions && typeof versions === "object" ? createHash("sha256").update(JSON.stringify([setup || "", install || "", Object.entries(versions).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)), base || "", factory || ""])).digest("hex") : null;
+export const imageMade = ({ setup = "", install = "", versions = null, base = "", pendulum = "" }) =>
+  versions && typeof versions === "object" ? createHash("sha256").update(JSON.stringify([setup || "", install || "", Object.entries(versions).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)), base || "", pendulum || ""])).digest("hex") : null;
 
 /**
  * Files a program reads by its own convention from the directory it runs in, which the setup guard does not follow
@@ -102,7 +102,7 @@ const CONVENTION_FILES = new Set(["Makefile", "makefile", "GNUmakefile", "justfi
  * or a requirements list (the dependency store), a toolchain pin or package-manager configuration (logic.mjs
  * toolchainFile: `.nvmrc`, `.tool-versions`, `mise.toml`, `rust-toolchain.toml` and the rest, what setup installs
  * from, and a path the repository's `toolchain_paths` setting covers, `paths`), and a file a program reads by convention
- * (CONVENTION_FILES); any file setup or the install runs (guardCovers); when either may run a file Factory cannot name
+ * (CONVENTION_FILES); any file setup or the install runs (guardCovers); when either may run a file Pendulum cannot name
  * (`unresolved`), any file.
  */
 export function imageTouch(files, guards = [], paths = []) {
@@ -112,8 +112,8 @@ export function imageTouch(files, guards = [], paths = []) {
 }
 
 /** The record comment's JSON line (`<` and `>` escaped, as the sandbox record's) and its parse. */
-export const imageMarkerLine = (builds) => `<!-- factory:image ${JSON.stringify({ builds }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
-const LINE = /^<!-- factory:image (\{[^\n]*\}) -->$/m;
+export const imageMarkerLine = (builds) => `<!-- pendulum:image ${JSON.stringify({ builds }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+const LINE = /^<!-- pendulum:image (\{[^\n]*\}) -->$/m;
 export function imageRecordOf(body) {
   const m = LINE.exec(body || "");
   if (!m) return [];
@@ -125,10 +125,10 @@ export function imageRecordOf(body) {
   }
 }
 
-/** Factory's image issue, or null (github.mjs findRecordIssue: its own, with the exact title, locked on Actions). */
+/** Pendulum's image issue, or null (github.mjs findRecordIssue: its own, with the exact title, locked on Actions). */
 export const findImageIssue = (repo, opts, { actions = process.env.GITHUB_ACTIONS === "true" } = {}) => findRecordIssue(repo, { label: IMAGE_LABEL, title: IMAGE_TITLE }, opts, { actions });
 
-/** The builds Factory recorded, newest first: its own marker comment on its own image issue only. */
+/** The builds Pendulum recorded, newest first: its own marker comment on its own image issue only. */
 export async function listImages(repo, opts) {
   const issue = await findImageIssue(repo, opts);
   if (!issue) return { issue: null, builds: [] };
@@ -138,7 +138,7 @@ export async function listImages(repo, opts) {
 }
 
 /**
- * Record a build (failed ones too, with no snapshot), newest first, on Factory's image issue: made the first time,
+ * Record a build (failed ones too, with no snapshot), newest first, on Pendulum's image issue: made the first time,
  * closed and locked, so it neither shows among open issues nor takes comments. Codes, ids and times only.
  */
 export async function recordImage(repo, entry, opts) {
@@ -146,27 +146,27 @@ export async function recordImage(repo, entry, opts) {
 }
 
 /** Record that `head` changes nothing the image built from `source` is made from (coverHead). */
-export const recordCover = (repo, cover, opts) => writeRecord(repo, (builds) => coverHead(builds, cover), opts, `Factory's sandbox image: \`${cover.head.slice(0, 7)}\` changes nothing the image is made from.`);
+export const recordCover = (repo, cover, opts) => writeRecord(repo, (builds) => coverHead(builds, cover), opts, `Pendulum's sandbox image: \`${cover.head.slice(0, 7)}\` changes nothing the image is made from.`);
 
 async function writeRecord(repo, change, opts, said = null) {
   let { issue, builds } = await listImages(repo, opts);
   if (!issue) {
-    const body = "Factory keeps the record of this repository's sandbox image here: what each build made, from which head, in how long. Factory reads only its own comment. Do not reopen.";
-    issue = await openRecordIssue(repo, { label: IMAGE_LABEL, color: "5319e7", description: "Factory's sandbox image record", title: IMAGE_TITLE, body }, opts);
+    const body = "Pendulum keeps the record of this repository's sandbox image here: what each build made, from which head, in how long. Pendulum reads only its own comment. Do not reopen.";
+    issue = await openRecordIssue(repo, { label: IMAGE_LABEL, color: "5319e7", description: "Pendulum's sandbox image record", title: IMAGE_TITLE, body }, opts);
   }
   const next = change(builds);
   const e = next[0];
   const human = said ?? (e.attempt
-    ? `Factory's sandbox image: a build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) started at ${e.builtAt.slice(0, 16)}Z.`
+    ? `Pendulum's sandbox image: a build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) started at ${e.builtAt.slice(0, 16)}Z.`
     : e.snapshot
-    ? `Factory's sandbox image: \`${e.snapshot}\` (${e.vendor}) from \`${e.sha.slice(0, 7)}\`, built in ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`
-    : `Factory's sandbox image: the build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) failed after ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`);
+    ? `Pendulum's sandbox image: \`${e.snapshot}\` (${e.vendor}) from \`${e.sha.slice(0, 7)}\`, built in ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`
+    : `Pendulum's sandbox image: the build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) failed after ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`);
   await upsertComment(repo, issue, marker(issue, "image"), `${imageMarkerLine(next)}\n${human}`, opts);
   return issue;
 }
 
 /**
- * The vendor's images for this repository, newest first: sandboxes in Factory's project with the repository's tag,
+ * The vendor's images for this repository, newest first: sandboxes in Pendulum's project with the repository's tag,
  * stopped, with a head and a snapshot tag. `others` are the rest with its tag (a build running, or one a crashed job left).
  */
 export async function vendorImages(adapter, repoId) {
@@ -186,7 +186,7 @@ export function verifiedRecords(builds, images, vendor) {
   });
 }
 
-/** Whether the vendor still lists the build's snapshot ready, in Factory's project (it expires 30 days after last use). */
+/** Whether the vendor still lists the build's snapshot ready, in Pendulum's project (it expires 30 days after last use). */
 export const imageReady = async (adapter, b) => (await adapter.snapshots(b.source)).some((s) => s.snapshot === b.snapshot && s.state === "ready");
 
 /**
@@ -201,8 +201,8 @@ export async function currentBuild(adapter, repo, verified, opts) {
 /**
  * What a stage's sandbox starts from: `{ snapshot, sha, checkout, envFile, builtAt }` for `adapter.create({ snapshot })`,
  * or null when there is no usable image (create from `adapter.baseImage(...)` and run setup cold). The newest build
- * Factory recorded that the vendor's listing confirms, whose snapshot is ready and whose head is on the default branch.
- * `opts` carries the Factory App's token (Factory's login must be known: setSelf), `repoId` the repository's id.
+ * Pendulum recorded that the vendor's listing confirms, whose snapshot is ready and whose head is on the default branch.
+ * `opts` carries the Pendulum App's token (Pendulum's login must be known: setSelf), `repoId` the repository's id.
  */
 export async function currentImage(adapter, repo, { repoId = null, ...opts }) {
   const id = repoId ?? (await getRepo(repo, opts)).id;
@@ -211,7 +211,7 @@ export async function currentImage(adapter, repo, { repoId = null, ...opts }) {
   return b ? { snapshot: b.snapshot, sha: b.sha, builtAt: b.builtAt, ...imagePaths(repo) } : null;
 }
 
-/** Milliseconds of image builds (failed ones included) Factory recorded on `now`'s UTC day. */
+/** Milliseconds of image builds (failed ones included) Pendulum recorded on `now`'s UTC day. */
 export function todaysBuildMs(builds, now = new Date()) {
   const day = now.toISOString().slice(0, 10);
   return builds.filter((b) => b.builtAt.slice(0, 10) === day).reduce((sum, b) => sum + (b.buildMs ?? 0), 0);
@@ -226,7 +226,7 @@ export function lastNightly(now = new Date()) {
 /**
  * Whether this event builds the image. `trigger` is `merge` (a push to the default branch), `nightly` (the nightly
  * schedule), `owed` (the dispatcher saw a head an earlier day left unbuilt, imageOwed) or `manual` (workflow_dispatch). `current` is the newest confirmed, ready image; `lastAttemptAt` when the
- * newest build Factory recorded started, failed ones included. The current image stands for a head only while it was
+ * newest build Pendulum recorded started, failed ones included. The current image stands for a head only while it was
  * made as this build would be (`made` equal to `current.made`, imageMade; an unknown `made` stands for the head it was
  * built from) and is younger than `maxAgeDays` (image_max_age_days: the base image and what setup fetches without a
  * pin move on with no change in the repository). While it does, its own head is not built again, except by hand; nor
@@ -252,14 +252,14 @@ export function imageDecision({ trigger, refresh, head, current, made = null, un
 
 /**
  * Whether the image is owed a build now (the dispatcher's tick runs the image job when it is): the default branch's
- * head (`head`, committed at `headAt`) is in no build Factory recorded (`builds`, newest first: built, failed, or only
+ * head (`head`, committed at `headAt`) is in no build Pendulum recorded (`builds`, newest first: built, failed, or only
  * started) and no build covers it (coverHead), it was committed before today's 00:00 UTC (a head an earlier day's minutes or `image_refresh: nightly`
  * left to the nightly build; a merge today builds on its own push), and today's turn allows one: `merge`, today's
  * builds under `dailyMinutes`; `nightly`, none tried yet today. So an owed build runs on the first dispatcher tick of
  * the UTC day, an event's or a wake's, never on GitHub's nightly cron alone, which stays the backstop.
  */
 export function imageOwed({ refresh, head, headAt, builds = [], todayMs, dailyMinutes, now = new Date() }) {
-  // Any build of the head Factory recorded ends the owing: built, failed, or only started (an attempt a crash, a timeout
+  // Any build of the head Pendulum recorded ends the owing: built, failed, or only started (an attempt a crash, a timeout
   // or a vendor error left), and so does a build that covers it. The next merge or the nightly cron tries again, never another tick.
   if (!head || builds.some((b) => b.sha === head || b.covers === head)) return false;
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
@@ -280,7 +280,7 @@ export function owedAttempt({ builds, tip, tipAt, refresh, dailyMinutes, vendor,
 }
 
 /**
- * imageOwed from GitHub: Factory's record and the default branch's head commit (`commits/HEAD`), three reads. False when either
+ * imageOwed from GitHub: Pendulum's record and the default branch's head commit (`commits/HEAD`), three reads. False when either
  * cannot be read: the next tick, the next merge or the nightly cron tries again.
  */
 export async function imageOwedNow(repo, { refresh, dailyMinutes, now = new Date() }, opts) {
@@ -299,7 +299,7 @@ export function imageWaits({ built = false, olderImage = false, now = Date.now()
 /** The images a build destroys: all but the newest KEEP by the vendor's clock, never `keep` (the one just built). */
 export const staleImages = (images, keep) => images.filter((i) => i.source !== keep).slice(KEEP - 1);
 
-/** When Factory recorded a build (its build's end), in ms; a launcher reading the record sees it from then. */
+/** When Pendulum recorded a build (its build's end), in ms; a launcher reading the record sees it from then. */
 const recordedAt = (b) => Date.parse(b.builtAt) + (Number.isFinite(b.buildMs) ? b.buildMs : 0);
 
 /**
@@ -338,7 +338,7 @@ export function imagePrune(images, current, verified = [], now = Date.now()) {
 
 /**
  * Destroy this repository's images no stage needs (prunableImages), from the vendor's listing in this project and
- * Factory's own record: never another repository's (the listing is by this repository's tag). Returns what it did per
+ * Pendulum's own record: never another repository's (the listing is by this repository's tag). Returns what it did per
  * image, `images: [{source, snapshot, action: "destroyed" | "would destroy" | "skipped", reason}]`, and `until`
  * (imagePrune): when an image it kept for a starting stage becomes prunable, or null.
  */

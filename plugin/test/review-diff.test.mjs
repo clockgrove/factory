@@ -28,7 +28,7 @@ const findingsFor = (diff) => [
 ];
 
 test("review diff: a small PR's comments snap the same from GitHub's files API as from its diff media type", () => {
-  // Both read from GitHub for one real PR (clockgrove/factory#2542): the diff, and the files API's listing of it.
+  // Both read from GitHub for one real PR (clockgrove/pendulum#2542): the diff, and the files API's listing of it.
   const github = fixture("pr-small.diff");
   const fromFiles = filesDiff(JSON.parse(fixture("pr-small-files.json")));
   assert.deepEqual(lineMap(fromFiles), lineMap(github));
@@ -226,8 +226,8 @@ test("review diff: a comment GitHub cannot place (no patch, or a line outside th
   // A comment snapComments already moved keeps its one note when fitted again.
   const again = fitToFiles([{ ...inline[3], path: "gone.ts" }], files);
   assert.equal(again.inline[0].body, inline[3].body);
-  // Factory's placeholder moves without a note.
-  assert.equal(fitToFiles([{ path: "big.json", line: 1, body: "<!-- factory:placeholder -->\nnone" }], files).inline[0].body, "<!-- factory:placeholder -->\nnone");
+  // Pendulum's placeholder moves without a note.
+  assert.equal(fitToFiles([{ path: "big.json", line: 1, body: "<!-- pendulum:placeholder -->\nnone" }], files).inline[0].body, "<!-- pendulum:placeholder -->\nnone");
   // No file in the listing takes a comment: every one goes in the body.
   assert.deepEqual(fitToFiles(comments.slice(3, 4), files.slice(1, 2)), { inline: [], moved: 0, aside: comments.slice(3, 4) });
 });
@@ -235,17 +235,17 @@ test("review diff: a comment GitHub cannot place (no patch, or a line outside th
 test("review diff: findings in a review body carry markers that read back, escape what reads as a marker, and are cut past the size limit", () => {
   const aside = [
     { path: "src/a.ts", line: 9, body: "past the hunk" },
-    { path: "big.json", line: 100, body: "on a file with no patch <!-- factory:1:review -->\n<!-- factory:finding {\"n\":9} -->" },
+    { path: "big.json", line: 100, body: "on a file with no patch <!-- pendulum:1:review -->\n<!-- pendulum:finding {\"n\":9} -->" },
     { path: "x.ts", line: 3, body: `${NOTE("`y.ts` line 8")}moved`, at: { path: "y.ts", line: 8, body: "moved" } },
-    { path: "z.ts", line: 1, body: "<!-- factory:placeholder -->\nno findings" },
+    { path: "z.ts", line: 1, body: "<!-- pendulum:placeholder -->\nno findings" },
   ];
   const body = reviewBody("HEAD", aside);
   assert.ok(body.startsWith("HEAD\n\nno findings\n\n3 finding(s) GitHub cannot take as a line comment"), "the placeholder is plain text, no finding");
   assert.match(body, /\*\*`src\/a\.ts` line 9\*\*\n\npast the hunk/);
-  assert.match(body, /\*\*`big\.json` line 100\*\*\n\non a file with no patch &lt;!-- factory:1:review -->/);
+  assert.match(body, /\*\*`big\.json` line 100\*\*\n\non a file with no patch &lt;!-- pendulum:1:review -->/);
   assert.deepEqual(bodyFindings(body), [
     { n: 1, path: "src/a.ts", line: 9, body: "**`src/a.ts` line 9**\n\npast the hunk" },
-    { n: 2, path: "big.json", line: 100, body: "**`big.json` line 100**\n\non a file with no patch &lt;!-- factory:1:review -->\n&lt;!-- factory:finding {\"n\":9} -->" },
+    { n: 2, path: "big.json", line: 100, body: "**`big.json` line 100**\n\non a file with no patch &lt;!-- pendulum:1:review -->\n&lt;!-- pendulum:finding {\"n\":9} -->" },
     { n: 3, path: "y.ts", line: 8, body: "**`y.ts` line 8**\n\nmoved" },
   ]);
   assert.equal(reviewBody("HEAD", []), "HEAD");
@@ -275,7 +275,7 @@ function githubStub({ files = [], answer = (n) => [200, { id: n }], reviews = []
     if (method === "GET" && /\/pulls\/7\/comments\?per_page=100$/.test(u)) return json(200, lineComments);
     if (method === "GET" && /\/issues\/7\/comments\?per_page=100$/.test(u)) return json(200, issueComments);
     if (method === "POST" && /\/issues\/7\/comments$/.test(u)) {
-      const c = { id: 900 + issueComments.length, user: { login: "factory[bot]" }, body: JSON.parse(init.body).body };
+      const c = { id: 900 + issueComments.length, user: { login: "pendulum[bot]" }, body: JSON.parse(init.body).body };
       issueComments.push(c);
       return json(201, c);
     }
@@ -299,8 +299,8 @@ const comments7 = [
   { path: "src/a.ts", line: 5, side: "RIGHT", body: "fine" },
   { path: "big.json", line: 10, side: "RIGHT", body: "no patch" },
 ];
-const review7 = { body: "<!-- factory:7:review -->\nFactory reviewer: one comment-only pass, 2 comment(s).", comments: comments7, commitId: "c".repeat(40) };
-// GitHub's answer to a line comment on a file it lists without a patch (clockgrove/factory-scratch#238).
+const review7 = { body: "<!-- pendulum:7:review -->\nPendulum reviewer: one comment-only pass, 2 comment(s).", comments: comments7, commitId: "c".repeat(40) };
+// GitHub's answer to a line comment on a file it lists without a patch (clockgrove/pendulum-scratch#238).
 const tooLarge = [422, { message: "Unprocessable Entity", errors: ["Diff entry big.json diff is too large"] }];
 const refusesBig = (n, b) => (b.comments.some((c) => c.path === "big.json") ? tooLarge : [200, { id: n }]);
 
@@ -313,7 +313,7 @@ test("review diff: postReview moves what GitHub cannot place to a line it takes,
     const placed = await postReview(repo7, 7, review7, { token: "t" });
     assert.deepEqual(placed, { review: { id: 1 }, inline: 2, moved: 1, inBody: 0, retried: 0, sent: gh.posts[0].comments });
     assert.equal(gh.posts.length, 1);
-    assert.deepEqual(gh.posts[0].comments, [comments7[0], { path: "src/a.ts", line: 5, side: "RIGHT", body: `${NOTE("`big.json` line 10")}no patch` }], "Factory's own fields stay off GitHub's call");
+    assert.deepEqual(gh.posts[0].comments, [comments7[0], { path: "src/a.ts", line: 5, side: "RIGHT", body: `${NOTE("`big.json` line 10")}no patch` }], "Pendulum's own fields stay off GitHub's call");
     assert.equal(gh.posts[0].event, "COMMENT");
     assert.equal(gh.posts[0].commit_id, "c".repeat(40));
     assert.equal(gh.posts[0].body, review7.body);
@@ -372,20 +372,20 @@ test("review diff: a diff that only deletes still gets every finding posted and 
     ["src/a.ts", 4, "no place named"],
   ]);
   const realFetch = globalThis.fetch;
-  setSelf("factory[bot]");
+  setSelf("pendulum[bot]");
   try {
     // GitHub lists the deleted file with a patch of removed lines only: every finding goes in the body, on the first post.
     const listing = [{ filename: "old.ts", status: "removed", changes: 2, patch: "@@ -1,2 +0,0 @@\n-a\n-b" }];
     const comments = snapComments(findings, gone);
     let gh = githubStub({ files: listing });
     globalThis.fetch = gh.fetch;
-    const review = { body: "<!-- factory:7:review -->\nFactory reviewer: one comment-only pass, 3 comment(s).", comments, commitId: "c".repeat(40) };
+    const review = { body: "<!-- pendulum:7:review -->\nPendulum reviewer: one comment-only pass, 3 comment(s).", comments, commitId: "c".repeat(40) };
     assert.deepEqual(await postReview(repo7, 7, review, { token: "t" }), { review: { id: 1 }, inline: 0, moved: 0, inBody: 3, retried: 0, sent: [] });
     assert.deepEqual(gh.posts[0].comments, []);
     assert.deepEqual(bodyFindings(gh.posts[0].body).map((f) => [f.n, f.path, f.line]), [[1, "old.ts", 2], [2, "src/a.ts", 40], [3, "", null]]);
     assert.match(gh.posts[0].body, /\*\*the PR as a whole \(no file named\)\*\*\n\nno place named/);
     // They count until answered: the deletion-only PR does not go to merge with them unseen.
-    gh = githubStub({ reviews: [{ id: 1, user: { login: "factory[bot]" }, body: gh.posts[0].body }] });
+    gh = githubStub({ reviews: [{ id: 1, user: { login: "pendulum[bot]" }, body: gh.posts[0].body }] });
     globalThis.fetch = gh.fetch;
     const open = await unaddressedReviewComments(repo7, 7, null, { token: "t", reviewIds: new Set([1]) });
     assert.deepEqual(open.map((c) => c.id), ["r1-1", "r1-2", "r1-3"]);
@@ -393,11 +393,11 @@ test("review diff: a diff that only deletes still gets every finding posted and 
     // No listing: what has no file and line goes in the body at once; no 422 round trip for it.
     gh = githubStub({ files: new Error("x") });
     globalThis.fetch = gh.fetch;
-    const placeholder = [{ path: null, line: null, side: "RIGHT", body: "<!-- factory:placeholder -->\nFactory reviewer: no findings; the pass ran and returned nothing line-tied." }];
+    const placeholder = [{ path: null, line: null, side: "RIGHT", body: "<!-- pendulum:placeholder -->\nPendulum reviewer: no findings; the pass ran and returned nothing line-tied." }];
     assert.deepEqual(await postReview(repo7, 7, { ...review, comments: placeholder }, { token: "t" }), { review: { id: 1 }, inline: 0, moved: 0, inBody: 0, retried: 0, sent: [] });
     assert.equal(gh.posts.length, 1);
     assert.deepEqual(gh.posts[0].comments, []);
-    assert.match(gh.posts[0].body, /\n\nFactory reviewer: no findings; the pass ran and returned nothing line-tied\.$/);
+    assert.match(gh.posts[0].body, /\n\nPendulum reviewer: no findings; the pass ran and returned nothing line-tied\.$/);
     assert.deepEqual(bodyFindings(gh.posts[0].body), []);
   } finally {
     setSelf(null);
@@ -407,16 +407,16 @@ test("review diff: a diff that only deletes still gets every finding posted and 
 
 test("review diff: findings a 422 put in the review body count as unaddressed, reach the answer pass, are answered once and count as answered once the finding check resolves them", async () => {
   const realFetch = globalThis.fetch;
-  setSelf("factory[bot]");
+  setSelf("pendulum[bot]");
   try {
     // The 422 retry's review, as GitHub stores it.
     let gh = githubStub({ files: new Error("x"), answer: refusesBig });
     globalThis.fetch = gh.fetch;
     await postReview(repo7, 7, review7, { token: "t" });
-    const stored = { id: 2, user: { login: "factory[bot]" }, body: gh.posts[1].body };
+    const stored = { id: 2, user: { login: "pendulum[bot]" }, body: gh.posts[1].body };
     // A stranger's copy of the same body, and a stranger's reply marker: neither counts.
     const forged = { id: 3, user: { login: "mallory" }, author_association: "NONE", body: stored.body };
-    const issueComments = [{ id: 50, user: { login: "mallory" }, author_association: "NONE", body: `<!-- factory:7:reply:${bodyFindingId(2, 1)} -->\nanswered` }];
+    const issueComments = [{ id: 50, user: { login: "mallory" }, author_association: "NONE", body: `<!-- pendulum:7:reply:${bodyFindingId(2, 1)} -->\nanswered` }];
     gh = githubStub({ reviews: [stored, forged], issueComments });
     globalThis.fetch = gh.fetch;
     for (const reviewIds of [new Set([2]), null]) {
@@ -424,22 +424,22 @@ test("review diff: findings a 422 put in the review body count as unaddressed, r
       assert.deepEqual(open.map((c) => [c.id, c.path, c.line]), [["r2-1", "src/a.ts", 5], ["r2-2", "big.json", 10]]);
       assert.match(open[1].body, /no patch$/);
     }
-    // The answer pass's replies.json names them by those ids; Factory answers each once, in a PR comment.
+    // The answer pass's replies.json names them by those ids; Pendulum answers each once, in a PR comment.
     const allowed = ["r2-1", "r2-2", 11];
     const text = JSON.stringify([{ id: "r2-1", body: "fixed in abc" }, { id: "r2-1", body: "twice" }, { id: 11, body: "ok" }, { id: "r9-9", body: "not given" }]);
     assert.deepEqual(parseReplies(text, allowed), [{ id: "r2-1", body: "fixed in abc" }, { id: 11, body: "ok" }]);
     assert.equal(await postReplies(repo7, 7, 7, JSON.stringify([{ id: "r2-1", body: "fixed in abc" }]), allowed, { token: "t" }), 1);
-    assert.match(issueComments.at(-1).body, /^<!-- factory:7:reply:r2-1 -->\n/);
+    assert.match(issueComments.at(-1).body, /^<!-- pendulum:7:reply:r2-1 -->\n/);
     // The reply alone leaves it open, with that answer (#368); the finding check's resolved marker answers it, a stranger's never.
     const before = await unaddressedReviewComments(repo7, 7, null, { token: "t", reviewIds: new Set([2]) });
     assert.deepEqual(before.map((c) => [c.id, c.earlier ?? null]), [["r2-1", "fixed in abc"], ["r2-2", null]]);
-    issueComments.push({ id: 51, user: { login: "mallory" }, author_association: "NONE", body: "<!-- factory:7:resolved:r2-1 -->\nresolved" });
+    issueComments.push({ id: 51, user: { login: "mallory" }, author_association: "NONE", body: "<!-- pendulum:7:resolved:r2-1 -->\nresolved" });
     assert.deepEqual((await unaddressedReviewComments(repo7, 7, null, { token: "t", reviewIds: new Set([2]) })).map((c) => c.id), ["r2-1", "r2-2"]);
-    issueComments.push({ id: 52, user: { login: "factory[bot]" }, author_association: "NONE", body: "<!-- factory:7:resolved:r2-1 -->\nFactory: the answer to review finding r2-1 (in the review body) resolves it." });
+    issueComments.push({ id: 52, user: { login: "pendulum[bot]" }, author_association: "NONE", body: "<!-- pendulum:7:resolved:r2-1 -->\nPendulum: the answer to review finding r2-1 (in the review body) resolves it." });
     const open = await unaddressedReviewComments(repo7, 7, null, { token: "t", reviewIds: new Set([2]) });
     assert.deepEqual(open.map((c) => c.id), ["r2-2"]);
     // A PR with no finding in a body makes no extra call for the PR's comments.
-    gh = githubStub({ reviews: [{ id: 4, user: { login: "factory[bot]" }, body: review7.body }] });
+    gh = githubStub({ reviews: [{ id: 4, user: { login: "pendulum[bot]" }, body: review7.body }] });
     globalThis.fetch = gh.fetch;
     assert.deepEqual(await unaddressedReviewComments(repo7, 7, null, { token: "t", reviewIds: new Set([4]) }), []);
     assert.ok(!gh.asked.some((a) => a.includes("/issues/7/comments")));

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, factoryReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, pendulumReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
 import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, quotaNow, quotaResource, spentCandidate, spentOn, spentResetOf, spentUntil, stoppedWaiting, waitingOutages } from "./network.mjs";
@@ -36,7 +36,7 @@ export class GitHubError extends Error {
 /**
  * Whether an error is GitHub or the network failing for now: no answer at all (`transport`, here and in the token
  * mint), a 5xx, a 429 or a rate limit (REST or GraphQL RATE_LIMITED). Anything else is permanent: a refusal (4xx), any
- * other GraphQL error, a git failure, Factory's own errors.
+ * other GraphQL error, a git failure, Pendulum's own errors.
  */
 export const transientError = (e) => !!e && (e.transport === true || e.rateLimited === true || (Number.isInteger(e.status) && (e.status >= 500 || e.status === 429)));
 
@@ -80,7 +80,7 @@ async function call(url, { method = "GET", body, token, accept = "application/vn
     headers: {
       Accept: accept,
       "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "clockgrove-factory",
+      "User-Agent": "clockgrove-pendulum",
       ...(t ? { Authorization: `Bearer ${t}` } : {}),
       ...(etag ? { "If-None-Match": etag } : {}),
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
@@ -198,7 +198,7 @@ function askedWaitMs(headers, now = Date.now()) {
 
 /**
  * A wait spread by up to 30% so many callers that failed together do not retry together: either way for a backoff of
- * Factory's own, only longer for a wait GitHub asked for (never below its value). `RETRY.random` is the source.
+ * Pendulum's own, only longer for a wait GitHub asked for (never below its value). `RETRY.random` is the source.
  */
 const jitter = (ms, asked) => Math.round(ms * (asked ? 1 + 0.3 * RETRY.random() : 0.7 + 0.6 * RETRY.random()));
 
@@ -422,8 +422,8 @@ const sameText = (b) => String(b ?? "").replace(/\r\n?/g, "\n").replace(/[ \t]+$
 /**
  * For a new comment on an issue or PR (POST …/issues/N/comments) whose caller gave no `landed`: a read of the comments
  * updated since just before the call (on GitHub's clock, less CLOCK_SKEW_MS) that finds one with the body sent (sameText).
- * Its author must be Factory's own login when that is known, unless the body carries a Factory marker: a notice is
- * posted with the notice App's token, whose login is not the one Factory reads. So a comment GitHub made before failing
+ * Its author must be Pendulum's own login when that is known, unless the body carries a Pendulum marker: a notice is
+ * posted with the notice App's token, whose login is not the one Pendulum reads. So a comment GitHub made before failing
  * (a 5xx, a dropped answer) is found, not posted twice. Its reads keep the call's `deadlineAt`. Null for any other call.
  */
 function commentLanded(method, url, body, { token, signal, deadlineAt }) {
@@ -431,7 +431,7 @@ function commentLanded(method, url, body, { token, signal, deadlineAt }) {
   if (String(method).toUpperCase() !== "POST" || !/\/issues\/\d+\/comments$/.test(route.pathname) || typeof body?.body !== "string") return null;
   const from = new Date(githubNow() - CLOCK_SKEW_MS).toISOString();
   const text = sameText(body.body);
-  const anyAuthor = /<!-- factory:\d+:/.test(text);
+  const anyAuthor = /<!-- pendulum:\d+:/.test(text);
   return async () => {
     const list = await rest(`${route.origin}${route.pathname}?since=${encodeURIComponent(from)}&per_page=100`, { token, paginate: true, signal, deadlineAt });
     return (list || []).find((c) => sameText(c?.body) === text && (anyAuthor || !selfLogin() || isSelf(c))) || null;
@@ -533,14 +533,14 @@ export async function repositoryVariables(repo, { token, cache = null } = {}) {
 }
 
 /**
- * The FACTORY_* names among the organization variables shared with the repository (one list call, the local token's
- * Variables read), which Factory's variable layer does not take (inputs.mjs organizationVariablesLine); null when they
+ * The PENDULUM_* names among the organization variables shared with the repository (one list call, the local token's
+ * Variables read), which Pendulum's variable layer does not take (inputs.mjs organizationVariablesLine); null when they
  * could not be listed (a repository a user owns has none to list).
  */
 export async function organizationVariableNames(repo, { token } = {}) {
   try {
     const list = await rest(`repos/${repo.full}/actions/organization-variables?per_page=30`, { token, paginate: true });
-    return (list || []).map((v) => String(v?.name ?? "").toUpperCase()).filter((n) => n.startsWith("FACTORY_")).sort();
+    return (list || []).map((v) => String(v?.name ?? "").toUpperCase()).filter((n) => n.startsWith("PENDULUM_")).sort();
   } catch {
     return null;
   }
@@ -650,10 +650,10 @@ export async function removeLabel(repo, number, label, opts) {
   }
 }
 
-/** Set exactly one of the factory:* state labels. */
+/** Set exactly one of the pendulum:* state labels. */
 export async function setStateLabel(repo, number, state, opts) {
-  const all = ["factory:running", "factory:blocked", "factory:question", "factory:in-review"];
-  const want = state ? `factory:${state}` : null;
+  const all = ["pendulum:running", "pendulum:blocked", "pendulum:question", "pendulum:in-review"];
+  const want = state ? `pendulum:${state}` : null;
   for (const l of all) if (l !== want) await removeLabel(repo, number, l, opts);
   if (want) await addLabels(repo, number, [want], opts);
 }
@@ -670,10 +670,10 @@ export async function ensureLabel(repo, name, color, description, opts) {
 }
 
 /**
- * One of Factory's own record issues (the sandbox image's, image.mjs; the account holds', route-holds.mjs), or null: the
- * oldest issue Factory's own login opened with the exact `title`. The `label` is only a hint (the first, cheap query);
- * without it, Factory's own issues are searched by creator (every page of them), unless `fallback` is false: then the
- * label's one query alone. On Actions the issue must be locked, as Factory leaves it, so an unlocked one (Factory's, but
+ * One of Pendulum's own record issues (the sandbox image's, image.mjs; the account holds', route-holds.mjs), or null: the
+ * oldest issue Pendulum's own login opened with the exact `title`. The `label` is only a hint (the first, cheap query);
+ * without it, Pendulum's own issues are searched by creator (every page of them), unless `fallback` is false: then the
+ * label's one query alone. On Actions the issue must be locked, as Pendulum leaves it, so an unlocked one (Pendulum's, but
  * not the record's) is not trusted.
  */
 export async function findRecordIssue(repo, { label, title }, opts, { actions = process.env.GITHUB_ACTIONS === "true", fallback = true } = {}) {
@@ -689,9 +689,9 @@ export async function findRecordIssue(repo, { label, title }, opts, { actions = 
 }
 
 /**
- * Open one of Factory's own record issues (findRecordIssue): `label` made when absent, the issue opened with `title` and
+ * Open one of Pendulum's own record issues (findRecordIssue): `label` made when absent, the issue opened with `title` and
  * `body`, then closed and locked, so it neither shows among open issues nor takes comments. Returns its number. Locked
- * is part of what makes it Factory's record on Actions: a failed close or lock throws, its error carrying the issue
+ * is part of what makes it Pendulum's record on Actions: a failed close or lock throws, its error carrying the issue
  * opened (`issue`) for the caller to clean up.
  */
 export async function openRecordIssue(repo, { label, color, description, title, body }, opts) {
@@ -711,13 +711,13 @@ export async function listComments(repo, number, opts) {
 }
 
 /**
- * Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). `head`: Factory's own text
+ * Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). `head`: Pendulum's own text
  * after the marker on its first line (the plan comment's record, handoff.mjs planTextMarker), or a function making it
  * from the head the comment has now; `keepHead` keeps the one an existing comment has instead.
  */
 export async function upsertComment(repo, number, mark, body, opts, { head = "", keepHead = false } = {}) {
-  // Only Factory's own comment, the marker on its first line, is ours to edit: anyone can paste the marker into theirs.
-  // Before Factory knows its login (a failed read), one by someone who can push is.
+  // Only Pendulum's own comment, the marker on its first line, is ours to edit: anyone can paste the marker into theirs.
+  // Before Pendulum knows its login (a failed read), one by someone who can push is.
   const ours = (c) => (selfLogin() ? isSelf(c) : trustedAuthor(c)) && (c.body || "").startsWith(mark);
   const existing = (await listComments(repo, number, opts)).find(ours);
   const now = existing ? /^[^\n]*/.exec(existing.body)[0].slice(mark.length).replace(/\r$/, "") : null;
@@ -856,14 +856,14 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
 }
 
 /**
- * The PR's review threads as Factory sorts them, each `{id, rootId, resolved, author, path, line, by, answered}`: `rootId` the root comment's REST id, `author` the root comment's, named as REST names it (an App's `<slug>[bot]`; GraphQL
- * names a Bot without the suffix), `line` the current line, else the original one. `by` is "ours" for a thread Factory's
+ * The PR's review threads as Pendulum sorts them, each `{id, rootId, resolved, author, path, line, by, answered}`: `rootId` the root comment's REST id, `author` the root comment's, named as REST names it (an App's `<slug>[bot]`; GraphQL
+ * names a Bot without the suffix), `line` the current line, else the original one. `by` is "ours" for a thread Pendulum's
  * reviewer opened (the root belongs to the review carrying marker(issue, "review"), by a trusted author: trustedAuthor),
- * "named" for one a reviewer Factory answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
+ * "named" for one a reviewer Pendulum answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
  * root comment's author), else null. `answered` is a person's answer, as the answer pass's list judges it: ours once a
- * reply by someone who can push (trustedAuthor) other than Factory's own answer exists (logic.mjs factoryReply) or the
- * root is Factory's placeholder; named once a
- * person's reply answers it (logic.mjs answersComment). Factory's own answer is the finding check's to judge
+ * reply by someone who can push (trustedAuthor) other than Pendulum's own answer exists (logic.mjs pendulumReply) or the
+ * root is Pendulum's placeholder; named once a
+ * person's reply answers it (logic.mjs answersComment). Pendulum's own answer is the finding check's to judge
  * (finding-check.mjs): only its yes resolves the thread.
  */
 export async function reviewThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
@@ -890,29 +890,29 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
     const root = comments[0];
     const review = root?.pullRequestReview;
     const ours = !!root && String(review?.body || "").includes(mark) && trustedAuthor(asRest(review?.author, review?.authorAssociation));
-    // A reviewer outside Factory is told by the root comment's own author, as the answer pass's list tells it.
+    // A reviewer outside Pendulum is told by the root comment's own author, as the answer pass's list tells it.
     const author = root?.author ? asRest(root.author).user.login : null;
     const theirs = !!root && !ours && named.has(String(author || "").toLowerCase());
     const replies = comments.slice(1).map((c) => asRest(c.author, c.authorAssociation, c.body));
-    const answered = ours ? isPlaceholder(root.body) || replies.some((r) => trustedAuthor(r) && !factoryReply(r)) : theirs ? replies.some((r) => answersComment(author, r)) : false;
+    const answered = ours ? isPlaceholder(root.body) || replies.some((r) => trustedAuthor(r) && !pendulumReply(r)) : theirs ? replies.some((r) => answersComment(author, r)) : false;
     return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : null, answered };
   });
 }
 /** The most pages of 100 review threads reviewThreads reads. */
 const THREAD_PAGES = 10;
 
-/** Resolve one review thread (pull requests write, which Factory's token has). */
+/** Resolve one review thread (pull requests write, which Pendulum's token has). */
 export async function resolveThread(id, opts) {
   await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id }, opts);
 }
 
 /**
- * Resolve the review threads Factory handles (reviewThreads: its own reviewer's, and those of the reviewers in
- * `thirdParty`) that a person answered or that hold Factory's placeholder, so a rule that requires resolved
- * conversations can merge; they stay visible on the PR. A thread Factory's own answer is in is resolved by the finding
+ * Resolve the review threads Pendulum handles (reviewThreads: its own reviewer's, and those of the reviewers in
+ * `thirdParty`) that a person answered or that hold Pendulum's placeholder, so a rule that requires resolved
+ * conversations can merge; they stay visible on the PR. A thread Pendulum's own answer is in is resolved by the finding
  * check's yes (finding-check.mjs), never here. Returns the number resolved.
  */
-export async function resolveFactoryThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
+export async function resolvePendulumThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
   let resolved = 0;
   for (const t of await reviewThreads(repo, number, issue, opts, { thirdParty })) {
     if (t.resolved || !t.by || !t.answered) continue;
@@ -1085,7 +1085,7 @@ export function logWindow(text, chars = 4000, job = null) {
   return [head, ...omitted(error.start - 1), ...error.kept, ...omitted(end.start - firstError - 1), ...end.kept].join("\n");
 }
 
-/** The most of one job log Factory holds: past it the head is cut while reading and the end kept. */
+/** The most of one job log Pendulum holds: past it the head is cut while reading and the end kept. */
 export const JOB_LOG_CAP = 8 * 1024 * 1024;
 // A finished job's log never changes: triage and the fix pass's detail read each one once.
 const LOGS = new Map();
@@ -1226,7 +1226,7 @@ export async function prComment(repo, number, body, opts) {
 /**
  * Merge exactly `sha`, never a later head: with a merge queue, enqueue with `expectedHeadOid`; without one, the merge
  * endpoint with `sha` (GitHub refuses either when the PR's head is not that commit). The squash commit's title and
- * message are Factory's (`title`, `message`), never the branch's commit messages, which could close any issue; the
+ * message are Pendulum's (`title`, `message`), never the branch's commit messages, which could close any issue; the
  * queue takes the repository's squash defaults, which setup sets to the PR's title and body. Returns "queued" or
  * "merged".
  */
@@ -1248,7 +1248,7 @@ export async function inMergeQueue(repo, number, opts) {
 
 /**
  * GitHub's record of the PR's removals from the merge queue (its timeline), newest 50: `{at, reason, actor, person}`,
- * `reason` GitHub's code, `actor` the login that removed it (`github-merge-queue` for the queue's own drops, Factory's
+ * `reason` GitHub's code, `actor` the login that removed it (`github-merge-queue` for the queue's own drops, Pendulum's
  * App when it took a stalled entry out) and `person` whether that is a user's account (a hand removal), not a bot's.
  */
 export async function mergeQueueRemovals(repo, number, opts) {
@@ -1324,7 +1324,7 @@ export async function mergeQueueHeads(repo, branch, opts) {
   return { base, entries: out.sort((a, b) => (a.position ?? 0) - (b.position ?? 0)).map(({ pr, head }) => ({ pr, head })) };
 }
 
-/** Take the PR out of the merge queue (Factory's App; the timeline names it as the actor). */
+/** Take the PR out of the merge queue (Pendulum's App; the timeline names it as the actor). */
 export async function dequeuePr(repo, nodeId, opts) {
   await graphql(`mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { mergeQueueEntry { id } } }`, { id: nodeId }, opts);
 }
@@ -1479,17 +1479,17 @@ const PROJECT_FIELDS = `
 `;
 
 /** The board's title: one per repository, since org projects share one namespace. */
-export const projectTitle = (repo) => `Factory: ${repo.name}`;
+export const projectTitle = (repo) => `Pendulum: ${repo.name}`;
 
 /**
- * The repository's Factory project, or null: by identity, the board whose node id the `project` setting holds
- * (`opts.project`, local mode's settings; else FACTORY_PROJECT, the workflow's env block on Actions), which setup records
+ * The repository's Pendulum project, or null: by identity, the board whose node id the `project` setting holds
+ * (`opts.project`, local mode's settings; else PENDULUM_PROJECT, the workflow's env block on Actions), which setup records
  * as it makes the board, when that board is linked to this repository; with no id recorded, the board linked to the
- * repository titled exactly "Factory: <repo>" (projectTitle, the title setup gives it). A recorded id that names no board,
+ * repository titled exactly "Pendulum: <repo>" (projectTitle, the title setup gives it). A recorded id that names no board,
  * or one not linked to this repository, is no board: nothing else stands in.
  */
 export async function findProject(repo, opts) {
-  const id = String(opts?.project ?? process.env.FACTORY_PROJECT ?? "").trim();
+  const id = String(opts?.project ?? process.env.PENDULUM_PROJECT ?? "").trim();
   if (id) {
     // Only a board linked to this repository: a workflow copied from another repository names that one's board. Its
     // linked repositories are read page by page (100 a page) until this one shows or none are left.
@@ -1591,7 +1591,7 @@ export async function moveCard(project, repo, issueNumber, status, opts) {
 
 export const COLUMNS = ["Queued", "Running", "In review", "Blocked", "Done"];
 
-/** Create the Factory project with the five Status options and link it to the repository. */
+/** Create the Pendulum project with the five Status options and link it to the repository. */
 export async function createProject(repo, opts) {
   const { id: repositoryId, owner } = await repositoryNodeId(repo, opts);
   const created = await graphql(`mutation($o: ID!, $t: String!) { createProjectV2(input: {ownerId: $o, title: $t}) { projectV2 { id number } } }`, { o: owner.id, t: projectTitle(repo) }, opts);
@@ -1613,13 +1613,13 @@ export async function createProject(repo, opts) {
 
 // --------------------------------------------------------------- artifacts
 
-/** An artifact never changes once uploaded: a long-lived dispatcher (factory serve) reads each one once. */
+/** An artifact never changes once uploaded: a long-lived dispatcher (pendulum serve) reads each one once. */
 const usageCache = new Map();
 const USAGE_DOWNLOADS = 8;
 
 /**
  * Today's spend by runs that upload no usage artifact (local mode, any machine, a cloud sandbox): the spend lines in
- * the progress comments and a sandbox stage's vendor comments updated today, written by Factory or someone who can
+ * the progress comments and a sandbox stage's vendor comments updated today, written by Pendulum or someone who can
  * push. Actions runs write none, so nothing here is counted twice with the artifacts.
  */
 export async function localSpendToday(repo, { dateIso = new Date().toISOString().slice(0, 10), token } = {}) {
@@ -1627,16 +1627,16 @@ export async function localSpendToday(repo, { dateIso = new Date().toISOString()
   const comments = (await rest(`repos/${repo.full}/issues/comments?since=${dateIso}T00:00:00Z&per_page=100`, { token, paginate: true })) || [];
   let usd = 0;
   for (const c of comments) {
-    if (trustedAuthor(c) && /^<!-- factory:\d+:(?:progress|vendor):/.test(c.body || "") && String(c.updated_at || "").startsWith(dateIso)) usd += spendOf(c.body);
+    if (trustedAuthor(c) && /^<!-- pendulum:\d+:(?:progress|vendor):/.test(c.body || "") && String(c.updated_at || "").startsWith(dateIso)) usd += spendOf(c.body);
   }
   return usd;
 }
 
 /** Usage artifacts uploaded today (UTC), as parsed result.json records. */
-export async function todaysUsage(repo, { prefix = "factory-usage-", token, dateIso = new Date().toISOString().slice(0, 10), download } = {}) {
+export async function todaysUsage(repo, { prefix = "pendulum-usage-", token, dateIso = new Date().toISOString().slice(0, 10), download } = {}) {
   // The artifacts endpoint wraps each page as {total_count, artifacts}; rest's pagination returns the artifacts.
   const artifacts = (await rest(`repos/${repo.full}/actions/artifacts?per_page=100`, { token, paginate: true })) || [];
-  // Names and run ids go to `gh` as arguments: only Factory's own artifact names and numeric ids.
+  // Names and run ids go to `gh` as arguments: only Pendulum's own artifact names and numeric ids.
   const today = artifacts.filter((a) => /^[A-Za-z0-9._-]+$/.test(a.name || "") && a.name.startsWith(prefix) && Number.isSafeInteger(a.workflow_run?.id) && !a.expired && String(a.created_at || "").startsWith(dateIso));
   // One download is about a second and a busy day has a hundred artifacts, so eight at a time. With a cloud sandbox
   // the dispatcher reads none of them (dispatch.mjs todaysSpend): each stage's dollars are in its spend line.
@@ -1654,7 +1654,7 @@ export async function todaysUsage(repo, { prefix = "factory-usage-", token, date
 
 /** One artifact's result.json; `gh run download` unpacks it, so nothing beyond gh is needed. */
 async function downloadArtifactResult(repo, artifact, token) {
-  const dir = mkdtempSync(join(tmpdir(), "factory-usage-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-usage-"));
   try {
     await run("gh", ["run", "download", String(artifact.workflow_run?.id), "-n", artifact.name, "-D", dir, "-R", repo.full], { env: env(token), timeoutMs: 120_000 });
     const file = [join(dir, "result.json"), join(dir, "usage", "result.json")].find(existsSync);
@@ -1666,8 +1666,8 @@ async function downloadArtifactResult(repo, artifact, token) {
 
 // ------------------------------------------------------------------- jobs
 
-/** The workflow file this run belongs to (GITHUB_WORKFLOW_REF), else factory.yml. */
-export const workflowFile = (env = process.env) => /\/(\.github\/workflows\/([^@/]+))@/.exec(env.GITHUB_WORKFLOW_REF || "")?.[2] || "factory.yml";
+/** The workflow file this run belongs to (GITHUB_WORKFLOW_REF), else pendulum.yml. */
+export const workflowFile = (env = process.env) => /\/(\.github\/workflows\/([^@/]+))@/.exec(env.GITHUB_WORKFLOW_REF || "")?.[2] || "pendulum.yml";
 
 /**
  * Issue numbers with a worker job (`work (<n>)`) not yet completed in any live run of the workflow. Needs actions: read.
@@ -1675,15 +1675,15 @@ export const workflowFile = (env = process.env) => /\/(\.github\/workflows\/([^@
  * Running Objective with no live job; a failed read must leave it alone, not Block it as vanished).
  */
 export async function activeWorkIssues(repo, opts) {
-  return (await activeFactoryJobs(repo, opts, { strict: true })).work;
+  return (await activePendulumJobs(repo, opts, { strict: true })).work;
 }
 
 /**
- * The Objectives with a live Factory job, by kind: `work (N)` and `review (factory/N)` jobs not yet completed, and the
+ * The Objectives with a live Pendulum job, by kind: `work (N)` and `review (pendulum/N)` jobs not yet completed, and the
  * dispatcher's wakes queued or sleeping (`wake (<kind> <iso>)`, logic.mjs parseWake) as `wakes: [{kind, at, startedAt}]`.
  * `strict` throws on a failed read instead of treating it as "none running" (a caller that must fail safe).
  */
-export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
+export async function activePendulumJobs(repo, opts, { strict = false } = {}) {
   const out = { work: new Set(), review: new Set(), wakes: [] };
   const read = (path) => rest(path, opts).catch((e) => {
     if (strict) throw e;
@@ -1697,7 +1697,7 @@ export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
         if (j.status === "completed") continue;
         const w = /^work \((\d+)\)$/.exec(j.name || "");
         if (w) out.work.add(Number(w[1]));
-        const r = /^review \(factory\/(\d+)\)$/.exec(j.name || "");
+        const r = /^review \(pendulum\/(\d+)\)$/.exec(j.name || "");
         if (r) out.review.add(Number(r[1]));
         const wake = parseWake(j.name);
         if (wake) out.wakes.push({ ...wake, startedAt: j.status === "in_progress" ? (j.started_at ?? null) : null });
@@ -1766,11 +1766,11 @@ export async function labelRemovedAt(repo, number, label, opts) {
   return last;
 }
 
-/** When the issue last became Running (its `labeled factory:running` event), or null. */
+/** When the issue last became Running (its `labeled pendulum:running` event), or null. */
 export async function runningSince(repo, number, opts) {
   const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
   let last = null;
-  for (const e of events) if (e.event === "labeled" && e.label?.name === "factory:running") last = e.created_at;
+  for (const e of events) if (e.event === "labeled" && e.label?.name === "pendulum:running") last = e.created_at;
   return last;
 }
 
@@ -1798,9 +1798,9 @@ export async function listRulesets(repo, opts) {
   return (await rest(`repos/${repo.full}/rulesets?per_page=100`, opts)) || [];
 }
 
-/** Create or update the Factory ruleset on the default branch: merge queue (unless `queue: false`), required checks, no deletion/force push. */
+/** Create or update the Pendulum ruleset on the default branch: merge queue (unless `queue: false`), required checks, no deletion/force push. */
 export async function ensureRuleset(repo, { branch, checks, queue = true }, opts) {
-  const existing = (await listRulesets(repo, opts)).find((r) => r.name === "factory");
+  const existing = (await listRulesets(repo, opts)).find((r) => r.name === "pendulum");
   const rules = [
     { type: "deletion" },
     { type: "non_fast_forward" },
@@ -1809,7 +1809,7 @@ export async function ensureRuleset(repo, { branch, checks, queue = true }, opts
   if (queue) rules.push({ type: "merge_queue", parameters: { merge_method: "SQUASH", max_entries_to_build: 5, min_entries_to_merge: 1, max_entries_to_merge: 5, min_entries_to_merge_wait_minutes: 5, grouping_strategy: "ALLGREEN", check_response_timeout_minutes: 60 } });
   if (checks.length) rules.push({ type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, required_status_checks: checks.map((context) => ({ context })) } });
   const body = {
-    name: "factory",
+    name: "pendulum",
     target: "branch",
     enforcement: "active",
     conditions: { ref_name: { include: [`refs/heads/${branch}`], exclude: [] } },
@@ -1838,11 +1838,11 @@ export async function primeWriters(repo, opts, { maintainers = null } = {}) {
     const list = (await rest(`repos/${repo.full}/collaborators?affiliation=all&permission=push&per_page=100`, { ...opts, paginate: true })) || [];
     setWriters(repo.full, list.map((u) => u.login));
     primed.set(repo.full, Date.now());
-    process.stdout.write(`[factory] ${list.length} writer(s) of ${repo.full} known\n`);
+    process.stdout.write(`[pendulum] ${list.length} writer(s) of ${repo.full} known\n`);
     return true;
   } catch (e) {
     // Not marked primed: the next call tries again. An earlier list of this repository's stays in use meanwhile.
-    process.stdout.write(`[factory] writers of ${repo.full} could not be read (${e.status || String(e.message).slice(0, 80)}); trusting by author association only\n`);
+    process.stdout.write(`[pendulum] writers of ${repo.full} could not be read (${e.status || String(e.message).slice(0, 80)}); trusting by author association only\n`);
     return same && primed.has(repo.full);
   }
 }
@@ -1851,7 +1851,7 @@ export async function primeWriters(repo, opts, { maintainers = null } = {}) {
  * Learn the login this process writes as (logic.mjs setSelf), from its token's own identity and never from a comment:
  * `GET /user` for a person's token (local mode), else GraphQL's viewer (an installation token, as `<slug>[bot]`). On
  * Actions the TokenKeeper already set it from the App's own record when it minted the token. A failed read leaves it
- * unknown, logged; Factory then trusts markers by push access alone and Blocks where it must know its own records.
+ * unknown, logged; Pendulum then trusts markers by push access alone and Blocks where it must know its own records.
  */
 export async function primeSelf(opts) {
   try {
@@ -1862,7 +1862,7 @@ export async function primeSelf(opts) {
       const v = (await graphql("query { viewer { login __typename } }", {}, opts))?.viewer;
       if (v?.login) setSelf(v.__typename === "Bot" && !v.login.endsWith("[bot]") ? `${v.login}[bot]` : v.login);
     } catch (e) {
-      process.stdout.write(`[factory] Factory's own login could not be read from its token (${String(e.message).slice(0, 80)}); its markers count by push access only\n`);
+      process.stdout.write(`[pendulum] Pendulum's own login could not be read from its token (${String(e.message).slice(0, 80)}); its markers count by push access only\n`);
     }
   }
   return selfLogin();

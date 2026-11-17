@@ -1,13 +1,13 @@
 // The metering relay for an opted-in AI Gateway key (#97). A repository that opts its own gateway key in to the worker's
-// shell (lib/worker-secrets.mjs, NAME AI_GATEWAY_API_KEY) no longer hands the key to the sandbox: Factory's stage process
+// shell (lib/worker-secrets.mjs, NAME AI_GATEWAY_API_KEY) no longer hands the key to the sandbox: Pendulum's stage process
 // holds it and runs this relay; the worker's shell gets a per-stage token in AI_GATEWAY_API_KEY and the relay's address
-// in FACTORY_GATEWAY_URL. Each call the relay forwards is priced and counted into the Objective's spend (the pass's usage
+// in PENDULUM_GATEWAY_URL. Each call the relay forwards is priced and counted into the Objective's spend (the pass's usage
 // record: max_usd, daily_usd, `usd`, the progress line, the scorecard), and the relay refuses calls once the cap is
 // reached, so a pipeline's spend through the key is capped live by numbers the model cannot edit.
 //
 // - Where it listens: a Unix socket (mode 600, or 660 for the agent's group on a runner) in a directory the agent cannot
 //   write, and, with no sandbox at all (a developer's own session), a TCP port on this machine's 127.0.0.1. Sandboxed
-//   commands reach the socket through a forwarder Factory's bwrap shim starts on the command namespace's own 127.0.0.1
+//   commands reach the socket through a forwarder Pendulum's bwrap shim starts on the command namespace's own 127.0.0.1
 //   (relay-shim.mjs). The token gates every call: another local user or process that reaches the socket or the port
 //   gets nothing without it.
 // - What it forwards: only the gateway's generation endpoints (POST; an image edit's multipart body as sent) and its
@@ -57,11 +57,11 @@ export const GATEWAY_ORIGIN = "https://ai-gateway.vercel.sh";
 /** The worker secret's NAME whose value is relayed, never handed over: the Vercel AI Gateway's own variable. */
 export const RELAYED_NAME = "AI_GATEWAY_API_KEY";
 /** The relay's address in the worker's shell (`http://127.0.0.1:<port>`): the AI SDK's createGateway takes `${it}/v4/ai` as baseURL. */
-export const RELAY_URL_ENV = "FACTORY_GATEWAY_URL";
+export const RELAY_URL_ENV = "PENDULUM_GATEWAY_URL";
 /** The worker's own state directory, outside the checkout, kept for the stage (docs/PLAN.md, Worker secrets). */
-export const STATE_DIR_ENV = "FACTORY_STATE_DIR";
-/** A path the relay answers without the token, with its probe id: Factory's probes check a command reaches this relay. */
-export const RELAY_PING = "/.factory-relay/ping";
+export const STATE_DIR_ENV = "PENDULUM_STATE_DIR";
+/** A path the relay answers without the token, with its probe id: Pendulum's probes check a command reaches this relay. */
+export const RELAY_PING = "/.pendulum-relay/ping";
 /** A value with an AI Gateway key's shape (worker-relay.mjs relays it, or withholds it under any other name). */
 export const GATEWAY_KEY_SHAPE = /^vck_/i;
 /** The most of one JSON answer the relay keeps to price it (a stream keeps only its first and last events). */
@@ -296,18 +296,18 @@ export function withGatewayRefusal(reason, refused) {
 
 /**
  * A Blocked stage's reason with what the relay saw named first: the gateway's own refusal (withGatewayRefusal), the
- * relay's shutdown (withRelayShut). `totals`: the relay's (totals()); `capReached`: Factory's max_usd was in fact reached.
+ * relay's shutdown (withRelayShut). `totals`: the relay's (totals()); `capReached`: Pendulum's max_usd was in fact reached.
  */
 export const stageBlockReason = (reason, totals, capReached = false) => withGatewayRefusal(withRelayShut(reason, totals?.shut ?? null, capReached), totals?.gatewayRefused ?? null);
 
 /**
  * A Blocked stage's cause (logic.mjs BLOCK_CAUSES) beside stageBlockReason: the gateway's budget or credits refusal in
  * this stage is the cause (the worker may have stopped on it); a "dollar cap" the relay's shutdown caused, with max_usd
- * not reached, is Factory's own; anything else keeps `cause`.
+ * not reached, is Pendulum's own; anything else keeps `cause`.
  */
 export function stageBlockCause(cause, totals, capReached = false) {
   if (totals?.gatewayRefused) return "gateway-budget";
-  if (totals?.shut && cause === "max-usd" && !capReached) return "factory";
+  if (totals?.shut && cause === "max-usd" && !capReached) return "pendulum";
   return cause;
 }
 
@@ -327,11 +327,11 @@ export const relayShutText = (shut) => (shut.complete ? `gateway relay shut: a c
 export function withRelayShut(reason, shut, capReached = false) {
   if (!shut) return reason;
   const named = relayShutText(shut);
-  if (reason === "dollar cap reached" && !capReached) return `${named}; Factory's max_usd was not reached`;
+  if (reason === "dollar cap reached" && !capReached) return `${named}; Pendulum's max_usd was not reached`;
   return !reason ? named : reason.includes(named) ? reason : `${named}; ${reason}`;
 }
 /** What a call after the gateway's budget or credits refusal is told, after the refusal itself. */
-const GATEWAY_REFUSED_MORE = "Factory's gateway relay refuses further calls in this stage: this is the AI Gateway's own budget or credits, not Factory's max_usd. Stop and report it";
+const GATEWAY_REFUSED_MORE = "Pendulum's gateway relay refuses further calls in this stage: this is the AI Gateway's own budget or credits, not Pendulum's max_usd. Stop and report it";
 /** The most billable calls waiting behind the one in flight while a cap is on; more get 429. */
 export const MAX_WAITING = 8;
 
@@ -466,14 +466,14 @@ export function tokenMatches(header, token) {
 }
 
 /**
- * The relay's own refusal: `factory_relay`, or `factory_max_usd` for Factory's dollar cap. `gateway`: an earlier answer's
+ * The relay's own refusal: `pendulum_relay`, or `pendulum_max_usd` for Pendulum's dollar cap. `gateway`: an earlier answer's
  * gateway refusal repeated (its type and message, `source: "ai-gateway"`), so a client tells the two 402s apart.
  */
-const refusal = (res, status, message, { type = "factory_relay", gateway = null, retryAfter = null } = {}) => {
+const refusal = (res, status, message, { type = "pendulum_relay", gateway = null, retryAfter = null } = {}) => {
   if (res.headersSent) return res.destroy();
   // What the client still sends is read and dropped, so the refusal reaches it.
   res.req?.resume?.();
-  const error = gateway ? { message: `${gatewayRefusalText(gateway)}. ${message}`, type: gateway.type, source: "ai-gateway" } : { message: `Factory's gateway relay: ${message}`, type };
+  const error = gateway ? { message: `${gatewayRefusalText(gateway)}. ${message}`, type: gateway.type, source: "ai-gateway" } : { message: `Pendulum's gateway relay: ${message}`, type };
   const body = JSON.stringify({ error });
   res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body), ...(retryAfter ? { "retry-after": String(retryAfter) } : {}) });
   res.end(body);
@@ -524,7 +524,7 @@ function eventReader() {
 }
 
 /**
- * Start the relay for `key`. `dir`: a directory only Factory's user writes, where the socket goes (made 700, or 711 when
+ * Start the relay for `key`. `dir`: a directory only Pendulum's user writes, where the socket goes (made 700, or 711 when
  * `group` is given, the agent's group, which then owns the socket at 660 through `chgrp`, an async (path, group) =>
  * void that throws when it cannot). `tcp`: also listen on 127.0.0.1 (no sandbox). `maxUsd`: the stage's max_usd (0 or
  * less: no cap). `socketDir`: where the socket goes, when not in `dir` (worker-relay.mjs relaySocketDir: a short
@@ -538,7 +538,7 @@ function eventReader() {
  */
 export async function openRelay({ key, dir, socketDir = null, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, unknownStageShut = UNKNOWN_STAGE_SHUT, unknownFloorUsd = UNKNOWN_COST_FLOOR_USD, slowFloorUsd = SLOW_UNKNOWN_FLOOR_USD, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, upstreamClock = Date.now, log = () => {} }) {
   if (typeof key !== "string" || !key) throw new Error("the relay needs the key");
-  const token = `factory-relay-${randomBytes(32).toString("base64url")}`;
+  const token = `pendulum-relay-${randomBytes(32).toString("base64url")}`;
   const probeId = randomBytes(12).toString("hex");
   const keyForms = keyCutter(key);
   const cutText = (t) => {
@@ -796,7 +796,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
         if (s.pass) s.pass.pings += 1;
       }
       res.writeHead(200, { "content-type": "text/plain" });
-      return res.end(`factory-relay ${probeId}\n`);
+      return res.end(`pendulum-relay ${probeId}\n`);
     }
     if (!tokenMatches(req.headers.authorization, token)) {
       s.refused.token += 1;
@@ -816,7 +816,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     }
     if (!s.pass || s.pass.ended) {
       s.refused.pass += 1;
-      return refusal(res, 403, "calls are relayed only while a Factory pass runs");
+      return refusal(res, 403, "calls are relayed only while a Pendulum pass runs");
     }
     const billable = route.family !== "free";
     // The gateway refused an earlier call for its own budget or credits: every later billable call gets that refusal.
@@ -907,11 +907,11 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
           p.capped = true;
           record({ method: req.method, path: req.url, model, status: 402, refused: "max_usd" });
           once("cap", `gateway relay: max_usd reached ($${p.usd.toFixed(4)} through the key and $${harnessUsd.toFixed(4)} by the harness this pass, $${p.budget.toFixed(4)} was left); further calls are refused`);
-          return refusal(res, 402, `Factory's dollar cap is reached: the Objective's max_usd ($${p.usd.toFixed(2)} spent through the key and $${harnessUsd.toFixed(2)} by the model in this pass, of the $${p.budget.toFixed(2)} left); no further call is relayed. Stop and report it: the cap is Factory's, for this Objective, not the AI Gateway's budget`, { type: "factory_max_usd" });
+          return refusal(res, 402, `Pendulum's dollar cap is reached: the Objective's max_usd ($${p.usd.toFixed(2)} spent through the key and $${harnessUsd.toFixed(2)} by the model in this pass, of the $${p.budget.toFixed(2)} left); no further call is relayed. Stop and report it: the cap is Pendulum's, for this Objective, not the AI Gateway's budget`, { type: "pendulum_max_usd" });
         }
         s.refused[s.failClosed ? "unpriced" : "pass"] += 1;
         record({ method: req.method, path: req.url, model, status: 403, refused: s.failClosed ? "shut" : "pass" });
-        return refusal(res, 403, s.failClosed ? `${relayShutText(s.shut)}; no further call is relayed in this stage` : "calls are relayed only while a Factory pass runs");
+        return refusal(res, 403, s.failClosed ? `${relayShutText(s.shut)}; no further call is relayed in this stage` : "calls are relayed only while a Pendulum pass runs");
       }
     }
     // The client may have hung up while the call waited (its turn, the live spend): one nobody waits for is never sent,
@@ -1275,7 +1275,7 @@ export function addKeySpend(rec, pass) {
     rec.budgetExceeded = true;
     rec.workerKeyCapped = true;
   }
-  // The gateway's own refusal is no cap of Factory's: the pass is not over budget for it.
+  // The gateway's own refusal is no cap of Pendulum's: the pass is not over budget for it.
   if (pass.gatewayRefused) rec.workerKeyGatewayRefused = pass.gatewayRefused;
   return rec;
 }

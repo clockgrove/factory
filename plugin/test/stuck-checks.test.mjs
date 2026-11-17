@@ -108,7 +108,7 @@ test("a required check whose workflow run GitHub left queued: a bounded wait in 
   assert.ok(phases.some((l) => /; waiting up to 0 min for it to start, no fix run$/.test(l)), phases.join("\n"));
   assert.ok(Date.now() - t0 >= 40 && checkReads >= 3, "it waited in the stage, reading again");
   const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: result.passes, green: false, stuck: result.stuck.reason } });
-  assert.deepEqual(exit, { exit: "blocked", reason: result.stuck.reason, cause: "factory" });
+  assert.deepEqual(exit, { exit: "blocked", reason: result.stuck.reason, cause: "pendulum" });
 });
 
 test("the in-stage wait is bounded by the stage's wall clock less the guard: none left, it Blocks at once", async () => {
@@ -438,7 +438,7 @@ test("a required check whose step is within its usual duration is waited for pas
 test("a required check whose step runs past its usual duration has hung: the wait ends there, as at a timeout, naming the step and the way past it", async () => {
   const { setSelf } = await import("../scripts/lib/logic.mjs");
   const { noProgressMarker } = await import("../scripts/lib/session.mjs");
-  setSelf("factory-app[bot]");
+  setSelf("pendulum-app[bot]");
   // Set-up normally takes 1 minute: past max(3 x 1, 1 + 15) = 16 it has hung, long before any hour.
   const { result, minutes, posted } = await running({ step: "Run scripts/ci/setup.sh", stepMin: 1, doneAt: 40 });
   assert.equal(result.harness, undefined, "no fix pass: nothing failed");
@@ -449,7 +449,7 @@ test("a required check whose step runs past its usual duration has hung: the wai
   assert.equal(posted.length, 1);
   assert.ok(posted[0].startsWith(noProgressMarker(4, SHA)), posted[0]);
   // The label re-applied: the next stage on that head has no hang judgement, and the slower step goes green at 40.
-  const again = await running({ step: "Run scripts/ci/setup.sh", stepMin: 1, doneAt: 40, comments: [{ id: 1, user: { login: "factory-app[bot]" }, body: posted[0] }] });
+  const again = await running({ step: "Run scripts/ci/setup.sh", stepMin: 1, doneAt: 40, comments: [{ id: 1, user: { login: "pendulum-app[bot]" }, body: posted[0] }] });
   assert.equal(again.result.green, true, again.result.stuck?.reason);
   assert.equal(again.minutes, 40);
   // A person's own pasted marker, someone who cannot push, is no answer.
@@ -461,7 +461,7 @@ test("a required check whose step runs past its usual duration has hung: the wai
 test("a no-progress Block after a triage rerun records its waiver too", async () => {
   const { setSelf } = await import("../scripts/lib/logic.mjs");
   const { noProgressMarker } = await import("../scripts/lib/session.mjs");
-  setSelf("factory-app[bot]");
+  setSelf("pendulum-app[bot]");
   const red = { id: 1, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: ago(10), completed_at: ago(5), app: ACTIONS };
   const { result, posted } = await running({ step: "Run scripts/ci/setup.sh", stepMin: 1, red });
   setSelf(null);
@@ -485,16 +485,16 @@ test("a required check with no history waits up to the merge queue rule's check 
 });
 
 test("on the local route no Actions job is read: a running required check is judged by the time bound only", async () => {
-  const before = process.env.FACTORY_LOCAL;
-  process.env.FACTORY_LOCAL = "1";
+  const before = process.env.PENDULUM_LOCAL;
+  process.env.PENDULUM_LOCAL = "1";
   try {
     const { result, jobReads, minutes } = await running({ stepMin: 80, doneAt: 90, timeoutMin: 30 });
     assert.equal(jobReads, 0);
     assert.equal(minutes, 31);
     assert.match(result.stuck.reason, /^no progress: `quality` running 31 min; /);
   } finally {
-    if (before === undefined) delete process.env.FACTORY_LOCAL;
-    else process.env.FACTORY_LOCAL = before;
+    if (before === undefined) delete process.env.PENDULUM_LOCAL;
+    else process.env.PENDULUM_LOCAL = before;
   }
 });
 
@@ -513,7 +513,7 @@ const lint = [{ id: 8, name: "lint", status: "completed", conclusion: "success",
 const lintOnly = { ".github/workflows/ci.yml": "jobs:\n  lint:\n    runs-on: x\n" };
 const suitesRoute = (suites) => (p) => (p === `/repos/${REPO.full}/commits/${SHA}/check-suites` ? { total_count: suites.length, check_suites: suites } : undefined);
 const actionsSuite = { id: 9, app: { id: 15368 }, status: "completed", latest_check_runs_count: 1 };
-// Apps that leave a suite queued with no runs on every head (as on clockgrove/factory).
+// Apps that leave a suite queued with no runs on every head (as on clockgrove/pendulum).
 const stale = [1, 2, 3].map((k) => ({ id: 20 + k, app: { id: 900 + k }, status: "queued", latest_check_runs_count: 0 }));
 const both = (...fs) => (p, u, reads, init) => fs.reduce((v, f) => (v !== undefined ? v : f(p, u, reads, init)), undefined);
 const completedCi = [ciRun({ status: "completed", conclusion: "success" })];

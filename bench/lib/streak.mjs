@@ -1,8 +1,8 @@
-// The 1.0 streak: consecutive walk-away merges per harness from a given Factory tag (docs/PLAN.md, the 1.0 bar).
+// The 1.0 streak: consecutive walk-away merges per harness from a given Pendulum tag (docs/PLAN.md, the 1.0 bar).
 // Pure: takes scored rows (lib/objective.mjs scoreObjective) and returns the streak; score.mjs --streak prints it.
 //
 // Only Objectives whose clock started at or after the tag count: an earlier one ran, at least in part, on an older
-// Factory. They are ordered by how they ended (merged, Blocked, closed). Each finished Objective either extends its
+// Pendulum. They are ordered by how they ended (merged, Blocked, closed). Each finished Objective either extends its
 // harness's streak or breaks it:
 //   extends  merged, walk-away yes (no human input of any kind, no Blocked, no stall), every input source read, and no
 //            P1 escape found later
@@ -47,7 +47,7 @@ export function verdict(row) {
 
 /**
  * The hand-over rules the rows were scored by (walkAway.handover). Only rows with a hand-over decide the mix (an owner
- * step, or Factory's `workflow hand-over` request; such a row from before the rule was recorded scored it as input);
+ * step, or Pendulum's `workflow hand-over` request; such a row from before the rule was recorded scored it as input);
  * with none, the one rule the rows record, if they record exactly one.
  */
 const handoverRules = (rows) => {
@@ -138,7 +138,7 @@ export function streakTable(result, { repository = "", tag = null } = {}) {
   return `${lines.join("\n")}\n`;
 }
 
-/** A Factory tag's time: its GitHub Release's publication (each tag gets one on push), else its commit's date. */
+/** A Pendulum tag's time: its GitHub Release's publication (each tag gets one on push), else its commit's date. */
 export async function tagTime(api, repo, tag) {
   try {
     const release = await api(`repos/${repo}/releases/tags/${encodeURIComponent(tag)}`);

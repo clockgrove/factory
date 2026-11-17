@@ -22,15 +22,15 @@ const SCRIPTS = join(import.meta.dirname, "..", "scripts");
 // Each route's own login: the App's bot on Actions and in a cloud sandbox stage, the developer in local mode, where the
 // same login also edits the issue, applies the label and answers a Question.
 const ROUTES = [
-  { route: "Actions", self: "factory-app[bot]", person: "kirk" },
-  { route: "cloud sandbox", self: "factory-app[bot]", person: "kirk" },
+  { route: "Actions", self: "pendulum-app[bot]", person: "kirk" },
+  { route: "cloud sandbox", self: "pendulum-app[bot]", person: "kirk" },
   { route: "local mode", self: "dev", person: "dev" },
 ];
 
-/** GitHub's comments on issue 7: the plan comment Factory wrote (from `record`, or none), and a person's answer. */
+/** GitHub's comments on issue 7: the plan comment Pendulum wrote (from `record`, or none), and a person's answer. */
 function comments({ self, person, record = null, none = false, plan = "## Plan\n- [ ] item" }) {
   const list = [{ id: 3, user: { login: person }, body: "Use the second option.", created_at: L1 }];
-  if (!none) list.unshift({ id: 2, user: { login: self }, body: `<!-- factory:7:plan -->${record ? planTextMarker(record) : ""}\n${plan}`, created_at: L0 });
+  if (!none) list.unshift({ id: 2, user: { login: self }, body: `<!-- pendulum:7:plan -->${record ? planTextMarker(record) : ""}\n${plan}`, created_at: L0 });
   return list;
 }
 
@@ -92,8 +92,8 @@ for (const { route, self, person } of ROUTES) {
     assert.equal(review.applied[0].pr.number, 9, "the PR goes back to a draft");
     assert.equal(BLOCK_CAUSES[review.applied[0].cause].external, false, "an edit is a person's action, never External");
     const notice = blockedLine({ issue: 7, pr: { number: 9 }, stage: "review", reason: EDITED_REASON, fix: EDITED_FIX });
-    assert.match(notice, /title, body or harness, model and host labels \(`factory:harness:`, `factory:model:`, `factory:subagent-model:`, `factory:reviewer-model:`, `factory:host:`\) changed after its plan was made/);
-    assert.match(notice, /Re-apply `factory:objective` to work from the issue as it is now, its text and its harness, model and host labels: the worker makes its plan again from it/);
+    assert.match(notice, /title, body or harness, model and host labels \(`pendulum:harness:`, `pendulum:model:`, `pendulum:subagent-model:`, `pendulum:reviewer-model:`, `pendulum:host:`\) changed after its plan was made/);
+    assert.match(notice, /Re-apply `pendulum:objective` to work from the issue as it is now, its text and its harness, model and host labels: the worker makes its plan again from it/);
   });
 
   test(`edit after plan (${route}): an edit while Blocked, then the label re-applied, plans again from the new text`, async () => {
@@ -128,14 +128,14 @@ for (const { route, self, person } of ROUTES) {
     assert.equal(writes.length, 1);
     assert.equal(writes[0].method, "PATCH");
     assert.match(writes[0].url, /\/repos\/acme\/app\/issues\/comments\/2$/);
-    assert.equal(writes[0].body.body, `<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan\n- [ ] item`, "the plan's text unchanged");
+    assert.equal(writes[0].body.body, `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan\n- [ ] item`, "the plan's text unchanged");
     // So an edit after this stage, with no label after it, Blocks rather than plans again.
     assert.equal(planTextState({ sha: B, plan: planOf([{ id: 2, user: { login: self }, body: writes[0].body.body }], 7), labeledAt: L1, work: true }), "changed");
   });
 }
 
-test("edit after plan: the record is Factory's own, on the plan comment's marker line", async () => {
-  setSelf("factory-app[bot]");
+test("edit after plan: the record is Pendulum's own, on the plan comment's marker line", async () => {
+  setSelf("pendulum-app[bot]");
   const posted = [];
   const real = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
@@ -150,13 +150,13 @@ test("edit after plan: the record is Factory's own, on the plan comment's marker
     globalThis.fetch = real;
   }
   assert.equal(posted.length, 1);
-  assert.match(posted[0], /^<!-- factory:7:plan --><!-- factory:plan-text \{"sha256":"[0-9a-f]{64}","label":"2026-11-13T10:00:00Z"\} -->\n&lt;!-- factory:plan-text/);
-  const mine = planOf([{ id: 2, user: { login: "factory-app[bot]" }, body: posted[0] }], 7);
+  assert.match(posted[0], /^<!-- pendulum:7:plan --><!-- pendulum:plan-text \{"sha256":"[0-9a-f]{64}","label":"2026-11-13T10:00:00Z"\} -->\n&lt;!-- pendulum:plan-text/);
+  const mine = planOf([{ id: 2, user: { login: "pendulum-app[bot]" }, body: posted[0] }], 7);
   assert.deepEqual(mine.record, { sha256: A, label: L0 });
-  assert.match(mine.text, /^&lt;!-- factory:plan-text .*\n## Plan$/, "the marker line is not the plan's");
+  assert.match(mine.text, /^&lt;!-- pendulum:plan-text .*\n## Plan$/, "the marker line is not the plan's");
   assert.equal(planOf([{ id: 2, user: { login: "stranger" }, body: posted[0] }], 7), null, "anyone else's copy of the comment is no plan");
-  assert.equal(planOf([{ id: 2, user: { login: "factory-app[bot]" }, body: `<!-- factory:7:plan -->\n${planTextMarker({ sha256: B, label: L1 })}\n## Plan` }], 7).record, null, "a record below the marker line is not read");
-  assert.equal(planTextOf('<!-- factory:plan-text {"sha256":"abc","label":null} -->'), null, "a record that is no SHA-256");
+  assert.equal(planOf([{ id: 2, user: { login: "pendulum-app[bot]" }, body: `<!-- pendulum:7:plan -->\n${planTextMarker({ sha256: B, label: L1 })}\n## Plan` }], 7).record, null, "a record below the marker line is not read");
+  assert.equal(planTextOf('<!-- pendulum:plan-text {"sha256":"abc","label":null} -->'), null, "a record that is no SHA-256");
 });
 
 test("edit after plan: the merge Blocks on an edit, cause work, as every other merge Block", () => {
@@ -193,28 +193,28 @@ test("edit after plan: every route's work and review stages check the text befor
   }
 });
 
-const own = (body, extra = {}) => ({ id: 2, user: { login: "factory-app[bot]" }, body, created_at: L0, ...extra });
+const own = (body, extra = {}) => ({ id: 2, user: { login: "pendulum-app[bot]" }, body, created_at: L0, ...extra });
 
 test("edit after plan: a plan comment saved with CRLF line ends keeps its record", async () => {
-  setSelf("factory-app[bot]");
+  setSelf("pendulum-app[bot]");
   // GitHub's web editor saves the whole comment with CRLF when a person ticks the plan's checklist.
-  const list = [own(`<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\r\n## Plan\r\n- [x] item`)];
+  const list = [own(`<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\r\n## Plan\r\n- [x] item`)];
   assert.deepEqual(planOf(list, 7).record, { sha256: A, label: L0 });
   const { r, applied } = await gate(list, { sha: B, work: false });
   assert.deepEqual([r.ok, applied[0]?.reason], [false, EDITED_REASON], "an edit after it still Blocks");
 });
 
 test("edit after plan: a plan comment whose record cannot be read is decided on GitHub's edit times, never taken for no plan", async () => {
-  setSelf("factory-app[bot]");
+  setSelf("pendulum-app[bot]");
   const T = (m) => `2026-11-13T${m}:00Z`;
-  for (const head of ["", "<!-- factory:plan-text {not json} -->", '<!-- factory:plan-text {"sha256":"abc"} -->']) {
-    const list = [own(`<!-- factory:7:plan -->${head}\n## Plan`, { created_at: T("10:00") })];
+  for (const head of ["", "<!-- pendulum:plan-text {not json} -->", '<!-- pendulum:plan-text {"sha256":"abc"} -->']) {
+    const list = [own(`<!-- pendulum:7:plan -->${head}\n## Plan`, { created_at: T("10:00") })];
     assert.equal(planOf(list, 7).record, null);
     // No edit since the comment was posted: the same text. The work stage records it there and then, and hands the plan on.
     const kept = await gate(list, { sha: B, work: true, labeledAt: T("09:00"), editedAt: T("09:30") });
     assert.equal(kept.r.state, "same", head);
     assert.equal(kept.writes.length, 1);
-    assert.equal(kept.writes[0].body.body, `<!-- factory:7:plan -->${planTextMarker({ sha256: B, label: T("09:00") })}\n## Plan`);
+    assert.equal(kept.writes[0].body.body, `<!-- pendulum:7:plan -->${planTextMarker({ sha256: B, label: T("09:00") })}\n## Plan`);
     // The body edited after it, no label since: Blocked, at review and at the next work stage.
     for (const work of [false, true]) {
       const edited = await gate(list, { sha: B, work, labeledAt: T("09:00"), editedAt: T("11:00") });
@@ -230,9 +230,9 @@ test("edit after plan: a plan comment whose record cannot be read is decided on 
 });
 
 test("edit after plan: a stage that knows no record never erases the one the plan comment has", async () => {
-  setSelf("factory-app[bot]");
+  setSelf("pendulum-app[bot]");
   const head = planTextMarker({ sha256: A, label: L0 });
-  const list = [own(`<!-- factory:7:plan -->${head}\r\n## Plan`)];
+  const list = [own(`<!-- pendulum:7:plan -->${head}\r\n## Plan`)];
   const written = [];
   const real = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
@@ -241,37 +241,37 @@ test("edit after plan: a stage that knows no record never erases the one the pla
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   };
   try {
-    // `factory deliver` with no issue.md from `factory issue`, or a review with no record: planSync with none.
+    // `pendulum deliver` with no issue.md from `pendulum issue`, or a review with no record: planSync with none.
     await planSync(repo, 7, { token: "t" }, null)("## Plan, ticked");
   } finally {
     globalThis.fetch = real;
   }
-  assert.deepEqual(written, [{ method: "PATCH", body: `<!-- factory:7:plan -->${head}\n## Plan, ticked` }]);
+  assert.deepEqual(written, [{ method: "PATCH", body: `<!-- pendulum:7:plan -->${head}\n## Plan, ticked` }]);
 });
 
-test("edit after plan: the plan comment of another Factory login counts: a writer's in full, another App's for its time only", async () => {
+test("edit after plan: the plan comment of another Pendulum login counts: a writer's in full, another App's for its time only", async () => {
   // Local mode (the developer's login) after the Action made the plan, or the other way round.
   setSelf("dev");
-  const bot = { id: 2, user: { login: "factory-app[bot]", type: "Bot" }, body: `<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\n## Plan`, created_at: L0 };
-  const stranger = { id: 4, user: { login: "stranger", type: "User" }, author_association: "NONE", body: `<!-- factory:7:plan -->${planTextMarker({ sha256: B, label: L1 })}\n## Forged`, created_at: L1 };
+  const bot = { id: 2, user: { login: "pendulum-app[bot]", type: "Bot" }, body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\n## Plan`, created_at: L0 };
+  const stranger = { id: 4, user: { login: "stranger", type: "User" }, author_association: "NONE", body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: B, label: L1 })}\n## Forged`, created_at: L1 };
   const fromApp = planOf([bot, stranger], 7);
   assert.deepEqual([fromApp.id, fromApp.text, fromApp.record, fromApp.own], [2, null, null, false], "another App's: its time, never its text or record; a stranger's: nothing");
   const edited = await gate([bot, stranger], { sha: B, work: false, editedAt: L1 });
   assert.equal(edited.r.ok, false, "edited after the App's plan comment: Blocked, not taken for no plan");
   assert.equal((await gate([bot], { sha: B, work: false, editedAt: "2026-11-13T09:00:00Z" })).r.ok, true);
-  setSelf("factory-app[bot]");
-  const writer = { id: 5, user: { login: "dev", type: "User" }, author_association: "MEMBER", body: `<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan from local mode`, created_at: L1, updated_at: L1 };
+  setSelf("pendulum-app[bot]");
+  const writer = { id: 5, user: { login: "dev", type: "User" }, author_association: "MEMBER", body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan from local mode`, created_at: L1, updated_at: L1 };
   const fromWriter = planOf([bot, writer], 7);
   assert.deepEqual([fromWriter.id, fromWriter.text, fromWriter.record], [5, "## Plan from local mode", { sha256: A, label: L1 }], "the newest written");
   const moved = await gate([bot, writer], { sha: B, work: false });
   assert.equal(moved.r.ok, false);
   // The work stage records on its own login's comment, with the plan it read.
   const same = await gate([writer], { sha: A, work: true, labeledAt: L1 });
-  assert.deepEqual(same.writes.map((w) => [w.method, w.body.body]), [["POST", `<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan from local mode`]]);
+  assert.deepEqual(same.writes.map((w) => [w.method, w.body.body]), [["POST", `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan from local mode`]]);
 });
 
 test("edit after plan: the work stage's label time is the one read before the text", async () => {
-  setSelf("factory-app[bot]");
+  setSelf("pendulum-app[bot]");
   let read = 0;
   const r = await planGate({ repo, issue: 7, sha: A, labeledAt: L0, work: true, opts: { token: "t" }, apply: async () => {}, stage: "work", read: { planComment: async () => null, labeledAt: async () => (read += 1, L1) } });
   assert.deepEqual([r.record, read], [{ sha256: A, label: L0 }, 0]);
@@ -285,12 +285,12 @@ test("edit after plan: the work stage's label time is the one read before the te
   assert.ok(deliver.indexOf("await startedAt(") > 0 && deliver.indexOf("await startedAt(") < deliver.indexOf("await authorGate("), "so does deliver");
 });
 
-test("edit after plan: with Factory's own login unknown, the merge and a session's review stop rather than see no plan", async () => {
+test("edit after plan: with Pendulum's own login unknown, the merge and a session's review stop rather than see no plan", async () => {
   setSelf(null);
   const real = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401, headers: { "content-type": "application/json" } });
   try {
-    const plan = async () => planOf([own(`<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\n## Plan`)], 7);
+    const plan = async () => planOf([own(`<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\n## Plan`)], 7);
     await assert.rejects(editedSincePlan(repo, 7, { token: "t" }, { read: plan, gh: { graphql: async () => ({ repository: { issue: { title: "Objective", body: "Build the other thing." } } }) } }), /own login could not be read/);
     await assert.rejects(planStateNow(repo, 7, { sha: B }, { token: "t" }, { planComment: plan }), /own login could not be read/);
   } finally {
@@ -298,15 +298,15 @@ test("edit after plan: with Factory's own login unknown, the merge and a session
   }
 });
 
-test("edit after plan: another App's marker never hides Factory's plan comment or its record, github-actions[bot] included", async () => {
-  setSelf("factory-app[bot]");
-  const mine = own(`<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\n## Plan`);
+test("edit after plan: another App's marker never hides Pendulum's plan comment or its record, github-actions[bot] included", async () => {
+  setSelf("pendulum-app[bot]");
+  const mine = own(`<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\n## Plan`);
   const later = "2026-11-13T13:00:00Z";
   const app = (id, login, body) => ({ id, user: { login, type: "Bot" }, body, created_at: later, updated_at: later });
   const cases = [
-    ["another App", app(8, "other-app[bot]", "<!-- factory:7:plan -->\n## Something")],
-    ["github-actions[bot]", app(9, "github-actions[bot]", "<!-- factory:7:plan -->\n## From a workflow")],
-    ["another App's forged record of the new text", app(10, "other-app[bot]", `<!-- factory:7:plan -->${planTextMarker({ sha256: B, label: later })}\n## Forged`)],
+    ["another App", app(8, "other-app[bot]", "<!-- pendulum:7:plan -->\n## Something")],
+    ["github-actions[bot]", app(9, "github-actions[bot]", "<!-- pendulum:7:plan -->\n## From a workflow")],
+    ["another App's forged record of the new text", app(10, "other-app[bot]", `<!-- pendulum:7:plan -->${planTextMarker({ sha256: B, label: later })}\n## Forged`)],
   ];
   const issueNow = { gh: { graphql: async () => ({ repository: { issue: { title: "Objective", body: "Build the other thing.", lastEditedAt: L1 } } }) }, changed: async () => null };
   for (const [name, c] of cases) {
@@ -319,7 +319,7 @@ test("edit after plan: another App's marker never hides Factory's plan comment o
     assert.equal(await editedSincePlan(repo, 7, { token: "t" }, { ...issueNow, read }), "changed", `${name}: the merge and the queue`);
     assert.equal((await planStateNow(repo, 7, { sha: B, editedAt: L1 }, { token: "t" }, { planComment: read, changedAt: async () => null })).state, "changed", `${name}: post-review`);
   }
-  // With no plan comment of Factory's, an App's marker only makes the check stricter: its time, never its record.
+  // With no plan comment of Pendulum's, an App's marker only makes the check stricter: its time, never its record.
   const alone = planOf([cases[2][1]], 7);
   assert.deepEqual([alone.foreign, alone.record, alone.text], [true, null, null]);
   assert.equal(planTextState({ sha: B, plan: alone, editedAt: "2026-11-13T14:00:00Z" }), "changed");

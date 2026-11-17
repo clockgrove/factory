@@ -2,7 +2,7 @@
 // an `outage` (session.mjs outageExit: its Block, written as the stage's one try), and one that vanished with no exit at
 // all (the dispatcher's Running pass: no live job, no lease). Such losses are almost always transient, so the dispatcher
 // starts the Objective's work again on its branch, in the slot it held, at most RELAUNCH_MAX times since a person last
-// started it; past that it Blocks for a person. The count is a record Factory owns on the issue, so a dispatcher that
+// started it; past that it Blocks for a person. The count is a record Pendulum owns on the issue, so a dispatcher that
 // restarts keeps it. The local route pauses and resumes a stage itself (local.mjs) and never gets here.
 import { addLabels, moveCard, removeLabel, rest, setStateLabel, upsertComment, workflowFile } from "./github.mjs";
 import { CLOCK_SKEW_MS, blockCauseOf, isSelf, marker, restartedAt, selfLogin, trustedAuthor } from "./logic.mjs";
@@ -15,8 +15,8 @@ export const RELAUNCH_MAX = 2;
 /** How many tries the record keeps, the latest last. */
 const KEEP_TRIES = 10;
 
-const RECORD_LINE = /^<!-- factory:relaunch (\{[^\n]*\}) -->$/m;
-// Factory's own comment (the marker on its first line); before Factory knows its login, one by someone who can push, as
+const RECORD_LINE = /^<!-- pendulum:relaunch (\{[^\n]*\}) -->$/m;
+// Pendulum's own comment (the marker on its first line); before Pendulum knows its login, one by someone who can push, as
 // upsertComment decides which comment is its own to edit.
 const ours = (c) => (selfLogin() ? isSelf(c) : trustedAuthor(c));
 
@@ -48,22 +48,22 @@ export function relaunchRecordOf(comments, issue) {
 export const commentsOf = (events) =>
   (events || []).filter((e) => e?.event === "commented").map((e) => ({ id: e.id, body: e.body ?? "", user: e.user ?? e.actor ?? null, author_association: e.author_association, created_at: e.created_at, updated_at: e.updated_at ?? e.created_at }));
 
-/** When the issue last became Running (its latest `labeled factory:running` event, GitHub's clock), or null. */
+/** When the issue last became Running (its latest `labeled pendulum:running` event, GitHub's clock), or null. */
 export function lastRunningAt(events) {
   let last = null;
-  for (const e of events || []) if (e?.event === "labeled" && e.label?.name === "factory:running" && Number.isFinite(Date.parse(e.created_at)) && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
+  for (const e of events || []) if (e?.event === "labeled" && e.label?.name === "pendulum:running" && Number.isFinite(Date.parse(e.created_at)) && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
   return last;
 }
 
 /**
- * The issue's Running stint as its timeline shows it: the newest `labeled` or `unlabeled` factory:running event (the later
+ * The issue's Running stint as its timeline shows it: the newest `labeled` or `unlabeled` pendulum:running event (the later
  * in the timeline's order on a tie). `key` names that event, so any label change since gives another key (`none`
  * without one); `at` is its time; `running` is whether it applied the label.
  */
 export function runningStint(events) {
   let last = null;
   for (const e of events || []) {
-    if ((e?.event !== "labeled" && e?.event !== "unlabeled") || e.label?.name !== "factory:running" || !Number.isFinite(Date.parse(e.created_at))) continue;
+    if ((e?.event !== "labeled" && e?.event !== "unlabeled") || e.label?.name !== "pendulum:running" || !Number.isFinite(Date.parse(e.created_at))) continue;
     if (!last || Date.parse(e.created_at) >= Date.parse(last.created_at)) last = e;
   }
   return last ? { key: `${last.event}:${last.id ?? ""}@${last.created_at}`, at: last.created_at, running: last.event === "labeled" } : { key: "none", at: null, running: false };
@@ -75,14 +75,14 @@ export const blockKey = (c) => `block:${c.id}@${c.updated_at ?? c.created_at ?? 
 export const stintKey = (since) => `stint:${since ?? "unknown"}`;
 
 /**
- * The outage Block a stage of this route wrote, when it is the issue's newest Blocked notice: Factory's own, written by
+ * The outage Block a stage of this route wrote, when it is the issue's newest Blocked notice: Pendulum's own, written by
  * a stage that ended on its network (session.mjs outageExit: stage `outage`, cause `outage`), after the Objective last
  * became Running (`runningAt`, GitHub's clock). Null otherwise: a later Blocked notice is the newest (the dispatcher's
  * own once the relaunches are used up, or any other), or the notice is from before the last Running stint (a relaunch
  * began since, so a later Block whose notice never landed is not taken for it; applyExit sets the label first).
  */
 export function outageBlockOf(comments, issue, runningAt) {
-  const head = `<!-- factory:${issue}:blocked:`;
+  const head = `<!-- pendulum:${issue}:blocked:`;
   const time = (c) => Date.parse(c.created_at) || 0;
   const newest = (comments || []).filter((c) => ours(c) && (c.body || "").startsWith(head)).sort((a, b) => time(a) - time(b) || a.id - b.id).at(-1);
   if (!newest || !newest.body.startsWith(`${head}outage:`) || blockCauseOf(newest.body) !== "outage") return null;
@@ -106,7 +106,7 @@ export const triesSince = (record, start) => (record?.tries || []).filter((t) =>
 /**
  * What the dispatcher does with a lost stage: `{relaunch: true, tries}` with the record to write (`record`, null when the
  * same loss was counted already and only its relaunch is to finish), or `{block: true, tries}` once RELAUNCH_MAX
- * relaunches since `start` were used. `setup`: the step a vanished work job failed at before Factory ran (endedNotLost
+ * relaunches since `start` were used. `setup`: the step a vanished work job failed at before Pendulum ran (endedNotLost
  * `{step, number}`), kept on the try so the next loss can be told to fail at the same step (setupAgain).
  */
 export function relaunchDecision({ record, start, key, lost, at, run = null, setup = null, max = RELAUNCH_MAX }) {
@@ -121,7 +121,7 @@ export function relaunchDecision({ record, start, key, lost, at, run = null, set
 export function relaunchBody({ tries }, count, { max = RELAUNCH_MAX } = {}) {
   const last = tries.at(-1);
   const how = last?.lost === "outage" ? "it ended on its network (an outage)" : "it vanished with no exit (its runner or sandbox could not report)";
-  return `Factory relaunched this Objective's stage: ${count} of ${max} since it was last started; the latest because ${how}. Past ${max} it is Blocked for you.\n<!-- factory:relaunch ${JSON.stringify({ tries })} -->`;
+  return `Pendulum relaunched this Objective's stage: ${count} of ${max} since it was last started; the latest because ${how}. Past ${max} it is Blocked for you.\n<!-- pendulum:relaunch ${JSON.stringify({ tries })} -->`;
 }
 
 /**
@@ -132,12 +132,12 @@ export function relaunchBody({ tries }, count, { max = RELAUNCH_MAX } = {}) {
  * - on the Action, its last `work (N)` job (stintWorkJob, GitHub's jobs API with its `conclusion` and `steps[]`):
  *   `{by: "cancelled"}` when the job concluded `cancelled` or `timed_out` (a person, or the job's timeout): a stop;
  *   `{by: "setup", step, number}` when GitHub never started it (triage.mjs neverStarted: no step, no runner; `step` and
- *   `number` null), or its first failed step came before Factory's own ran: GitHub's Set up job (step 1), or a step
- *   numbered below `workStep`, Factory's work step's number read from the workflow file (workStepNumber); `step` and
+ *   `number` null), or its first failed step came before Pendulum's own ran: GitHub's Set up job (step 1), or a step
+ *   numbered below `workStep`, Pendulum's work step's number read from the workflow file (workStepNumber); `step` and
  *   `number` are the failed step's. One such failure may be passing (a checkout's or a token mint's 5xx, a runner not
  *   acquired), so the dispatcher relaunches it once; the same step failing on the relaunch's job too (setupAgain) is a
  *   set-up that fails the same way every time, and Blocks.
- * Anything else is lost: no job, a job with no failed step of its own (a runner that went away), Factory's own step
+ * Anything else is lost: no job, a job with no failed step of its own (a runner that went away), Pendulum's own step
  * failing with no exit written (its network), or a failed step that cannot be placed (`workStep` null: the workflow
  * file unread; the caller logs that).
  */
@@ -168,9 +168,9 @@ export function setupAgain(record, start, end) {
 export const needsWorkStep = (job) => !!job && job.conclusion !== "cancelled" && job.conclusion !== "timed_out" && !neverStarted(job) && (failedStep(job)?.number ?? 1) !== 1;
 
 /**
- * The number Factory's work step has in GitHub's `steps[]` for the job reporting `jobName`, read from the workflow file's
- * text: GitHub's Set up job is step 1 and the job's YAML steps follow in order, so the step at index i is i + 2. Factory's
- * work step is the top-level step that `uses: clockgrove/factory@…` with `mode: work` (Factory renders the workflow;
+ * The number Pendulum's work step has in GitHub's `steps[]` for the job reporting `jobName`, read from the workflow file's
+ * text: GitHub's Set up job is step 1 and the job's YAML steps follow in order, so the step at index i is i + 2. Pendulum's
+ * work step is the top-level step that `uses: clockgrove/pendulum@…` with `mode: work` (Pendulum renders the workflow;
  * the account step runs the same action with `mode: account`). Null when the text does not parse or names no such step.
  */
 export function workStepNumber(text, jobName) {
@@ -182,14 +182,14 @@ export function workStepNumber(text, jobName) {
   }
   for (const [id, j] of Object.entries(doc?.jobs || {})) {
     if (!reports(typeof j?.name === "string" ? j.name : id, jobName) || !Array.isArray(j?.steps)) continue;
-    const i = j.steps.findIndex((st) => /^clockgrove\/factory@\S+$/.test(String(st?.uses ?? "").trim()) && st?.with?.mode === "work");
+    const i = j.steps.findIndex((st) => /^clockgrove\/pendulum@\S+$/.test(String(st?.uses ?? "").trim()) && st?.with?.mode === "work");
     if (i >= 0) return i + 2;
   }
   return null;
 }
 
 /**
- * Factory's work step's number for a vanished work job (workStepNumber), from the workflow file at the job's commit
+ * Pendulum's work step's number for a vanished work job (workStepNumber), from the workflow file at the job's commit
  * (`head_sha`): this workflow's own file (github.mjs workflowFile), one contents read. Null when it cannot be read.
  */
 export async function stintWorkStep(repo, job, opts) {
@@ -200,14 +200,14 @@ export async function stintWorkStep(repo, job, opts) {
 
 /** The dispatcher's Block reason and cause for a vanished stage endedNotLost placed (`end`), after `note`. */
 export function notLostBlock(end, note = "") {
-  if (end?.by === "setup") return { reason: `worker job failed before Factory ran: ${end.step ? `its step "${end.step}" failed, as it did on the job Factory relaunched it from` : "GitHub never started it (no runner was assigned), nor the job Factory relaunched it from"}${note}; a set-up failure that fails the same way every time, so it was not relaunched again`, cause: "setup" };
-  if (end?.by === "cancelled") return { reason: `worker job vanished: its work job was cancelled (a person, or its timeout)${note}; a stop, so it was not relaunched`, cause: "factory" };
-  return { reason: `worker job vanished: Running with no job in progress${note}`, cause: "factory" };
+  if (end?.by === "setup") return { reason: `worker job failed before Pendulum ran: ${end.step ? `its step "${end.step}" failed, as it did on the job Pendulum relaunched it from` : "GitHub never started it (no runner was assigned), nor the job Pendulum relaunched it from"}${note}; a set-up failure that fails the same way every time, so it was not relaunched again`, cause: "setup" };
+  if (end?.by === "cancelled") return { reason: `worker job vanished: its work job was cancelled (a person, or its timeout)${note}; a stop, so it was not relaunched`, cause: "pendulum" };
+  return { reason: `worker job vanished: Running with no job in progress${note}`, cause: "pendulum" };
 }
 
 /**
  * The Running stint's `work (N)` job, or null: only a job created in the stint (from `since`) counts. The dispatcher that
- * applied `factory:running` named the job in its own run: `run`, when the record names the relaunch's run, is read
+ * applied `pendulum:running` named the job in its own run: `run`, when the record names the relaunch's run, is read
  * first; else the runs created in the hour up to the label (that run was created before it; any status, since a run's
  * wake job may still sleep), the newest first, at most `maxRuns` of them, one jobs read each.
  */
@@ -240,14 +240,14 @@ export const timelineOf = async (repo, n, opts) => (await rest(`repos/${repo.ful
 export const writeRelaunchRecord = (repo, n, record, count, opts) => upsertComment(repo, n, marker(n, "relaunch"), relaunchBody(record, count), opts);
 
 /**
- * A new Running stint for the Objective: `factory:running` applied afresh (taken off first when on), so the stint's
+ * A new Running stint for the Objective: `pendulum:running` applied afresh (taken off first when on), so the stint's
  * start (github.mjs runningSince) is now and the grace a job or sandbox start gets counts from the relaunch. Any other
  * state label goes; the card moves to Running.
  */
 export async function newStint(repo, n, { project, wasRunning }, opts) {
   if (wasRunning) {
-    await removeLabel(repo, n, "factory:running", opts);
-    await addLabels(repo, n, ["factory:running"], opts);
+    await removeLabel(repo, n, "pendulum:running", opts);
+    await addLabels(repo, n, ["pendulum:running"], opts);
   } else await setStateLabel(repo, n, "running", opts);
   await moveCard(project, repo, n, "Running", opts).catch(() => {});
 }

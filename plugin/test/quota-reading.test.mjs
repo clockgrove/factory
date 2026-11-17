@@ -53,7 +53,7 @@ test("#391 quotaReading: Claude Code's rate_limit_event windows, a later event's
 
 /** A fake harness `name` in its own bin: prints `stream`; a Codex one also writes `rollout(now)` to its thread's rollout. */
 function fakeHarness(name, stream, rollout = null) {
-  const bin = realpathSync(mkdtempSync(join(tmpdir(), `factory-quota-${name}-`)));
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), `pendulum-quota-${name}-`)));
   writeFileSync(join(bin, "out.jsonl"), stream);
   writeFileSync(
     join(bin, name),
@@ -270,14 +270,14 @@ test("#391 model windows: a per-model window limits only stages on that family (
   assert.deepEqual(stageModels({ model: "claude-opus-5-5", subagentModel: "", reviewerModel: "claude-fable-5-2" }, "review"), ["claude-fable-5-2", "claude-opus-5-5"]);
 });
 
-test("#391 cache warmth: a pass's prompt cache lasts the TTL Factory sets, else Claude Code's own (an hour on a login or plan token, five minutes on an API key); the stage records until when", async () => {
+test("#391 cache warmth: a pass's prompt cache lasts the TTL Pendulum sets, else Claude Code's own (an hour on a login or plan token, five minutes on an API key); the stage records until when", async () => {
   const { cacheLifetimeMs } = await import("../scripts/lib/harness.mjs");
   const { cacheWarmUntil } = await import("../scripts/lib/session.mjs");
   assert.equal(cacheLifetimeMs("claude", {}), H);
   assert.equal(cacheLifetimeMs("claude", { ANTHROPIC_API_KEY: "k" }), 5 * 60_000);
-  assert.equal(cacheLifetimeMs("claude", { ANTHROPIC_API_KEY: "k", FACTORY_PROMPT_CACHE_TTL: "auto" }), H);
-  assert.equal(cacheLifetimeMs("claude", { FACTORY_PROMPT_CACHE_TTL: "5m" }), 5 * 60_000);
-  assert.equal(cacheLifetimeMs("codex", {}), null, "none Factory sets");
+  assert.equal(cacheLifetimeMs("claude", { ANTHROPIC_API_KEY: "k", PENDULUM_PROMPT_CACHE_TTL: "auto" }), H);
+  assert.equal(cacheLifetimeMs("claude", { PENDULUM_PROMPT_CACHE_TTL: "5m" }), 5 * 60_000);
+  assert.equal(cacheLifetimeMs("codex", {}), null, "none Pendulum sets");
   const end = "2026-11-15T10:00:00.000Z";
   assert.equal(cacheWarmUntil([{ ended: "2026-11-15T09:00:00.000Z", cacheWarmMs: H }, { ended: end, cacheWarmMs: 5 * 60_000 }]), Date.parse(end) + 5 * 60_000, "the last pass's");
   assert.equal(cacheWarmUntil([{ ended: end, cacheWarmMs: null }]), null);

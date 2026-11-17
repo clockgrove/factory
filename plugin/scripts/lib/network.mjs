@@ -1,7 +1,7 @@
 // Whether this machine reaches the services a stage needs, and the one wait while it does not (#228).
 // A request that never left this machine (DNS, a refused or unreachable connect, a connect that timed out) is no
 // answer from GitHub or the model provider: it is this machine's network. A process that waits outages out
-// (waitOutages: the stages and `factory serve`) sends no such request again until a cheap probe of the same host gets
+// (waitOutages: the stages and `pendulum serve`) sends no such request again until a cheap probe of the same host gets
 // an answer. One probe loop per host, however many calls wait on it, and one log line when the host is lost and one
 // when it answers again. Any HTTP answer, a 5xx or a 429 included, is GitHub (or the provider) answering: the client's
 // own retries handle those (github.mjs RETRY), until a 5xx outlasts them: then GitHub is down for the caller, an outage
@@ -118,10 +118,10 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * The bounds. `stageWaitMs`: how long a local stage waits in place for the network before it ends `paused` for its serve
  * to resume (fifteen minutes by default: a DNS flap or a router restart passes, and a longer outage costs the stage no
  * more of its wall clock than the claim's own freshness, local.mjs CLAIM_FRESH_MS; the repository's or this machine's
- * FACTORY_LOCAL_WAIT_MINUTES, at most an hour, which a stage sets here when it starts, harness.mjs stageLimits, and serve
+ * PENDULUM_LOCAL_WAIT_MINUTES, at most an hour, which a stage sets here when it starts, harness.mjs stageLimits, and serve
  * each tick for its own same-outage window, local.mjs applyLocalLimits). `blockMs`: how long an
  * Objective may stay paused on one outage before serve Blocks it with the External cause `outage` (twelve hours by
- * default: a night's outage, from late evening to the next morning, fits with room; FACTORY_LOCAL_OUTAGE_HOURS, which
+ * default: a night's outage, from late evening to the next morning, fits with room; PENDULUM_LOCAL_OUTAGE_HOURS, which
  * serve sets here each tick). It stays under the dispatcher's bound for a claim gone quiet (claim_pause_hours, a day by
  * default), so an outage between the two Blocks naming the outage, while one that keeps the machine off GitHub for longer
  * meets the dispatcher's Block first; doctor names a pair that is not so ordered. `probeMs`: the pause before each probe, the last
@@ -131,7 +131,7 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * it (a tenth of it at least), so the callers of several processes on one quota do not all go again at once; a limit
  * still refused after its stated reset waits `probeMs` (doubling) instead. `exitWaitMs`: how long past its deadline a
  * stage off the local route that ended on a rate limit may wait for the reset to write its Block (the job keeps fifteen
- * minutes after its deadline, session.mjs deadline, which also pay for the steps before Factory runs and the upload
+ * minutes after its deadline, session.mjs deadline, which also pay for the steps before Pendulum runs and the upload
  * after). `serverResumeMs`, `serverResumeMaxMs`: serve resumes an Objective paused on a host that answered, and failed
  * or was busy, past the retries (serverDown: GitHub's 5xx, a model provider's busy answer) after 1, 2, 4… minutes,
  * doubling up to half an hour (serverWait), since a probe of the host answers while one endpoint fails; it waits on up
@@ -297,7 +297,7 @@ export async function givenUp() {
 
 /**
  * The outage a failed call met, as its error: a host this machine could not reach (unreachable: a NetworkDown, or a bare
- * connect-level failure), or GitHub's core REST quota spent, the one every write of Factory's goes against. Else null: a
+ * connect-level failure), or GitHub's core REST quota spent, the one every write of Pendulum's goes against. Else null: a
  * spent GraphQL or search quota is no outage of the stage's writes, and any answer from the host is no outage at all.
  */
 export const outageMet = (e) => (unreachable(e) && (e.code !== RATE_LIMIT_SPENT || quotaName(e.key) === "core") ? e : null);
@@ -574,7 +574,7 @@ const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "N
 
 /**
  * One reachability check on a fresh connection: a new agent with no kept-alive socket, so no pooled connection answers
- * for a network that is gone, and a HEAD to `origin`. It reaches the network as Factory's GitHub client does (Node's
+ * for a network that is gone, and a HEAD to `origin`. It reaches the network as Pendulum's GitHub client does (Node's
  * fetch): through the proxy the stage process's own environment names (HTTPS_PROXY, HTTP_PROXY, NO_PROXY) when
  * NODE_USE_ENV_PROXY is 1, as local mode's stages run, else directly; never a setting of the checkout's. Directly, it
  * makes its own DNS lookup (OUTAGE.lookup) and, unless `privateOk`, connects to no private, loopback or link-local
@@ -604,7 +604,7 @@ export function freshProbe(origin, env = process.env, { privateOk = false } = {}
         }
         cb(null, address, family);
       });
-    const req = mod.request({ protocol: u.protocol, hostname: u.hostname, port: u.port || undefined, path: "/", method: "HEAD", agent, lookup, headers: { "user-agent": "clockgrove-factory" } }, (res) => {
+    const req = mod.request({ protocol: u.protocol, hostname: u.hostname, port: u.port || undefined, path: "/", method: "HEAD", agent, lookup, headers: { "user-agent": "clockgrove-pendulum" } }, (res) => {
       res.resume();
       resolve(proxyEnv && /^https?:\/\//.test(req.path) && res.statusCode === 502 ? "ERR_PROXY_502" : null);
     });

@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { LIMIT_BACKOFF_MS, accountHolds, holdsDir } from "../scripts/lib/holds.mjs";
 import { parseArgs } from "../scripts/local.mjs";
 
-// `factory hold list | release <account>` (#376) on this machine: the real command, in its own process, on a fake home's
+// `pendulum hold list | release <account>` (#376) on this machine: the real command, in its own process, on a fake home's
 // holds folder, read back by another serve's store (the real holds.mjs) as every serve here reads it.
 const CLI = join(import.meta.dirname, "..", "scripts", "local.mjs");
 const MIN = 60_000;
@@ -46,7 +46,7 @@ test("#376: hold list shows each held or passed-over account; hold release lifts
   const rel = hold(home, "release", "alpha");
   assert.equal(rel.status, 0, rel.stderr);
   assert.match(rel.stdout, /^released alpha \(Claude Code\), which was held until \S+ \(seven_day\), back-off count 2; passed over until about /);
-  assert.match(rel.stdout, /\nevery serve on this Factory release or later on this machine may start on it at its next tick, .*; a serve on an earlier release still holds it until its reset: restart that serve on this release/);
+  assert.match(rel.stdout, /\nevery serve on this Pendulum release or later on this machine may start on it at its next tick, .*; a serve on an earlier release still holds it until its reset: restart that serve on this release/);
   const after = readdirSync(dir).sort();
   assert.equal(after.length, files.length + 1, "one release record, and no file removed");
   assert.ok(files.every((f) => after.includes(f)));

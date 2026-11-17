@@ -1,4 +1,4 @@
-// Stopping one Objective (#207): removing its factory:objective label, or closing its issue. The running stage sees it
+// Stopping one Objective (#207): removing its pendulum:objective label, or closing its issue. The running stage sees it
 // on its watch, ends its harness passes (spend recorded), leaves its PR a draft and exits; no tick, loop or relaunch
 // picks it up again; the dispatcher tidies a stopped one no stage holds.
 import "./temp.mjs";
@@ -17,18 +17,18 @@ RETRY.sleep = async () => {};
 const issue = (labels, state = "open", number = 7) => ({ number, state, labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } });
 
 test("stopCause: a closed issue or one without its Objective label is stopped; labels as names or objects", () => {
-  assert.equal(stopCause(issue(["factory:objective", "factory:running"]), "factory:objective"), null);
-  assert.equal(stopCause(issue(["factory:running"]), "factory:objective"), "unlabeled");
-  assert.equal(stopCause(issue(["factory:objective"], "closed"), "factory:objective"), "closed", "closing stops it, label or not");
-  assert.equal(stopCause({ state: "open", labels: ["factory:objective"] }, "factory:objective"), null);
+  assert.equal(stopCause(issue(["pendulum:objective", "pendulum:running"]), "pendulum:objective"), null);
+  assert.equal(stopCause(issue(["pendulum:running"]), "pendulum:objective"), "unlabeled");
+  assert.equal(stopCause(issue(["pendulum:objective"], "closed"), "pendulum:objective"), "closed", "closing stops it, label or not");
+  assert.equal(stopCause({ state: "open", labels: ["pendulum:objective"] }, "pendulum:objective"), null);
   assert.equal(stopCause({ state: "open", labels: ["my:objective"] }, "my:objective"), null, "the workflow's own Objective label");
-  assert.equal(stopCause(null, "factory:objective"), null, "no read is no stop");
+  assert.equal(stopCause(null, "pendulum:objective"), null, "no read is no stop");
   assert.equal(stopText("closed"), "the issue was closed");
-  assert.equal(stopText("unlabeled", "factory:objective"), "`factory:objective` was removed");
+  assert.equal(stopText("unlabeled", "pendulum:objective"), "`pendulum:objective` was removed");
 });
 
 test("watchObjective: the first read that shows the stop calls onStop once; a failed read is no answer", async () => {
-  const reads = [issue(["factory:objective"]), new Error("502"), issue(["factory:objective"]), issue([]), issue([], "closed")];
+  const reads = [issue(["pendulum:objective"]), new Error("502"), issue(["pendulum:objective"]), issue([]), issue([], "closed")];
   const seen = [];
   let i = 0;
   await new Promise((done) => {
@@ -38,7 +38,7 @@ test("watchObjective: the first read that shows the stop calls onStop once; a fa
         if (r instanceof Error) throw r;
         return r;
       },
-      label: "factory:objective",
+      label: "pendulum:objective",
       everyMs: 5,
       onStop: (cause) => {
         seen.push(cause);
@@ -50,7 +50,7 @@ test("watchObjective: the first read that shows the stop calls onStop once; a fa
   assert.equal(i, 4);
   // A watch stopped before any stop never calls back.
   let called = false;
-  const w = watchObjective({ read: async () => issue([]), label: "factory:objective", everyMs: 5, onStop: () => (called = true) });
+  const w = watchObjective({ read: async () => issue([]), label: "pendulum:objective", everyMs: 5, onStop: () => (called = true) });
   w.stop();
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(called, false);
@@ -94,7 +94,7 @@ test("stoppedRecords: a pass the stop ended before it reported dollars counts it
   assert.deepEqual(out[4], passes[4], "a pass that reported dollars keeps them");
 });
 
-/** A fetch fake over one repository: `issues(label)` lists open issues, `pr(n)` the factory/<n> branch's open PR. */
+/** A fetch fake over one repository: `issues(label)` lists open issues, `pr(n)` the pendulum/<n> branch's open PR. */
 function fakeApi({ issues = () => [], closed = [], pr = () => null, timeline = () => [], queued = new Set() }) {
   const writes = [];
   const realFetch = globalThis.fetch;
@@ -113,7 +113,7 @@ function fakeApi({ issues = () => [], closed = [], pr = () => null, timeline = (
     if (method !== "GET") writes.push(`${method} ${decodeURIComponent(u.pathname).replace("/repos/acme/app", "")}`);
     if (method === "GET" && u.pathname === "/repos/acme/app/issues") return json(u.searchParams.get("state") === "closed" ? closed : issues(u.searchParams.get("labels")));
     if (method === "GET" && u.pathname === "/repos/acme/app/pulls") {
-      const n = Number(/factory\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1]);
+      const n = Number(/pendulum\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1]);
       const p = pr(n);
       return json(p ? [p] : []);
     }
@@ -130,9 +130,9 @@ function fakeApi({ issues = () => [], closed = [], pr = () => null, timeline = (
 }
 
 const withApi = async (env, fn) => {
-  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
+  const saved = Object.fromEntries(["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
   Object.assign(process.env, { GITHUB_API_URL: "https://github.test", ...env });
-  for (const k of ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
+  for (const k of ["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
   try {
     return await fn();
   } finally {
@@ -146,10 +146,10 @@ test("applyStop: the open PR leaves the merge queue and goes back to a draft wit
     const api = fakeApi({ pr: (n) => (n === 7 ? { number: 70, draft: false, node_id: "PR_70" } : null), queued: new Set([70]) });
     try {
       assert.deepEqual(await applyStop({ owner: "acme", name: "app", full: "acme/app" }, 7, { project: null }, { token: "t" }), []);
-      assert.deepEqual(api.writes, ["dequeue PR_70", "draft PR_70", "DELETE /issues/70/labels/factory:review", "DELETE /issues/7/labels/factory:running", "DELETE /issues/7/labels/factory:blocked", "DELETE /issues/7/labels/factory:question", "DELETE /issues/7/labels/factory:in-review"]);
+      assert.deepEqual(api.writes, ["dequeue PR_70", "draft PR_70", "DELETE /issues/70/labels/pendulum:review", "DELETE /issues/7/labels/pendulum:running", "DELETE /issues/7/labels/pendulum:blocked", "DELETE /issues/7/labels/pendulum:question", "DELETE /issues/7/labels/pendulum:in-review"]);
       api.writes.length = 0;
       await applyStop({ owner: "acme", name: "app", full: "acme/app" }, 7, { closed: true, project: null }, { token: "t" });
-      assert.deepEqual(api.writes, ["dequeue PR_70", "draft PR_70", "DELETE /issues/70/labels/factory:review"], "a closed issue: only its PR");
+      assert.deepEqual(api.writes, ["dequeue PR_70", "draft PR_70", "DELETE /issues/70/labels/pendulum:review"], "a closed issue: only its PR");
       api.writes.length = 0;
       await applyStop({ owner: "acme", name: "app", full: "acme/app" }, 8, { closed: true, project: null }, { token: "t" });
       assert.deepEqual(api.writes, [], "no PR, nothing to do");
@@ -165,18 +165,18 @@ test("dispatcher: a stopped Objective In review is left a draft and Queued at on
   const ago = (ms) => new Date(now - ms).toISOString();
   // #7 In review and #8 Running lost their label just now; #9 Running lost it long ago (its stage died); #10 is still an
   // Objective; #11 is a local loop's, its label off long ago (another route's to a local loop without --all).
-  const open = { "factory:objective": [issue(["factory:objective"], "open", 10)], "factory:in-review": [issue(["factory:in-review"], "open", 7)], "factory:running": [issue(["factory:running"], "open", 8), issue(["factory:running"], "open", 9), issue(["factory:running", "factory:local"], "open", 11)] };
+  const open = { "pendulum:objective": [issue(["pendulum:objective"], "open", 10)], "pendulum:in-review": [issue(["pendulum:in-review"], "open", 7)], "pendulum:running": [issue(["pendulum:running"], "open", 8), issue(["pendulum:running"], "open", 9), issue(["pendulum:running", "pendulum:local"], "open", 11)] };
   const run = (env) =>
     withApi(env, async () => {
       const api = fakeApi({
         issues: (label) => open[label] || [],
         // #12 closed by a person while In review, its PR still open.
-        closed: [issue(["factory:objective", "factory:in-review"], "closed", 12)],
+        closed: [issue(["pendulum:objective", "pendulum:in-review"], "closed", 12)],
         pr: (n) => (n === 7 || n === 9 || n === 12 ? { number: n * 10, draft: false, node_id: `PR_${n * 10}` } : null),
-        timeline: (n) => [{ event: "labeled", label: { name: "factory:objective" }, actor: { login: "maintainer", type: "User" }, created_at: ago(3 * 3600_000) }, { event: "unlabeled", label: { name: "factory:objective" }, created_at: n === 9 || n === 11 ? ago(STOP_GRACE_MS + 60_000) : ago(60_000) }],
+        timeline: (n) => [{ event: "labeled", label: { name: "pendulum:objective" }, actor: { login: "maintainer", type: "User" }, created_at: ago(3 * 3600_000) }, { event: "unlabeled", label: { name: "pendulum:objective" }, created_at: n === 9 || n === 11 ? ago(STOP_GRACE_MS + 60_000) : ago(60_000) }],
       });
       try {
-        const r = await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
+        const r = await dispatch({ repo: "acme/app", objectiveLabel: "pendulum:objective", maxConcurrent: 2, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
         return { r, writes: api.writes };
       } finally {
         api.restore();
@@ -185,16 +185,16 @@ test("dispatcher: a stopped Objective In review is left a draft and Queued at on
   const actions = await run({});
   assert.deepEqual(actions.r.stopped, [7, 9, 11]);
   const on = (writes, n) => writes.filter((w) => w.includes(`/issues/${n}/`) || w.includes(`PR_${n * 10}`) || w.includes(`/issues/${n * 10}/`));
-  assert.ok(on(actions.writes, 7).includes("draft PR_70") && on(actions.writes, 7).includes("DELETE /issues/70/labels/factory:review"), "its PR a draft, unlabelled for review");
-  assert.ok(on(actions.writes, 7).includes("DELETE /issues/7/labels/factory:in-review"));
+  assert.ok(on(actions.writes, 7).includes("draft PR_70") && on(actions.writes, 7).includes("DELETE /issues/70/labels/pendulum:review"), "its PR a draft, unlabelled for review");
+  assert.ok(on(actions.writes, 7).includes("DELETE /issues/7/labels/pendulum:in-review"));
   assert.deepEqual(on(actions.writes, 8), [], "a stage may still be stopping itself");
-  assert.ok(on(actions.writes, 9).includes("DELETE /issues/9/labels/factory:running") && on(actions.writes, 9).includes("draft PR_90"));
+  assert.ok(on(actions.writes, 9).includes("DELETE /issues/9/labels/pendulum:running") && on(actions.writes, 9).includes("draft PR_90"));
   assert.deepEqual(actions.r.ready, [10], "the Objective that is not stopped is picked; a stopped one never is");
   // Closing the issue stops it too: the Done pass leaves its open PR a draft without the review label.
   assert.deepEqual(actions.r.done, [12]);
-  assert.ok(actions.writes.includes("draft PR_120") && actions.writes.includes("DELETE /issues/120/labels/factory:review"));
+  assert.ok(actions.writes.includes("draft PR_120") && actions.writes.includes("DELETE /issues/120/labels/pendulum:review"));
   // A local loop tends only the Objectives it routes.
-  const local = await run({ FACTORY_LOCAL: "1" });
+  const local = await run({ PENDULUM_LOCAL: "1" });
   assert.deepEqual(local.r.stopped, [11]);
 });
 
@@ -292,8 +292,8 @@ setTimeout(() => {}, 60000);
     const ends = [];
     const finish = async (exit, reason) => ends.push({ exit, reason, records: records.map((r) => ({ label: r.label, stopped: r.stopped, usd: r.usd })) });
     const repo = { owner: "acme", name: "app", full: "acme/app" };
-    const took = await stopStage({ cause: "unlabeled", label: "factory:objective", repo, issue: 7, pr: { number: 70 }, records, finish, opts: { token: "t" } });
-    const again = await stopStage({ cause: "closed", label: "factory:objective", repo, issue: 7, pr: { number: 70 }, records, finish, opts: { token: "t" } });
+    const took = await stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70 }, records, finish, opts: { token: "t" } });
+    const again = await stopStage({ cause: "closed", label: "pendulum:objective", repo, issue: 7, pr: { number: 70 }, records, finish, opts: { token: "t" } });
     process.stdout.write(JSON.stringify({ took, again, ms: Date.now() - started, ends, writes, home: (await import("node:os")).homedir() }) + "\\n");
     process.exit(0);
   `;
@@ -310,31 +310,31 @@ setTimeout(() => {}, 60000);
   assert.ok(r.ms < 40_000, `the stop waited on the pass (${r.ms} ms)`);
   assert.equal(r.ends.length, 1);
   assert.equal(r.ends[0].exit, "stopped");
-  assert.equal(r.ends[0].reason, "`factory:objective` was removed");
+  assert.equal(r.ends[0].reason, "`pendulum:objective` was removed");
   assert.equal(r.ends[0].records.length, 1, "the pass still running at the stop is in the records");
   assert.equal(r.ends[0].records[0].stopped, true);
   assert.ok(r.ends[0].records[0].usd > 0, "with its spend");
-  assert.ok(r.writes.includes("draft PR_70") && r.writes.includes("DELETE /repos/acme/app/issues/70/labels/factory:review"), r.writes.join("\n"));
-  assert.ok(r.writes.includes("DELETE /repos/acme/app/issues/7/labels/factory:running"));
+  assert.ok(r.writes.includes("draft PR_70") && r.writes.includes("DELETE /repos/acme/app/issues/70/labels/pendulum:review"), r.writes.join("\n"));
+  assert.ok(r.writes.includes("DELETE /repos/acme/app/issues/7/labels/pendulum:running"));
 });
 
 test("local loop: a stopped Objective's labelled PR gets no review, and a stopped Objective it held is not resumed", async () => {
   const { Local, holderId } = await import("../scripts/local.mjs");
   const { claimBody } = await import("../scripts/lib/local.mjs");
-  const loop = Object.assign(Object.create(Local.prototype), { repo: { owner: "acme", name: "app", full: "acme/app" }, repoFull: "acme/app", opts: { token: "t" }, wf: {}, holder: "this-loop", baseEnv: () => ({ FACTORY_LOCAL_ALL: "1" }) });
+  const loop = Object.assign(Object.create(Local.prototype), { repo: { owner: "acme", name: "app", full: "acme/app" }, repoFull: "acme/app", opts: { token: "t" }, wf: {}, holder: "this-loop", baseEnv: () => ({ PENDULUM_LOCAL_ALL: "1" }) });
   // Both held by a loop of this machine that went away (a pid long gone): ones to resume, unless stopped.
   const away = holderId(undefined, 2 ** 22 + 7);
-  const claim = (n) => ({ id: n, user: { login: "maintainer", type: "User" }, updated_at: new Date(Date.now() - 3600_000).toISOString(), body: `<!-- factory:${n}:local -->\n${claimBody(away, new Date(Date.now() - 3600_000))}` });
-  const pull = (n) => ({ number: n * 10, draft: false, head: { ref: `factory/${n}` }, labels: [{ name: "factory:review" }] });
-  await withApi({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, async () => {
+  const claim = (n) => ({ id: n, user: { login: "maintainer", type: "User" }, updated_at: new Date(Date.now() - 3600_000).toISOString(), body: `<!-- pendulum:${n}:local -->\n${claimBody(away, new Date(Date.now() - 3600_000))}` });
+  const pull = (n) => ({ number: n * 10, draft: false, head: { ref: `pendulum/${n}` }, labels: [{ name: "pendulum:review" }] });
+  await withApi({ PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" }, async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = async (url) => {
       const u = new URL(url);
       const json = (b) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
       if (u.pathname === "/repos/acme/app/pulls") return json([pull(7), pull(8), pull(9)]);
       const one = /^\/repos\/acme\/app\/issues\/(\d+)$/.exec(u.pathname);
-      if (one) return json(issue(Number(one[1]) === 7 ? ["factory:objective", "factory:in-review"] : Number(one[1]) === 8 ? ["factory:in-review"] : ["factory:objective"], Number(one[1]) === 9 ? "closed" : "open", Number(one[1])));
-      if (u.pathname === "/repos/acme/app/issues") return json(u.searchParams.get("labels") === "factory:running" ? [issue(["factory:running"], "open", 8), issue(["factory:objective", "factory:running"], "open", 7)] : []);
+      if (one) return json(issue(Number(one[1]) === 7 ? ["pendulum:objective", "pendulum:in-review"] : Number(one[1]) === 8 ? ["pendulum:in-review"] : ["pendulum:objective"], Number(one[1]) === 9 ? "closed" : "open", Number(one[1])));
+      if (u.pathname === "/repos/acme/app/issues") return json(u.searchParams.get("labels") === "pendulum:running" ? [issue(["pendulum:running"], "open", 8), issue(["pendulum:objective", "pendulum:running"], "open", 7)] : []);
       if (u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
       if (u.pathname === "/user") return json({ login: "maintainer", type: "User" });
       const comments = /^\/repos\/acme\/app\/issues\/(\d+)\/comments$/.exec(u.pathname);

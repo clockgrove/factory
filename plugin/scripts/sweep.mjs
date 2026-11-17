@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Factory's sandbox sweep (mode: sweep): destroys the Objective sandboxes and the images no live Objective needs, and
+// Pendulum's sandbox sweep (mode: sweep): destroys the Objective sandboxes and the images no live Objective needs, and
 // stops one left running with no stage holding it.
 //   node scripts/sweep.mjs --repo OWNER/NAME [--dry-run]
 // Runs when an Objective closes (its issue closed, its PR merged), is Blocked or asks a Question, by hand, on its own
 // wakes (sweepWaits: what a run left for minutes later), with GitHub's hourly cron as the backstop, and inside a
 // launch the vendor refused for its quota (launch.mjs). The job log and summary show the snapshot storage before and after.
-// Lists Factory's Objective sandboxes for this repository in the vendor's project (tags `factory=objective` and
-// `factory-repo=<repository id>`; image sandboxes and anything else are never listed, never touched) and destroys one
+// Lists Pendulum's Objective sandboxes for this repository in the vendor's project (tags `pendulum=objective` and
+// `pendulum-repo=<repository id>`; image sandboxes and anything else are never listed, never touched) and destroys one
 // (logic.mjs sweepDecision) when its Objective is closed, when the Objective's record names another sandbox or none,
 // or when it has been stopped longer than `sandbox_idle_days` with the Objective neither Running nor In review. At most
 // `sweep_max_destroys` a run. The record's own sandbox, running with no stage holding it on an Objective neither Running
@@ -30,19 +30,19 @@ import { findProject, getIssue, getRepo, listComments, projectStatuses, repoOf }
 import { lockBase } from "./lib/lock.mjs";
 import { IMAGE_TAG, pruneImages } from "./lib/image.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { WAKE_SLACK_MS, factorySandboxId, sandboxRecord, settleStale, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
+import { WAKE_SLACK_MS, pendulumSandboxId, sandboxRecord, settleStale, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
 
 /** Usage tarballs collected per run: the workflow's sweep job has this many upload steps. */
 export const COLLECT_SLOTS = 3;
 /** A sandbox younger than this is left alone: a launcher may be between creating it and recording it. */
 const GRACE_MS = 15 * 60_000;
 
-/** Factory's Objective sandboxes for this repository, by their tags; nothing else the listing holds. */
+/** Pendulum's Objective sandboxes for this repository, by their tags; nothing else the listing holds. */
 export const objectiveSandboxes = (listed, repoId) =>
-  (listed || []).filter((s) => s.tags?.factory === "objective" && s.tags?.["factory-repo"] === String(repoId) && /^[1-9]\d{0,9}$/.test(s.tags?.["factory-issue"] ?? "") && factorySandboxId(s.id));
+  (listed || []).filter((s) => s.tags?.pendulum === "objective" && s.tags?.["pendulum-repo"] === String(repoId) && /^[1-9]\d{0,9}$/.test(s.tags?.["pendulum-issue"] ?? "") && pendulumSandboxId(s.id));
 
-/** Where the stage leaves its usage (stage.mjs): `<home>/factory/out/usage-<claim>.tgz`. */
-export const usageTarball = (record) => `${record.home}/factory/out/usage-${record.claim}.tgz`;
+/** Where the stage leaves its usage (stage.mjs): `<home>/pendulum/out/usage-<claim>.tgz`. */
+export const usageTarball = (record) => `${record.home}/pendulum/out/usage-${record.claim}.tgz`;
 
 /** The record's uncollected usage, out of the sandbox and unpacked into `dir`; false when the stage left none. */
 async function collect(adapter, id, record, dir) {
@@ -66,11 +66,11 @@ async function collect(adapter, id, record, dir) {
  */
 export async function storageReport(adapter, repoId) {
   const [objectives, images, project] = await Promise.all([
-    adapter.list({ tag: ["factory-repo", String(repoId)] }),
+    adapter.list({ tag: ["pendulum-repo", String(repoId)] }),
     adapter.list({ tag: [IMAGE_TAG, String(repoId)] }),
     adapter.storage().catch(() => null),
   ]);
-  const mine = [...objectiveSandboxes(objectives, repoId), ...images.filter((s) => s.tags?.factory === "image")];
+  const mine = [...objectiveSandboxes(objectives, repoId), ...images.filter((s) => s.tags?.pendulum === "image")];
   let snapshots = 0;
   let bytes = 0;
   for (const s of mine) {
@@ -109,9 +109,9 @@ export function ownStage(record) {
  * to come out waits for the sweep job).
  */
 export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys, staleMs, collectRoot, now = Date.now(), dryRun = false, harness = null, collectSlots = COLLECT_SLOTS, images = true }) {
-  const mine = objectiveSandboxes(await adapter.list({ tag: ["factory-repo", String(repoId)] }), repoId);
+  const mine = objectiveSandboxes(await adapter.list({ tag: ["pendulum-repo", String(repoId)] }), repoId);
   const project = await findProject(repo, opts).catch(() => null);
-  const numbers = [...new Set(mine.map((s) => Number(s.tags["factory-issue"])))];
+  const numbers = [...new Set(mine.map((s) => Number(s.tags["pendulum-issue"])))];
   const statuses = project ? await projectStatuses(project, repo, numbers, opts).catch(() => ({})) : {};
   const out = [];
   const slots = [];
@@ -125,7 +125,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
     } catch (e) {
       // A missing issue is gone for good; any other failure is a read to try again next run.
       if (e.status !== 404 && e.status !== 410) {
-        for (const s of mine.filter((x) => x.tags["factory-issue"] === String(n))) out.push({ id: s.id, issue: n, action: "skipped", reason: `issue unreadable (${e.status ?? "error"})`, retry: "error" });
+        for (const s of mine.filter((x) => x.tags["pendulum-issue"] === String(n))) out.push({ id: s.id, issue: n, action: "skipped", reason: `issue unreadable (${e.status ?? "error"})`, retry: "error" });
         continue;
       }
     }
@@ -134,7 +134,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
     // The record as written, without the comment's own id and time that sandboxRecord adds.
     const written = record && Object.fromEntries(Object.entries(record).filter(([k]) => k !== "commentId" && k !== "updatedAt"));
     const state = issue ? stateOf(issue, statuses[n] ?? null) : null;
-    for (const s of mine.filter((x) => x.tags["factory-issue"] === String(n))) {
+    for (const s of mine.filter((x) => x.tags["pendulum-issue"] === String(n))) {
       const d = sweepDecision({ sandbox: s, issue, state, record, holds: stageHolds(record, now, staleMs), now, idleMs: idleDays * 86_400_000, graceMs: GRACE_MS });
       if (d.keep) {
         out.push({ id: s.id, issue: n, action: "kept", reason: d.keep, ...(d.until ? { until: d.until, idle: !!d.idle } : {}) });
@@ -192,7 +192,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         if (d.collect) {
           const dir = join(collectRoot, `slot-${slots.length + 1}`);
           if (await collect(adapter, s.id, { ...record, ...own }, dir)) {
-            usage = { dir, name: own.stage === "review" ? `factory-usage-${n}-review` : `factory-usage-${n}` };
+            usage = { dir, name: own.stage === "review" ? `pendulum-usage-${n}-review` : `pendulum-usage-${n}` };
             slots.push(usage);
           }
         }
@@ -239,7 +239,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
       }
     }
   }
-  // This repository's images no stage needs, from Factory's record and the vendor's listing (lib/image.mjs).
+  // This repository's images no stage needs, from Pendulum's record and the vendor's listing (lib/image.mjs).
   const pruned = images ? await pruneImages(adapter, repo, { ...opts, repoId, now, dryRun, log }).catch((e) => {
     log(`sweep: images not pruned (${e.code ?? e.status ?? "error"}): ${String(e.message).slice(0, 200)}`);
     return { images: [], until: null, failed: true };
@@ -288,7 +288,7 @@ async function main() {
   const adapter = await openSandbox(inputs.sandbox, { VERCEL_TOKEN: inputs.vercelToken, VERCEL_TEAM_ID: inputs.vercelTeamId, VERCEL_PROJECT_ID: inputs.vercelProjectId });
   inputs.vercelToken = "";
   const repoId = String(process.env.GITHUB_REPOSITORY_ID || (await getRepo(repo, opts)).id);
-  const collectRoot = join(process.env.RUNNER_TEMP || tmpdir(), "factory-sweep-usage");
+  const collectRoot = join(process.env.RUNNER_TEMP || tmpdir(), "pendulum-sweep-usage");
   const storage = () => storageReport(adapter, repoId).catch((e) => (log(`sweep: storage not read (${e.code ?? "error"})`), null));
   const before = await storage();
   if (before) log(`sweep: storage before: ${storageLine(before)}`);
@@ -326,13 +326,13 @@ async function main() {
   if (process.env.GITHUB_STEP_SUMMARY) {
     const rows = [...results.map((r) => `| #${r.issue} | \`${r.id}\` | ${r.action} | ${r.reason} |`), ...images.map((i) => `| image | \`${i.source}\` | ${i.action} | ${i.reason} |`)];
     const lines = [before && `Storage before: ${storageLine(before)}.`, after && `Storage after: ${storageLine(after)}.`].filter(Boolean).join("\n\n");
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory sandbox sweep\n\n${lines}\n\n${rows.length ? `| Objective | Sandbox | Action | Why |\n| --- | --- | --- | --- |\n${rows.join("\n")}\n` : ""}`);
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum sandbox sweep\n\n${lines}\n\n${rows.length ? `| Objective | Sandbox | Action | Why |\n| --- | --- | --- | --- |\n${rows.join("\n")}\n` : ""}`);
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
-    process.stderr.write(`[factory] sweep failed: ${e.message}\n`);
+    process.stderr.write(`[pendulum] sweep failed: ${e.message}\n`);
     process.exit(1);
   });
 }

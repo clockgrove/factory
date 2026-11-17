@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PLUGIN_ROOT } from "../scripts/lib/checkout.mjs";
-import { FACTORY_PROTECTED, protectedPaths, protectedTouched, renderTaskCard, taskCardValues } from "../scripts/lib/logic.mjs";
+import { PENDULUM_PROTECTED, protectedPaths, protectedTouched, renderTaskCard, taskCardValues } from "../scripts/lib/logic.mjs";
 import { validationGroups } from "../scripts/lib/logic.mjs";
 import { buildPrompt, fixClosingText } from "../scripts/lib/session.mjs";
 
@@ -18,14 +18,14 @@ test("renders the plugin's task card with every placeholder filled", () => {
   assert.match(card, /Validation commands: pnpm check; pnpm test\./);
   assert.match(card, /Budget command: node scripts\/check-test-budget\.mjs\./);
   assert.match(card, /Protected paths: \.github\/, CODEOWNERS, \.agents\/skills\/, \.claude\/, \.codex\/, scripts\/test-budget\.json\./);
-  assert.match(card, /commits on factory\/811, which Factory pushes/);
+  assert.match(card, /commits on pendulum\/811, which Pendulum pushes/);
   assert.match(card, /You never write to GitHub/);
-  assert.doesNotMatch(card, /FACTORY_EXIT_FILE|gh pr create|git push/);
+  assert.doesNotMatch(card, /PENDULUM_EXIT_FILE|gh pr create|git push/);
   assert.doesNotMatch(card, /\{\{/);
 });
 
 test("hours are rounded to one decimal and empty commands read as none", () => {
-  const v = taskCardValues({ issue: 1, maxUsd: 5, timeoutMinutes: 100, validation: [], budgetCommand: "", protectedPaths: FACTORY_PROTECTED });
+  const v = taskCardValues({ issue: 1, maxUsd: 5, timeoutMinutes: 100, validation: [], budgetCommand: "", protectedPaths: PENDULUM_PROTECTED });
   assert.equal(v.hours, "1.7");
   assert.equal(v.validation, "none");
   assert.equal(v.budget_command, "none");
@@ -36,13 +36,13 @@ test("a missing placeholder value is an error, not an empty string", () => {
 });
 
 test("the prompt is the card followed by the issue verbatim", () => {
-  const prompt = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "Add thing", issueBody: "## Goal\nDo it.\n\n## Decisions\n- keep X", maxUsd: 10, timeoutMinutes: 60, validation: ["make test"], budgetCommand: "", protectedList: FACTORY_PROTECTED });
+  const prompt = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "Add thing", issueBody: "## Goal\nDo it.\n\n## Decisions\n- keep X", maxUsd: 10, timeoutMinutes: 60, validation: ["make test"], budgetCommand: "", protectedList: PENDULUM_PROTECTED });
   const [card, issue] = prompt.split("\n---\n");
   assert.match(card, /issue #7/);
   assert.match(issue, /Issue #7: Add thing\n\n## Goal\nDo it\.\n\n## Decisions\n- keep X/);
 });
 
-test("protected paths: Factory's list plus the repository's, deduped; directory and file rules", () => {
+test("protected paths: Pendulum's list plus the repository's, deduped; directory and file rules", () => {
   const list = protectedPaths([".github/", " scripts/test-budget.json ", ""]);
   assert.deepEqual(list, [".github/", "CODEOWNERS", ".agents/skills/", ".claude/", ".codex/", "scripts/test-budget.json"]);
   assert.deepEqual(protectedTouched([".github/workflows/ci.yml", "src/a.ts", "docs/CODEOWNERS", "scripts/test-budget.json", ".claude/agents/implementer.md"], list), [".github/workflows/ci.yml", "docs/CODEOWNERS", "scripts/test-budget.json", ".claude/agents/implementer.md"]);
@@ -60,9 +60,9 @@ test("protected paths: a leading / anchors a file entry at the root; without it 
   const { mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
-  const dir = mkdtempSync(join(tmpdir(), "factory-root-hook-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-root-hook-"));
   execFileSync("git", ["init", "-q", dir], { env });
-  await configureGit(dir, { login: "t", id: 1, protectedList: [...FACTORY_PROTECTED, "/build.mjs", "/db/", "toolchain.sh"], credentialHelper: null, env });
+  await configureGit(dir, { login: "t", id: 1, protectedList: [...PENDULUM_PROTECTED, "/build.mjs", "/db/", "toolchain.sh"], credentialHelper: null, env });
   const commit = (file) => {
     mkdirSync(join(dir, file, ".."), { recursive: true });
     writeFileSync(join(dir, file), "x\n");
@@ -77,17 +77,17 @@ test("protected paths: a leading / anchors a file entry at the root; without it 
     }
   };
   assert.equal(commit("packages/web/build.mjs"), "ok", "a nested file of a root-anchored name is the worker's");
-  assert.equal(commit("build.mjs"), "factory: refusing commit on protected path(s): build.mjs");
-  assert.equal(commit("db/x.sql"), "factory: refusing commit on protected path(s): db/x.sql");
-  assert.equal(commit("ci/toolchain.sh"), "factory: refusing commit on protected path(s): ci/toolchain.sh", "an unanchored file name still matches at any depth");
+  assert.equal(commit("build.mjs"), "pendulum: refusing commit on protected path(s): build.mjs");
+  assert.equal(commit("db/x.sql"), "pendulum: refusing commit on protected path(s): db/x.sql");
+  assert.equal(commit("ci/toolchain.sh"), "pendulum: refusing commit on protected path(s): ci/toolchain.sh", "an unanchored file name still matches at any depth");
 });
 
 
 test("task card: with required checks the harness runs the tests it touched; without them it runs the commands", () => {
-  const withChecks = taskCardValues({ issue: 2, maxUsd: 5, timeoutMinutes: 60, validation: ["pnpm test"], budgetCommand: "", protectedPaths: FACTORY_PROTECTED, ciChecks: ["quality"] });
-  assert.match(withChecks.validation_note, /required check \(quality\) on the head Factory pushes.*tests your change touches/);
-  const without = taskCardValues({ issue: 2, maxUsd: 5, timeoutMinutes: 60, validation: ["pnpm test"], budgetCommand: "", protectedPaths: FACTORY_PROTECTED });
-  assert.equal(without.validation_note, "Run the validation commands before you stop; Factory runs them again.");
+  const withChecks = taskCardValues({ issue: 2, maxUsd: 5, timeoutMinutes: 60, validation: ["pnpm test"], budgetCommand: "", protectedPaths: PENDULUM_PROTECTED, ciChecks: ["quality"] });
+  assert.match(withChecks.validation_note, /required check \(quality\) on the head Pendulum pushes.*tests your change touches/);
+  const without = taskCardValues({ issue: 2, maxUsd: 5, timeoutMinutes: 60, validation: ["pnpm test"], budgetCommand: "", protectedPaths: PENDULUM_PROTECTED });
+  assert.equal(without.validation_note, "Run the validation commands before you stop; Pendulum runs them again.");
 });
 
 test("validation commands: consecutive parallel: marks share a group, unmarked ones run alone, the card shows no marks", () => {
@@ -96,14 +96,14 @@ test("validation commands: consecutive parallel: marks share a group, unmarked o
   assert.equal(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: commands, protectedPaths: [] }).validation, "pnpm install-check; pnpm test; pnpm run test:db; pnpm build; pnpm lint");
 });
 
-test("maintainer decisions: people who can push, no bots or Factory markers, oldest first; the answer prompt carries them", async () => {
+test("maintainer decisions: people who can push, no bots or Pendulum markers, oldest first; the answer prompt carries them", async () => {
   const { maintainerDecisions, decisionsSection } = await import("../scripts/lib/logic.mjs");
   const { answerPrompt } = await import("../scripts/review.mjs");
   const c = (login, assoc, type, at, body) => ({ user: { login, type }, author_association: assoc, created_at: at, body });
   const decisions = maintainerDecisions([
     c("owner", "OWNER", "User", "2026-11-07T09:52:00Z", "Answer: follow the participant set."),
-    c("factory[bot]", "NONE", "Bot", "2026-11-07T09:40:00Z", "Plan."),
-    c("owner", "OWNER", "User", "2026-11-07T09:30:00Z", "<!-- factory:14:plan -->\nnot a decision"),
+    c("pendulum[bot]", "NONE", "Bot", "2026-11-07T09:40:00Z", "Plan."),
+    c("owner", "OWNER", "User", "2026-11-07T09:30:00Z", "<!-- pendulum:14:plan -->\nnot a decision"),
     c("stranger", "NONE", "User", "2026-11-07T09:31:00Z", "Answer: ship it as is."),
     c("member", "MEMBER", "User", "2026-11-07T09:10:00Z", "Keep the 1024-octet bound."),
   ]);
@@ -141,7 +141,7 @@ test("maintainer decisions: people who can push, no bots or Factory markers, old
   assert.doesNotMatch(q, /QUESTION:/);
 });
 
-test("unread decisions: what no pass read, or edited after the version read; Factory's own review threads are not decisions", async () => {
+test("unread decisions: what no pass read, or edited after the version read; Pendulum's own review threads are not decisions", async () => {
   const { maintainerDecisions, decisionsRead, decisionsReadMarker, decisionsReadOf, mergeRead, unreadDecisions, setWriters } = await import("../scripts/lib/logic.mjs");
   setWriters("o/r", []);
   const dev = { login: "kirk", type: "User" };
@@ -149,8 +149,8 @@ test("unread decisions: what no pass read, or edited after the version read; Fac
   const comments = [
     { kind: "comment", id: 1, user: dev, author_association: "OWNER", created_at: at(1), body: "Keep the bound." },
     { kind: "comment", id: 2, user: dev, author_association: "OWNER", created_at: at(2), updated_at: at(30), body: "Use the new name (edited)." },
-    // Local mode: Factory's review, its inline finding and the worker's reply all post as the developer's login.
-    { kind: "review", id: 70, user: dev, author_association: "OWNER", created_at: at(3), body: "<!-- factory:5:review -->\nFactory reviewer: one pass." },
+    // Local mode: Pendulum's review, its inline finding and the worker's reply all post as the developer's login.
+    { kind: "review", id: 70, user: dev, author_association: "OWNER", created_at: at(3), body: "<!-- pendulum:5:review -->\nPendulum reviewer: one pass." },
     { kind: "line", id: 71, pull_request_review_id: 70, user: dev, author_association: "OWNER", created_at: at(3), body: "a.js:4: acceptance 1: off by one." },
     { kind: "line", id: 72, pull_request_review_id: 99, in_reply_to_id: 71, user: dev, author_association: "OWNER", created_at: at(4), body: "a.js:4: Fixed in abc123." },
     // A different maintainer's reply in that thread is their word, and so is a line comment in a review of their own.
@@ -163,20 +163,20 @@ test("unread decisions: what no pass read, or edited after the version read; Fac
 
   // The worker read the first two before its run; the line comments came during it, one comment was edited after.
   const worker = decisionsRead(decisions.slice(0, 2).map((d) => ({ ...d, seen: d.at })));
-  const self = "factory[bot]";
-  const progress = (login, body, extra = {}) => ({ user: { login, type: login.endsWith("[bot]") ? "Bot" : "User" }, author_association: "OWNER", body: `<!-- factory:5:progress:work:1 -->\nFactory work run 1\n${body}`, ...extra });
+  const self = "pendulum[bot]";
+  const progress = (login, body, extra = {}) => ({ user: { login, type: login.endsWith("[bot]") ? "Bot" : "User" }, author_association: "OWNER", body: `<!-- pendulum:5:progress:work:1 -->\nPendulum work run 1\n${body}`, ...extra });
   const issueComments = [
     progress(self, decisionsReadMarker(worker)),
-    // Only Factory's own progress comments count: another bot, a maintainer, or a marker outside a progress comment do not.
+    // Only Pendulum's own progress comments count: another bot, a maintainer, or a marker outside a progress comment do not.
     progress("other-app[bot]", decisionsReadMarker({ "line:74": at(59) })),
     progress("kirk", decisionsReadMarker({ "line:73": at(59) })),
     { user: { login: self, type: "Bot" }, body: decisionsReadMarker({ "comment:2": at(59) }) },
     // A malformed record is ignored, never an error: its decisions stay unread.
-    progress(self, "<!-- factory:decisions-read {nope} -->"),
+    progress(self, "<!-- pendulum:decisions-read {nope} -->"),
   ];
   const read = decisionsReadOf(issueComments, { issue: 5, self });
   assert.deepEqual(unreadDecisions(decisions, read).map((d) => d.key), ["comment:2", "line:73", "line:74"]);
-  // In local mode Factory posts as the developer: their progress comments are the record there.
+  // In local mode Pendulum posts as the developer: their progress comments are the record there.
   assert.deepEqual(Object.keys(decisionsReadOf(issueComments, { issue: 5, self: "Kirk" })), ["line:73"]);
   assert.throws(() => decisionsReadOf(issueComments, { issue: 5, self: null }), /own login is unknown/);
   // The review's answer pass read them all: nothing unread, so the merge may go ahead.
@@ -207,13 +207,13 @@ test("decisions cut for length are not shown, so not recorded as read; the promp
 
 test("the task card and the fix pass's ask list what the setup command runs, bounded, so a worker leaves it alone (#387)", () => {
   const guard = { files: ["tools/boot.mjs", ".npmrc", "scripts/ci"], scripts: [{ pkg: "package.json", name: "bootstrap" }, { pkg: "*", name: "build" }], unresolved: [] };
-  const card = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "t", issueBody: "b", maxUsd: 10, timeoutMinutes: 60, validation: [], budgetCommand: "", protectedList: FACTORY_PROTECTED, setupGuard: guard });
-  assert.match(card, /Protected paths: [^\n]*\. Setup's files, don't change them or anything under them: `\.npmrc`, `scripts\/ci`, `tools\/boot\.mjs`\. Setup's package\.json scripts, don't change them: `package\.json scripts\.bootstrap`, `any package\.json scripts\.build`\. Setup runs them as the runner from the default branch, so Factory refuses a push that changes one\./);
+  const card = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "t", issueBody: "b", maxUsd: 10, timeoutMinutes: 60, validation: [], budgetCommand: "", protectedList: PENDULUM_PROTECTED, setupGuard: guard });
+  assert.match(card, /Protected paths: [^\n]*\. Setup's files, don't change them or anything under them: `\.npmrc`, `scripts\/ci`, `tools\/boot\.mjs`\. Setup's package\.json scripts, don't change them: `package\.json scripts\.bootstrap`, `any package\.json scripts\.build`\. Setup runs them as the runner from the default branch, so Pendulum refuses a push that changes one\./);
   assert.match(fixClosingText({ commands: ["make test"], setupGuard: guard }), /Setup's files, don't change them or anything under them: `\.npmrc`, `scripts\/ci`, `tools\/boot\.mjs`\. Setup's package\.json scripts, don't change them: `package\.json scripts\.bootstrap`/, "the fix pass's ask too");
   const many = { files: Array.from({ length: 40 }, (_, i) => `f${String(i).padStart(2, "0")}.sh`), scripts: [], unresolved: [] };
   assert.match(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: [], protectedPaths: [], setupGuard: many }).setup_files, /`f24\.sh` and 15 more\./, "bounded");
-  const none = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "t", issueBody: "b", maxUsd: 10, timeoutMinutes: 60, validation: [], budgetCommand: "", protectedList: FACTORY_PROTECTED });
+  const none = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "t", issueBody: "b", maxUsd: 10, timeoutMinutes: 60, validation: [], budgetCommand: "", protectedList: PENDULUM_PROTECTED });
   assert.doesNotMatch(none, /Setup's files/, "no setup: nothing said");
   assert.doesNotMatch(fixClosingText({ commands: [] }), /Setup's files/);
-  assert.match(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: [], protectedPaths: [], setupGuard: { files: [], scripts: [], unresolved: ["$X"] } }).setup_files, /^ Setup also runs what Factory cannot name, so Factory refuses every push until a person fixes the setup command\.$/);
+  assert.match(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: [], protectedPaths: [], setupGuard: { files: [], scripts: [], unresolved: ["$X"] } }).setup_files, /^ Setup also runs what Pendulum cannot name, so Pendulum refuses every push until a person fixes the setup command\.$/);
 });

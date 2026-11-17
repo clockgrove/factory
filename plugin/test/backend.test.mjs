@@ -7,38 +7,38 @@ import { setSelf, trustedAuthor } from "../scripts/lib/logic.mjs";
 
 const issue = (...labels) => ({ labels: labels.map((name) => ({ name })) });
 
-test("backend: FACTORY_LOCAL=1 picks local, anything else the Action's runner", () => {
-  assert.equal(backend({ FACTORY_LOCAL: "1" }).name, "local");
+test("backend: PENDULUM_LOCAL=1 picks local, anything else the Action's runner", () => {
+  assert.equal(backend({ PENDULUM_LOCAL: "1" }).name, "local");
   assert.equal(backend({}).name, "actions");
-  assert.equal(backend({ FACTORY_LOCAL_SANDBOX: "{}" }).name, "local", "sandbox settings alone still mean local");
+  assert.equal(backend({ PENDULUM_LOCAL_SANDBOX: "{}" }).name, "local", "sandbox settings alone still mean local");
 });
 
-test("deniedFix: a local Block on denied hosts gets the FACTORY_LOCAL_DOMAINS fix, a runner's (Claude's sandbox) the allowed_domains input", () => {
-  const env = { FACTORY_LOCAL_SANDBOX: JSON.stringify({ domains: ["github.com", "extra.example.com"] }) };
-  assert.match(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}, "claude"), /^The harness's sandbox denied `cdn\.example\.org`\. .*`allowed_domains` input.*re-apply `factory:objective`\.$/);
-  assert.equal(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org", "registry.npmjs.org"], { FACTORY_INPUT_ALLOWED_DOMAINS: "*.example.org" }, "claude"), null, "allowed already, by the input or by default");
-  assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org", "extra.example.com"], env), /^The local sandbox denied `cdn\.example\.org`\. .*FACTORY_LOCAL_DOMAINS.*re-apply `factory:objective`\.$/);
+test("deniedFix: a local Block on denied hosts gets the PENDULUM_LOCAL_DOMAINS fix, a runner's (Claude's sandbox) the allowed_domains input", () => {
+  const env = { PENDULUM_LOCAL_SANDBOX: JSON.stringify({ domains: ["github.com", "extra.example.com"] }) };
+  assert.match(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}, "claude"), /^The harness's sandbox denied `cdn\.example\.org`\. .*`allowed_domains` input.*re-apply `pendulum:objective`\.$/);
+  assert.equal(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org", "registry.npmjs.org"], { PENDULUM_INPUT_ALLOWED_DOMAINS: "*.example.org" }, "claude"), null, "allowed already, by the input or by default");
+  assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org", "extra.example.com"], env), /^The local sandbox denied `cdn\.example\.org`\. .*PENDULUM_LOCAL_DOMAINS.*re-apply `pendulum:objective`\.$/);
   assert.equal(BACKENDS.local.sandbox.deniedFix(["github.com"], env), null, "an allowed host is no allow-list fix");
-  assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org"], { FACTORY_LOCAL_SANDBOX: "{not json" }), /cdn\.example\.org/, "unreadable settings never fail the notice");
+  assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org"], { PENDULUM_LOCAL_SANDBOX: "{not json" }), /cdn\.example\.org/, "unreadable settings never fail the notice");
 });
 
-test("trigger: the Action takes unlabelled Objectives, a local loop the factory:local ones (or all with FACTORY_LOCAL_ALL)", () => {
-  assert.equal(BACKENDS.actions.trigger.routes(issue("factory:objective")), true);
-  assert.equal(BACKENDS.actions.trigger.routes(issue("factory:objective", "factory:local")), false);
-  assert.equal(BACKENDS.local.trigger.routes(issue("factory:objective"), {}), false);
-  assert.equal(BACKENDS.local.trigger.routes(issue("factory:objective", "factory:local"), {}), true);
-  assert.equal(BACKENDS.local.trigger.routes(issue("factory:objective"), { FACTORY_LOCAL_ALL: "1" }), true);
+test("trigger: the Action takes unlabelled Objectives, a local loop the pendulum:local ones (or all with PENDULUM_LOCAL_ALL)", () => {
+  assert.equal(BACKENDS.actions.trigger.routes(issue("pendulum:objective")), true);
+  assert.equal(BACKENDS.actions.trigger.routes(issue("pendulum:objective", "pendulum:local")), false);
+  assert.equal(BACKENDS.local.trigger.routes(issue("pendulum:objective"), {}), false);
+  assert.equal(BACKENDS.local.trigger.routes(issue("pendulum:objective", "pendulum:local"), {}), true);
+  assert.equal(BACKENDS.local.trigger.routes(issue("pendulum:objective"), { PENDULUM_LOCAL_ALL: "1" }), true);
 });
 
-test("sandbox and gate: local wraps Factory's commands in srt (and factory-db for validation), notes TMPDIR, runs commands first", async () => {
+test("sandbox and gate: local wraps Pendulum's commands in srt (and pendulum-db for validation), notes TMPDIR, runs commands first", async () => {
   const inner = ["bash", "-eo", "pipefail", "-c", "npm test"];
   assert.deepEqual(BACKENDS.actions.sandbox.command(inner, {}), ["bash", ["-eo", "pipefail", "-c", "npm test"]]);
-  const env = { FACTORY_LOCAL: "1", FACTORY_LOCAL_SRT: "/s.json", FACTORY_LOCAL_DB: "1", FACTORY_DB_WRAP: "1", FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], clone: null }) };
-  assert.deepEqual(BACKENDS.local.sandbox.command(inner, env), ["srt", ["-s", "/s.json", "--", "factory-db", ...inner]]);
-  assert.deepEqual(BACKENDS.local.sandbox.command(inner, { ...env, FACTORY_DB_WRAP: "" }), ["srt", ["-s", "/s.json", "--", ...inner]]);
-  assert.deepEqual(BACKENDS.local.sandbox.command(inner, { ...env, TMPDIR: "/tmp/factory-7-ab" }), ["srt", ["-s", "/s.json", "--", "env", "TMPDIR=/tmp/factory-7-ab", "factory-db", ...inner]]);
-  assert.equal(BACKENDS.actions.sandbox.harness({ FACTORY_LOCAL_SANDBOX: "{}" }), null);
-  assert.throws(() => BACKENDS.local.sandbox.harness({ FACTORY_LOCAL: "1" }), /unsandboxed/);
+  const env = { PENDULUM_LOCAL: "1", PENDULUM_LOCAL_SRT: "/s.json", PENDULUM_LOCAL_DB: "1", PENDULUM_DB_WRAP: "1", PENDULUM_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], clone: null }) };
+  assert.deepEqual(BACKENDS.local.sandbox.command(inner, env), ["srt", ["-s", "/s.json", "--", "pendulum-db", ...inner]]);
+  assert.deepEqual(BACKENDS.local.sandbox.command(inner, { ...env, PENDULUM_DB_WRAP: "" }), ["srt", ["-s", "/s.json", "--", ...inner]]);
+  assert.deepEqual(BACKENDS.local.sandbox.command(inner, { ...env, TMPDIR: "/tmp/pendulum-7-ab" }), ["srt", ["-s", "/s.json", "--", "env", "TMPDIR=/tmp/pendulum-7-ab", "pendulum-db", ...inner]]);
+  assert.equal(BACKENDS.actions.sandbox.harness({ PENDULUM_LOCAL_SANDBOX: "{}" }), null);
+  assert.throws(() => BACKENDS.local.sandbox.harness({ PENDULUM_LOCAL: "1" }), /unsandboxed/);
   assert.equal(BACKENDS.actions.sandbox.cardNotes(), "");
   assert.match(BACKENDS.actions.sandbox.cardNotes({}, "copilot"), /\$TMPDIR[\s\S]*`deniedHosts`[\s\S]*outside your sandbox/, "Copilot's sandbox on a runner: Codex's notes");
   assert.match(BACKENDS.actions.sandbox.cardNotes({}, "codex"), /\$TMPDIR[\s\S]*`deniedHosts`/, "Codex's sandbox on a runner: local mode's notes");
@@ -46,18 +46,18 @@ test("sandbox and gate: local wraps Factory's commands in srt (and factory-db fo
   assert.doesNotMatch(BACKENDS.actions.sandbox.cardNotes({}, "claude"), /localhost|service/i, "no service offered: nothing said about services");
   assert.match(BACKENDS.actions.sandbox.cardNotes({}, "claude", [5432, 6379]), /reachable from your commands at `localhost:5432`, `localhost:6379`\./, "the ports actually offered");
   assert.match(BACKENDS.local.sandbox.cardNotes({}), /\$TMPDIR/);
-  assert.doesNotMatch(BACKENDS.local.sandbox.cardNotes({}), /factory-db/);
-  assert.match(BACKENDS.local.sandbox.cardNotes({ FACTORY_LOCAL_DB: "1" }), /factory-db npm run test:db/);
+  assert.doesNotMatch(BACKENDS.local.sandbox.cardNotes({}), /pendulum-db/);
+  assert.match(BACKENDS.local.sandbox.cardNotes({ PENDULUM_LOCAL_DB: "1" }), /pendulum-db npm run test:db/);
   assert.match(BACKENDS.local.sandbox.cardNotes({}), /`deniedHosts`/);
   assert.deepEqual([BACKENDS.actions.gate.commandsFirst, BACKENDS.local.gate.commandsFirst], [false, true]);
   assert.equal(await BACKENDS.local.trigger.stepsAside(), false);
 });
 
-test("trustedAuthor: Factory acts on a marker only from its own login or someone who can push, never another App", () => {
+test("trustedAuthor: Pendulum acts on a marker only from its own login or someone who can push, never another App", () => {
   setSelf(null);
-  assert.equal(trustedAuthor({ user: { type: "Bot", login: "clockgrove-factory[bot]" }, author_association: "NONE" }), false, "Factory's login unknown: no App counts");
-  setSelf("clockgrove-factory[bot]");
-  assert.equal(trustedAuthor({ user: { type: "Bot", login: "Clockgrove-Factory[bot]" }, author_association: "NONE" }), true);
+  assert.equal(trustedAuthor({ user: { type: "Bot", login: "clockgrove-pendulum[bot]" }, author_association: "NONE" }), false, "Pendulum's login unknown: no App counts");
+  setSelf("clockgrove-pendulum[bot]");
+  assert.equal(trustedAuthor({ user: { type: "Bot", login: "Clockgrove-Pendulum[bot]" }, author_association: "NONE" }), true);
   assert.equal(trustedAuthor({ user: { type: "Bot", login: "github-actions[bot]" }, author_association: "NONE" }), false, "the job token's comments forge nothing");
   assert.equal(trustedAuthor({ user: { type: "Bot", login: "other-app[bot]" }, author_association: "NONE" }), false);
   setSelf(null);
@@ -68,35 +68,35 @@ test("trustedAuthor: Factory acts on a marker only from its own login or someone
 test("whichSync: a PATH scan, never a shell; names with separators or shell syntax resolve to nothing", async () => {
   const { whichSync } = await import("../scripts/lib/proc.mjs");
   assert.ok(whichSync("node"));
-  for (const bad of ["node;touch /tmp/factory-which-probe", "$(id)", "../node", "/usr/bin/node", ""]) assert.equal(whichSync(bad), null);
+  for (const bad of ["node;touch /tmp/pendulum-which-probe", "$(id)", "../node", "/usr/bin/node", ""]) assert.equal(whichSync(bad), null);
 });
 
 test("spend lines: a local run's dollars round-trip through its progress comment; prose and junk count 0", async () => {
   const { spendMarker, spendOf } = await import("../scripts/lib/logic.mjs");
-  const body = `<!-- factory:7:progress:work:1 -->\nFactory work run 1\n- 01:00Z exit: delivered; usd 0.34\n${spendMarker(0.3392)}`;
+  const body = `<!-- pendulum:7:progress:work:1 -->\nPendulum work run 1\n- 01:00Z exit: delivered; usd 0.34\n${spendMarker(0.3392)}`;
   assert.equal(spendOf(body), 0.3392);
   assert.equal(spendOf("- 01:00Z exit: delivered; usd 0.34"), 0, "the prose exit line is never read");
-  assert.equal(spendOf('<!-- factory:spend {"usd":"x"} -->'), 0);
-  assert.equal(spendOf('<!-- factory:spend {"usd":-5} -->'), 0);
+  assert.equal(spendOf('<!-- pendulum:spend {"usd":"x"} -->'), 0);
+  assert.equal(spendOf('<!-- pendulum:spend {"usd":-5} -->'), 0);
 });
 
-test("Factory's git on the agent's checkout: locally always in srt's git profile, never on the host", () => {
-  const inner = ["git", "-C", "/c", "checkout", "-B", "factory/1"];
-  assert.throws(() => BACKENDS.local.sandbox.git(inner, { FACTORY_LOCAL: "1" }), /unsandboxed/);
-  assert.deepEqual(BACKENDS.local.sandbox.git(inner, { FACTORY_LOCAL_SRT_GIT: "/g.json", TMPDIR: "/t" }), ["srt", ["-s", "/g.json", "--", "env", "TMPDIR=/t", ...inner]]);
+test("Pendulum's git on the agent's checkout: locally always in srt's git profile, never on the host", () => {
+  const inner = ["git", "-C", "/c", "checkout", "-B", "pendulum/1"];
+  assert.throws(() => BACKENDS.local.sandbox.git(inner, { PENDULUM_LOCAL: "1" }), /unsandboxed/);
+  assert.deepEqual(BACKENDS.local.sandbox.git(inner, { PENDULUM_LOCAL_SRT_GIT: "/g.json", TMPDIR: "/t" }), ["srt", ["-s", "/g.json", "--", "env", "TMPDIR=/t", ...inner]]);
 });
 
 test("agent uid: its commands run in a confined systemd unit with an allowlisted env, values never on the command line", async () => {
   const { asAgent, setAgent, sudoEnv } = await import("../scripts/lib/proc.mjs");
-  setAgent({ user: "factory-agent", home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set(["DATABASE_URL"]) });
+  setAgent({ user: "pendulum-agent", home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set(["DATABASE_URL"]) });
   try {
-    const env = { PATH: "/opt/tool/bin:/usr/bin", LANG: "C", CI: "true", DATABASE_URL: "postgres://x", FACTORY_OUT: "/o", ANTHROPIC_API_KEY: "sk-secret", GITHUB_TOKEN: "ghs_job", FACTORY_INPUT_APP_PRIVATE_KEY: "pem", ACTIONS_RUNTIME_TOKEN: "rt", RANDOM_RUNNER_VAR: "x" };
-    const [cmd, args, out] = asAgent("bash", ["-c", "true"], env, [], "/home/factory-agent/repo");
+    const env = { PATH: "/opt/tool/bin:/usr/bin", LANG: "C", CI: "true", DATABASE_URL: "postgres://x", PENDULUM_OUT: "/o", ANTHROPIC_API_KEY: "sk-secret", GITHUB_TOKEN: "ghs_job", PENDULUM_INPUT_APP_PRIVATE_KEY: "pem", ACTIONS_RUNTIME_TOKEN: "rt", RANDOM_RUNNER_VAR: "x" };
+    const [cmd, args, out] = asAgent("bash", ["-c", "true"], env, [], "/home/pendulum-agent/repo");
     assert.equal(cmd, "/usr/bin/sudo");
-    assert.deepEqual(args.slice(0, 3), ["-n", "--preserve-env=LANG,CI,DATABASE_URL,FACTORY_OUT", "/usr/bin/systemd-run"]);
-    for (const p of ["--uid=factory-agent", "--gid=factory-agent", "--pipe", "--wait", "--collect", "--working-directory=/home/factory-agent/repo", "--property=ProtectSystem=strict", "--property=ProtectHome=tmpfs", "--property=BindPaths=/home/factory-agent", "--property=ReadWritePaths=/home/factory-agent", "--property=PrivateTmp=yes", "--property=ReadOnlyPaths=/run", "--property=TemporaryFileSystem=/dev/shm:mode=1777 /run/lock:mode=1777", "--property=PrivateIPC=yes", "--property=NoNewPrivileges=yes", "--property=KillMode=control-group", "--setenv=DATABASE_URL", "--setenv=TMPDIR=/home/factory-agent/tmp", "--setenv=HOME=/home/factory-agent"]) assert.ok(args.includes(p), p);
+    assert.deepEqual(args.slice(0, 3), ["-n", "--preserve-env=LANG,CI,DATABASE_URL,PENDULUM_OUT", "/usr/bin/systemd-run"]);
+    for (const p of ["--uid=pendulum-agent", "--gid=pendulum-agent", "--pipe", "--wait", "--collect", "--working-directory=/home/pendulum-agent/repo", "--property=ProtectSystem=strict", "--property=ProtectHome=tmpfs", "--property=BindPaths=/home/pendulum-agent", "--property=ReadWritePaths=/home/pendulum-agent", "--property=PrivateTmp=yes", "--property=ReadOnlyPaths=/run", "--property=TemporaryFileSystem=/dev/shm:mode=1777 /run/lock:mode=1777", "--property=PrivateIPC=yes", "--property=NoNewPrivileges=yes", "--property=KillMode=control-group", "--setenv=DATABASE_URL", "--setenv=TMPDIR=/home/pendulum-agent/tmp", "--setenv=HOME=/home/pendulum-agent"]) assert.ok(args.includes(p), p);
     assert.deepEqual(args.slice(args.indexOf("--")), ["--", "/usr/bin/env", "bash", "-c", "true"]);
-    assert.deepEqual(out, { LANG: "C", CI: "true", DATABASE_URL: "postgres://x", FACTORY_OUT: "/o" });
+    assert.deepEqual(out, { LANG: "C", CI: "true", DATABASE_URL: "postgres://x", PENDULUM_OUT: "/o" });
     assert.doesNotMatch(args.join(" "), /sk-secret|ghs_job|postgres/, "no value on the command line");
     assert.deepEqual(sudoEnv(args, out), { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", ...out }, "sudo itself starts with only those, and a fixed PATH");
     const [, harnessArgs, harnessEnv] = asAgent("claude", ["-p"], env, ["ANTHROPIC_API_KEY"]);
@@ -121,59 +121,59 @@ test("Copilot always runs with its built-in GitHub MCP server off; the local san
 
 test("the agent's read-only token: a file in its own home, git's helper for github.com only, gh's hosts.yml", async () => {
   const { readTokenFiles } = await import("../scripts/lib/agent.mjs");
-  const { files, helper } = readTokenFiles("/home/factory-agent", "ghs_read");
-  assert.equal(files[".factory/read-token"], "ghs_read\n");
-  assert.match(files[".gitconfig"], /^\[credential\]\n\thelper =\n\[credential "https:\/\/github\.com"\]\n\thelper = "!f\(\) \{ echo username=x-access-token; echo \\"password=\$\(cat \/home\/factory-agent\/\.factory\/read-token\)\\"; \}; f"\n$/);
+  const { files, helper } = readTokenFiles("/home/pendulum-agent", "ghs_read");
+  assert.equal(files[".pendulum/read-token"], "ghs_read\n");
+  assert.match(files[".gitconfig"], /^\[credential\]\n\thelper =\n\[credential "https:\/\/github\.com"\]\n\thelper = "!f\(\) \{ echo username=x-access-token; echo \\"password=\$\(cat \/home\/pendulum-agent\/\.pendulum\/read-token\)\\"; \}; f"\n$/);
   assert.match(files[".config/gh/hosts.yml"], /oauth_token: ghs_read/);
-  assert.match(helper, /cat \/home\/factory-agent\/\.factory\/read-token/);
+  assert.match(helper, /cat \/home\/pendulum-agent\/\.pendulum\/read-token/);
 });
 
 test("a local Copilot run is given the stage's own temp directory, never the host's /tmp", async () => {
   const { copilotTmpdir } = await import("../scripts/lib/local.mjs");
-  const local = { addDirs: ["/home/u/.cache/factory/pnpm", "/home/u/.cache/factory/s/stage-1"] };
-  assert.equal(copilotTmpdir(local, { TMPDIR: "/home/u/.cache/factory/s/stage-1" }), "/home/u/.cache/factory/s/stage-1");
+  const local = { addDirs: ["/home/u/.cache/pendulum/pnpm", "/home/u/.cache/pendulum/s/stage-1"] };
+  assert.equal(copilotTmpdir(local, { TMPDIR: "/home/u/.cache/pendulum/s/stage-1" }), "/home/u/.cache/pendulum/s/stage-1");
   assert.throws(() => copilotTmpdir(local, {}), /TMPDIR/, "unset: Copilot would open the host's /tmp");
   assert.throws(() => copilotTmpdir(local, { TMPDIR: "/tmp" }), /TMPDIR/);
 });
 
-test("local notices: the App's key only from under ~/.config/factory (its real path), both settings or neither", async () => {
+test("local notices: the App's key only from under ~/.config/pendulum (its real path), both settings or neither", async () => {
   const { chmodSync, linkSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { localApp } = await import("../scripts/lib/local.mjs");
-  const home = realpathSync(mkdtempSync(join(tmpdir(), "factory-home-")));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "pendulum-home-")));
   try {
-    mkdirSync(join(home, ".config", "factory", "github-app"), { recursive: true });
-    const key = join(home, ".config", "factory", "github-app", "app.pem");
+    mkdirSync(join(home, ".config", "pendulum", "github-app"), { recursive: true });
+    const key = join(home, ".config", "pendulum", "github-app", "app.pem");
     writeFileSync(key, "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----\n", { mode: 0o600 });
     writeFileSync(join(home, "elsewhere.pem"), "secret-text");
-    symlinkSync(join(home, "elsewhere.pem"), join(home, ".config", "factory", "link.pem"));
+    symlinkSync(join(home, "elsewhere.pem"), join(home, ".config", "pendulum", "link.pem"));
     assert.deepEqual(localApp({}, home), { app: null });
-    assert.deepEqual(localApp({ FACTORY_LOCAL_APP_ID: "5", FACTORY_LOCAL_APP_KEY: "~/.config/factory/github-app/app.pem" }, home).app, { id: "5", key: "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----\n" });
-    assert.match(localApp({ FACTORY_LOCAL_APP_ID: "5" }, home).problem, /both/);
-    assert.match(localApp({ FACTORY_LOCAL_APP_ID: "x", FACTORY_LOCAL_APP_KEY: key }, home).problem, /numeric/);
-    assert.match(localApp({ FACTORY_LOCAL_APP_ID: "5", FACTORY_LOCAL_APP_KEY: join(home, "nope.pem") }, home).problem, /no file/);
-    for (const p of [join(home, "elsewhere.pem"), join(home, ".config", "factory", "link.pem")]) {
-      const r = localApp({ FACTORY_LOCAL_APP_ID: "5", FACTORY_LOCAL_APP_KEY: p }, home);
+    assert.deepEqual(localApp({ PENDULUM_LOCAL_APP_ID: "5", PENDULUM_LOCAL_APP_KEY: "~/.config/pendulum/github-app/app.pem" }, home).app, { id: "5", key: "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----\n" });
+    assert.match(localApp({ PENDULUM_LOCAL_APP_ID: "5" }, home).problem, /both/);
+    assert.match(localApp({ PENDULUM_LOCAL_APP_ID: "x", PENDULUM_LOCAL_APP_KEY: key }, home).problem, /numeric/);
+    assert.match(localApp({ PENDULUM_LOCAL_APP_ID: "5", PENDULUM_LOCAL_APP_KEY: join(home, "nope.pem") }, home).problem, /no file/);
+    for (const p of [join(home, "elsewhere.pem"), join(home, ".config", "pendulum", "link.pem")]) {
+      const r = localApp({ PENDULUM_LOCAL_APP_ID: "5", PENDULUM_LOCAL_APP_KEY: p }, home);
       assert.match(r.problem, /no sandbox can read/);
       assert.ok(!r.problem.includes("secret-text"), "the key's text is never in a message");
     }
-    const ok = { FACTORY_LOCAL_APP_ID: "5", FACTORY_LOCAL_APP_KEY: key };
+    const ok = { PENDULUM_LOCAL_APP_ID: "5", PENDULUM_LOCAL_APP_KEY: key };
     chmodSync(key, 0o640);
     assert.match(localApp(ok, home).problem, /chmod 600/, "group or world bits");
     chmodSync(key, 0o600);
     linkSync(key, join(home, "second-link.pem"));
-    assert.match(localApp(ok, home).problem, /hard links/, "a second hard link reaches the key outside ~/.config/factory");
+    assert.match(localApp(ok, home).problem, /hard links/, "a second hard link reaches the key outside ~/.config/pendulum");
     rmSync(join(home, "second-link.pem"));
     assert.ok(localApp(ok, home).app);
-    assert.ok(localApp(ok, home, "claude").app, "the default harness homes hold no ~/.config/factory");
+    assert.ok(localApp(ok, home, "claude").app, "the default harness homes hold no ~/.config/pendulum");
     assert.match(localApp({ ...ok, CLAUDE_CONFIG_DIR: join(home, ".config") }, home, "claude").problem, /harness's home/, "a harness home the outer sandbox reads holds the key");
-    assert.match(localApp({ ...ok, CODEX_HOME: join(home, ".config", "factory") }, home, "codex").problem, /harness's home/);
-    // ~/.config/factory itself a symlink: the sandboxes deny the literal path, not where it points.
-    const other = realpathSync(mkdtempSync(join(tmpdir(), "factory-home-")));
+    assert.match(localApp({ ...ok, CODEX_HOME: join(home, ".config", "pendulum") }, home, "codex").problem, /harness's home/);
+    // ~/.config/pendulum itself a symlink: the sandboxes deny the literal path, not where it points.
+    const other = realpathSync(mkdtempSync(join(tmpdir(), "pendulum-home-")));
     mkdirSync(join(other, ".config"), { recursive: true });
-    symlinkSync(join(home, ".config", "factory"), join(other, ".config", "factory"));
-    assert.match(localApp({ FACTORY_LOCAL_APP_ID: "5", FACTORY_LOCAL_APP_KEY: join(other, ".config", "factory", "github-app", "app.pem") }, other).problem, /not a symlink/);
+    symlinkSync(join(home, ".config", "pendulum"), join(other, ".config", "pendulum"));
+    assert.match(localApp({ PENDULUM_LOCAL_APP_ID: "5", PENDULUM_LOCAL_APP_KEY: join(other, ".config", "pendulum", "github-app", "app.pem") }, other).problem, /not a symlink/);
     rmSync(other, { recursive: true, force: true });
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -184,7 +184,7 @@ test("doctor: a local run whose login is the notify user WARNs unless the App po
   const { noticeChecks } = await import("../scripts/doctor.mjs");
   const inputs = { notify: "Op" };
   assert.deepEqual(noticeChecks({ inputs, notice: false, local: true, self: "op" }).map((c) => c.status), ["WARN"]);
-  assert.match(noticeChecks({ inputs, notice: false, local: true, self: "op" })[0].fix, /FACTORY_LOCAL_APP_ID/);
+  assert.match(noticeChecks({ inputs, notice: false, local: true, self: "op" })[0].fix, /PENDULUM_LOCAL_APP_ID/);
   assert.deepEqual(noticeChecks({ inputs, notice: true, local: true, self: "op" }).map((c) => c.status), ["PASS"]);
   assert.deepEqual(noticeChecks({ inputs, notice: false, local: true, self: "someone-else" }), []);
   assert.deepEqual(noticeChecks({ inputs, notice: false, local: false, self: "op" }), [], "on Actions the App posts everything");
@@ -234,7 +234,7 @@ test("local notices: a stage gets the notice token from its parent over IPC, and
   assert.ok(!lines.some((l) => l.startsWith("NODE_CHANNEL")), "no NODE_CHANNEL_* reaches the stage's children");
 });
 
-test("doctor: a local run of a repository that uses Postgres WARNs with FACTORY_LOCAL_DB=1 until the database is provided (#2601)", async () => {
+test("doctor: a local run of a repository that uses Postgres WARNs with PENDULUM_LOCAL_DB=1 until the database is provided (#2601)", async () => {
   const { mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs");
   const { execFileSync } = await import("node:child_process");
   const { tmpdir } = await import("node:os");
@@ -242,7 +242,7 @@ test("doctor: a local run of a repository that uses Postgres WARNs with FACTORY_
   const { localDatabaseChecks, repositoryChecks } = await import("../scripts/doctor.mjs");
   const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
   const repo = (files) => {
-    const dir = mkdtempSync(join(tmpdir(), "factory-dbrepo-"));
+    const dir = mkdtempSync(join(tmpdir(), "pendulum-dbrepo-"));
     for (const [rel, text] of Object.entries(files)) {
       mkdirSync(join(dir, rel, ".."), { recursive: true });
       writeFileSync(join(dir, rel), text);
@@ -251,35 +251,35 @@ test("doctor: a local run of a repository that uses Postgres WARNs with FACTORY_
     execFileSync("git", ["-C", dir, "add", "-A"]);
     return dir;
   };
-  // The scratch adopter's shape (#324): a pg dependency, a database suite in the validation, no FACTORY_LOCAL_DB.
-  const factoryYml = "env:\n  FACTORY_VALIDATION: npm run check, npm test, npm run test:db\n";
-  const scratch = repo({ "package.json": JSON.stringify({ scripts: { test: "x" }, dependencies: { pg: "^8" } }), ".github/workflows/factory.yml": factoryYml });
+  // The scratch adopter's shape (#324): a pg dependency, a database suite in the validation, no PENDULUM_LOCAL_DB.
+  const pendulumYml = "env:\n  PENDULUM_VALIDATION: npm run check, npm test, npm run test:db\n";
+  const scratch = repo({ "package.json": JSON.stringify({ scripts: { test: "x" }, dependencies: { pg: "^8" } }), ".github/workflows/pendulum.yml": pendulumYml });
   const [w] = localDatabaseChecks({ checkout: scratch, env: {}, os: "linux" });
   assert.equal(w.status, "WARN");
   assert.match(w.detail, /package\.json depends on pg/);
-  assert.match(w.fix, /FACTORY_LOCAL_DB=1/);
-  assert.doesNotMatch(localDatabaseChecks({ checkout: scratch, env: {}, os: "darwin" })[0].fix, /set FACTORY_LOCAL_DB=1/, "macOS has no local database to offer");
-  assert.equal(localDatabaseChecks({ checkout: scratch, env: { FACTORY_LOCAL_DB: "1" } })[0].status, "PASS");
-  assert.equal(localDatabaseChecks({ checkout: scratch, env: {}, wf: { FACTORY_LOCAL_DB: "1" } })[0].status, "PASS", "the workflow's setting counts");
-  assert.equal(localDatabaseChecks({ checkout: scratch, env: { FACTORY_LOCAL_DB: "" }, wf: { FACTORY_LOCAL_DB: "1" } })[0].status, "WARN", "the shell wins, as in the local loop");
-  // A trimmed FACTORY_LOCAL_VALIDATION still WARNs and names what still runs locally: only the owner knows if one needs Postgres.
-  const trimmed = localDatabaseChecks({ checkout: scratch, env: { FACTORY_LOCAL_VALIDATION: "npm test, npm run test:db" }, os: "linux" });
+  assert.match(w.fix, /PENDULUM_LOCAL_DB=1/);
+  assert.doesNotMatch(localDatabaseChecks({ checkout: scratch, env: {}, os: "darwin" })[0].fix, /set PENDULUM_LOCAL_DB=1/, "macOS has no local database to offer");
+  assert.equal(localDatabaseChecks({ checkout: scratch, env: { PENDULUM_LOCAL_DB: "1" } })[0].status, "PASS");
+  assert.equal(localDatabaseChecks({ checkout: scratch, env: {}, wf: { PENDULUM_LOCAL_DB: "1" } })[0].status, "PASS", "the workflow's setting counts");
+  assert.equal(localDatabaseChecks({ checkout: scratch, env: { PENDULUM_LOCAL_DB: "" }, wf: { PENDULUM_LOCAL_DB: "1" } })[0].status, "WARN", "the shell wins, as in the local loop");
+  // A trimmed PENDULUM_LOCAL_VALIDATION still WARNs and names what still runs locally: only the owner knows if one needs Postgres.
+  const trimmed = localDatabaseChecks({ checkout: scratch, env: { PENDULUM_LOCAL_VALIDATION: "npm test, npm run test:db" }, os: "linux" });
   assert.equal(trimmed[0].status, "WARN", "the scratch case: test:db still runs in a sandbox with no database");
   assert.match(trimmed[0].detail, /still runs npm test, npm run test:db locally/);
   assert.match(trimmed[0].fix, /confirm none of those needs Postgres/);
-  assert.equal(localDatabaseChecks({ checkout: scratch, env: { FACTORY_LOCAL_VALIDATION: "npm run check, parallel: npm test" } })[0].status, "WARN");
-  // macOS refuses FACTORY_LOCAL_DB=1, so it is no PASS there.
-  const mac = localDatabaseChecks({ checkout: scratch, env: {}, wf: { FACTORY_LOCAL_DB: "1" }, os: "darwin" });
+  assert.equal(localDatabaseChecks({ checkout: scratch, env: { PENDULUM_LOCAL_VALIDATION: "npm run check, parallel: npm test" } })[0].status, "WARN");
+  // macOS refuses PENDULUM_LOCAL_DB=1, so it is no PASS there.
+  const mac = localDatabaseChecks({ checkout: scratch, env: {}, wf: { PENDULUM_LOCAL_DB: "1" }, os: "darwin" });
   assert.equal(mac[0].status, "WARN");
   assert.match(mac[0].detail, /Linux and WSL2 only/);
-  // A CI service container is a signal; Factory's own workflow and a non-Postgres service are not; nothing to say without one.
+  // A CI service container is a signal; Pendulum's own workflow and a non-Postgres service are not; nothing to say without one.
   const ci = "on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    services:\n      db:\n        image: pgvector/pgvector:pg17\n      pg2:\n        image: bitnami/postgresql:16\n      cache:\n        image: redis:7\n    steps:\n      - run: npm test\n";
-  const svc = repo({ "package.json": "{}", ".github/workflows/ci.yml": ci, ".github/workflows/factory.yml": `${factoryYml}jobs:\n  x:\n    services:\n      p:\n        image: postgres:17\n` });
+  const svc = repo({ "package.json": "{}", ".github/workflows/ci.yml": ci, ".github/workflows/pendulum.yml": `${pendulumYml}jobs:\n  x:\n    services:\n      p:\n        image: postgres:17\n` });
   const [s] = localDatabaseChecks({ checkout: svc, env: {} });
   assert.equal(s.status, "WARN");
   assert.match(s.detail, /\.github\/workflows\/ci\.yml job test has a db service \(pgvector\)/);
   assert.match(s.detail, /has a pg2 service \(postgresql\)/);
-  assert.doesNotMatch(s.detail, /factory\.yml|redis/);
+  assert.doesNotMatch(s.detail, /pendulum\.yml|redis/);
   assert.deepEqual(localDatabaseChecks({ checkout: repo({ "package.json": JSON.stringify({ dependencies: { "pg-format": "1" } }) }), env: {} }), [], "only a client package counts");
   // Only the root and the declared workspaces count: a fixture package.json is not a package of this repository.
   const pg = JSON.stringify({ dependencies: { pg: "^8" } });
@@ -292,7 +292,7 @@ test("doctor: a local run of a repository that uses Postgres WARNs with FACTORY_
   const pnpmWs = repo({ "package.json": "{}", "pnpm-workspace.yaml": "packages:\n  - 'apps/**'\n", "apps/web/server/package.json": pg });
   assert.match(localDatabaseChecks({ checkout: pnpmWs, env: {} })[0].detail, /apps\/web\/server\/package\.json depends on pg/);
   // Wired into the repository checks only when asked (doctor --local); never by default, so a worker job never scans the agent's clone.
-  const inputs = resolveInputs({ env: { FACTORY_VALIDATION: "npm run test:db" } });
+  const inputs = resolveInputs({ env: { PENDULUM_VALIDATION: "npm run test:db" } });
   assert.ok((await repositoryChecks({ inputs, checkout: scratch, env: {}, local: true })).some((c) => c.name === "local database" && c.status === "WARN"));
   assert.ok(!(await repositoryChecks({ inputs, checkout: scratch, env: {}, local: false })).some((c) => c.name === "local database"));
   assert.ok(!(await repositoryChecks({ inputs, checkout: scratch, env: {} })).some((c) => c.name === "local database"));
@@ -322,7 +322,7 @@ test("local notices: a failed App post is posted again with the local token; the
   assert.deepEqual(noticeAppExtra({ issues: "write", metadata: "read", contents: "write", pull_requests: "write" }), ["contents:write", "pull_requests:write"]);
   assert.equal(noticeAppCheck({ appSlug: "a", installationPermissions: { issues: "write", metadata: "read" } }).status, "PASS");
   const wide = noticeAppCheck({ appSlug: "a", installationPermissions: { issues: "write", contents: "write" } });
-  assert.equal(wide.status, "PASS", "Factory's own App is a supported choice: a note, not a warning");
+  assert.equal(wide.status, "PASS", "Pendulum's own App is a supported choice: a note, not a warning");
   assert.match(wide.detail, /also has contents:write; the notice token is narrowed to issues write/);
 });
 
@@ -331,7 +331,7 @@ test("a local harness loads no settings or hooks from the clone, and no sandbox 
   const { HARNESS_CONFIG, claudeLocalSettings, copilotLocalSettings, srtSettings } = await import("../scripts/lib/local.mjs");
   const local = { addDirs: ["/s/tmp"], readDirs: ["/s/usage"], domains: [], clone: "/c", readOnly: ["/s/usage"], claudeDir: "/s/usage/claude" };
   const c = harnessCommand({ harness: "claude", prompt: "x", local });
-  // Claude Code: flag settings only (no user, project or local source), hooks off, skills and agents from Factory's copy.
+  // Claude Code: flag settings only (no user, project or local source), hooks off, skills and agents from Pendulum's copy.
   assert.equal(c.args[c.args.indexOf("--setting-sources") + 1], "");
   assert.equal(JSON.parse(c.args[c.args.indexOf("--settings") + 1]).disableAllHooks, true);
   assert.equal(c.args[c.args.indexOf("--plugin-dir") + 1], "/s/usage/claude/plugin");
@@ -349,7 +349,7 @@ test("a local harness loads no settings or hooks from the clone, and no sandbox 
     assert.ok(copilot.sandbox.userPolicy.filesystem.readonlyPaths.includes(p), p);
     assert.ok(srt.filesystem.denyWrite.includes(p), p);
   }
-  // Factory's own git work (no clone in its profile) still writes the plugin's skills and agents there.
+  // Pendulum's own git work (no clone in its profile) still writes the plugin's skills and agents there.
   assert.ok(!srtSettings({ home: "/h" }).filesystem.denyWrite.some((p) => p.startsWith("/c/")));
 });
 
@@ -408,7 +408,7 @@ test("a local harness's git: .git/commondir read-only everywhere, each .gitmodul
   const env = harnessGitEnv(["lib/a"]);
   const cfg = Object.fromEntries(Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, i) => [env[`GIT_CONFIG_KEY_${i}`], env[`GIT_CONFIG_VALUE_${i}`]]));
   assert.equal(cfg["submodule.lib/a.ignore"], "all", "a .gitmodules ignore = none would otherwise win");
-  assert.match(gitGuardScript("/usr/bin/git"), /FACTORY_GIT_ID[\s\S]*exit 128[\s\S]*exec "\/usr\/bin\/git" "\$@"/);
+  assert.match(gitGuardScript("/usr/bin/git"), /PENDULUM_GIT_ID[\s\S]*exit 128[\s\S]*exec "\/usr\/bin\/git" "\$@"/);
 });
 
 test("Linux: Claude Code, and Codex and Copilot where their sandboxes start in it, run in an outer srt sandbox", async () => {
@@ -420,8 +420,8 @@ test("Linux: Claude Code, and Codex and Copilot where their sandboxes start in i
   const hosts = new Set(s.network.allowedDomains);
   assert.ok(hosts.has("api.openai.com") && !hosts.has("api.anthropic.com"));
   assert.ok(s.filesystem.allowWrite.includes("/h/.codex") && !s.filesystem.denyRead.some((p) => p.startsWith("/h/.codex")));
-  assert.ok(s.filesystem.denyRead.includes("/h/.ssh") && s.filesystem.denyRead.includes("/h/.config/factory") && s.filesystem.denyRead.includes("/h/.claude/.credentials.json"));
-  assert.equal(s.bwrapPath, undefined, "only Copilot's outer sandbox runs bwrap through Factory's wrapper");
+  assert.ok(s.filesystem.denyRead.includes("/h/.ssh") && s.filesystem.denyRead.includes("/h/.config/pendulum") && s.filesystem.denyRead.includes("/h/.claude/.credentials.json"));
+  assert.equal(s.bwrapPath, undefined, "only Copilot's outer sandbox runs bwrap through Pendulum's wrapper");
   const c = harnessOuterSettings({ harness: "copilot", domains: ["registry.npmjs.org"], writable: ["/c"], clone: "/c", home: "/h", env: { COPILOT_HOME: "/u/copilot" }, bwrapPath: "/u/outer/bwrap" });
   assert.equal(c.bwrapPath, "/u/outer/bwrap");
   const copilotHosts = new Set(c.network.allowedDomains);
@@ -435,7 +435,7 @@ test("Copilot's outer sandbox: bwrap gets the host's /dev/net/tun after srt's fr
   const { tmpdir } = await import("node:os");
   const { spawnSync } = await import("node:child_process");
   const { join } = await import("node:path");
-  const dir = mkdtempSync(join(tmpdir(), "factory-bwrap-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-bwrap-"));
   // A stand-in for the real bwrap that prints each argument it is given on its own line.
   const fake = join(dir, "real-bwrap");
   write(fake, '#!/bin/sh\nfor a do printf "%s\\n" "$a"; done\n', { mode: 0o755 });
@@ -475,7 +475,7 @@ test("the sandboxes' scan (#154): ripgrep's list less the lines whose first prot
   const { tmpdir } = await import("node:os");
   const { spawnSync, spawn } = await import("node:child_process");
   const { join, dirname } = await import("node:path");
-  const dir = mkdtempSync(join(tmpdir(), "factory-scan-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-scan-"));
   const fake = join(dir, "real-rg");
   write(fake, FAKE_RG, { mode: 0o755 });
   const scan = writeNestedGitScan(join(dir, "scan"), fake);
@@ -533,7 +533,7 @@ test("the sandboxes' scan (#154): a ripgrep shim works and never reads the scann
   const { tmpdir } = await import("node:os");
   const { spawnSync } = await import("node:child_process");
   const { join, dirname } = await import("node:path");
-  const dir = mkdtempSync(join(tmpdir(), "factory-scan-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-scan-"));
   // A version manager's binary: ripgrep only when called as `rg`, an error otherwise; and, like mise or asdf, it reads
   // `.tool-versions` from its working directory: one there names a ripgrep it lacks, so it fails with exit 1.
   const manager = join(dir, "manager");
@@ -577,16 +577,16 @@ test("the sandboxes' scan (#154): a ripgrep shim works and never reads the scann
   assert.throws(() => writeNestedGitScan(join(dir, "scan4"), join(dir, "bin", "rg2"), { writable: [clone] }), (e) => e.code === "sandbox-scan");
 });
 
-test("the sandboxes' scan (#154): srt, the outer sandbox and Claude Code (from the stage's FACTORY_LOCAL_SANDBOX) get it; the clone's git guards stay", async () => {
+test("the sandboxes' scan (#154): srt, the outer sandbox and Claude Code (from the stage's PENDULUM_LOCAL_SANDBOX) get it; the clone's git guards stay", async () => {
   const { claudeLocalSettings, gitGuards, harnessOuterSettings, localSandbox, srtSettings } = await import("../scripts/lib/local.mjs");
   const { harnessCommand } = await import("../scripts/lib/harness.mjs");
   const r = "/w/clone";
-  const scan = "/w/.factory/1/usage/scan/rg";
+  const scan = "/w/.pendulum/1/usage/scan/rg";
   const srt = srtSettings({ clone: r, home: "/h", ripgrep: scan });
   assert.deepEqual(srt.ripgrep, { command: scan });
   const outer = harnessOuterSettings({ harness: "claude", clone: r, home: "/h", ripgrep: scan });
   assert.deepEqual(outer.ripgrep, { command: scan });
-  const local = localSandbox({ FACTORY_LOCAL_SANDBOX: JSON.stringify({ clone: r, addDirs: [], domains: ["github.com"], readOnly: [], ripgrep: scan }) });
+  const local = localSandbox({ PENDULUM_LOCAL_SANDBOX: JSON.stringify({ clone: r, addDirs: [], domains: ["github.com"], readOnly: [], ripgrep: scan }) });
   const c = harnessCommand({ harness: "claude", prompt: "", local });
   const claude = JSON.parse(c.args[c.args.indexOf("--settings") + 1]);
   assert.deepEqual(claude.sandbox.ripgrep, { command: scan });
@@ -603,7 +603,7 @@ test("Copilot's outer probe: names each missing tool its sandbox needs, and slir
   const { tmpdir } = await import("node:os");
   const { spawnSync } = await import("node:child_process");
   const { join } = await import("node:path");
-  const dir = mkdtempSync(join(tmpdir(), "factory-probe-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-probe-"));
   const bin = join(dir, "bin");
   mkdirSync(bin);
   // Real tools the probe text runs around the sandbox's own; each sandbox tool a stub, slirp4netns failing as it would.
@@ -681,12 +681,12 @@ test("local mode pins the clone's .git when it clones and refuses one put in its
   pinGitState(clone);
   assert.equal(checkGitState(clone), "");
   writeFileSync(join(clone, ".git", "hooks", "post-checkout"), "#!/bin/sh\n");
-  assert.match(checkGitState(clone), /changed since Factory set them up/);
+  assert.match(checkGitState(clone), /changed since Pendulum set them up/);
   // Copied, edited and swapped in: same content does not make it the same directory.
   cpSync(join(clone, ".git"), join(clone, ".git-new"), { recursive: true });
   renameSync(join(clone, ".git"), join(clone, ".git-old"));
   renameSync(join(clone, ".git-new"), join(clone, ".git"));
-  assert.match(gitDirChanged(clone, id, pin), /not the directory Factory cloned/);
+  assert.match(gitDirChanged(clone, id, pin), /not the directory Pendulum cloned/);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -711,7 +711,7 @@ test("a stage whose clone's .git is not the pinned one Blocks the Objective with
   assert.equal(r.exit, "blocked");
   assert.deepEqual(blocked, [[7, "work"]]);
   assert.doesNotMatch(gitIdentityReason(7), /\/home|\/tmp|\/Users/, "no local path reaches GitHub");
-  assert.match(gitIdentityReason(7), /\.factory\/7/);
+  assert.match(gitIdentityReason(7), /\.pendulum\/7/);
   rmSync(dev, { recursive: true, force: true });
 });
 
@@ -732,7 +732,7 @@ test("the outer sandbox: host sockets unreadable, the harness's settings, MCP co
   const c = harnessOuterSettings({ harness: "copilot", writable: ["/c"], clone: "/c", home: "/h", env: { COPILOT_HOME: "/u/c" } });
   for (const p of guards) assert.ok(c.filesystem.denyWrite.includes(p) && !c.filesystem.allowWrite.includes(p), p);
   assert.ok(c.filesystem.allowWrite.includes("/u/c"), "its sessions, which a later stage resumes");
-  assert.deepEqual(harnessHomeGuards("copilot", {}, "/h"), [], "no Copilot home of Factory's: nothing in the developer's own ~/.copilot is made or guarded");
+  assert.deepEqual(harnessHomeGuards("copilot", {}, "/h"), [], "no Copilot home of Pendulum's: nothing in the developer's own ~/.copilot is made or guarded");
   // Copilot's binary unpacks the release it runs into its cache home: only its sandboxed --version may write there.
   const { versionSettings, copilotCacheHome } = await import("../scripts/lib/local.mjs");
   assert.equal(copilotCacheHome({}, "/h", "linux"), "/h/.cache/copilot");
@@ -744,14 +744,14 @@ test("the outer sandbox: host sockets unreadable, the harness's settings, MCP co
   assert.ok(guards.includes("/u/c/pkg"), "a release in its home would run too");
 });
 
-test("macOS refuses FACTORY_LOCAL_DB=1 at start, set in the shell or in the workflow's env (#161)", async () => {
+test("macOS refuses PENDULUM_LOCAL_DB=1 at start, set in the shell or in the workflow's env (#161)", async () => {
   const { preflight } = await import("../scripts/local.mjs");
-  const refused = (o) => preflight("claude", "o/r", "t", "", o).filter((p) => /^FACTORY_LOCAL_DB runs on Linux and WSL2 only/.test(p));
-  assert.equal(refused({ os: "darwin", env: { FACTORY_LOCAL_DB: "1" }, wf: {} }).length, 1, "from the shell");
-  assert.equal(refused({ os: "darwin", env: {}, wf: { FACTORY_LOCAL_DB: "1" } }).length, 1, "from the workflow file");
-  assert.equal(refused({ os: "darwin", env: { FACTORY_LOCAL_DB: "" }, wf: { FACTORY_LOCAL_DB: "1" } }).length, 0, "the shell wins, as in baseEnv");
+  const refused = (o) => preflight("claude", "o/r", "t", "", o).filter((p) => /^PENDULUM_LOCAL_DB runs on Linux and WSL2 only/.test(p));
+  assert.equal(refused({ os: "darwin", env: { PENDULUM_LOCAL_DB: "1" }, wf: {} }).length, 1, "from the shell");
+  assert.equal(refused({ os: "darwin", env: {}, wf: { PENDULUM_LOCAL_DB: "1" } }).length, 1, "from the workflow file");
+  assert.equal(refused({ os: "darwin", env: { PENDULUM_LOCAL_DB: "" }, wf: { PENDULUM_LOCAL_DB: "1" } }).length, 0, "the shell wins, as in baseEnv");
   assert.equal(refused({ os: "darwin", env: {}, wf: {} }).length, 0, "off");
-  assert.equal(refused({ os: "linux", env: {}, wf: { FACTORY_LOCAL_DB: "1" } }).length, 0, "Linux runs it");
+  assert.equal(refused({ os: "linux", env: {}, wf: { PENDULUM_LOCAL_DB: "1" } }).length, 0, "Linux runs it");
 });
 
 test("local Copilot runs only inside the outer sandbox: serve refuses a host where it does not start, and a stage that finds it off Blocks", async () => {
@@ -761,7 +761,7 @@ test("local Copilot runs only inside the outer sandbox: serve refuses a host whe
   const off = preflight("copilot", "o/r", "t", "c", { outer: (h) => (calls++, assert.equal(h, "copilot"), { on: false, why: "no /dev/net/tun" }) });
   // Probed where it can start at all (srt, bubblewrap and copilot here, or off Linux); then refused with the probe's reason.
   assert.equal(refused(off).length, calls);
-  if (calls) assert.match(refused(off)[0], /: no \/dev\/net\/tun; use FACTORY_HARNESS=claude or codex/);
+  if (calls) assert.match(refused(off)[0], /: no \/dev\/net\/tun; use PENDULUM_HARNESS=claude or codex/);
   assert.deepEqual(refused(preflight("copilot", "o/r", "t", "c", { outer: () => ({ on: true, why: "" }) })), [], "where it starts, Copilot runs");
   for (const h of ["claude", "codex"]) assert.deepEqual(refused(preflight(h, "o/r", "t", "", { outer: () => assert.fail("only Copilot needs it at serve") })), []);
   // A stage that finds it off (a version probed again after serve began): Blocked with fixed text, nothing started.
@@ -926,7 +926,7 @@ test("the outer sandbox: in the harness's own state only what its run writes is 
   const { join } = await import("node:path");
   const { harnessHomeGuards, harnessOuterSettings, claudeProject } = await import("../scripts/lib/local.mjs");
   const h = mkdtempSync(join(tmpdir(), "hg-"));
-  const clone = "/w/.factory/3/repo";
+  const clone = "/w/.pendulum/3/repo";
   for (const d of [".claude/projects/-home-dev-app/memory", `.claude/projects/${claudeProject(clone)}`, ".claude/shell-snapshots", ".claude/some-new-dir", ".codex/sessions/2020/01/01"]) mkdirSync(join(h, d), { recursive: true });
   for (const f of [".claude/.credentials.json", ".claude/history.jsonl", ".codex/auth.json", ".codex/logs_2.sqlite", ".codex/memories_1.sqlite", ".codex/queue_1.sqlite", ".codex/sessions/2020/01/01/rollout-old.jsonl"]) writeFileSync(join(h, f), "x");
   const now = new Date("2026-11-08T12:00:00Z").getTime();
@@ -957,9 +957,9 @@ test("Claude Code's projects: read-only in the outer sandbox, the clone's own a 
   const { join } = await import("node:path");
   const { claudeProject, claudeProjectLink, dropClaudeProjectLink, harnessOuterSettings } = await import("../scripts/lib/local.mjs");
   const h = mkdtempSync(join(tmpdir(), "cp-"));
-  const clone = join(h, "dev", ".factory", "4", "repo");
+  const clone = join(h, "dev", ".pendulum", "4", "repo");
   const link = join(h, ".claude", "projects", claudeProject(clone));
-  const dir = join(h, "dev", ".factory", "4", "claude-project");
+  const dir = join(h, "dev", ".pendulum", "4", "claude-project");
   // A project directory an earlier stage kept there: its sessions move with it.
   mkdirSync(link, { recursive: true });
   writeFileSync(join(link, "s1.jsonl"), "earlier\n");
@@ -982,7 +982,7 @@ test("Claude Code's projects: read-only in the outer sandbox, the clone's own a 
   rmSync(h, { recursive: true, force: true });
 });
 
-test("a git-identity Block on the review path takes factory:review off the PR, and a repeat updates its one comment", async () => {
+test("a git-identity Block on the review path takes pendulum:review off the PR, and a repeat updates its one comment", async () => {
   const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -1009,12 +1009,12 @@ test("a git-identity Block on the review path takes factory:review off the PR, a
   await local.blockForClone(9, "review", gh);
   assert.notEqual(calls.at(-1)[2], keys[0]);
   // serve's review picks: no draft PR, no Blocked Objective's.
-  const pr = (o) => ({ head: { ref: "factory/9" }, labels: [{ name: REVIEW_LABEL }], draft: false, ...o });
+  const pr = (o) => ({ head: { ref: "pendulum/9" }, labels: [{ name: REVIEW_LABEL }], draft: false, ...o });
   assert.equal(reviewIssue(pr()), 9);
   assert.equal(reviewIssue(pr({ draft: true })), 0);
   assert.equal(reviewIssue(pr({ labels: [] })), 0);
   assert.equal(reviewIssue(pr({ head: { ref: "feature/9" } })), 0);
-  assert.ok(isBlocked({ labels: [{ name: "factory:blocked" }] }) && isBlocked({ labels: ["factory:blocked"] }) && !isBlocked({ labels: [{ name: "factory:in-review" }] }));
+  assert.ok(isBlocked({ labels: [{ name: "pendulum:blocked" }] }) && isBlocked({ labels: ["pendulum:blocked"] }) && !isBlocked({ labels: [{ name: "pendulum:in-review" }] }));
   rmSync(dev, { recursive: true, force: true });
 });
 
@@ -1035,7 +1035,7 @@ test("a clone's .git/info/attributes: made empty and read-only everywhere; pin, 
   assert.ok(gitGuards(clone).includes(attr));
   assert.ok(claudeLocalSettings({ clone, home: "/h" }).sandbox.filesystem.denyWrite.includes(attr) && srtSettings({ clone, home: "/h" }).filesystem.denyWrite.includes(attr));
   assert.ok(codexLocalConfig({ clone, home: "/h" }).some((c) => c.includes(`${JSON.stringify(attr)}="read"`)));
-  // As a stage runs them: pin after Factory's git setup, then the pre-start clear before each harness start, then the check.
+  // As a stage runs them: pin after Pendulum's git setup, then the pre-start clear before each harness start, then the check.
   const run = (inner) => exec(inner[0], inner.slice(1));
   pinGitState(clone);
   await clearHarnessConfig(clone, run);
@@ -1051,15 +1051,15 @@ test("a clone's .git/info/attributes: made empty and read-only everywhere; pin, 
   assert.doesNotMatch(r.reason, /\/tmp|\/home/);
   assert.match(r.reason, /git-state/);
   assert.equal(r.key, undefined, "a git-state Block is per run");
-  const g = refusalExit(new GitRefusal("git-identity", "x"), { stage: "work", issue: 5, env: { FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: "1:2" }) } });
-  assert.match(g.reason, /\.factory\/5/);
+  const g = refusalExit(new GitRefusal("git-identity", "x"), { stage: "work", issue: 5, env: { PENDULUM_LOCAL_SANDBOX: JSON.stringify({ gitId: "1:2" }) } });
+  assert.match(g.reason, /\.pendulum\/5/);
   assert.match(g.key, /^git-identity:work:/);
   assert.match(refusalExit(new GitRefusal("git-clear", "y"), { stage: "review", issue: 5, env: {} }).reason, /git-clear/);
   assert.equal(refusalExit(new Error("other"), { stage: "work", issue: 5 }), null, "any other error is still a crash");
   rmSync(root, { recursive: true, force: true });
 });
 
-test("a stage's start clears what an earlier stage or run left untracked in the reused clone; ignored files and Factory's paths stay", async () => {
+test("a stage's start clears what an earlier stage or run left untracked in the reused clone; ignored files and Pendulum's paths stay", async () => {
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -1075,7 +1075,7 @@ test("a stage's start clears what an earlier stage or run left untracked in the 
   git("add", ".");
   git("commit", "-q", "-m", "i");
   const run = (inner) => exec(inner[0], inner.slice(1));
-  // The first stage: Factory's paths made, then the run leaves files behind.
+  // The first stage: Pendulum's paths made, then the run leaves files behind.
   await prepareClone(clone, [], run);
   mkdirSync(join(clone, "node_modules", "dep"), { recursive: true });
   writeFileSync(join(clone, "node_modules", "dep", "index.js"), "x\n");
@@ -1091,7 +1091,7 @@ test("a stage's start clears what an earlier stage or run left untracked in the 
   assert.equal(existsSync(join(clone, "notes.txt")), false);
   assert.equal(existsSync(join(clone, "gen")), false);
   assert.ok(existsSync(join(clone, "node_modules", "dep", "index.js")), "ignored files (the dependencies) stay");
-  for (const p of [".claude/agents", ".vscode", ".codex", ".mcp.json"]) assert.ok(existsSync(join(clone, p)), `Factory's own ${p} stays`);
+  for (const p of [".claude/agents", ".vscode", ".codex", ".mcp.json"]) assert.ok(existsSync(join(clone, p)), `Pendulum's own ${p} stays`);
   assert.equal(git("status", "--porcelain").trim(), "M app.txt", "a tracked change is the checkout's to discard (outbox.mjs putOn)");
   rmSync(root, { recursive: true, force: true });
 });
@@ -1117,7 +1117,7 @@ test("a stage's start removes the git locks an interrupted run left, and leaves 
   };
   const start = async () => (await prepareClone(clone, [], run, { fresh: true, locks: staleGitLocks(clone).stale })).locks.sort();
   plant();
-  assert.throws(() => git("config", "factory.x", "1"), "the planted lock stops git");
+  assert.throws(() => git("config", "pendulum.x", "1"), "the planted lock stops git");
   // A live holder: a process with the lock open. Both locks stay (the holder may be mid-way through a ref update too).
   const holder = spawn(process.execPath, ["-e", "require('fs').openSync(process.argv[1], 'r'); process.stdout.write('ok'); setInterval(() => {}, 1e3)", join(clone, ".git", "config.lock")], { cwd: root, stdio: ["ignore", "pipe", "inherit"] });
   try {
@@ -1130,7 +1130,7 @@ test("a stage's start removes the git locks an interrupted run left, and leaves 
   }
   // The holder is gone: the next start removes both, and git works again.
   assert.deepEqual(await start(), [".git/config.lock", ".git/refs/heads/main.lock"]);
-  git("config", "factory.x", "1");
+  git("config", "pendulum.x", "1");
   git("commit", "-q", "--allow-empty", "-m", "after");
   // A lock older than the box's last boot has no holder, whatever /proc says.
   plant();

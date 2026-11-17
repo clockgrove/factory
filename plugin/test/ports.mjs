@@ -43,7 +43,7 @@ async function listenOn(server, ...at) {
  * process however that ends.
  */
 export async function reservePort(port) {
-  const name = process.platform === "linux" ? `\0factory-test-port-${port}` : join("/tmp", `factory-test-port-${port}.sock`);
+  const name = process.platform === "linux" ? `\0pendulum-test-port-${port}` : join("/tmp", `pendulum-test-port-${port}.sock`);
   const lock = await listenOn(createServer((socket) => socket.destroy()), name);
   return lock && { release: () => new Promise((r) => lock.close(r)) };
 }

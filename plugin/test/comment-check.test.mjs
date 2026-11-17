@@ -16,7 +16,7 @@ import { MIN_CONFIDENCE } from "../scripts/lib/triage.mjs";
 
 RETRY.sleep = async () => {};
 
-const SELF = "factory-app[bot]";
+const SELF = "pendulum-app[bot]";
 const repo = { full: "o/r", owner: "o", name: "r" };
 const HEAD = "a".repeat(40);
 const SCRIPTS = join(import.meta.dirname, "..", "scripts");
@@ -32,7 +32,7 @@ function fakeCheck(verdict, confidence = 0.95, error = null) {
  * its head recorded mergeable and green, and `comments` on the issue (a writer's, `kirk`, among them). Writes recorded.
  */
 function world(comments, { reviews = [], lines = [] } = {}) {
-  const state = { issue: [...comments], reviews: [...reviews], lines: [...lines], issueLabels: [{ name: "factory:objective" }, { name: "factory:in-review" }], pr: [{ id: 500, user: { login: SELF, type: "Bot" }, body: `<!-- factory:7:mergeable:${HEAD} -->\nFactory: reviewed.`, created_at: "2026-11-15T09:00:00Z" }], labelled: [], merged: false, writes: [] };
+  const state = { issue: [...comments], reviews: [...reviews], lines: [...lines], issueLabels: [{ name: "pendulum:objective" }, { name: "pendulum:in-review" }], pr: [{ id: 500, user: { login: SELF, type: "Bot" }, body: `<!-- pendulum:7:mergeable:${HEAD} -->\nPendulum: reviewed.`, created_at: "2026-11-15T09:00:00Z" }], labelled: [], merged: false, writes: [] };
   let id = 1000;
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
   const fetch = async (url, init = {}) => {
@@ -49,8 +49,8 @@ function world(comments, { reviews = [], lines = [] } = {}) {
       return json(200, { data: {} });
     }
     if (method === "GET" && p === "/issues/7") return json(200, { number: 7, state: "open", title: "Save the report as CSV", body: "## Acceptance\n- A: the report saves as CSV.", labels: state.issueLabels });
-    if (method === "GET" && p === "/pulls/70") return json(200, { number: 70, state: "open", draft: false, node_id: "PR_70", title: "Save the report as CSV", mergeable_state: "clean", head: { sha: HEAD, ref: "factory/7" }, base: { ref: "main" }, labels: [] });
-    if (method === "GET" && p === "/pulls/70/reviews") return json(200, [{ id: 1, user: { login: SELF, type: "Bot" }, body: `${marker(7, "review")}\nFactory reviewer`, state: "COMMENTED", submitted_at: "2026-11-15T09:00:00Z" }, ...state.reviews]);
+    if (method === "GET" && p === "/pulls/70") return json(200, { number: 70, state: "open", draft: false, node_id: "PR_70", title: "Save the report as CSV", mergeable_state: "clean", head: { sha: HEAD, ref: "pendulum/7" }, base: { ref: "main" }, labels: [] });
+    if (method === "GET" && p === "/pulls/70/reviews") return json(200, [{ id: 1, user: { login: SELF, type: "Bot" }, body: `${marker(7, "review")}\nPendulum reviewer`, state: "COMMENTED", submitted_at: "2026-11-15T09:00:00Z" }, ...state.reviews]);
     if (method === "GET" && p === "/pulls/70/comments") return json(200, state.lines);
     if (method === "GET" && (m = /^\/issues\/(7|70)\/comments$/.exec(p))) return json(200, m[1] === "7" ? state.issue : state.pr);
     if (method === "POST" && p === "/issues/7/comments") {
@@ -91,7 +91,7 @@ async function merge(w, commentCheck) {
   setSelf(SELF);
   globalThis.fetch = w.fetch;
   try {
-    return await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, checkNames: ["ci"], objectiveLabel: "factory:objective", commentCheck }, { token: "t" });
+    return await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, checkNames: ["ci"], objectiveLabel: "pendulum:objective", commentCheck }, { token: "t" });
   } finally {
     globalThis.fetch = real;
   }
@@ -138,7 +138,7 @@ test("#416: a writer's comment that asks nothing no longer holds the merge: the 
   assert.match(asked[0].input, /LGTM, thanks!/);
   assert.match(asked[0].input, /Pull request: #70, open, reviewed, its required checks green, about to merge/);
   assert.match(asked[0].input, /A Question to the issue's owner is open: no/);
-  // The record is Factory's own progress comment, which every later reader trusts: the comment is read now.
+  // The record is Pendulum's own progress comment, which every later reader trusts: the comment is read now.
   const record = w.state.issue.find((c) => c.body.startsWith(marker(7, "progress", "merge:").replace(/ -->$/, "")));
   assert.ok(record, "a progress comment of the merge pass's own");
   assert.match(record.body, /comment check: 1 unread writer comment\(s\), the newest by kirk, read as asking nothing by fake \(perplexity\/pplx-decider-v1\.2\) \(0\.92\); recorded as read, the merge goes on/);
@@ -164,7 +164,7 @@ test("#416: `asks`, a confidence under the floor, no answer, no decider or a com
     const w = world([writer("Please also write a header row.")]);
     assert.equal(await merge(w, () => check), "unread", what);
     assert.equal(asked.length, 1, what);
-    assert.deepEqual(w.state.labelled, ["factory:review"], `${what}: the review stage applies it`);
+    assert.deepEqual(w.state.labelled, ["pendulum:review"], `${what}: the review stage applies it`);
     assert.equal(w.state.merged, false, what);
     assert.equal(w.state.issue.length, 1, `${what}: nothing recorded as read`);
   }
@@ -172,7 +172,7 @@ test("#416: `asks`, a confidence under the floor, no answer, no decider or a com
   for (const commentCheck of [null, () => openCommentCheck({ inputs: { decisionRoute: "off" } })]) {
     const w = world([writer("LGTM")]);
     assert.equal(await merge(w, commentCheck), "unread");
-    assert.deepEqual(w.state.labelled, ["factory:review"]);
+    assert.deepEqual(w.state.labelled, ["pendulum:review"]);
   }
   // A comment longer than one question shows whole is never judged cut.
   const long = fakeCheck("nothing_asked", 0.99);
@@ -206,7 +206,7 @@ test("#416: a writer's review requesting changes holds the merge whatever its te
   const w = world([], { reviews: [review(31, "CHANGES_REQUESTED", "Hmm.")] });
   assert.equal(await merge(w, () => terse.check), "unread");
   assert.equal(terse.asked.length, 0, "the structure decides; the decider is never asked");
-  assert.deepEqual(w.state.labelled, ["factory:review"]);
+  assert.deepEqual(w.state.labelled, ["pendulum:review"]);
   assert.equal(w.state.merged, false);
   // A request for changes with no body of its own: its inline comment carries the review's state and holds the merge too.
   const inline = fakeCheck("nothing_asked", 0.99);
@@ -243,7 +243,7 @@ test("#416: a writer comment posted or edited while the comment check runs holds
   const posted = slowCheck(() => w.state.issue.push(writer("Wait, do not merge yet: rename save to export.", 12, new Date().toISOString())));
   assert.equal(await merge(w, () => posted.check), "unread");
   assert.equal(w.state.merged, false);
-  assert.deepEqual(w.state.labelled, ["factory:review"]);
+  assert.deepEqual(w.state.labelled, ["pendulum:review"]);
   assert.deepEqual((await unreadOf(w)).map((d) => d.key), ["comment:11", "comment:12"], "nothing recorded as read");
   // The judged comment edited during the call: a version never judged.
   const w2 = world([writer("LGTM")]);
@@ -252,7 +252,7 @@ test("#416: a writer comment posted or edited while the comment check runs holds
   assert.equal(w2.state.merged, false);
   // The Objective stopped (its label removed) during the call: nothing merges and nothing is recorded.
   const w3 = world([writer("LGTM")]);
-  const stopped = slowCheck(() => (w3.state.issueLabels = [{ name: "factory:in-review" }]));
+  const stopped = slowCheck(() => (w3.state.issueLabels = [{ name: "pendulum:in-review" }]));
   assert.equal(await merge(w3, () => stopped.check), "stopped");
   assert.equal(w3.state.merged, false);
   assert.equal(w3.state.issue.length, 1);
@@ -264,7 +264,7 @@ test("#416: the unread comments are judged together, the newest read with the ea
     { key: "comment:1", author: "kirk", at: "2026-11-15T10:00:00Z", body: "Rename `save` to `export`." },
     { key: "comment:2", author: "kirk", at: "2026-11-15T10:05:00Z", body: "Never mind, keep it." },
   ];
-  const r = await judgeUnread({ check, repo, issue: 7, issueData: { title: "T", body: "B", labels: ["factory:question"] }, pr: { number: 70, title: "P" }, unread });
+  const r = await judgeUnread({ check, repo, issue: 7, issueData: { title: "T", body: "B", labels: ["pendulum:question"] }, pr: { number: 70, title: "P" }, unread });
   assert.equal(r.clear, false);
   assert.equal(asked.length, 1, "one question for the set");
   assert.match(asked[0].input, /Comment 1 of 2, a comment,[\s\S]*Rename[\s\S]*Comment 2 of 2, a comment,[\s\S]*Never mind/);

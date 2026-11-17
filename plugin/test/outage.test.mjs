@@ -61,8 +61,8 @@ async function offline(answer, fn) {
   }
 }
 
-const netLines = (lines) => lines.filter((l) => /\[factory\] network: /.test(l));
-const retryLines = (lines) => lines.filter((l) => /\[factory\] GitHub /.test(l));
+const netLines = (lines) => lines.filter((l) => /\[pendulum\] network: /.test(l));
+const retryLines = (lines) => lines.filter((l) => /\[pendulum\] GitHub /.test(l));
 
 test("rest: calls that cannot leave this machine wait for one probe loop, then go again; one line lost, one back, no retry lines", async () => {
   let probes = 0;
@@ -202,7 +202,7 @@ const SPENT_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000
 
 /** A fake codex: its first `fail` runs print `lost` and exit 1, every later one completes; argv logged. */
 function fakeCodex({ fail = 1, lost = LOST_RUN } = {}) {
-  const bin = mkdtempSync(join(tmpdir(), "factory-codex-outage-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-codex-outage-"));
   const log = join(bin, "calls.jsonl");
   writeFileSync(join(bin, "lost.jsonl"), lost);
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
@@ -396,14 +396,14 @@ test("outbox: a push while the remote's host does not answer waits for it and go
   run(work, "add", "app.txt");
   run(work, "commit", "-q", "-m", "base");
   run(work, "push", "-q", "origin", "HEAD:main");
-  run(work, "checkout", "-q", "-b", "factory/1");
+  run(work, "checkout", "-q", "-b", "pendulum/1");
   writeFileSync(join(work, "app.txt"), "v2\n");
   run(work, "commit", "-q", "-am", "work");
   let probes = 0;
   await offline(
     () => (++probes === 1 ? Promise.reject(dns()) : new Response(null, { status: 200 })),
     async ({ lines }) => {
-      const box = await openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: work, remote: origin, networkOrigin: "https://github.test", agentEnv: { ...process.env, ...quiet }, base: root });
+      const box = await openOutbox({ branch: "pendulum/1", defaultBranch: "main", checkout: work, remote: origin, networkOrigin: "https://github.test", agentEnv: { ...process.env, ...quiet }, base: root });
       try {
         waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
         // Four dropped connections: one more than the client's three retries allow, unless the outage's own is no try.
@@ -411,7 +411,7 @@ test("outbox: a push while the remote's host does not answer waits for it and go
         writeFileSync(drops, "x\n".repeat(4));
         writeFileSync(join(origin, "hooks", "pre-receive"), `#!/bin/sh\nif [ -s "${drops}" ]; then sed -i 1d "${drops}"; kill -9 $PPID; sleep 1; exit 1; fi\nexit 0\n`, { mode: 0o755 });
         assert.equal(await box.push(), true, box.error);
-        assert.equal(run(origin, "rev-parse", "factory/1"), run(work, "rev-parse", "HEAD"));
+        assert.equal(run(origin, "rev-parse", "pendulum/1"), run(work, "rev-parse", "HEAD"));
         assert.equal(netLines(lines).length, 2);
       } finally {
         box.close();
@@ -467,7 +467,7 @@ async function stageAgainstNothing(script, args, extraEnv = {}) {
   // Run as its own process while this one keeps the port's server answering (so an unrefused request would get an answer).
   const r = await new Promise((done) => {
     const child = spawn(process.execPath, ["--import", pathToFileURL(pre).href, join(import.meta.dirname, "..", "scripts", script), "--repo", "o/r", ...args, "--checkout", join(root, "co"), "--usage-dir", join(root, "u")], {
-      env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, FACTORY_LOCAL: "1", GITHUB_API_URL: origin, ...extraEnv },
+      env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, PENDULUM_LOCAL: "1", GITHUB_API_URL: origin, ...extraEnv },
     });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
@@ -480,7 +480,7 @@ async function stageAgainstNothing(script, args, extraEnv = {}) {
 }
 
 test("worker.mjs, run for real: a stage whose first reads swallow the outage still ends paused on it, naming its host and its first loss", async () => {
-  const { code, out, result, origin } = await stageAgainstNothing("worker.mjs", ["--issue", "7"], { FACTORY_APP_TOKEN: "t" });
+  const { code, out, result, origin } = await stageAgainstNothing("worker.mjs", ["--issue", "7"], { PENDULUM_APP_TOKEN: "t" });
   assert.equal(code, 0, out);
   assert.equal(result?.exit, "paused", out);
   const first = /network: \S+ is unreachable from this machine \(ECONNREFUSED\)/.exec(out);
@@ -491,7 +491,7 @@ test("worker.mjs, run for real: a stage whose first reads swallow the outage sti
 });
 
 test("review.mjs, run for real: an outage in its first reads (the token, the writers, the PR) ends it paused with its record, not exit 1", async () => {
-  const { code, out, result, origin } = await stageAgainstNothing("review.mjs", ["--pr", "12"], { FACTORY_APP_TOKEN: "t" });
+  const { code, out, result, origin } = await stageAgainstNothing("review.mjs", ["--pr", "12"], { PENDULUM_APP_TOKEN: "t" });
   assert.equal(code, 0, out);
   assert.equal(result?.exit, "paused", out);
   assert.equal(result.outage.origin, origin);
@@ -499,7 +499,7 @@ test("review.mjs, run for real: an outage in its first reads (the token, the wri
 
 test("worker.mjs, run for real: a token mint that cannot reach GitHub waits, then ends the stage paused on the outage", async () => {
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  const { code, out, result, origin } = await stageAgainstNothing("worker.mjs", ["--issue", "7"], { FACTORY_INPUT_APP_ID: "1", FACTORY_INPUT_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs1", format: "pem" }) });
+  const { code, out, result, origin } = await stageAgainstNothing("worker.mjs", ["--issue", "7"], { PENDULUM_INPUT_APP_ID: "1", PENDULUM_INPUT_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs1", format: "pem" }) });
   assert.equal(code, 0, out);
   assert.equal(result?.exit, "paused", out);
   assert.equal(result.outage.origin, origin);
@@ -630,7 +630,7 @@ async function giveUp() {
   return e;
 }
 
-test("#337: the worker's split record, its write failed on the outage, ends the stage paused on that outage, not a factory Block", async () => {
+test("#337: the worker's split record, its write failed on the outage, ends the stage paused on that outage, not a pendulum Block", async () => {
   const { recordPart } = await import("../scripts/lib/handoff.mjs");
   let down = false;
   await offline(
@@ -643,7 +643,7 @@ test("#337: the worker's split record, its write failed on the outage, ends the 
       // The worker's step, as worker.mjs runs it.
       await sessionLib.exitStep(decision, "the split record could not be written", () => recordPart(REPO, 7, 70, 2, { token: "t" }));
       assert.equal(decision.exit, "blocked");
-      assert.equal(decision.cause, "factory");
+      assert.equal(decision.cause, "pendulum");
       assert.match(decision.reason, /^the split record could not be written: api\.github\.test unreachable from this machine/);
       const end = thrown(() => sessionLib.outageFirst(decision));
       assert.ok(end instanceof NetworkDown, String(end));
@@ -672,7 +672,7 @@ test("#337: host back after the stage gave up: a real Block stays a Block, a ste
         assert.equal(await net.givenUp(), null, "a host that answers again stops counting");
         // Blocks no outage caused: protected paths, the dollar cap, validation.
         for (const reason of ["protected paths touched: .github/workflows/ci.yml", "dollar cap reached", "validation red after 2 passes"]) assert.equal(thrown(() => sessionLib.outageFirst({ exit: "blocked", reason, cause: "work" })), null, reason);
-        // A step GitHub answered with a refusal: a factory Block that stands.
+        // A step GitHub answered with a refusal: a pendulum Block that stands.
         const decision = { exit: "delivered", reason: "" };
         await sessionLib.exitStep(decision, "the review label could not be applied", () => rest("repos/o/r/issues/70/labels", { method: "POST", body: { labels: ["x"] }, token: "t" }));
         assert.equal(decision.exit, "blocked");
@@ -756,14 +756,14 @@ test("#337: only GitHub's core REST quota spent is an outage of a write: a spent
 
 // --- #353: GitHub answering 5xx past the client's retries is an outage of GitHub, not a crash. ---
 
-test("#353: a label write GitHub answers 500 on every try ends the stage on GitHub's outage (paused locally, an outage Block elsewhere); a 422 stays a factory Block", async () => {
+test("#353: a label write GitHub answers 500 on every try ends the stage on GitHub's outage (paused locally, an outage Block elsewhere); a 422 stays a pendulum Block", async () => {
   await offline(
     (req) => (req.probe ? assert.fail("no probe: GitHub answered") : req.path.endsWith("/issues/70/labels") ? json({ message: "Server Error" }, 500) : json({ message: "Validation Failed" }, 422)),
     async ({ seen, now }) => {
       waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
       const first = now();
       const decision = { exit: "delivered", reason: "" };
-      await sessionLib.exitStep(decision, "the review label could not be applied", () => rest("repos/o/r/issues/70/labels", { method: "POST", body: { labels: ["factory:in-review"] }, token: "t" }));
+      await sessionLib.exitStep(decision, "the review label could not be applied", () => rest("repos/o/r/issues/70/labels", { method: "POST", body: { labels: ["pendulum:in-review"] }, token: "t" }));
       assert.equal(seen.length, RETRY.tries, "every try sent");
       assert.equal(decision.exit, "blocked");
       const end = thrown(() => sessionLib.outageFirst(decision));
@@ -804,7 +804,7 @@ async function stageAgainstStatus(script, args, status, extraEnv = {}) {
   writeFileSync(pre, `import { RETRY } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, "..", "scripts", "lib", "github.mjs")).href)};\nRETRY.baseMs = 5;\n`);
   const r = await new Promise((done) => {
     const child = spawn(process.execPath, ["--import", pathToFileURL(pre).href, join(import.meta.dirname, "..", "scripts", script), "--repo", "o/r", ...args, "--checkout", join(root, "co"), "--usage-dir", join(root, "u")], {
-      env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, FACTORY_LOCAL: "1", GITHUB_API_URL: origin, GITHUB_GRAPHQL_URL: `${origin}/graphql`, ...extraEnv },
+      env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, PENDULUM_LOCAL: "1", GITHUB_API_URL: origin, GITHUB_GRAPHQL_URL: `${origin}/graphql`, ...extraEnv },
     });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
@@ -817,7 +817,7 @@ async function stageAgainstStatus(script, args, status, extraEnv = {}) {
 }
 
 test("#353, worker.mjs run for real: GitHub answering 500 past the retries ends the stage paused on it, naming the status, not a crash Block", async () => {
-  const { code, out, result, origin } = await stageAgainstStatus("worker.mjs", ["--issue", "7"], 500, { FACTORY_APP_TOKEN: "t" });
+  const { code, out, result, origin } = await stageAgainstStatus("worker.mjs", ["--issue", "7"], 500, { PENDULUM_APP_TOKEN: "t" });
   assert.equal(code, 0, out);
   assert.equal(result?.exit, "paused", out);
   assert.equal(result.outage.origin, origin);

@@ -97,7 +97,7 @@ test("requestRefused: a 400, 413 or 422 with no auth, permission, quota or billi
  * a thread. Each call's argv and prompt are logged.
  */
 function fakeCodex(runs) {
-  const bin = mkdtempSync(join(tmpdir(), "factory-codex-busy-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-codex-busy-"));
   const log = join(bin, "calls.jsonl");
   writeFileSync(join(bin, "runs.json"), JSON.stringify(runs));
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
@@ -199,7 +199,7 @@ test("runHarness: outside a process that waits outages out, a busy pass is retur
 
 /** A fake claude: its first run answers a plain rate limit (no usage-limit code) whose reset is `resetS`, later ones succeed. */
 function fakeClaudeBusy(resetS) {
-  const bin = mkdtempSync(join(tmpdir(), "factory-claude-busy-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-claude-busy-"));
   const log = join(bin, "calls.jsonl");
   writeFileSync(join(bin, "busy.jsonl"), claudeBusy().replaceAll(`"resetsAt":${RESET_S}`, `"resetsAt":${resetS}`));
   const ok = [{ type: "system", subtype: "init", session_id: "00000000-0000-0000-0000-000000000254" }, { type: "result", subtype: "success", is_error: false, num_turns: 2, result: "done", session_id: "00000000-0000-0000-0000-000000000254", total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: {} }];
@@ -353,23 +353,23 @@ test("runHarness, real, fake codex: a resumed pass refused 400/413/422 for its r
   });
 });
 
-test("endedNotLost: the work job's conclusion and steps place a vanished stage, Factory's step read from the workflow file; a runner that went away is lost", () => {
-  // The workflow names its own steps: Factory's work step is found by its `uses` and `mode`, never by a name.
-  const workflow = ["jobs:", "  work:", "    steps:", "      - name: Pick the account", "        uses: clockgrove/factory@v0.9", "        with: { mode: account }", "      - name: Get the code", "        uses: actions/checkout@v7", "      - name: Build it", "        uses: clockgrove/factory@v0.9", "        with: { mode: work }", "      - uses: actions/upload-artifact@v7", ""].join("\n");
+test("endedNotLost: the work job's conclusion and steps place a vanished stage, Pendulum's step read from the workflow file; a runner that went away is lost", () => {
+  // The workflow names its own steps: Pendulum's work step is found by its `uses` and `mode`, never by a name.
+  const workflow = ["jobs:", "  work:", "    steps:", "      - name: Pick the account", "        uses: clockgrove/pendulum@v0.9", "        with: { mode: account }", "      - name: Get the code", "        uses: actions/checkout@v7", "      - name: Build it", "        uses: clockgrove/pendulum@v0.9", "        with: { mode: work }", "      - uses: actions/upload-artifact@v7", ""].join("\n");
   assert.equal(workStepNumber(workflow, "work (7)"), 4, "Set up job is 1, then the YAML steps in order");
-  assert.equal(workStepNumber(workflow, "review (factory/7)"), null, "another job");
+  assert.equal(workStepNumber(workflow, "review (pendulum/7)"), null, "another job");
   assert.equal(workStepNumber("jobs: [", "work (7)"), null, "unparsable");
-  assert.equal(workStepNumber(workflow.replace("mode: work", "mode: review"), "work (7)"), null, "no Factory work step");
+  assert.equal(workStepNumber(workflow.replace("mode: work", "mode: review"), "work (7)"), null, "no Pendulum work step");
   const step = (number, name, conclusion, status = "completed") => ({ number, name, status, conclusion });
   const job = (steps, conclusion = "failure") => ({ name: "work (7)", status: "completed", conclusion, runner_id: 3, runner_name: "r", steps });
   const ran = (failedAt) => job([step(1, "Set up job", failedAt === 1 ? "failure" : "success"), step(2, "Pick the account", failedAt === 2 ? "failure" : "skipped"), step(3, "Get the code", failedAt === 3 ? "failure" : failedAt < 3 ? "skipped" : "success"), step(4, "Build it", failedAt === 4 ? "failure" : failedAt < 4 ? "skipped" : null), step(5, "Run actions/upload-artifact@v7", "success")]);
   assert.deepEqual(endedNotLost({ job: ran(1) }), { by: "setup", step: "Set up job", number: 1 }, "GitHub's set-up: no workflow needed");
   assert.equal(needsWorkStep(ran(1)), false);
-  assert.deepEqual(endedNotLost({ job: ran(2), workStep: 4 }), { by: "setup", step: "Pick the account", number: 2 }, "the account step, before Factory's own");
+  assert.deepEqual(endedNotLost({ job: ran(2), workStep: 4 }), { by: "setup", step: "Pick the account", number: 2 }, "the account step, before Pendulum's own");
   assert.deepEqual(endedNotLost({ job: ran(3), workStep: 4 }), { by: "setup", step: "Get the code", number: 3 });
   assert.equal(needsWorkStep(ran(3)), true);
   assert.equal(endedNotLost({ job: ran(3), workStep: null }), null, "the workflow unread: the step cannot be placed, so lost");
-  assert.equal(endedNotLost({ job: ran(4), workStep: 4 }), null, "Factory's own step failed with no exit written: its network");
+  assert.equal(endedNotLost({ job: ran(4), workStep: 4 }), null, "Pendulum's own step failed with no exit written: its network");
   const gone = job([step(1, "Set up job", "success"), step(2, "Get the code", "success"), step(3, "Build it", null, "in_progress")]);
   assert.equal(endedNotLost({ job: gone, workStep: 3 }), null, "a runner that went away: no step of its own failed");
   assert.equal(needsWorkStep(gone), false, "nothing failed: no workflow read");

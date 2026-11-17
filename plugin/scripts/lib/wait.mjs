@@ -1,6 +1,6 @@
-// `factory wait` (#272): an orchestrating session waits on the queue and is told when an Objective Blocks, asks a
+// `pendulum wait` (#272): an orchestrating session waits on the queue and is told when an Objective Blocks, asks a
 // Question, goes In review, merges or closes, or the queue drains. It reads GitHub only, so it works for every route
-// (the Action, a cloud sandbox, any machine's `factory serve`) with or without a loop on this machine. Each poll reads
+// (the Action, a cloud sandbox, any machine's `pendulum serve`) with or without a loop on this machine. Each poll reads
 // the repository's issue events back through the cursor's window, and the open Objectives when an event is new, all
 // conditional: an unchanged page is a 304, which GitHub's rate limit does not count. Blocks, Questions, In review and
 // closes are events, each told once by id; drained is the open Objectives' state. Decided on structure only: the
@@ -8,7 +8,7 @@
 import { rest } from "./github.mjs";
 import { DRAFT_LABEL, isDraft } from "./stop.mjs";
 
-/** What `factory wait` tells, in this order in its usage. */
+/** What `pendulum wait` tells, in this order in its usage. */
 export const WAIT_KINDS = ["blocked", "question", "in-review", "merged", "closed", "drained"];
 /** The exit code when --timeout passes with nothing told. */
 export const WAIT_TIMEOUT_EXIT = 3;
@@ -25,11 +25,11 @@ export const WAIT_MAX_PAGES = 10;
 export const WAIT_LOOKBACK_MS = 5 * 60_000;
 export const WAIT_SEEN = 50;
 
-const STATE_KINDS = { "factory:blocked": "blocked", "factory:question": "question", "factory:in-review": "in-review" };
+const STATE_KINDS = { "pendulum:blocked": "blocked", "pendulum:question": "question", "pendulum:in-review": "in-review" };
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
 
 /**
- * A `--since` cursor: the `cursor` of a line `factory wait` printed, base64url JSON (Node's Buffer and JSON, no format of
+ * A `--since` cursor: the `cursor` of a line `pendulum wait` printed, base64url JSON (Node's Buffer and JSON, no format of
  * our own) of {id, drained, seen}: the newest event id read, the watched queue's state there (null when unknown) and the
  * other ids read within WAIT_LOOKBACK_MS of it, as distances below `id`. Parsed as {id, drained, seen} (`seen` with
  * the id itself). Also a bare event id (state unknown, nothing else read), or a time with its zone, which GitHub's events
@@ -64,7 +64,7 @@ export function cursorText(c, drained = null, seen = []) {
 }
 
 /**
- * One event as the line `factory wait` prints: JSON, with the line and paragraph separators (U+2028, U+2029) and NEL
+ * One event as the line `pendulum wait` prints: JSON, with the line and paragraph separators (U+2028, U+2029) and NEL
  * (U+0085), which JSON.stringify leaves as they are, escaped, so a reader that splits on them never splits a title.
  */
 export const jsonLine = (o) => JSON.stringify(o).replace(/[\u2028\u2029\u0085]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
@@ -78,7 +78,7 @@ export function parseKinds(text) {
 
 /**
  * The kind one repository issue event tells, on its own payload only: `labeled` with a state label (blocked, question,
- * in-review), which only Factory sets, or `closed` (told apart as merged or closed by closedAs). Null for any other
+ * in-review), which only Pendulum sets, or `closed` (told apart as merged or closed by closedAs). Null for any other
  * event and any event on a pull request.
  */
 export function eventKind(e) {
@@ -96,8 +96,8 @@ export function eventKind(e) {
 export function drainedOf(open, watched = null) {
   const mine = open.filter((i) => !i.pull_request && !isDraft(i) && (!watched || watched.has(i.number)));
   const has = (i, l) => names(i).includes(l);
-  const blocked = mine.filter((i) => has(i, "factory:blocked")).map((i) => i.number);
-  const question = mine.filter((i) => !has(i, "factory:blocked") && has(i, "factory:question")).map((i) => i.number);
+  const blocked = mine.filter((i) => has(i, "pendulum:blocked")).map((i) => i.number);
+  const question = mine.filter((i) => !has(i, "pendulum:blocked") && has(i, "pendulum:question")).map((i) => i.number);
   return { drained: mine.length === blocked.length + question.length, blocked, question };
 }
 
@@ -133,9 +133,9 @@ export async function eventsAfter(repo, cursor, { opts, cache, seen = null }) {
 }
 const sorted = (found) => [...found.values()].sort((a, b) => a.id - b.id);
 
-/** How a closed Objective ended: merged when the newest PR on its factory/<issue> branch is merged, else closed. */
+/** How a closed Objective ended: merged when the newest PR on its pendulum/<issue> branch is merged, else closed. */
 export async function closedAs(repo, issue, opts) {
-  const prs = await rest(`repos/${repo.full}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:factory/${issue}`)}&per_page=1`, opts);
+  const prs = await rest(`repos/${repo.full}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${issue}`)}&per_page=1`, opts);
   const pr = Array.isArray(prs) ? prs[0] : null;
   return pr?.merged_at ? { kind: "merged", pr: pr.number } : { kind: "closed", pr: pr?.number ?? null };
 }
@@ -149,8 +149,8 @@ export async function closedAs(repo, issue, opts) {
  * conditional read, free while they are unchanged), and drained is told when that finds the queue drained and the read
  * before did not (or its state was unknown). A wait that starts from now reads whether it already is, and the cursor
  * carries that state on, so neither a queue already drained nor one still drained after a restart is told again. Every
- * other kind is an event, told once by its id and judged on its own payload: a state label only Factory sets, or a close
- * of an issue with a PR on factory/<issue> or the Objective label.
+ * other kind is an event, told once by its id and judged on its own payload: a state label only Pendulum sets, or a close
+ * of an issue with a PR on pendulum/<issue> or the Objective label.
  *
  * A read moves the cursor only once all its reads (events, PRs, the open Objectives) have answered, so a read cut off
  * leaves it where it was. Besides the events: a `gap` line when the cursor was more than WAIT_MAX_PAGES pages back
@@ -159,7 +159,7 @@ export async function closedAs(repo, issue, opts) {
  * before a failure is thrown. Returns {code, cursor}: 0 after the first read that told something (with `follow`, it
  * never returns so), WAIT_TIMEOUT_EXIT after the timeout line.
  */
-export async function waitQueue(repo, { opts, objectiveLabel = "factory:objective", issues = null, kinds = WAIT_KINDS, since = null, follow = false, intervalMs = WAIT_POLL_MS, timeoutMs = null, emit, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() }) {
+export async function waitQueue(repo, { opts, objectiveLabel = "pendulum:objective", issues = null, kinds = WAIT_KINDS, since = null, follow = false, intervalMs = WAIT_POLL_MS, timeoutMs = null, emit, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() }) {
   const cache = new Map();
   const watched = issues?.length ? new Set(issues) : null;
   const deadline = timeoutMs ? now() + timeoutMs : Infinity;
@@ -243,7 +243,7 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
       if (kind === "closed") {
         if (!kinds.includes("merged") && !kinds.includes("closed")) continue;
         ({ kind, pr } = await closedAs(repo, e.issue.number, opts));
-        // An Objective's close: it has a PR on factory/<issue>, or its issue carries the Objective label.
+        // An Objective's close: it has a PR on pendulum/<issue>, or its issue carries the Objective label.
         if (pr === null && !names(e.issue).includes(objectiveLabel)) continue;
       }
       if (!kinds.includes(kind)) continue;

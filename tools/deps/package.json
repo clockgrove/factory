@@ -1,9 +1,9 @@
 {
-  "name": "factory-deps",
+  "name": "pendulum-deps",
   "private": true,
-  "description": "The libraries Factory ships inside plugin/vendor, pinned here so Dependabot tracks them. sync.mjs copies each one's published files there; CI checks the copy matches. devDependencies are CI tools and never vendored.",
+  "description": "The libraries Pendulum ships inside plugin/vendor, pinned here so Dependabot tracks them. sync.mjs copies each one's published files there; CI checks the copy matches. devDependencies are CI tools and never vendored.",
   "scripts": {
-    "lint": "cd ../.. && eslint -c tools/deps/eslint.config.mjs --max-warnings 0 plugin bench tools plugin/bin/factory"
+    "lint": "cd ../.. && eslint -c tools/deps/eslint.config.mjs --max-warnings 0 plugin bench tools plugin/bin/pendulum"
   },
   "dependencies": {
     "@actions/expressions": "0.3.61",

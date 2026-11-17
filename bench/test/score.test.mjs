@@ -9,8 +9,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { collectObjective, snapshotApi, usageDirFor, usageFromDir } from "../lib/collect.mjs";
 import { cacheOf, costOf, loadPrices, parseUsageText, priceTokens, sessionsOf } from "../lib/cost.mjs";
-import { factoryRequests, handoverSteps, humanActions, localFactoryActions, markdownTable, scoreObjective, splitInterventions, summaryLine } from "../lib/objective.mjs";
-import { bySelf, dispatchLatency, factoryLogin, failedStartsOf, lastWrite, launchesOf, phaseMinutes, setupSeconds } from "../lib/phases.mjs";
+import { pendulumRequests, handoverSteps, humanActions, localPendulumActions, markdownTable, scoreObjective, splitInterventions, summaryLine } from "../lib/objective.mjs";
+import { bySelf, dispatchLatency, pendulumLogin, failedStartsOf, lastWrite, launchesOf, phaseMinutes, setupSeconds } from "../lib/phases.mjs";
 import { noWait, waitedRecorded, waitedUnrecorded } from "./fixtures/sandbox-drill.mjs";
 import { blocked, cleanMerge, humanPush, localMerge, OPERATOR, questionAnswered, REPO, snapshotOf, withHandover } from "./fixtures/github.mjs";
 import { CODEX_NO_TOKENS, mergeUsage, parseUsage } from "../../plugin/scripts/lib/usage.mjs";
@@ -37,7 +37,7 @@ test("clean merge: walk-away yes, operator 0, Claude dollars from total_cost_usd
   assert.equal(row.runnerMinutes, 112); // 69 + 43
   assert.equal(row.quality.status, "pending");
   assert.deepEqual(row.missing, []);
-  assert.equal(row.mergedBy, "acme-factory[bot]");
+  assert.equal(row.mergedBy, "acme-pendulum[bot]");
 });
 
 test("human push: a maintainer's commit on the branch after the label breaks walk-away and names itself", () => {
@@ -54,7 +54,7 @@ test("human push: a maintainer's commit on the branch after the label breaks wal
   assert.deepEqual(timed.operator, { minutes: 12, basis: "--minutes (stopwatch)" });
 });
 
-test("workflow hand-over, scored as input: a merged PR carrying Factory's hand-over line leaves a person's step, asked for, counted like any other operator minute", () => {
+test("workflow hand-over, scored as input: a merged PR carrying Pendulum's hand-over line leaves a person's step, asked for, counted like any other operator minute", () => {
   const c = cleanMerge(45, usage("claude"));
   c.pulls[0].body = `${handoverLine({ issue: 45, url: "https://github.test/c", files: [".github/workflows/ci.yml"] })}\n\n## Undone\n- the CI trigger: handed over\n\nCloses #45\n`;
   const input = { prices, now: NOW, handover: "input" };
@@ -68,12 +68,12 @@ test("workflow hand-over, scored as input: a merged PR carrying Factory's hand-o
   assert.deepEqual(scoreObjective(c, { ...input, minutes: 4 }).operator, { minutes: 4, basis: "--minutes (stopwatch)" });
   assert.equal(row.ownerStep, null);
   assert.equal(row.walkAway.handover, "input");
-  // The same body without Factory's marker line (a person's copy, or none) is no hand-over.
+  // The same body without Pendulum's marker line (a person's copy, or none) is no hand-over.
   c.pulls[0].body = "## Undone\n- nothing\n\nCloses #45\n";
   assert.equal(scoreObjective(c, input).walkAway.value, true);
 });
 
-test("workflow hand-over: on a split Objective each merged part with Factory's line is one step, and the actions and Factory's requests agree", () => {
+test("workflow hand-over: on a split Objective each merged part with Pendulum's line is one step, and the actions and Pendulum's requests agree", () => {
   const c = cleanMerge(46, usage("claude"));
   const line = handoverLine({ issue: 46, url: "https://github.test/c", files: [".github/workflows/ci.yml"] });
   const second = { ...c.pulls[0], number: 101, created_at: "2031-03-02T04:00:00Z", merged_at: "2031-03-02T05:00:00Z", body: `${line}\n\npart 2\n\nCloses #46\n` };
@@ -82,7 +82,7 @@ test("workflow hand-over: on a split Objective each merged part with Factory's l
   c.pullDetails[101] = { commits: [], timeline: [], comments: [], reviews: [], reviewComments: [] };
   const steps = handoverSteps(c).map((a) => a.at);
   assert.deepEqual(steps, [c.pulls[0].merged_at, second.merged_at]);
-  assert.deepEqual(factoryRequests(c, "2031-03-02T01:00:00Z").filter((r) => r.kind === "workflow hand-over").map((r) => r.at), steps);
+  assert.deepEqual(pendulumRequests(c, "2031-03-02T01:00:00Z").filter((r) => r.kind === "workflow hand-over").map((r) => r.at), steps);
   const row = scoreObjective(c, { prices, now: NOW, handover: "input" });
   assert.equal(row.walkAway.interventions.asked, 2);
 });
@@ -98,13 +98,13 @@ test("workflow hand-over, scored as an owner step (the default): the Objective w
   assert.equal(row.walkAway.askedOnly.value, true);
   assert.equal(row.walkAway.humanActions, 0);
   assert.match(row.walkAway.reason, /^merged with no human action after the label; owner step: workflow hand-over \(PR #100\)$/);
-  // Factory still asked for it: the request is listed, and nothing answered it inside the run.
+  // Pendulum still asked for it: the request is listed, and nothing answered it inside the run.
   assert.deepEqual(row.walkAway.interventions.requests.filter((r) => r.kind === "workflow hand-over").map((r) => r.at), [merged]);
   assert.deepEqual(row.operator, { minutes: 0, basis: "clean merge; the owner step's minutes are apart (ownerStep)" });
-  assert.deepEqual(row.ownerStep, { kind: "workflow hand-over", steps: [{ at: merged, where: "PR #100" }], applied: null, minutes: "unknown", basis: "not applied yet (factory:handover still on); give --owner-minutes <issue>=<n> from a stopwatch" });
-  // The person removing factory:handover after the merge marks it applied: part of the owner step, not input. Its
+  assert.deepEqual(row.ownerStep, { kind: "workflow hand-over", steps: [{ at: merged, where: "PR #100" }], applied: null, minutes: "unknown", basis: "not applied yet (pendulum:handover still on); give --owner-minutes <issue>=<n> from a stopwatch" });
+  // The person removing pendulum:handover after the merge marks it applied: part of the owner step, not input. Its
   // minutes come from --owner-minutes, never from --minutes or the timestamps.
-  c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: MAINTAINER, created_at: "2031-03-02T05:00:00Z" });
+  c.issueTimeline.push({ event: "unlabeled", label: { name: "pendulum:handover" }, actor: MAINTAINER, created_at: "2031-03-02T05:00:00Z" });
   const done = scoreObjective(c, { prices, ownerMinutes: 7, now: NOW });
   assert.equal(done.walkAway.value, true);
   assert.equal(done.walkAway.humanActions, 0);
@@ -126,15 +126,15 @@ test("workflow hand-over, scored as an owner step (the default): the Objective w
   assert.throws(() => scoreObjective(c, { prices, now: NOW, handover: "skip" }), /handover: skip is not one of owner-step, input/);
 });
 
-test("workflow hand-over: an owner step only when Factory's comment with the patch is on the issue; else it stays a person's action", () => {
+test("workflow hand-over: an owner step only when Pendulum's comment with the patch is on the issue; else it stays a person's action", () => {
   const unposted = scoreObjective(withHandover(cleanMerge(47), { posted: false }), { prices, now: NOW });
   assert.equal(unposted.walkAway.value, false);
   assert.equal(unposted.ownerStep, null);
   assert.equal(unposted.walkAway.firstHumanAction.kind, "workflow hand-over");
-  assert.equal(unposted.walkAway.firstHumanAction.detail, "Factory's hand-over comment with the patch is not on the issue");
-  // A person's comment carrying the marker is not Factory's hand-over; nor is Factory's notice with no patch in it.
+  assert.equal(unposted.walkAway.firstHumanAction.detail, "Pendulum's hand-over comment with the patch is not on the issue");
+  // A person's comment carrying the marker is not Pendulum's hand-over; nor is Pendulum's notice with no patch in it.
   assert.equal(scoreObjective(withHandover(cleanMerge(47), { by: { login: "maintainer", type: "User" } }), { prices, now: NOW }).ownerStep, null);
-  // Nor is another machine's: only Factory's own login (the App that applied factory:running, or --app) posts it.
+  // Nor is another machine's: only Pendulum's own login (the App that applied pendulum:running, or --app) posts it.
   assert.equal(scoreObjective(withHandover(cleanMerge(47), { by: { login: "other-tool[bot]", type: "Bot" } }), { prices, now: NOW }).ownerStep, null);
   assert.equal(scoreObjective(withHandover(cleanMerge(47), { by: { login: "other-tool[bot]", type: "Bot" } }), { prices, now: NOW, app: "other-tool[bot]" }).walkAway.value, true);
   const notice = withHandover(cleanMerge(47));
@@ -142,16 +142,16 @@ test("workflow hand-over: an owner step only when Factory's comment with the pat
   assert.equal(scoreObjective(notice, { prices, now: NOW }).walkAway.value, false);
 });
 
-test("workflow hand-over on a split Objective: Factory applying the label again for a later part's patch makes it pending again, until the person removes it again", () => {
+test("workflow hand-over on a split Objective: Pendulum applying the label again for a later part's patch makes it pending again, until the person removes it again", () => {
   const MAINTAINER = { login: "maintainer", type: "User" };
-  const APP = { login: "acme-factory[bot]", type: "Bot" };
+  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
   const c = withHandover(cleanMerge(48));
   const line = c.pulls[0].body.split("\n\n")[0];
   c.pulls[0].body = `${line}\n\npart 1\n\nRefs #48\n`;
   c.pulls.push({ ...c.pulls[0], number: 101, created_at: "2031-03-02T04:00:00Z", merged_at: "2031-03-02T05:00:00Z", body: `${line}\n\npart 2\n\nCloses #48\n` });
   c.pullDetails[101] = { commits: [], timeline: [], comments: [], reviews: [], reviewComments: [] };
-  const removed = (at) => ({ event: "unlabeled", label: { name: "factory:handover" }, actor: MAINTAINER, created_at: at });
-  c.issueTimeline.push(removed("2031-03-02T03:45:00Z"), { event: "labeled", label: { name: "factory:handover" }, actor: APP, created_at: "2031-03-02T04:00:30Z" });
+  const removed = (at) => ({ event: "unlabeled", label: { name: "pendulum:handover" }, actor: MAINTAINER, created_at: at });
+  c.issueTimeline.push(removed("2031-03-02T03:45:00Z"), { event: "labeled", label: { name: "pendulum:handover" }, actor: APP, created_at: "2031-03-02T04:00:30Z" });
   const pending = scoreObjective(c, { prices, now: NOW });
   assert.equal(pending.walkAway.value, true);
   assert.deepEqual(pending.ownerStep.steps.map((x) => x.where), ["PR #100", "PR #101"]);
@@ -160,28 +160,28 @@ test("workflow hand-over on a split Objective: Factory applying the label again 
   assert.deepEqual(scoreObjective(c, { prices, now: NOW }).ownerStep.applied, { at: "2031-03-02T06:00:00Z", by: "maintainer" });
 });
 
-test("workflow hand-over in local mode: Factory's own factory:handover label under the operator's login is Factory's, the operator's later removal is the owner step's", () => {
+test("workflow hand-over in local mode: Pendulum's own pendulum:handover label under the operator's login is Pendulum's, the operator's later removal is the owner step's", () => {
   const c = withHandover(localMerge(60), { by: OPERATOR });
-  c.issueTimeline.push({ event: "labeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: "2031-03-02T01:20:05Z" });
-  c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: "2031-03-02T04:00:00Z" });
-  const own = localFactoryActions(c);
-  assert.equal(own("2031-03-02T01:20:05Z", OPERATOR, "labeled factory:handover"), true);
-  // A removal is the person's "applied" mark, inside a run's window too, unless it is Factory's drop; after the merge,
+  c.issueTimeline.push({ event: "labeled", label: { name: "pendulum:handover" }, actor: OPERATOR, created_at: "2031-03-02T01:20:05Z" });
+  c.issueTimeline.push({ event: "unlabeled", label: { name: "pendulum:handover" }, actor: OPERATOR, created_at: "2031-03-02T04:00:00Z" });
+  const own = localPendulumActions(c);
+  assert.equal(own("2031-03-02T01:20:05Z", OPERATOR, "labeled pendulum:handover"), true);
+  // A removal is the person's "applied" mark, inside a run's window too, unless it is Pendulum's drop; after the merge,
   // outside any window, it is the person's.
-  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "unlabeled factory:handover"), false);
-  assert.equal(own("2031-03-02T04:00:00Z", OPERATOR, "unlabeled factory:handover"), false);
+  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "unlabeled pendulum:handover"), false);
+  assert.equal(own("2031-03-02T04:00:00Z", OPERATOR, "unlabeled pendulum:handover"), false);
   const row = scoreObjective(c, { prices, now: NOW });
   assert.equal(row.walkAway.value, true, row.walkAway.reason);
   assert.deepEqual(row.ownerStep.applied, { at: "2031-03-02T04:00:00Z", by: "dev" });
-  // Under the strict rule the first action is the hand-over at the merge, not Factory's own label.
+  // Under the strict rule the first action is the hand-over at the merge, not Pendulum's own label.
   const strict = scoreObjective(c, { prices, now: NOW, handover: "input" });
   assert.equal(strict.walkAway.firstHumanAction.kind, "workflow hand-over");
 });
 
-test("workflow hand-over in local mode: a removal inside a run is Factory's only when it is Factory's drop; else it is the person's applying it, input before the merge", () => {
-  const removedAt = (c, at) => c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: at });
-  const labeledAt = (c, at) => c.issueTimeline.push({ event: "labeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: at });
-  // The operator removes it at 01:30, inside the work run, with Factory's patch posted and no relabel: the plugin reads
+test("workflow hand-over in local mode: a removal inside a run is Pendulum's only when it is Pendulum's drop; else it is the person's applying it, input before the merge", () => {
+  const removedAt = (c, at) => c.issueTimeline.push({ event: "unlabeled", label: { name: "pendulum:handover" }, actor: OPERATOR, created_at: at });
+  const labeledAt = (c, at) => c.issueTimeline.push({ event: "labeled", label: { name: "pendulum:handover" }, actor: OPERATOR, created_at: at });
+  // The operator removes it at 01:30, inside the work run, with Pendulum's patch posted and no relabel: the plugin reads
   // that as applied (handoff.mjs handoverApplied), so it is the person's input before the merge, a miss.
   const person = withHandover(localMerge(60), { by: OPERATOR });
   labeledAt(person, "2031-03-02T01:20:05Z");
@@ -189,30 +189,30 @@ test("workflow hand-over in local mode: a removal inside a run is Factory's only
   const miss = scoreObjective(person, { prices, now: NOW });
   assert.equal(miss.walkAway.value, false);
   assert.equal(miss.walkAway.humanActions, 1);
-  assert.equal(miss.walkAway.firstHumanAction.kind, "unlabeled factory:handover");
-  // Factory's drop: it applied the label again later in a run...
+  assert.equal(miss.walkAway.firstHumanAction.kind, "unlabeled pendulum:handover");
+  // Pendulum's drop: it applied the label again later in a run...
   const again = withHandover(localMerge(60), { by: OPERATOR });
   labeledAt(again, "2031-03-02T01:20:05Z");
   removedAt(again, "2031-03-02T01:30:00Z");
   labeledAt(again, "2031-03-02T01:35:00Z");
-  assert.equal(localFactoryActions(again)("2031-03-02T01:30:00Z", OPERATOR, "unlabeled factory:handover"), true);
+  assert.equal(localPendulumActions(again)("2031-03-02T01:30:00Z", OPERATOR, "unlabeled pendulum:handover"), true);
   assert.equal(scoreObjective(again, { prices, now: NOW }).walkAway.value, true);
   // ...or its hand-over comment now carries no patch (the PR carries none). Outside a run it is still the person's.
   const none = localMerge(60);
-  none.issueComments.push({ user: OPERATOR, created_at: "2031-03-02T01:20:00Z", updated_at: "2031-03-02T01:30:00Z", body: `<!-- factory:60:handover -->\nFactory: PR #200 carries no workflow hand-over.` });
-  const own = localFactoryActions(none);
-  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "unlabeled factory:handover"), true);
-  assert.equal(own("2031-03-02T04:00:00Z", OPERATOR, "unlabeled factory:handover"), false);
+  none.issueComments.push({ user: OPERATOR, created_at: "2031-03-02T01:20:00Z", updated_at: "2031-03-02T01:30:00Z", body: `<!-- pendulum:60:handover -->\nPendulum: PR #200 carries no workflow hand-over.` });
+  const own = localPendulumActions(none);
+  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "unlabeled pendulum:handover"), true);
+  assert.equal(own("2031-03-02T04:00:00Z", OPERATOR, "unlabeled pendulum:handover"), false);
 });
 
-test("workflow hand-over in local mode: the operator applying factory:handover by hand is the person's, unless Factory's hand-over comment is there or it falls in a run", () => {
+test("workflow hand-over in local mode: the operator applying pendulum:handover by hand is the person's, unless Pendulum's hand-over comment is there or it falls in a run", () => {
   const c = localMerge(60);
-  const own = localFactoryActions(c);
-  assert.equal(own("2031-03-02T05:00:00Z", OPERATOR, "labeled factory:handover"), false);
-  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "labeled factory:handover"), true);
-  assert.equal(localFactoryActions(withHandover(localMerge(60), { by: OPERATOR }))("2031-03-02T05:00:00Z", OPERATOR, "labeled factory:handover"), true);
-  c.issueTimeline.push({ event: "labeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: "2031-03-02T05:00:00Z" });
-  assert.equal(scoreObjective(c, { prices, now: NOW }).walkAway.firstHumanAction.kind, "labeled factory:handover");
+  const own = localPendulumActions(c);
+  assert.equal(own("2031-03-02T05:00:00Z", OPERATOR, "labeled pendulum:handover"), false);
+  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "labeled pendulum:handover"), true);
+  assert.equal(localPendulumActions(withHandover(localMerge(60), { by: OPERATOR }))("2031-03-02T05:00:00Z", OPERATOR, "labeled pendulum:handover"), true);
+  c.issueTimeline.push({ event: "labeled", label: { name: "pendulum:handover" }, actor: OPERATOR, created_at: "2031-03-02T05:00:00Z" });
+  assert.equal(scoreObjective(c, { prices, now: NOW }).walkAway.firstHumanAction.kind, "labeled pendulum:handover");
 });
 
 test("workflow hand-over in local mode, split: the operator applying part one's hand-over during part two's run is the owner step's applied mark", () => {
@@ -222,8 +222,8 @@ test("workflow hand-over in local mode, split: the operator applying part one's 
   first.body = `${line}\n\npart 1\n\nRefs #60\n`;
   c.pulls.push({ ...first, number: 201, created_at: "2031-03-02T03:30:00Z", merged_at: "2031-03-02T04:30:00Z", body: `${line}\n\npart 2\n\nCloses #60\n` });
   c.pullDetails[201] = { commits: [], timeline: [], comments: [], reviews: [], reviewComments: [] };
-  c.issueComments.push({ id: 1700000003, user: OPERATOR, created_at: "2031-03-02T02:40:00Z", updated_at: "2031-03-02T04:00:00Z", body: "<!-- factory:60:progress:work:1700000003 -->\nFactory work run 1700000003\n- 02:40Z harness codex (gpt-test) attempt 1\n- 04:00Z exit: delivered; usd 1" });
-  c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: "2031-03-02T03:00:00Z" });
+  c.issueComments.push({ id: 1700000003, user: OPERATOR, created_at: "2031-03-02T02:40:00Z", updated_at: "2031-03-02T04:00:00Z", body: "<!-- pendulum:60:progress:work:1700000003 -->\nPendulum work run 1700000003\n- 02:40Z harness codex (gpt-test) attempt 1\n- 04:00Z exit: delivered; usd 1" });
+  c.issueTimeline.push({ event: "unlabeled", label: { name: "pendulum:handover" }, actor: OPERATOR, created_at: "2031-03-02T03:00:00Z" });
   const row = scoreObjective(c, { prices, now: NOW });
   assert.equal(row.walkAway.value, true, row.walkAway.reason);
   assert.deepEqual(row.ownerStep.steps.map((x) => x.where), ["PR #200", "PR #201"]);
@@ -245,7 +245,7 @@ test("blocked: a Blocked card is a miss with the worker's reason, exit blocked, 
   assert.equal(row.exit, "blocked");
   assert.equal(row.walkAway.value, false);
   assert.equal(row.walkAway.blocked.at, "2031-03-02T04:00:00Z");
-  assert.equal(row.walkAway.blocked.reason, "validation red after Factory's second pass (work)");
+  assert.equal(row.walkAway.blocked.reason, "validation red after Pendulum's second pass (work)");
   assert.match(row.walkAway.reason, /not merged \(blocked: .*validation red/);
   assert.equal(row.wallMinutes, null);
   assert.equal(row.operator.minutes, "unknown");
@@ -269,7 +269,7 @@ test("cost: a raw Codex stream counts a resumed pass's own share", () => {
   // Real Codex 0.167.0 streams as the worker tees them: `codex exec`, then `codex exec resume` on the same thread, whose
   // turn.completed is the thread's running total. Together they cost what the thread reported last.
   const fixtures = join(BENCH, "..", "plugin", "test", "fixtures");
-  const pass = (label, f) => `{"type":"factory.run","label":"${label}","harness":"codex"}\n${read(join(fixtures, f))}`;
+  const pass = (label, f) => `{"type":"pendulum.run","label":"${label}","harness":"codex"}\n${read(join(fixtures, f))}`;
   const raw = parseUsageText(pass("work-1", "codex-0.167-thread.jsonl") + pass("validation-fix-1", "codex-0.167-thread-resumed.jsonl"), { model: "gpt-6.1-sol" });
   assert.deepEqual(raw.tokens, { input: 39039, output: 55, cached: 24576, written: 0 });
   assert.equal(raw.turns, 2);
@@ -295,14 +295,14 @@ test("cost: Codex tokens are priced from the Codex price table, with its date in
 });
 
 test("cost: a Codex stage with no completed turn says so, in the worker's record, its exit line and the scorecard alike; never a missing price", () => {
-  // clockgrove/factory-scratch#498: three gpt-6.1-sol calls, each refused before any turn completed (events.jsonl, one run's lines).
+  // clockgrove/pendulum-scratch#498: three gpt-6.1-sol calls, each refused before any turn completed (events.jsonl, one run's lines).
   const events = read(join(import.meta.dirname, "..", "..", "plugin", "test", "fixtures", "codex-0.167-refused-400.jsonl"));
   const worker = mergeUsage([1, 2, 3].map(() => parseUsage("codex", events, "gpt-6.1-sol", 1)));
   assert.equal(worker.usd, null, "spend unknown, not zero: a cut turn may have spent tokens");
   assert.equal(worker.basis, CODEX_NO_TOKENS);
   assert.equal(usdText(worker), "unmetered (no Codex turn completed, so Codex reported no tokens)");
   // The scorecard, from the uploaded result.json (as session.mjs writes it) or from the raw events.
-  const result = { harness: "codex", model: "gpt-6.1-sol", usd: null, tokens: worker.tokens, basis: worker.basis, turns: 0, runs: 3, artifact: "factory-usage-498/result.json" };
+  const result = { harness: "codex", model: "gpt-6.1-sol", usd: null, tokens: worker.tokens, basis: worker.basis, turns: 0, runs: 3, artifact: "pendulum-usage-498/result.json" };
   for (const rec of [result, parseUsageText(events, { model: "gpt-6.1-sol" })]) {
     const cost = costOf([rec], prices);
     assert.equal(cost.usd, null);
@@ -314,8 +314,8 @@ test("cost: a Codex stage with no completed turn says so, in the worker's record
 });
 
 test("cost: Copilot dollars are the AI credits the worker priced, premium requests beside; an old artifact without credits stays unmetered", () => {
-  const work = { harness: "copilot", model: "claude-sonnet-5.5", artifact: "factory-usage-47/result.json", usd: 0.4123, premiumRequests: 3, aiCredits: 41.23, tokens: { input: 90000, output: 900, cached: 60000, written: 29000 }, basis: "harness-reported: 41.23 AI credits from copilot --usage-output-file at $0.01/credit, 3 premium request(s)", runs: 2 };
-  const review = { ...work, artifact: "factory-usage-47-review/result.json", usd: 0.1, premiumRequests: 1, aiCredits: 10 };
+  const work = { harness: "copilot", model: "claude-sonnet-5.5", artifact: "pendulum-usage-47/result.json", usd: 0.4123, premiumRequests: 3, aiCredits: 41.23, tokens: { input: 90000, output: 900, cached: 60000, written: 29000 }, basis: "harness-reported: 41.23 AI credits from copilot --usage-output-file at $0.01/credit, 3 premium request(s)", runs: 2 };
+  const review = { ...work, artifact: "pendulum-usage-47-review/result.json", usd: 0.1, premiumRequests: 1, aiCredits: 10 };
   const row = scoreObjective(cleanMerge(47, [work, review]), { prices, now: NOW });
   assert.equal(row.harness, "copilot");
   assert.equal(row.cost.unit, "usd");
@@ -350,8 +350,8 @@ test("cost: the reviewer's artifact is summed with the worker's; a raw Claude re
 });
 
 test("cost: the row's model is the work stage's whatever order the artifacts are listed in (#49)", () => {
-  const work = { harness: "claude", model: "claude-opus-5-5", artifact: "factory-usage-49/result.json", usd: 2, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 } };
-  const review = { ...work, model: "claude-fable-5-2", artifact: "factory-usage-49-review/result.json", usd: 1 };
+  const work = { harness: "claude", model: "claude-opus-5-5", artifact: "pendulum-usage-49/result.json", usd: 2, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 } };
+  const review = { ...work, model: "claude-fable-5-2", artifact: "pendulum-usage-49-review/result.json", usd: 1 };
   for (const records of [[work, review], [review, work]]) {
     const row = scoreObjective(cleanMerge(49, records), { prices, now: NOW });
     assert.equal(row.model, "claude-opus-5-5");
@@ -362,8 +362,8 @@ test("cost: the row's model is the work stage's whatever order the artifacts are
 
 test("cost: the prompt cache after each CI wait is summed across artifacts and noted under the table", () => {
   const first = (written, input) => ({ unit: "request", input, cached: input - written, written, written1h: written, written5m: 0 });
-  const work = { harness: "claude", artifact: "factory-usage-49/result.json", usd: 2, runs: 3, tokens: { input: 1e6, output: 1e4, cached: 9e5, written: 1e5 }, cache: { ttl: "1h", writeShare: 0.1, afterWait: [{ label: "validation-fix-1", waitMin: 14, resumed: true, first: first(2000, 90000), writeShare: 0.05 }] } };
-  const review = { harness: "claude", artifact: "factory-usage-49-review/result.json", usd: 1, runs: 2, tokens: { input: 5e5, output: 5e3, cached: 4e5, written: 1e5 }, cache: { ttl: "1h", writeShare: 0.2, afterWait: [{ label: "review-validation-fix-1", waitMin: 9, resumed: true, first: first(3000, 95000), writeShare: 0.1 }] } };
+  const work = { harness: "claude", artifact: "pendulum-usage-49/result.json", usd: 2, runs: 3, tokens: { input: 1e6, output: 1e4, cached: 9e5, written: 1e5 }, cache: { ttl: "1h", writeShare: 0.1, afterWait: [{ label: "validation-fix-1", waitMin: 14, resumed: true, first: first(2000, 90000), writeShare: 0.05 }] } };
+  const review = { harness: "claude", artifact: "pendulum-usage-49-review/result.json", usd: 1, runs: 2, tokens: { input: 5e5, output: 5e3, cached: 4e5, written: 1e5 }, cache: { ttl: "1h", writeShare: 0.2, afterWait: [{ label: "review-validation-fix-1", waitMin: 9, resumed: true, first: first(3000, 95000), writeShare: 0.1 }] } };
   const c = cacheOf([work, review]);
   assert.equal(c.ttl, "1h");
   assert.equal(c.firstWritten, 5000);
@@ -399,7 +399,7 @@ test("collect over a snapshot gives the fixture back, and score.mjs --replay wri
   const snapshot = snapshotOf(fixture);
   const collected = await collectObjective(snapshotApi(snapshot), REPO, 42, { usage: usage("claude") });
   assert.equal(collected.pulls.length, 1);
-  assert.equal(collected.pulls[0].merged_by.login, "acme-factory[bot]");
+  assert.equal(collected.pulls[0].merged_by.login, "acme-pendulum[bot]");
   assert.equal(collected.jobs.length, 2);
   assert.equal(collected.harness, "claude");
   const rowA = scoreObjective(collected, { prices, now: NOW });
@@ -407,7 +407,7 @@ test("collect over a snapshot gives the fixture back, and score.mjs --replay wri
   assert.equal(rowA.walkAway.value, true);
   assert.equal(rowA.runnerMinutes, rowB.runnerMinutes);
 
-  const dir = mkdtempSync(join(tmpdir(), "factory-bench-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-bench-test-"));
   const file = join(dir, "snapshot.json");
   writeFileSync(file, JSON.stringify(snapshot));
   const standing = join(dir, "scorecard.json");
@@ -416,7 +416,7 @@ test("collect over a snapshot gives the fixture back, and score.mjs --replay wri
   assert.match(out, /^\| Issue \| Exit \| Walk-away \|/);
   assert.match(out, /^\| Issue \| Exit \| Walk-away \| Walk-away \(asked only\) \| Asked \/ unprompted \| Quality \|/);
   assert.match(out, /\| #42 \| merged \| yes \| yes \| 0 \/ 0 \| pending \| 0 \| none \| \$7\.43 \(201k in \/ 2700k cached \/ 0k written \/ 50k out\) \| usd \|/);
-  assert.match(out, /^Walk-away: 1 of 1 Objective\(s\) \(1 merged\) with no human input; 1 of 1 counting only input Factory asked for\. Interventions: 0 asked for \(Question, Blocked notice, review request\), 0 unprompted\.$/m);
+  assert.match(out, /^Walk-away: 1 of 1 Objective\(s\) \(1 merged\) with no human input; 1 of 1 counting only input Pendulum asked for\. Interventions: 0 asked for \(Question, Blocked notice, review request\), 0 unprompted\.$/m);
   const rows = JSON.parse(read(join(dir, "rows.json"))).rows;
   assert.equal(rows.length, 1);
   assert.equal(rows[0].issue, 42);
@@ -442,10 +442,10 @@ test("score.mjs refuses a bad invocation with exit 64", () => {
 });
 
 test("score.mjs --handover: owner-step by default, input on request, the rule in the JSON; --owner-minutes times the owner step; a bad rule exits 64", () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-bench-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-bench-test-"));
   const file = join(dir, "snapshot.json");
   const c = withHandover(cleanMerge(47));
-  c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: { login: "maintainer", type: "User" }, created_at: "2031-03-02T05:00:00Z" });
+  c.issueTimeline.push({ event: "unlabeled", label: { name: "pendulum:handover" }, actor: { login: "maintainer", type: "User" }, created_at: "2031-03-02T05:00:00Z" });
   writeFileSync(file, JSON.stringify(snapshotOf(c)));
   const score = (...args) => execFileSync("node", [join(BENCH, "score.mjs"), "--replay", file, "--usage", join(USAGE, "claude"), ...args], { encoding: "utf8", cwd: dir, stdio: "pipe" });
   const out = score("--owner-minutes", "47=7", "--out", join(dir, "rows.json"));
@@ -467,31 +467,31 @@ test("score.mjs --handover: owner-step by default, input on request, the rule in
 test("labelTime: a Running label before a recovery relabel is the clock", async () => {
   const { labelTime } = await import("../lib/objective.mjs");
   const timeline = [
-    { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-10-26T04:00:00Z" },
-    { event: "labeled", label: { name: "factory:running" }, created_at: "2026-11-05T17:50:00Z" },
-    { event: "labeled", label: { name: "factory:question" }, created_at: "2026-11-05T19:54:00Z" },
-    { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-11-05T20:29:48Z" },
+    { event: "labeled", label: { name: "pendulum:objective" }, created_at: "2026-10-26T04:00:00Z" },
+    { event: "labeled", label: { name: "pendulum:running" }, created_at: "2026-11-05T17:50:00Z" },
+    { event: "labeled", label: { name: "pendulum:question" }, created_at: "2026-11-05T19:54:00Z" },
+    { event: "labeled", label: { name: "pendulum:objective" }, created_at: "2026-11-05T20:29:48Z" },
   ];
-  assert.equal(labelTime({}, timeline, "factory:objective", "2026-11-05T17:00:00Z"), "2026-11-05T17:50:00Z");
-  assert.equal(labelTime({}, timeline, "factory:objective", null), "2026-10-26T04:00:00Z");
+  assert.equal(labelTime({}, timeline, "pendulum:objective", "2026-11-05T17:00:00Z"), "2026-11-05T17:50:00Z");
+  assert.equal(labelTime({}, timeline, "pendulum:objective", null), "2026-10-26T04:00:00Z");
 });
 
 test("waitingMinutes and decisionsOf: queue and human-turn time apart from working time; one person's burst is one decision", async () => {
   const { waitingMinutes, decisionsOf } = await import("../lib/objective.mjs");
   const t = [
-    { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-11-05T09:40:00Z" },
-    { event: "labeled", label: { name: "factory:running" }, created_at: "2026-11-05T10:00:00Z" },
-    { event: "labeled", label: { name: "factory:question" }, created_at: "2026-11-05T11:00:00Z" },
-    { event: "labeled", label: { name: "factory:running" }, created_at: "2026-11-05T12:00:00Z" },
-    { event: "labeled", label: { name: "factory:in-review" }, created_at: "2026-11-05T12:30:00Z" },
+    { event: "labeled", label: { name: "pendulum:objective" }, created_at: "2026-11-05T09:40:00Z" },
+    { event: "labeled", label: { name: "pendulum:running" }, created_at: "2026-11-05T10:00:00Z" },
+    { event: "labeled", label: { name: "pendulum:question" }, created_at: "2026-11-05T11:00:00Z" },
+    { event: "labeled", label: { name: "pendulum:running" }, created_at: "2026-11-05T12:00:00Z" },
+    { event: "labeled", label: { name: "pendulum:in-review" }, created_at: "2026-11-05T12:30:00Z" },
   ];
   const w = waitingMinutes(t, "2026-11-05T09:40:00Z", "2026-11-05T13:00:00Z");
   assert.deepEqual(w, { minutes: 80, basis: "waiting: queue, question" });
   assert.equal(waitingMinutes(t, "2026-11-05T09:40:00Z", null).minutes, null);
   const acts = [
     { at: "2026-11-05T11:05:00Z", by: "kirk", kind: "body edit" },
-    { at: "2026-11-05T11:06:00Z", by: "kirk", kind: "unlabeled factory:objective" },
-    { at: "2026-11-05T11:06:10Z", by: "kirk", kind: "labeled factory:objective" },
+    { at: "2026-11-05T11:06:00Z", by: "kirk", kind: "unlabeled pendulum:objective" },
+    { at: "2026-11-05T11:06:10Z", by: "kirk", kind: "labeled pendulum:objective" },
     { at: "2026-11-05T11:08:00Z", by: "kirk", kind: "comment" },
     { at: "2026-11-05T12:40:00Z", by: "kirk", kind: "comment" },
   ];
@@ -499,14 +499,14 @@ test("waitingMinutes and decisionsOf: queue and human-turn time apart from worki
   assert.equal(decisionsOf([]), 0);
 });
 
-test("humanActions: board bookkeeping and Factory-marker comments are not human actions", async () => {
+test("humanActions: board bookkeeping and Pendulum-marker comments are not human actions", async () => {
   const collected = {
     issue: { number: 9 },
     issueTimeline: [
-      { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-11-06T01:45:23Z", actor: { login: "kirk", type: "User" } },
+      { event: "labeled", label: { name: "pendulum:objective" }, created_at: "2026-11-06T01:45:23Z", actor: { login: "kirk", type: "User" } },
       { event: "added_to_project_v2", created_at: "2026-11-06T01:45:40Z", actor: { login: "kirk", type: "User" } },
       { event: "project_v2_item_status_changed", created_at: "2026-11-06T01:45:50Z", actor: { login: "kirk", type: "User" } },
-      { event: "commented", created_at: "2026-11-06T01:46:00Z", actor: { login: "kirk", type: "User" }, body: "<!-- factory:9:held -->\nHeld on the board." },
+      { event: "commented", created_at: "2026-11-06T01:46:00Z", actor: { login: "kirk", type: "User" }, body: "<!-- pendulum:9:held -->\nHeld on the board." },
       { event: "commented", created_at: "2026-11-06T02:46:00Z", actor: { login: "kirk", type: "User" }, body: "Please also handle the dark theme." },
     ],
     issueComments: [],
@@ -518,15 +518,15 @@ test("humanActions: board bookkeeping and Factory-marker comments are not human 
 });
 
 test("phaseMinutes: minutes between progress lines go to the earlier line's phase; midnight is crossed; no comment is null", () => {
-  const body = (n, lines) => `<!-- factory:${n}:progress:work:1 -->\nFactory work run 1\n${lines.map((l) => `- ${l}`).join("\n")}`;
+  const body = (n, lines) => `<!-- pendulum:${n}:progress:work:1 -->\nPendulum work run 1\n${lines.map((l) => `- ${l}`).join("\n")}`;
   const work = body(7, ["23:50Z setup", "23:52Z install", "00:01Z harness claude (claude-opus-5-5) attempt 1", "00:31Z waiting for required checks (quality) on abc1234", "00:45Z validation pass 1 red: required checks quality on abc1234; fix run", "00:55Z waiting for required checks (quality) on def5678", "01:05Z exit: delivered; usd 1.00"]);
-  const review = `<!-- factory:7:progress:review:2 -->\nFactory review run 2\n- 01:10Z setup\n- 01:11Z reviewer claude-fable-5-1\n- 01:20Z answer pass: 2 comment(s)\n- 01:24Z exit: delivered; usd 0.50`;
-  const p = phaseMinutes([{ body: "<!-- factory:7:plan -->" }, { body: work }, { body: review }], 7);
+  const review = `<!-- pendulum:7:progress:review:2 -->\nPendulum review run 2\n- 01:10Z setup\n- 01:11Z reviewer claude-fable-5-1\n- 01:20Z answer pass: 2 comment(s)\n- 01:24Z exit: delivered; usd 0.50`;
+  const p = phaseMinutes([{ body: "<!-- pendulum:7:plan -->" }, { body: work }, { body: review }], 7);
   assert.deepEqual(p, { runs: 2, firstSetupMinutes: 0, setupMinutes: 11 + 1, modelMinutes: 30 + 10 + 9 + 4, ciWaitMinutes: 14 + 10, overlapMinutes: 0, otherMinutes: 0, basis: "2 progress comment(s)" });
-  assert.equal(phaseMinutes([{ body: "<!-- factory:8:progress:work:1 -->\n- 01:00Z setup" }], 7).runs, 0);
+  assert.equal(phaseMinutes([{ body: "<!-- pendulum:8:progress:work:1 -->\n- 01:00Z setup" }], 7).runs, 0);
   assert.equal(phaseMinutes([], 7).modelMinutes, null);
   // A local Objective's first stage on a machine: the clone's seconds ride its line, the cold install is its own phase.
-  const firstRun = "<!-- factory:7:progress:work:9 -->\n- 10:00Z first-time setup: cloned in 90 s\n- 10:00Z install (first time on this machine)\n- 10:03Z harness\n- 10:13Z exit: delivered";
+  const firstRun = "<!-- pendulum:7:progress:work:9 -->\n- 10:00Z first-time setup: cloned in 90 s\n- 10:00Z install (first time on this machine)\n- 10:03Z harness\n- 10:13Z exit: delivered";
   const f = phaseMinutes([{ body: firstRun }], 7);
   assert.equal(f.firstSetupMinutes, 1.5 + 3);
   assert.equal(f.setupMinutes, 0);
@@ -565,7 +565,7 @@ test("phaseMinutes: a reviewer beside the required checks counts its minutes onc
     await progress("answer pass: 2 comment(s)");
     return lines;
   };
-  const at = (lines, clocks) => `<!-- factory:7:progress:review:3 -->\nFactory review run 3\n${lines.map((l, i) => `- ${clocks[i]} ${l}`).join("\n")}\n- 01:40Z exit: delivered; usd 1.00`;
+  const at = (lines, clocks) => `<!-- pendulum:7:progress:review:3 -->\nPendulum review run 3\n${lines.map((l, i) => `- ${clocks[i]} ${l}`).join("\n")}\n- 01:40Z exit: delivered; usd 1.00`;
   // The checks outlast the reviewer: 1 min CI wait, 8 min side by side, 5 min CI wait after it, 10 min answer pass.
   const after = await run("after");
   assert.deepEqual(after, ["pre-review-validation pass 1 (required checks)", "waiting for required checks (quality) on abc1234", "reviewer claude-fable-5-2 beside the required checks on abc1234", "waiting for required checks on abc1234 after the reviewer", "answer pass: 2 comment(s)"]);
@@ -579,18 +579,18 @@ test("phaseMinutes: a reviewer beside the required checks counts its minutes onc
   // Each minute once: the phases add up to the run's wall clock (01:15 to 01:40).
   for (const x of [p, q]) assert.equal(x.otherMinutes + x.ciWaitMinutes + x.overlapMinutes + x.modelMinutes + x.setupMinutes, 25);
   // The pass's own lines during the overlap stay in it.
-  assert.equal(phaseMinutes([{ body: "<!-- factory:7:progress:review:4 -->\n- 02:00Z reviewer m beside the required checks on abc1234\n- 02:03Z during the reviewer: triage: off (no-key); fix pass\n- 02:07Z required checks on abc1234 red while the reviewer runs\n- 02:09Z exit: delivered" }], 7).overlapMinutes, 7);
+  assert.equal(phaseMinutes([{ body: "<!-- pendulum:7:progress:review:4 -->\n- 02:00Z reviewer m beside the required checks on abc1234\n- 02:03Z during the reviewer: triage: off (no-key); fix pass\n- 02:07Z required checks on abc1234 red while the reviewer runs\n- 02:09Z exit: delivered" }], 7).overlapMinutes, 7);
 });
 
 test("dispatchLatency: each run's pickup against the latest trigger since the previous run; skipped duplicates and Running are not triggers", () => {
-  const progress = (stage, id, at, lines) => ({ created_at: at, body: `<!-- factory:7:progress:${stage}:${id} -->\nFactory ${stage} run\n${lines.map((l) => `- ${l}`).join("\n")}` });
+  const progress = (stage, id, at, lines) => ({ created_at: at, body: `<!-- pendulum:7:progress:${stage}:${id} -->\nPendulum ${stage} run\n${lines.map((l) => `- ${l}`).join("\n")}` });
   const collected = {
     issue: { created_at: "2026-11-06T08:20:13Z" },
     issueTimeline: [
-      { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-11-06T08:20:13Z" },
-      { event: "labeled", label: { name: "factory:running" }, created_at: "2026-11-06T08:20:40Z" },
-      { event: "commented", body: "<!-- factory:7:local -->", created_at: "2026-11-06T08:20:41Z" },
-      { event: "unlabeled", label: { name: "factory:question" }, created_at: "2026-11-06T09:00:00Z" },
+      { event: "labeled", label: { name: "pendulum:objective" }, created_at: "2026-11-06T08:20:13Z" },
+      { event: "labeled", label: { name: "pendulum:running" }, created_at: "2026-11-06T08:20:40Z" },
+      { event: "commented", body: "<!-- pendulum:7:local -->", created_at: "2026-11-06T08:20:41Z" },
+      { event: "unlabeled", label: { name: "pendulum:question" }, created_at: "2026-11-06T09:00:00Z" },
     ],
     issueComments: [
       progress("work", 1, "2026-11-06T08:21:02Z", ["08:21Z setup", "08:24Z exit: delivered"]),
@@ -599,7 +599,7 @@ test("dispatchLatency: each run's pickup against the latest trigger since the pr
       progress("work", 4, "2026-11-06T09:20:00Z", ["09:20Z setup"]),
       progress("work", 5, "2026-11-06T09:40:00Z", ["09:40Z setup"]),
     ],
-    pullDetails: { 8: { timeline: [{ event: "ready_for_review", created_at: "2026-11-06T08:24:04Z" }, { event: "labeled", label: { name: "factory:review" }, created_at: "2026-11-06T08:24:05Z" }] } },
+    pullDetails: { 8: { timeline: [{ event: "ready_for_review", created_at: "2026-11-06T08:24:04Z" }, { event: "labeled", label: { name: "pendulum:review" }, created_at: "2026-11-06T08:24:05Z" }] } },
   };
   const d = dispatchLatency(collected, 7);
   // No launch record and no launching run read: each run is timed from its own trigger, and its slot wait is unknown.
@@ -622,8 +622,8 @@ test("activity: turns, harness calls, sessions and run counts come from the arti
   assert.deepEqual(sessionsOf(events), { calls: 2, sessions: 1 });
   assert.equal(sessionsOf('{"type":"thread.started","thread_id":"t-9"}\n{"type":"turn.completed","usage":{"input_tokens":1}}').sessions, 1);
   assert.equal(sessionsOf("not json"), null);
-  // Real artifacts are named factory-usage-<issue> and factory-usage-<issue>-review; the fixture dirs are not.
-  const both = [...usage("claude").map((r) => ({ ...r, artifact: "factory-usage-48" })), ...usage("review").map((r) => ({ ...r, artifact: "factory-usage-48-review" }))];
+  // Real artifacts are named pendulum-usage-<issue> and pendulum-usage-<issue>-review; the fixture dirs are not.
+  const both = [...usage("claude").map((r) => ({ ...r, artifact: "pendulum-usage-48" })), ...usage("review").map((r) => ({ ...r, artifact: "pendulum-usage-48-review" }))];
   const row = scoreObjective(cleanMerge(48, both), { prices, now: NOW });
   assert.equal(row.activity.workRuns, 1);
   assert.equal(row.activity.reviewRuns, 1);
@@ -632,15 +632,15 @@ test("activity: turns, harness calls, sessions and run counts come from the arti
   assert.match(markdownTable([row]), /\| 1\+1 \|/);
 });
 
-test("interventions: what Factory asked for (Question, Blocked notice, review request) is split from unprompted input; walk-away both ways", () => {
-  // A Question answered: Factory's label, its review request and the QUESTION in its PR body all ask; both of the owner's actions answer it.
+test("interventions: what Pendulum asked for (Question, Blocked notice, review request) is split from unprompted input; walk-away both ways", () => {
+  // A Question answered: Pendulum's label, its review request and the QUESTION in its PR body all ask; both of the owner's actions answer it.
   const q = scoreObjective(questionAnswered(45, usage("claude")), { prices, now: NOW });
   assert.deepEqual(q.walkAway.interventions.requests.map((r) => r.kind), ["question", "question", "review request"]);
   assert.equal(q.walkAway.interventions.asked, 2);
   assert.equal(q.walkAway.interventions.unprompted, 0);
   assert.equal(q.walkAway.firstHumanAction.asked, "review request");
   assert.equal(q.walkAway.value, false);
-  assert.equal(q.walkAway.askedOnly.value, false, "Factory needed a person: a miss both ways");
+  assert.equal(q.walkAway.askedOnly.value, false, "Pendulum needed a person: a miss both ways");
   assert.match(q.walkAway.askedOnly.reason, /^first asked-for action: comment on PR #103 by maintainer/);
 
   // An owner's push nobody asked for: a miss on the strict count, a walk-away on the asked-only one.
@@ -657,45 +657,45 @@ test("interventions: what Factory asked for (Question, Blocked notice, review re
   assert.deepEqual(b.walkAway.interventions.requests.map((r) => r.kind), ["blocked", "blocked"]);
   assert.equal(b.walkAway.askedOnly.value, false);
 
-  // Once Factory picks the Objective up again (its factory:running label), a later note is unprompted again.
+  // Once Pendulum picks the Objective up again (its pendulum:running label), a later note is unprompted again.
   const c = questionAnswered(46);
-  c.issueTimeline.push({ event: "labeled", label: { name: "factory:running" }, actor: { login: "acme-factory[bot]", type: "Bot" }, created_at: "2031-03-03T08:31:00Z" });
+  c.issueTimeline.push({ event: "labeled", label: { name: "pendulum:running" }, actor: { login: "acme-pendulum[bot]", type: "Bot" }, created_at: "2031-03-03T08:31:00Z" });
   c.issueComments.push({ user: { login: "maintainer", type: "User" }, created_at: "2031-03-03T09:30:00Z", body: "Also add a TSV export while you are there." });
   const later = scoreObjective(c, { prices, now: NOW });
   assert.equal(later.walkAway.interventions.asked, 2);
   assert.equal(later.walkAway.interventions.unprompted, 1);
   assert.match(later.walkAway.interventions.firstUnprompted.detail, /TSV/);
 
-  // A person who applies factory:question or factory:blocked by hand asks nothing: only Factory's own labels are requests.
+  // A person who applies pendulum:question or pendulum:blocked by hand asks nothing: only Pendulum's own labels are requests.
   const h = humanPush(47);
-  h.issueTimeline.push({ event: "labeled", label: { name: "factory:blocked" }, actor: { login: "maintainer", type: "User" }, created_at: "2031-03-02T01:30:00Z" });
-  assert.deepEqual(factoryRequests(h, "2031-03-02T01:00:00Z"), []);
+  h.issueTimeline.push({ event: "labeled", label: { name: "pendulum:blocked" }, actor: { login: "maintainer", type: "User" }, created_at: "2031-03-02T01:30:00Z" });
+  assert.deepEqual(pendulumRequests(h, "2031-03-02T01:00:00Z"), []);
 
-  // Local mode: Factory posts as the operator's login, so its requests are told apart by its markers and its run windows.
+  // Local mode: Pendulum posts as the operator's login, so its requests are told apart by its markers and its run windows.
   const local = blocked(48);
-  local.issue.labels.push({ name: "factory:local" });
+  local.issue.labels.push({ name: "pendulum:local" });
   const op = { login: "maintainer", type: "User" };
   for (const e of local.issueTimeline) if (e.actor?.type === "Bot") e.actor = op;
   for (const cm of local.issueComments) cm.user = op;
-  local.issueComments.push({ user: op, created_at: "2031-03-02T01:05:00Z", updated_at: "2031-03-02T04:00:00Z", body: "<!-- factory:48:progress:work:1 -->\nFactory work" });
+  local.issueComments.push({ user: op, created_at: "2031-03-02T01:05:00Z", updated_at: "2031-03-02T04:00:00Z", body: "<!-- pendulum:48:progress:work:1 -->\nPendulum work" });
   local.issueComments.push({ user: op, created_at: "2031-03-02T06:00:00Z", body: "Pushed a fix; re-running." });
-  local.issueTimeline.push({ event: "labeled", label: { name: "factory:objective" }, actor: op, created_at: "2031-03-02T06:01:00Z" });
-  const reqs = factoryRequests(local, "2031-03-02T01:00:00Z");
+  local.issueTimeline.push({ event: "labeled", label: { name: "pendulum:objective" }, actor: op, created_at: "2031-03-02T06:01:00Z" });
+  const reqs = pendulumRequests(local, "2031-03-02T01:00:00Z");
   assert.deepEqual(reqs.map((r) => r.kind), ["blocked", "blocked"]);
   const split = splitInterventions(humanActions(local, "2031-03-02T01:00:00Z"), reqs);
-  assert.deepEqual(split.map((a) => [a.kind, a.asked]), [["comment", "blocked"], ["labeled factory:objective", "blocked"]]);
+  assert.deepEqual(split.map((a) => [a.kind, a.asked]), [["comment", "blocked"], ["labeled pendulum:objective", "blocked"]]);
 
   // The table carries both columns and the summary both rates and both counts.
   const md = markdownTable([q, p]);
   assert.match(md, /\| #43 \| merged \| no: first human action: push on PR #101 by maintainer at [^|]+ \| yes \| 0 \/ 1 \|/);
   assert.match(md, /\| #45 \| merged \| no: [^|]+ \| no: first asked-for action: [^|]+ \| 2 \/ 0 \|/);
-  assert.equal(summaryLine([q, p]), "Walk-away: 0 of 2 Objective(s) (2 merged) with no human input; 1 of 2 counting only input Factory asked for. Interventions: 2 asked for (Question, Blocked notice, review request), 1 unprompted.");
+  assert.equal(summaryLine([q, p]), "Walk-away: 0 of 2 Objective(s) (2 merged) with no human input; 1 of 2 counting only input Pendulum asked for. Interventions: 2 asked for (Question, Blocked notice, review request), 1 unprompted.");
 });
 
 test("cost: a sandbox stage's vendor cost is summed beside the model's, with a total, in the row, the table and the baseline", async () => {
   const rates = { vendor: "vercel", plan: "Pro", region: "iad1", date: "2026-11-08" };
-  const work = { harness: "claude", artifact: "factory-usage-50/result.json", usd: 0.26, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 }, vendor: { usd: 0.0063, upperBound: false, storedUsd: 0, rates } };
-  const review = { harness: "claude", artifact: "factory-usage-50-review/result.json", usd: 0.5, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 }, vendor: { usd: 0.21, upperBound: true, storedUsd: 0.0002, rates } };
+  const work = { harness: "claude", artifact: "pendulum-usage-50/result.json", usd: 0.26, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 }, vendor: { usd: 0.0063, upperBound: false, storedUsd: 0, rates } };
+  const review = { harness: "claude", artifact: "pendulum-usage-50-review/result.json", usd: 0.5, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 }, vendor: { usd: 0.21, upperBound: true, storedUsd: 0.0002, rates } };
   const row = scoreObjective(cleanMerge(50, [work, review]), { prices, now: NOW });
   assert.equal(row.cost.usd, 0.76, "the model's dollars stay the harness's");
   assert.equal(row.cost.vendorUsd, 0.2163);
@@ -712,7 +712,7 @@ test("cost: a sandbox stage's vendor cost is summed beside the model's, with a t
   assert.equal(line.measures.totalUsd.median, 0.98);
   // One booking per stage: the same stage's booking carried by two artifacts (a retried launch) counts once.
   const once = { ...work, vendor: { ...work.vendor, claim: "0123456789ab" } };
-  const twice = scoreObjective(cleanMerge(52, [once, { ...once, artifact: "factory-usage-52/result.json", usd: null }]), { prices, now: NOW });
+  const twice = scoreObjective(cleanMerge(52, [once, { ...once, artifact: "pendulum-usage-52/result.json", usd: null }]), { prices, now: NOW });
   assert.equal(twice.cost.vendorUsd, 0.0063);
   assert.equal(twice.cost.vendor.parts, 1);
   // A runner Objective has no vendor part: its total is its model cost.
@@ -749,16 +749,16 @@ test("dispatch from the event that started the stage: a work stage that waited f
   d.issueComments = d.issueComments.filter((x) => !x.body.includes(":sandbox -->"));
   d.stageRuns = { 42578525960: { event: "issues", created_at: "2026-11-09T07:18:48Z" } };
   assert.deepEqual(dispatchLatency(d, 262).runs[0], { stage: "work", seconds: 72, slotWaitSeconds: 0, from: "own trigger", tickEvent: null });
-  // Only Factory's own record counts: a person's copy of the marker is not read, nor another App's.
-  const self = factoryLogin(waitedRecorded().issueTimeline);
-  assert.equal(self, "acme-factory[bot]", "the App that applied factory:running");
-  assert.equal(factoryLogin(waitedRecorded().issueTimeline, "Other-App[bot]"), "other-app[bot]", "--app wins");
+  // Only Pendulum's own record counts: a person's copy of the marker is not read, nor another App's.
+  const self = pendulumLogin(waitedRecorded().issueTimeline);
+  assert.equal(self, "acme-pendulum[bot]", "the App that applied pendulum:running");
+  assert.equal(pendulumLogin(waitedRecorded().issueTimeline, "Other-App[bot]"), "other-app[bot]", "--app wins");
   const e = waitedRecorded();
   e.issueComments = e.issueComments.map((x) => (x.body.includes(":sandbox -->") ? { ...x, user: { login: "maintainer", type: "User" } } : x));
   assert.deepEqual(launchesOf(e.issueComments, 253, self), []);
   e.issueComments = e.issueComments.map((x) => (x.body.includes(":sandbox -->") ? { ...x, user: { login: "other-ci[bot]", type: "Bot" } } : x));
   assert.deepEqual(launchesOf(e.issueComments, 253, self), []);
-  assert.deepEqual(launchesOf(waitedRecorded().issueComments, 253, null), [], "no known Factory login: nothing is Factory's");
+  assert.deepEqual(launchesOf(waitedRecorded().issueComments, 253, null), [], "no known Pendulum login: nothing is Pendulum's");
   assert.deepEqual(launchesOf(waitedRecorded().issueComments, 253, self).map((l) => l.stage), ["work", "review"]);
   // A launch entry with the launcher's `eventAt` is read as written, not as `at` less `latencyMs`.
   const f = waitedRecorded();
@@ -771,7 +771,7 @@ test("slot wait only for a tick that freed a slot: a cron recovery or the Object
   // The cron picked the Objective up (its own `issues` dispatcher run lost or replaced): no slot was full, so the
   // ten minutes are dispatch, the 60 s bar sees them, and the tick is named.
   const cron = noWait();
-  cron.issueTimeline = [{ event: "labeled", label: { name: "factory:objective" }, actor: { login: "maintainer", type: "User" }, created_at: "2026-11-09T07:00:00Z" }, { event: "labeled", label: { name: "factory:running" }, actor: { login: "acme-factory[bot]", type: "Bot" }, created_at: "2026-11-09T07:10:30Z" }];
+  cron.issueTimeline = [{ event: "labeled", label: { name: "pendulum:objective" }, actor: { login: "maintainer", type: "User" }, created_at: "2026-11-09T07:00:00Z" }, { event: "labeled", label: { name: "pendulum:running" }, actor: { login: "acme-pendulum[bot]", type: "Bot" }, created_at: "2026-11-09T07:10:30Z" }];
   cron.issue.created_at = "2026-11-09T06:59:59Z";
   cron.issueComments = cron.issueComments.filter((x) => !x.body.includes(":sandbox -->")).map((x) => ({ ...x, created_at: "2026-11-09T07:11:00Z" }));
   cron.stageRuns = { 42578525960: { event: "schedule", created_at: "2026-11-09T07:10:02Z" } };
@@ -785,8 +785,8 @@ test("slot wait only for a tick that freed a slot: a cron recovery or the Object
   // repository_dispatch, in the record) and on the runner path (the review job's workflow_dispatch tick).
   const fix = (tick) => {
     const o = waitedRecorded();
-    o.issueTimeline.push({ event: "unlabeled", label: { name: "factory:in-review" }, actor: { login: "acme-factory[bot]", type: "Bot" }, created_at: "2026-11-09T07:09:30Z" });
-    o.issueComments.push({ id: 9, user: { login: "acme-factory[bot]", type: "Bot" }, created_at: "2026-11-09T07:10:40Z", body: "<!-- factory:253:progress:work:42577500000-aa11bb22cc33 -->\nFactory work run.\n- 07:10Z setup" });
+    o.issueTimeline.push({ event: "unlabeled", label: { name: "pendulum:in-review" }, actor: { login: "acme-pendulum[bot]", type: "Bot" }, created_at: "2026-11-09T07:09:30Z" });
+    o.issueComments.push({ id: 9, user: { login: "acme-pendulum[bot]", type: "Bot" }, created_at: "2026-11-09T07:10:40Z", body: "<!-- pendulum:253:progress:work:42577500000-aa11bb22cc33 -->\nPendulum work run.\n- 07:10Z setup" });
     tick(o);
     return dispatchLatency(o, 253).runs.at(-1);
   };
@@ -803,20 +803,20 @@ test("slot wait only for a tick that freed a slot: a cron recovery or the Object
   const other = waitedUnrecorded();
   other.stageRuns = { 42579245832: { event: "workflow_dispatch", created_at: "2026-11-09T07:25:26Z" } };
   assert.equal(dispatchLatency(other, 263).runs[0].slotWaitSeconds, 397);
-  // A person's progress marker is never a launching run: collect.mjs reads ids from Factory's comments only.
-  assert.equal(bySelf({ user: { login: "maintainer" } }, "acme-factory[bot]"), false);
-  assert.equal(bySelf({ user: { login: "Acme-Factory[bot]" } }, "acme-factory[bot]"), true);
+  // A person's progress marker is never a launching run: collect.mjs reads ids from Pendulum's comments only.
+  assert.equal(bySelf({ user: { login: "maintainer" } }, "acme-pendulum[bot]"), false);
+  assert.equal(bySelf({ user: { login: "Acme-Pendulum[bot]" } }, "acme-pendulum[bot]"), true);
 });
 
 test("no slot wait for an Objective picked and sent back before the tick: a transient failed start stays dispatch", () => {
   // #253's drill shape, but the dispatcher picked it at once (a slot was free): Running at 06:56:40, its sandbox start
   // failed with a transient code at 06:57:00 and the launcher sent it back to Queued (Running off at 06:57:01). Nothing
   // re-ticked; the sibling's merge at 07:01:44 started it. The 392 s are dispatch (the 60 s bar sees them), not a wait.
-  const APP = { login: "acme-factory[bot]", type: "Bot" };
+  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
   const failedEntry = '{"stage":"work","event":"issues","ok":false,"found":false,"run":"42576100000","at":"2026-11-09T06:57:00.000Z","cue":"stint-1794207400"},';
   const requeued = ({ label = true, entry = true } = {}) => {
     const o = waitedRecorded();
-    if (label) o.issueTimeline.splice(1, 0, { event: "labeled", label: { name: "factory:running" }, actor: APP, created_at: "2026-11-09T06:56:40Z" }, { event: "unlabeled", label: { name: "factory:running" }, actor: APP, created_at: "2026-11-09T06:57:01Z" });
+    if (label) o.issueTimeline.splice(1, 0, { event: "labeled", label: { name: "pendulum:running" }, actor: APP, created_at: "2026-11-09T06:56:40Z" }, { event: "unlabeled", label: { name: "pendulum:running" }, actor: APP, created_at: "2026-11-09T06:57:01Z" });
     if (entry) o.issueComments = o.issueComments.map((x) => (x.body.includes(":sandbox -->") ? { ...x, body: x.body.replace('"launches":[', `"launches":[${failedEntry}`) } : x));
     return dispatchLatency(o, 253);
   };
@@ -829,11 +829,11 @@ test("no slot wait for an Objective picked and sent back before the tick: a tran
   // launch-event start that failed and ticked the dispatcher itself, its Running label never shown).
   assert.equal(requeued({ entry: false }).runs[0].tickEvent, "requeued");
   assert.equal(requeued({ label: false }).runs[0].tickEvent, "requeued");
-  assert.deepEqual(failedStartsOf(waitedRecorded().issueComments, 253, "acme-factory[bot]"), []);
+  assert.deepEqual(failedStartsOf(waitedRecorded().issueComments, 253, "acme-pendulum[bot]"), []);
   // The real waits stay: #253's own Running label came after the tick, and a person's Running label is not a pick.
   assert.equal(dispatchLatency(waitedRecorded(), 253).runs[0].slotWaitSeconds, 333);
   const person = waitedRecorded();
-  person.issueTimeline.splice(1, 0, { event: "labeled", label: { name: "factory:running" }, actor: { login: "maintainer", type: "User" }, created_at: "2026-11-09T06:56:40Z" }, { event: "unlabeled", label: { name: "factory:running" }, actor: { login: "maintainer", type: "User" }, created_at: "2026-11-09T06:57:01Z" });
+  person.issueTimeline.splice(1, 0, { event: "labeled", label: { name: "pendulum:running" }, actor: { login: "maintainer", type: "User" }, created_at: "2026-11-09T06:56:40Z" }, { event: "unlabeled", label: { name: "pendulum:running" }, actor: { login: "maintainer", type: "User" }, created_at: "2026-11-09T06:57:01Z" });
   assert.equal(dispatchLatency(person, 253).runs[0].slotWaitSeconds, 333);
   // A failed start of another stage (the review) is not this work stage's.
   const review = waitedRecorded();
@@ -842,30 +842,30 @@ test("no slot wait for an Objective picked and sent back before the tick: a tran
 });
 
 test("a lost launch still Running when a later tick relaunched it, and an answered Question's own tick, are no slot wait", () => {
-  const APP = { login: "acme-factory[bot]", type: "Bot" };
+  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
   const OWNER = { login: "maintainer", type: "User" };
   const lab = (name, actor, at, event = "labeled") => ({ event, label: { name }, actor, created_at: at });
-  const rec = (launches) => ({ id: 1, user: APP, created_at: "2026-11-09T06:59:59Z", body: `<!-- factory:9:sandbox -->\n<!-- factory:sandbox ${JSON.stringify({ vendor: "vercel", stage: "work", state: "running", launches })} -->` });
-  const prog = (id, run, at) => ({ id, user: APP, created_at: at, body: `<!-- factory:9:progress:work:${run}-abc -->\n- ${at.slice(11, 16)}Z setup` });
+  const rec = (launches) => ({ id: 1, user: APP, created_at: "2026-11-09T06:59:59Z", body: `<!-- pendulum:9:sandbox -->\n<!-- pendulum:sandbox ${JSON.stringify({ vendor: "vercel", stage: "work", state: "running", launches })} -->` });
+  const prog = (id, run, at) => ({ id, user: APP, created_at: at, body: `<!-- pendulum:9:progress:work:${run}-abc -->\n- ${at.slice(11, 16)}Z setup` });
   const objective = (timeline, comments) => ({ issue: { number: 9, created_at: "2026-11-09T06:59:00Z" }, issueTimeline: timeline, issueComments: comments, pullDetails: {}, stageRuns: {} });
   const first = { stage: "work", event: "issues", eventAt: "2026-11-09T07:00:01Z", ok: true, latencyMs: 40000, run: "100", at: "2026-11-09T07:00:41Z" };
 
   // Picked at 07:00:20, the launch lost with no record entry and Running left on; a sibling's merge at 07:20:00 ticked
   // the dispatcher, whose sweep launched it again. The slot was held throughout: 1250 s of dispatch, no slot wait.
-  const lost = dispatchLatency(objective([lab("factory:objective", OWNER, "2026-11-09T07:00:00Z"), lab("factory:running", APP, "2026-11-09T07:00:20Z")], [rec([{ stage: "work", event: "pull_request", eventAt: "2026-11-09T07:20:00Z", ok: true, latencyMs: 40000, run: "200", at: "2026-11-09T07:20:40Z" }]), prog(2, "200", "2026-11-09T07:20:50Z")]), 9);
+  const lost = dispatchLatency(objective([lab("pendulum:objective", OWNER, "2026-11-09T07:00:00Z"), lab("pendulum:running", APP, "2026-11-09T07:00:20Z")], [rec([{ stage: "work", event: "pull_request", eventAt: "2026-11-09T07:20:00Z", ok: true, latencyMs: 40000, run: "200", at: "2026-11-09T07:20:40Z" }]), prog(2, "200", "2026-11-09T07:20:50Z")]), 9);
   assert.deepEqual(lost.runs, [{ stage: "work", seconds: 1250, slotWaitSeconds: 0, from: "own trigger", tickEvent: "relaunched" }]);
   assert.equal(lost.basis, "1/1 run(s) matched to an event; 1 started by a later tick that freed no slot (relaunched)");
   // A real wait: Running only after the tick, so the 600 s stay a slot wait.
-  const waited = dispatchLatency(objective([lab("factory:objective", OWNER, "2026-11-09T07:00:00Z"), lab("factory:running", APP, "2026-11-09T07:10:20Z")], [rec([{ stage: "work", event: "pull_request", eventAt: "2026-11-09T07:10:00Z", ok: true, latencyMs: 40000, run: "200", at: "2026-11-09T07:10:40Z" }]), prog(2, "200", "2026-11-09T07:10:50Z")]), 9);
+  const waited = dispatchLatency(objective([lab("pendulum:objective", OWNER, "2026-11-09T07:00:00Z"), lab("pendulum:running", APP, "2026-11-09T07:10:20Z")], [rec([{ stage: "work", event: "pull_request", eventAt: "2026-11-09T07:10:00Z", ok: true, latencyMs: 40000, run: "200", at: "2026-11-09T07:10:40Z" }]), prog(2, "200", "2026-11-09T07:10:50Z")]), 9);
   assert.deepEqual(waited.runs, [{ stage: "work", seconds: 50, slotWaitSeconds: 600, from: "launch record", tickEvent: "pull_request" }]);
 
   // An answered Question on the sandbox path: the person's comment at 07:30:00, the launcher's requeue takes
-  // factory:question off at 07:30:20 and its step ticks the dispatcher (workflow_dispatch) at 07:30:25. That tick is
+  // pendulum:question off at 07:30:20 and its step ticks the dispatcher (workflow_dispatch) at 07:30:25. That tick is
   // the Objective's own: timed from the unlabel, no slot wait.
   const answered = (unlabelActor = APP, comment = true) => {
-    const timeline = [lab("factory:objective", OWNER, "2026-11-09T07:00:00Z"), lab("factory:running", APP, "2026-11-09T07:00:20Z"), lab("factory:running", APP, "2026-11-09T07:05:00Z", "unlabeled"), lab("factory:question", APP, "2026-11-09T07:05:00Z")];
+    const timeline = [lab("pendulum:objective", OWNER, "2026-11-09T07:00:00Z"), lab("pendulum:running", APP, "2026-11-09T07:00:20Z"), lab("pendulum:running", APP, "2026-11-09T07:05:00Z", "unlabeled"), lab("pendulum:question", APP, "2026-11-09T07:05:00Z")];
     if (comment) timeline.push({ event: "commented", user: OWNER, actor: OWNER, body: "use X", created_at: "2026-11-09T07:30:00Z" });
-    timeline.push(lab("factory:question", unlabelActor, "2026-11-09T07:30:20Z", "unlabeled"), lab("factory:running", APP, "2026-11-09T07:30:40Z"));
+    timeline.push(lab("pendulum:question", unlabelActor, "2026-11-09T07:30:20Z", "unlabeled"), lab("pendulum:running", APP, "2026-11-09T07:30:40Z"));
     const tick = { stage: "work", event: "workflow_dispatch", eventAt: "2026-11-09T07:30:25Z", ok: true, latencyMs: 30000, run: "400", at: "2026-11-09T07:30:55Z" };
     return dispatchLatency(objective(timeline, [rec([first, tick]), prog(2, "100", "2026-11-09T07:00:50Z"), prog(3, "400", "2026-11-09T07:31:00Z")]), 9).runs[1];
   };
@@ -881,8 +881,8 @@ test("after a review, a workflow_dispatch tick is its own only shortly after the
   const fix = (tickAt, updated = null) => {
     const o = waitedRecorded();
     o.issueComments = o.issueComments.filter((x) => !x.body.includes(":sandbox -->")).map((x) => (updated && x.body.includes(":progress:review:") ? { ...x, updated_at: updated } : x));
-    o.issueTimeline.push({ event: "unlabeled", label: { name: "factory:in-review" }, actor: { login: "acme-factory[bot]", type: "Bot" }, created_at: "2026-11-09T07:09:30Z" });
-    o.issueComments.push({ id: 9, user: { login: "acme-factory[bot]", type: "Bot" }, created_at: "2026-11-09T07:26:00Z", body: "<!-- factory:253:progress:work:42577500000-aa11bb22cc33 -->\nFactory work run.\n- 07:26Z setup" });
+    o.issueTimeline.push({ event: "unlabeled", label: { name: "pendulum:in-review" }, actor: { login: "acme-pendulum[bot]", type: "Bot" }, created_at: "2026-11-09T07:09:30Z" });
+    o.issueComments.push({ id: 9, user: { login: "acme-pendulum[bot]", type: "Bot" }, created_at: "2026-11-09T07:26:00Z", body: "<!-- pendulum:253:progress:work:42577500000-aa11bb22cc33 -->\nPendulum work run.\n- 07:26Z setup" });
     o.stageRuns = { 42576687052: { event: "pull_request", created_at: "2026-11-09T07:01:44Z" }, 42577500000: { event: "workflow_dispatch", created_at: tickAt } };
     return dispatchLatency(o, 253).runs.at(-1);
   };
@@ -915,10 +915,10 @@ test("setup in seconds per run: progress comment to the usage record's harness s
 });
 
 test("--usage: an issue with no directory of its own has no usage, never the other issues'", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-bench-usage-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-bench-usage-"));
   const isDir = (f) => statSync(f).isDirectory();
-  mkdirSync(join(dir, "42", "factory-usage-42"), { recursive: true });
-  cpSync(join(USAGE, "claude", "result.json"), join(dir, "42", "factory-usage-42", "result.json"));
+  mkdirSync(join(dir, "42", "pendulum-usage-42"), { recursive: true });
+  cpSync(join(USAGE, "claude", "result.json"), join(dir, "42", "pendulum-usage-42", "result.json"));
   assert.equal(usageDirFor(dir, 42, { scored: 2, readdir: readdirSync, isDir }), join(dir, "42"));
   assert.equal(usageDirFor(dir, 44, { scored: 2, readdir: readdirSync, isDir }), null);
   assert.equal(usageDirFor(dir, 44, { scored: 1, readdir: readdirSync, isDir }), null, "other issues' directories are not this issue's unzip");
@@ -950,38 +950,38 @@ test("--usage: an issue with no directory of its own has no usage, never the oth
 /** #295's shape: reviewed and enqueued, dropped by the queue, idle until an unrelated tick enqueued it again. */
 function queueDropped(number = 46) {
   const c = cleanMerge(number);
-  const APP = { login: "acme-factory[bot]", type: "Bot" };
+  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
   const QUEUE = { login: "github-merge-queue[bot]", type: "Bot" };
   c.pulls[0].merged_at = "2031-03-02T05:00:00Z";
   c.issue.closed_at = "2031-03-02T05:00:00Z";
   for (const e of c.issueTimeline) if (e.created_at === "2031-03-02T03:30:00Z") e.created_at = "2031-03-02T05:00:00Z";
   c.pullDetails[100].timeline = [
-    { event: "labeled", label: { name: "factory:review" }, actor: APP, created_at: "2031-03-02T02:11:00Z" },
+    { event: "labeled", label: { name: "pendulum:review" }, actor: APP, created_at: "2031-03-02T02:11:00Z" },
     { event: "added_to_merge_queue", actor: APP, created_at: "2031-03-02T03:00:00Z" },
     { event: "removed_from_merge_queue", actor: QUEUE, created_at: "2031-03-02T04:00:00Z" },
     { event: "added_to_merge_queue", actor: APP, created_at: "2031-03-02T04:55:00Z" },
     { event: "merged", actor: APP, created_at: "2031-03-02T05:00:00Z" },
   ];
-  // The sandbox record is rewritten when a stage is booked, after the merge too: its last edit is not Factory acting.
-  c.issueComments.push({ user: APP, created_at: "2031-03-02T01:06:00Z", updated_at: "2031-03-02T05:01:00Z", body: `<!-- factory:${number}:sandbox -->\n<!-- factory:sandbox {} -->` });
+  // The sandbox record is rewritten when a stage is booked, after the merge too: its last edit is not Pendulum acting.
+  c.issueComments.push({ user: APP, created_at: "2031-03-02T01:06:00Z", updated_at: "2031-03-02T05:01:00Z", body: `<!-- pendulum:${number}:sandbox -->\n<!-- pendulum:sandbox {} -->` });
   return c;
 }
 
-test("a merge idle past the stall threshold after Factory's last act is a stall, not a walk-away, with how long it sat", async () => {
+test("a merge idle past the stall threshold after Pendulum's last act is a stall, not a walk-away, with how long it sat", async () => {
   const { idleStall, STALL_MINUTES } = await import("../lib/objective.mjs");
   assert.equal(STALL_MINUTES, 60);
   const row = scoreObjective(queueDropped(), { prices, now: NOW });
   assert.equal(row.exit, "merged");
   assert.equal(row.walkAway.value, false);
   assert.equal(row.walkAway.humanActions, 0);
-  // The queue's drop is not Factory's act: idle from the enqueue at 03:00 to the re-enqueue at 04:55.
+  // The queue's drop is not Pendulum's act: idle from the enqueue at 03:00 to the re-enqueue at 04:55.
   assert.deepEqual(row.walkAway.stall, { minutes: 115, from: "2031-03-02T03:00:00Z", until: "2031-03-02T04:55:00Z", thresholdMinutes: 60 });
   assert.equal(row.walkAway.longestIdleMinutes, 115);
-  assert.equal(row.walkAway.reason, "stalled 115 min after Factory's last action (2031-03-02T03:00:00Z to 2031-03-02T04:55:00Z; threshold 60 min); no human action");
+  assert.equal(row.walkAway.reason, "stalled 115 min after Pendulum's last action (2031-03-02T03:00:00Z to 2031-03-02T04:55:00Z; threshold 60 min); no human action");
   assert.equal(row.walkAway.askedOnly.value, false);
   assert.deepEqual(row.operator, { minutes: 0, basis: "no human action (stalled)" });
-  assert.match(markdownTable([row]), /\| #46 \| merged \| no: stalled 115 min after Factory's last action/);
-  assert.match(summaryLine([row, scoreObjective(cleanMerge(42), { prices, now: NOW })]), /^Walk-away: 1 of 2 .* Stalled: #46 115 min idle after Factory's last action \(threshold 60 min\)\.$/);
+  assert.match(markdownTable([row]), /\| #46 \| merged \| no: stalled 115 min after Pendulum's last action/);
+  assert.match(summaryLine([row, scoreObjective(cleanMerge(42), { prices, now: NOW })]), /^Walk-away: 1 of 2 .* Stalled: #46 115 min idle after Pendulum's last action \(threshold 60 min\)\.$/);
   // The threshold is named: above the idle span it is a clean walk-away, and the span is still on the row.
   const lenient = scoreObjective(queueDropped(), { prices, now: NOW, stallMinutes: 120 });
   assert.equal(lenient.walkAway.value, true);
@@ -993,9 +993,9 @@ test("a merge idle past the stall threshold after Factory's last act is a stall,
   assert.equal(clean.walkAway.longestIdleMinutes, 32);
   // Time a person had the turn (an open Question) is not idle, nor is an Objective that never merged.
   const q = questionAnswered(45);
-  assert.equal(idleStall(q, "2031-03-02T01:00:00Z", q.pulls[0].merged_at, { requests: factoryRequests(q, "2031-03-02T01:00:00Z") }).stalled, false);
+  assert.equal(idleStall(q, "2031-03-02T01:00:00Z", q.pulls[0].merged_at, { requests: pendulumRequests(q, "2031-03-02T01:00:00Z") }).stalled, false);
   assert.equal(idleStall(blocked(44), "2031-03-02T01:00:00Z", null), null);
-  // Another login's act is not Factory's: a person relabelling inside the gap does not shorten it.
+  // Another login's act is not Pendulum's: a person relabelling inside the gap does not shorten it.
   const c = queueDropped();
   c.issueTimeline.push({ event: "labeled", label: { name: "P2" }, actor: { login: "maintainer", type: "User" }, created_at: "2031-03-02T04:30:00Z" });
   assert.equal(idleStall(c, "2031-03-02T01:00:00Z", c.pulls[0].merged_at).minutes, 115);
@@ -1004,41 +1004,41 @@ test("a merge idle past the stall threshold after Factory's last act is a stall,
 test("a stage that died and was booked late by the sweep is idle from its own last write, not its comment's last edit", async () => {
   const { idleStall } = await import("../lib/objective.mjs");
   const { stageLastWrite } = await import("../lib/phases.mjs");
-  const APP = { login: "acme-factory[bot]", type: "Bot" };
+  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
   const c = cleanMerge(48);
   c.pulls[0].merged_at = "2031-03-02T05:00:00Z";
   for (const e of [...c.issueTimeline, ...c.pullDetails[100].timeline]) if (e.created_at === "2031-03-02T03:30:00Z") e.created_at = "2031-03-02T05:00:00Z";
   // A sandbox work stage started 03:00 and last wrote ten minutes in; the sweep booked its cost into the comment at
   // 04:50 (the header stays) and the dispatcher picked the Objective up again.
-  const progress = { user: APP, created_at: "2031-03-02T03:00:20Z", updated_at: "2031-03-02T04:50:00Z", body: "<!-- factory:48:progress:work:9-0123456789ab -->\nFactory work run 9-0123456789ab: started 03:00Z, 10 min at the last line.\n- 03:00Z setup\n- 03:10Z harness\n- 04:50Z sandbox stopped: $0.01\n<!-- factory:spend 0.5 -->" };
+  const progress = { user: APP, created_at: "2031-03-02T03:00:20Z", updated_at: "2031-03-02T04:50:00Z", body: "<!-- pendulum:48:progress:work:9-0123456789ab -->\nPendulum work run 9-0123456789ab: started 03:00Z, 10 min at the last line.\n- 03:00Z setup\n- 03:10Z harness\n- 04:50Z sandbox stopped: $0.01\n<!-- pendulum:spend 0.5 -->" };
   c.issueComments.push(progress);
-  c.issueTimeline.push({ event: "labeled", label: { name: "factory:running" }, actor: APP, created_at: "2031-03-02T04:50:00Z" });
+  c.issueTimeline.push({ event: "labeled", label: { name: "pendulum:running" }, actor: APP, created_at: "2031-03-02T04:50:00Z" });
   assert.equal(new Date(stageLastWrite(progress)).toISOString(), "2031-03-02T03:11:30.000Z");
   assert.deepEqual(idleStall(c, "2031-03-02T01:00:00Z", c.pulls[0].merged_at), { minutes: 98.5, from: "2031-03-02T03:11:30Z", until: "2031-03-02T04:50:00Z", thresholdMinutes: 60, stalled: true });
   // A stage that started before midnight UTC and first wrote after it; a comment with no header falls back to its last edit.
-  assert.equal(new Date(stageLastWrite({ created_at: "2031-03-03T00:00:10Z", updated_at: "2031-03-03T00:30:00Z", body: "<!-- x -->\nFactory review run 7: started 23:59Z, 20 min at the last line." })).toISOString(), "2031-03-03T00:20:30.000Z");
-  assert.equal(new Date(stageLastWrite({ created_at: "2031-03-02T03:00:00Z", updated_at: "2031-03-02T04:00:00Z", body: "<!-- x -->\nFactory work run abc: the stage left no progress of its own." })).toISOString(), "2031-03-02T04:00:00.000Z");
+  assert.equal(new Date(stageLastWrite({ created_at: "2031-03-03T00:00:10Z", updated_at: "2031-03-03T00:30:00Z", body: "<!-- x -->\nPendulum review run 7: started 23:59Z, 20 min at the last line." })).toISOString(), "2031-03-03T00:20:30.000Z");
+  assert.equal(new Date(stageLastWrite({ created_at: "2031-03-02T03:00:00Z", updated_at: "2031-03-02T04:00:00Z", body: "<!-- x -->\nPendulum work run abc: the stage left no progress of its own." })).toISOString(), "2031-03-02T04:00:00.000Z");
   // The header never stretches a span past the comment's last edit.
-  assert.equal(new Date(stageLastWrite({ created_at: "2031-03-02T03:00:20Z", updated_at: "2031-03-02T03:05:00Z", body: "Factory work run 9: started 03:00Z, 5 min at the last line." })).toISOString(), "2031-03-02T03:05:00.000Z");
+  assert.equal(new Date(stageLastWrite({ created_at: "2031-03-02T03:00:20Z", updated_at: "2031-03-02T03:05:00Z", body: "Pendulum work run 9: started 03:00Z, 5 min at the last line." })).toISOString(), "2031-03-02T03:05:00.000Z");
 });
 
-test("usage still owed: the latest stage of each kind Factory ran needs its artifact, created at or after the stage started", async () => {
+test("usage still owed: the latest stage of each kind Pendulum ran needs its artifact, created at or after the stage started", async () => {
   const { usagePending } = await import("../lib/collect.mjs");
-  const APP = { login: "acme-factory[bot]", type: "Bot" };
-  const self = "acme-factory[bot]";
-  const work = { user: APP, created_at: "2031-03-02T01:10:00Z", body: "<!-- factory:47:progress:work:123-abc -->\nFactory work run." };
-  const review = { user: APP, created_at: "2031-03-02T02:15:00Z", body: "<!-- factory:47:progress:review:124-def -->\nFactory review run." };
+  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
+  const self = "acme-pendulum[bot]";
+  const work = { user: APP, created_at: "2031-03-02T01:10:00Z", body: "<!-- pendulum:47:progress:work:123-abc -->\nPendulum work run." };
+  const review = { user: APP, created_at: "2031-03-02T02:15:00Z", body: "<!-- pendulum:47:progress:review:124-def -->\nPendulum review run." };
   const art = (name, created_at) => ({ id: 1, name, created_at, expired: false, workflow_run: 9 });
   // Blocked before any stage ran: nothing is owed, so the drill scores it at once.
   assert.deepEqual(usagePending(47, [], [], { self }), []);
   // Blocked by a stage whose upload lands after the label: owed until the artifact exists.
-  assert.deepEqual(usagePending(47, [work], [], { self }), ["factory-usage-47"]);
-  assert.deepEqual(usagePending(47, [work], [art("factory-usage-47", "2031-03-02T01:40:03Z")], { self }), []);
+  assert.deepEqual(usagePending(47, [work], [], { self }), ["pendulum-usage-47"]);
+  assert.deepEqual(usagePending(47, [work], [art("pendulum-usage-47", "2031-03-02T01:40:03Z")], { self }), []);
   // An earlier run's artifact of the same name does not stand in for the last stage's.
   const fix = { ...work, created_at: "2031-03-02T03:00:00Z" };
-  assert.deepEqual(usagePending(47, [work, review, fix], [art("factory-usage-47", "2031-03-02T01:40:00Z"), art("factory-usage-47-review", "2031-03-02T02:20:00Z")], { self }), ["factory-usage-47"]);
-  assert.deepEqual(usagePending(47, [work, review], [art("factory-usage-47", "2031-03-02T01:40:00Z")], { self }), ["factory-usage-47-review"]);
-  // A pasted marker is not Factory's stage, nor is another issue's.
+  assert.deepEqual(usagePending(47, [work, review, fix], [art("pendulum-usage-47", "2031-03-02T01:40:00Z"), art("pendulum-usage-47-review", "2031-03-02T02:20:00Z")], { self }), ["pendulum-usage-47"]);
+  assert.deepEqual(usagePending(47, [work, review], [art("pendulum-usage-47", "2031-03-02T01:40:00Z")], { self }), ["pendulum-usage-47-review"]);
+  // A pasted marker is not Pendulum's stage, nor is another issue's.
   assert.deepEqual(usagePending(47, [{ ...work, user: { login: "writer", type: "User" } }], [], { self }), []);
   assert.deepEqual(usagePending(48, [work], [], { self }), []);
 });
@@ -1046,7 +1046,7 @@ test("usage still owed: the latest stage of each kind Factory ran needs its arti
 test("score.mjs refuses a --usage directory that does not exist, with exit 64 and no stack", () => {
   let code = 0;
   try {
-    execFileSync("node", [join(BENCH, "score.mjs"), "--repo", "acme/widgets", "--issue", "1", "--usage", join(tmpdir(), "factory-no-such-usage-dir")], { encoding: "utf8", stdio: "pipe" });
+    execFileSync("node", [join(BENCH, "score.mjs"), "--repo", "acme/widgets", "--issue", "1", "--usage", join(tmpdir(), "pendulum-no-such-usage-dir")], { encoding: "utf8", stdio: "pipe" });
   } catch (error) {
     code = error.status;
     assert.match(String(error.stderr), /^--usage: .* is not a directory$/m);
@@ -1056,19 +1056,19 @@ test("score.mjs refuses a --usage directory that does not exist, with exit 64 an
 
 test("the drill's usage wait: a Blocked Objective's artifact that lands after the label is waited for and fetched; one that never comes is named; a running one's finished stages are fetched", async () => {
   const { awaitUsage } = await import("../lib/collect.mjs");
-  const APP = { login: "acme-factory[bot]", type: "Bot" };
-  const timeline = [{ event: "labeled", label: { name: "factory:running" }, actor: APP, created_at: "2031-03-02T01:05:00Z" }, { event: "labeled", label: { name: "factory:blocked" }, actor: APP, created_at: "2031-03-02T01:30:00Z" }];
-  const work = (n) => ({ user: APP, created_at: "2031-03-02T01:06:00Z", body: `<!-- factory:${n}:progress:work:77-abc -->\nFactory work run.` });
-  const review49 = { user: APP, created_at: "2031-03-02T01:25:00Z", body: "<!-- factory:49:progress:review:80-def -->\nFactory review run." };
+  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
+  const timeline = [{ event: "labeled", label: { name: "pendulum:running" }, actor: APP, created_at: "2031-03-02T01:05:00Z" }, { event: "labeled", label: { name: "pendulum:blocked" }, actor: APP, created_at: "2031-03-02T01:30:00Z" }];
+  const work = (n) => ({ user: APP, created_at: "2031-03-02T01:06:00Z", body: `<!-- pendulum:${n}:progress:work:77-abc -->\nPendulum work run.` });
+  const review49 = { user: APP, created_at: "2031-03-02T01:25:00Z", body: "<!-- pendulum:49:progress:review:80-def -->\nPendulum review run." };
   let polls = 0;
   const answers = (path) => {
-    const n = Number(/issues\/(\d+)\//.exec(path)?.[1] ?? /factory-usage-(\d+)/.exec(path)?.[1]);
+    const n = Number(/issues\/(\d+)\//.exec(path)?.[1] ?? /pendulum-usage-(\d+)/.exec(path)?.[1]);
     if (path.includes("/timeline")) return timeline;
     if (path.includes("/comments")) return n === 44 ? [] : n === 49 ? [work(n), review49] : [work(n)];
     if (path.includes("actions/artifacts")) {
       // #47's upload lands on the second poll; #48's never does; #49 is still in review at the deadline, its work uploaded.
-      if (n === 49 && /factory-usage-49&/.test(path)) return [{ artifacts: [{ id: 9, name: "factory-usage-49", created_at: "2031-03-02T01:20:00Z", expired: false, workflow_run: { id: 79 } }] }];
-      if (n === 47 && /factory-usage-47&/.test(path) && polls >= 2) return [{ artifacts: [{ id: 5, name: "factory-usage-47", created_at: "2031-03-02T01:30:03Z", expired: false, workflow_run: { id: 77 } }] }];
+      if (n === 49 && /pendulum-usage-49&/.test(path)) return [{ artifacts: [{ id: 9, name: "pendulum-usage-49", created_at: "2031-03-02T01:20:00Z", expired: false, workflow_run: { id: 79 } }] }];
+      if (n === 47 && /pendulum-usage-47&/.test(path) && polls >= 2) return [{ artifacts: [{ id: 5, name: "pendulum-usage-47", created_at: "2031-03-02T01:30:03Z", expired: false, workflow_run: { id: 77 } }] }];
       return [{ artifacts: [] }];
     }
     throw Object.assign(new Error(`no answer for ${path}`), { status: 404 });
@@ -1082,51 +1082,51 @@ test("the drill's usage wait: a Blocked Objective's artifact that lands after th
   const logs = [];
   const { missing } = await awaitUsage(api, REPO, [44, 47, 48, 49], { ended: [44, 47, 48], waitMs: 60_000, pollMs: 15_000, now: () => clock, sleep: async (ms) => { clock += ms; }, fetch: async (issue, a) => fetched.push([issue, a.name, a.workflow_run]), log: (l) => logs.push(l) });
   // #49 is not waited for (the log never names it), but its finished work stage's usage is fetched and its review named.
-  assert.deepEqual(fetched, [[47, "factory-usage-47", 77], [49, "factory-usage-49", 79]]);
-  assert.deepEqual(missing, { 48: ["factory-usage-48"], 49: ["factory-usage-49-review (still running)"] });
-  assert.match(logs[0], /^waiting for usage: #47 factory-usage-47; #48 factory-usage-48$/);
+  assert.deepEqual(fetched, [[47, "pendulum-usage-47", 77], [49, "pendulum-usage-49", 79]]);
+  assert.deepEqual(missing, { 48: ["pendulum-usage-48"], 49: ["pendulum-usage-49-review (still running)"] });
+  assert.match(logs[0], /^waiting for usage: #47 pendulum-usage-47; #48 pendulum-usage-48$/);
   assert.equal(clock, 60_000, "the wait is bounded");
   // A failed download is named, never thrown.
   polls = 2;
   const failed = await awaitUsage(api, REPO, [47], { sleep: async () => {}, fetch: async () => { throw Object.assign(new Error("gh"), { code: 1 }); } });
-  assert.deepEqual(failed.missing, { 47: ["factory-usage-47 (download failed: exit 1)"] });
+  assert.deepEqual(failed.missing, { 47: ["pendulum-usage-47 (download failed: exit 1)"] });
 });
 
-test("Done pass under a person's login (#2668): its removal of a closed Objective's state label is Factory's only with its done record", async () => {
+test("Done pass under a person's login (#2668): its removal of a closed Objective's state label is Pendulum's only with its done record", async () => {
   const { doneRecord } = await import("../../plugin/scripts/lib/logic.mjs");
   const op = { login: "maintainer", type: "User" };
   // #373's shape: a non-local Objective the App merged and closed; 17 s later a local loop's Done pass, as the operator,
-  // removes factory:in-review. `record` is what it posted first, as whom and when.
+  // removes pendulum:in-review. `record` is what it posted first, as whom and when.
   const collected = (record = null, { by = op, at = "2031-03-02T03:30:16Z", removal = "2031-03-02T03:30:17Z", issue = 60 } = {}) => {
     const c = cleanMerge(issue);
     c.issueTimeline = c.issueTimeline.filter((e) => e.event !== "unlabeled");
-    c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:in-review" }, actor: op, created_at: removal });
-    if (record) c.issueComments.push({ user: by, created_at: at, updated_at: at, body: `<!-- factory:${issue}:done -->\n${record}` });
+    c.issueTimeline.push({ event: "unlabeled", label: { name: "pendulum:in-review" }, actor: op, created_at: removal });
+    if (record) c.issueComments.push({ user: by, created_at: at, updated_at: at, body: `<!-- pendulum:${issue}:done -->\n${record}` });
     return c;
   };
   const tidied = (record, o) => scoreObjective(collected(record, o), { prices, now: NOW }).walkAway;
   const miss = tidied();
   assert.equal(miss.value, false, "unmarked, the operator's removal is a person's");
-  assert.equal(miss.firstHumanAction.kind, "unlabeled factory:in-review");
-  assert.equal(tidied(doneRecord(["factory:in-review"])).value, true, "recorded first: Factory's, and the merge walked away");
-  assert.equal(tidied(doneRecord(["factory:in-review"]), { by: { login: "someone-else", type: "User" } }).value, false, "a record by another login excuses nothing");
-  assert.equal(tidied(doneRecord(["factory:blocked"])).value, false, "only the labels the record names");
-  assert.equal(tidied(doneRecord(["factory:in-review"]), { at: "2031-03-02T03:29:00Z" }).value, false, "a record posted while the issue was open is no Done record");
-  assert.equal(tidied(doneRecord(["factory:in-review"]), { at: "2031-03-02T03:40:00Z" }).value, false, "a removal before the record is not covered");
+  assert.equal(miss.firstHumanAction.kind, "unlabeled pendulum:in-review");
+  assert.equal(tidied(doneRecord(["pendulum:in-review"])).value, true, "recorded first: Pendulum's, and the merge walked away");
+  assert.equal(tidied(doneRecord(["pendulum:in-review"]), { by: { login: "someone-else", type: "User" } }).value, false, "a record by another login excuses nothing");
+  assert.equal(tidied(doneRecord(["pendulum:blocked"])).value, false, "only the labels the record names");
+  assert.equal(tidied(doneRecord(["pendulum:in-review"]), { at: "2031-03-02T03:29:00Z" }).value, false, "a record posted while the issue was open is no Done record");
+  assert.equal(tidied(doneRecord(["pendulum:in-review"]), { at: "2031-03-02T03:40:00Z" }).value, false, "a removal before the record is not covered");
   // A removal that failed waits for a later tick, whose retry rewrites the same body: GitHub need not move updated_at.
-  assert.equal(tidied(doneRecord(["factory:in-review"]), { removal: "2031-03-02T03:45:00Z" }).value, true, "a removal ticks after its record is still covered");
+  assert.equal(tidied(doneRecord(["pendulum:in-review"]), { removal: "2031-03-02T03:45:00Z" }).value, true, "a removal ticks after its record is still covered");
   // Reopened, the operator's own removal of a named label is theirs, whatever the record's later edits span.
-  const reopened = collected(doneRecord(["factory:in-review"]), { removal: "2031-03-02T04:10:00Z" });
+  const reopened = collected(doneRecord(["pendulum:in-review"]), { removal: "2031-03-02T04:10:00Z" });
   reopened.issueTimeline.push({ event: "reopened", actor: op, created_at: "2031-03-02T04:00:00Z" }, { event: "closed", actor: op, created_at: "2031-03-02T04:20:00Z" });
   reopened.issueComments.at(-1).updated_at = "2031-03-02T04:20:05Z";
-  assert.equal(localFactoryActions(reopened)("2031-03-02T04:10:00Z", op, "unlabeled factory:in-review"), false, "a removal while the issue is open is a person's");
-  assert.equal(localFactoryActions(reopened)("2031-03-02T04:20:06Z", op, "unlabeled factory:in-review"), true, "re-closed, the Done pass's removal is Factory's again");
+  assert.equal(localPendulumActions(reopened)("2031-03-02T04:10:00Z", op, "unlabeled pendulum:in-review"), false, "a removal while the issue is open is a person's");
+  assert.equal(localPendulumActions(reopened)("2031-03-02T04:20:06Z", op, "unlabeled pendulum:in-review"), true, "re-closed, the Done pass's removal is Pendulum's again");
 });
 
-test("local mode where no Action runs: the factory:local label a loop applied is Factory's when its local-route mark names that exact event; a person's own factory:local label stays a person's (#455)", async () => {
-  const picked = { id: 9001, event: "labeled", label: { name: "factory:local" }, actor: OPERATOR, created_at: "2031-03-02T01:00:40Z" };
-  const mark = (id, user = OPERATOR) => ({ id: 8000 + id, user, created_at: "2031-03-02T01:00:42Z", updated_at: "2031-03-02T01:00:42Z", body: `<!-- factory:60:local-route:${id} -->\nFactory: no Action runs Objectives in this repository, so a local loop took this Objective and labelled it \`factory:local\`; it stays that machine's.` });
-  // The loop's pick: the label event and Factory's mark naming it. No human action.
+test("local mode where no Action runs: the pendulum:local label a loop applied is Pendulum's when its local-route mark names that exact event; a person's own pendulum:local label stays a person's (#455)", async () => {
+  const picked = { id: 9001, event: "labeled", label: { name: "pendulum:local" }, actor: OPERATOR, created_at: "2031-03-02T01:00:40Z" };
+  const mark = (id, user = OPERATOR) => ({ id: 8000 + id, user, created_at: "2031-03-02T01:00:42Z", updated_at: "2031-03-02T01:00:42Z", body: `<!-- pendulum:60:local-route:${id} -->\nPendulum: no Action runs Objectives in this repository, so a local loop took this Objective and labelled it \`pendulum:local\`; it stays that machine's.` });
+  // The loop's pick: the label event and Pendulum's mark naming it. No human action.
   const serve = localMerge(60);
   serve.issueTimeline.splice(1, 0, picked);
   serve.issueComments.push(mark(9001));
@@ -1138,26 +1138,26 @@ test("local mode where no Action runs: the factory:local label a loop applied is
   unmarked.issueTimeline.splice(1, 0, picked);
   const miss = scoreObjective(unmarked, { prices, now: NOW });
   assert.equal(miss.walkAway.value, false);
-  assert.equal(miss.walkAway.firstHumanAction.kind, "labeled factory:local");
-  // A person's own factory:local label (another event) stays theirs beside the loop's mark; a mark by another login, or
+  assert.equal(miss.walkAway.firstHumanAction.kind, "labeled pendulum:local");
+  // A person's own pendulum:local label (another event) stays theirs beside the loop's mark; a mark by another login, or
   // naming another event, counts for nothing.
   const own = localMerge(60);
   own.issueTimeline.splice(1, 0, picked);
-  own.issueTimeline.push({ id: 9002, event: "labeled", label: { name: "factory:local" }, actor: OPERATOR, created_at: "2031-03-02T01:30:00Z" });
+  own.issueTimeline.push({ id: 9002, event: "labeled", label: { name: "pendulum:local" }, actor: OPERATOR, created_at: "2031-03-02T01:30:00Z" });
   own.issueComments.push(mark(9001));
   const person = scoreObjective(own, { prices, now: NOW });
   assert.equal(person.walkAway.humanActions, 1);
   assert.equal(person.walkAway.firstHumanAction.at, "2031-03-02T01:30:00Z");
-  const check = localFactoryActions({ ...own, issueComments: [...own.issueComments, mark(9002, { login: "someone", type: "User" })] });
-  assert.equal(check("2031-03-02T01:00:40Z", OPERATOR, "labeled factory:local", 9001), true);
-  assert.equal(check("2031-03-02T01:30:00Z", OPERATOR, "labeled factory:local", 9002), false, "a mark by another login");
-  assert.equal(check("2031-03-02T01:00:40Z", OPERATOR, "labeled factory:local", null), false, "no event id, no mark");
+  const check = localPendulumActions({ ...own, issueComments: [...own.issueComments, mark(9002, { login: "someone", type: "User" })] });
+  assert.equal(check("2031-03-02T01:00:40Z", OPERATOR, "labeled pendulum:local", 9001), true);
+  assert.equal(check("2031-03-02T01:30:00Z", OPERATOR, "labeled pendulum:local", 9002), false, "a mark by another login");
+  assert.equal(check("2031-03-02T01:00:40Z", OPERATOR, "labeled pendulum:local", null), false, "no event id, no mark");
   // Two marks naming one event, by two logins: each pair counts on its own, never the last one only.
-  const both = localFactoryActions({ ...serve, issueComments: [...serve.issueComments, mark(9001, { login: "someone", type: "User" })] });
-  assert.equal(both("2031-03-02T01:00:40Z", OPERATOR, "labeled factory:local", 9001), true);
-  // Factory's activity spans count the marked label as its act too.
-  const { factoryActivity } = await import("../lib/objective.mjs");
+  const both = localPendulumActions({ ...serve, issueComments: [...serve.issueComments, mark(9001, { login: "someone", type: "User" })] });
+  assert.equal(both("2031-03-02T01:00:40Z", OPERATOR, "labeled pendulum:local", 9001), true);
+  // Pendulum's activity spans count the marked label as its act too.
+  const { pendulumActivity } = await import("../lib/objective.mjs");
   const at = Date.parse("2031-03-02T01:00:40Z");
-  assert.ok(factoryActivity(serve).some(([a, b]) => a === at && b === at));
-  assert.ok(!factoryActivity(unmarked).some(([a, b]) => a === at && b === at));
+  assert.ok(pendulumActivity(serve).some(([a, b]) => a === at && b === at));
+  assert.ok(!pendulumActivity(unmarked).some(([a, b]) => a === at && b === at));
 });

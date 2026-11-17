@@ -12,10 +12,10 @@ import { RELAUNCH_MAX, relaunchDecision, relaunchRecordOf } from "../scripts/lib
 
 RETRY.sleep = async () => {};
 
-const SELF = { login: "factory-app[bot]", type: "Bot" };
+const SELF = { login: "pendulum-app[bot]", type: "Bot" };
 const PERSON = { login: "maintainer", type: "User" };
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
-const OBJ = "factory:objective";
+const OBJ = "pendulum:objective";
 const MIN = 60_000;
 
 /**
@@ -35,11 +35,11 @@ function fakeGitHub(open, cfg = {}) {
     const at = given ?? new Date(Date.now() - since).toISOString();
     issues.set(number, {
       issue: { number, state: "open", body: "", user: { login: "maintainer" }, labels: [...labels] },
-      // The label's start, by a person, then each state label as Factory applied it.
+      // The label's start, by a person, then each state label as Pendulum applied it.
       timeline: [
         // A Blocked Objective was Running before its Block.
-        ...(labels.includes("factory:blocked") ? ["labeled", "unlabeled"].map((event) => ({ event, label: { name: "factory:running" }, actor: SELF, created_at: new Date(Date.parse(at) - MIN).toISOString() })) : []),
-        ...labels.map((name) => ({ event: "labeled", label: { name }, actor: name === OBJ || name === "factory:restart" ? PERSON : SELF, created_at: at })),
+        ...(labels.includes("pendulum:blocked") ? ["labeled", "unlabeled"].map((event) => ({ event, label: { name: "pendulum:running" }, actor: SELF, created_at: new Date(Date.parse(at) - MIN).toISOString() })) : []),
+        ...labels.map((name) => ({ event: "labeled", label: { name }, actor: name === OBJ || name === "pendulum:restart" ? PERSON : SELF, created_at: at })),
       ],
       comments: comments.map((c) => ({ id: (ids += 1), user: SELF, created_at: at, updated_at: at, ...c })),
     });
@@ -70,8 +70,8 @@ function fakeGitHub(open, cfg = {}) {
     if (method === "GET" && /^\/issues\/\d+\/comments$/.test(path) && one) return json(one.comments);
     // A PR is an issue too: its timeline holds the review label's start, its comments nothing.
     const pr = Object.entries(cfg.prs || {}).find(([, p]) => p.number === n || p.number === Number(/^\/pulls\/(\d+)$/.exec(path)?.[1]));
-    const pull = pr && { number: pr[1].number, state: "open", draft: false, mergeable: true, mergeable_state: "clean", head: { ref: `factory/${pr[0]}`, sha: "a".repeat(40) }, base: { ref: "main" }, labels: pr[1].review ? [{ name: "factory:review" }] : [] };
-    if (method === "GET" && pr && /^\/issues\/\d+\/timeline$/.test(path)) return json(pr[1].review ? [{ event: "labeled", label: { name: "factory:review" }, actor: SELF, created_at: pr[1].review }] : []);
+    const pull = pr && { number: pr[1].number, state: "open", draft: false, mergeable: true, mergeable_state: "clean", head: { ref: `pendulum/${pr[0]}`, sha: "a".repeat(40) }, base: { ref: "main" }, labels: pr[1].review ? [{ name: "pendulum:review" }] : [] };
+    if (method === "GET" && pr && /^\/issues\/\d+\/timeline$/.test(path)) return json(pr[1].review ? [{ event: "labeled", label: { name: "pendulum:review" }, actor: SELF, created_at: pr[1].review }] : []);
     if (method === "GET" && pr && /^\/issues\/\d+\/comments$/.test(path)) return json([]);
     if (method === "GET" && pr && /^\/pulls\/\d+$/.test(path)) return json(pull);
     if (method === "POST" && /^\/issues\/\d+\/comments$/.test(path) && one && cfg.failRecord && body.body.includes(":relaunch -->")) return json({ message: "Bad Gateway" }, 502);
@@ -104,9 +104,9 @@ function fakeGitHub(open, cfg = {}) {
       return json({});
     }
     if (method === "GET" && path === "/pulls") {
-      const head = Number(/:factory\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1]);
+      const head = Number(/:pendulum\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1]);
       const p = cfg.prs?.[head];
-      return json(p ? [{ number: p.number, state: "open", head: { ref: `factory/${head}` } }] : []);
+      return json(p ? [{ number: p.number, state: "open", head: { ref: `pendulum/${head}` } }] : []);
     }
     if (method === "GET" && path === "/collaborators") return json([{ login: "maintainer" }]);
     if (method === "GET" && /^\/actions\/workflows\/[^/]+\/runs$/.test(path)) {
@@ -120,7 +120,7 @@ function fakeGitHub(open, cfg = {}) {
     if (method === "GET" && runJobs) return json({ jobs: cfg.jobs?.[runJobs[1]] || [] });
     if (method === "GET" && path === "/actions/artifacts") return json({ artifacts: [] });
     // The workflow file (raw) at the commit the test gives it at, only there.
-    if (method === "GET" && path === "/contents/.github/workflows/factory.yml" && typeof cfg.workflow === "string" && u.searchParams.get("ref") === cfg.workflowSha) return new Response(cfg.workflow, { status: 200 });
+    if (method === "GET" && path === "/contents/.github/workflows/pendulum.yml" && typeof cfg.workflow === "string" && u.searchParams.get("ref") === cfg.workflowSha) return new Response(cfg.workflow, { status: 200 });
     if (method === "GET" && path === "/issues/comments") return json(cfg.spend || []);
     return json({ message: "Not Found" }, 404);
   };
@@ -132,7 +132,7 @@ function fakeGitHub(open, cfg = {}) {
     labels: (n) => [...issues.get(n).issue.labels].sort(),
     /** The Running stints' starts moved `ms` into the past: that long passes with no job or stage showing up. */
     age(ms) {
-      for (const i of issues.values()) for (const e of i.timeline) if (e.label?.name === "factory:running") e.created_at = new Date(Date.parse(e.created_at) - ms).toISOString();
+      for (const i of issues.values()) for (const e of i.timeline) if (e.label?.name === "pendulum:running") e.created_at = new Date(Date.parse(e.created_at) - ms).toISOString();
     },
     /** A person's action: a label applied or taken off. */
     person(n, event, name) {
@@ -141,20 +141,20 @@ function fakeGitHub(open, cfg = {}) {
       if (event === "unlabeled") one.issue.labels = one.issue.labels.filter((l) => l !== name);
       one.timeline.push({ event, label: { name }, actor: PERSON, created_at: stamp() });
     },
-    /** Factory's Blocked notices on an issue, oldest first. */
-    blocks: (n) => issues.get(n).comments.filter((c) => c.body.startsWith(`<!-- factory:${n}:blocked:`)),
+    /** Pendulum's Blocked notices on an issue, oldest first. */
+    blocks: (n) => issues.get(n).comments.filter((c) => c.body.startsWith(`<!-- pendulum:${n}:blocked:`)),
   };
 }
 
 /** Run `fn` with this fake as GitHub, as the Action's dispatcher (or the sandbox route's, with `sandbox`). */
 async function on(gh, fn) {
   const realFetch = globalThis.fetch;
-  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL", "GITHUB_RUN_ID", "GITHUB_WORKFLOW_REF"].map((k) => [k, process.env[k]]));
+  const saved = Object.fromEntries(["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL", "GITHUB_API_URL", "GITHUB_RUN_ID", "GITHUB_WORKFLOW_REF"].map((k) => [k, process.env[k]]));
   process.env.GITHUB_API_URL = "https://github.test";
   // The dispatcher's own workflow (github.mjs workflowFile), whatever workflow runs these tests (CI's is quality.yml).
-  process.env.GITHUB_WORKFLOW_REF = "acme/app/.github/workflows/factory.yml@refs/heads/main";
-  delete process.env.FACTORY_LOCAL;
-  delete process.env.FACTORY_LOCAL_ALL;
+  process.env.GITHUB_WORKFLOW_REF = "acme/app/.github/workflows/pendulum.yml@refs/heads/main";
+  delete process.env.PENDULUM_LOCAL;
+  delete process.env.PENDULUM_LOCAL_ALL;
   globalThis.fetch = gh.fetch;
   setSelf(SELF.login);
   try {
@@ -194,15 +194,15 @@ const recordOf = (gh, n) => {
 };
 
 test("a vanished Running stage is relaunched, and relaunched again, then Blocked with the count; each tick reads the count from the issue", async () => {
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "factory:running"], since: 20 * MIN }]);
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since: 20 * MIN }]);
   for (const k of [1, 2]) {
     const r = await tick(gh);
     assert.deepEqual(r.relaunched, [7], `lost ${k}: relaunched`);
     assert.deepEqual(r.relaunch, [7], "named in the work matrix again");
     assert.deepEqual(r.vanished, [], "no Block yet");
     assert.deepEqual(gh.blocks(7), []);
-    assert.deepEqual(gh.labels(7), [OBJ, "factory:running"].sort(), "Running again, in its own slot");
-    assert.ok(gh.writes.includes("DELETE /issues/7/labels/factory:running") && gh.writes.at(-1).startsWith("POST /issues/7/labels factory:running"), "a new Running stint: its job gets the start grace again");
+    assert.deepEqual(gh.labels(7), [OBJ, "pendulum:running"].sort(), "Running again, in its own slot");
+    assert.ok(gh.writes.includes("DELETE /issues/7/labels/pendulum:running") && gh.writes.at(-1).startsWith("POST /issues/7/labels pendulum:running"), "a new Running stint: its job gets the start grace again");
     assert.deepEqual(recordOf(gh, 7).tries.map((t) => t.lost), Array(k).fill("vanished"), "the count is on the issue");
     // Inside the new stint's grace the relaunched job is not lost yet: nothing more.
     const young = await tick(gh);
@@ -214,21 +214,21 @@ test("a vanished Running stage is relaunched, and relaunched again, then Blocked
   assert.deepEqual(used.relaunched, []);
   assert.deepEqual(used.vanished, [7]);
   const [notice] = gh.blocks(7);
-  assert.match(notice.body, /^<!-- factory:7:blocked:dispatch:[^]*@kirk Blocked \(dispatch\): worker job vanished: Running with no job in progress; Factory relaunched its stage 2 times since the Objective was last started/);
-  assert.equal(blockCauseOf(notice.body), "factory", "no stage recorded an outage: the vanished cause");
-  assert.deepEqual(gh.labels(7), [OBJ, "factory:blocked"].sort());
+  assert.match(notice.body, /^<!-- pendulum:7:blocked:dispatch:[^]*@kirk Blocked \(dispatch\): worker job vanished: Running with no job in progress; Pendulum relaunched its stage 2 times since the Objective was last started/);
+  assert.equal(blockCauseOf(notice.body), "pendulum", "no stage recorded an outage: the vanished cause");
+  assert.deepEqual(gh.labels(7), [OBJ, "pendulum:blocked"].sort());
   assert.equal(recordOf(gh, 7).tries.length, RELAUNCH_MAX, "the Block adds no try");
 });
 
 test("an outage exit is relaunched, twice, then Blocked once with cause outage and the count, the person mentioned only then", async () => {
-  const gh = fakeGitHub([{ number: 8, labels: [OBJ, "factory:running"], since: 5 * MIN }]);
+  const gh = fakeGitHub([{ number: 8, labels: [OBJ, "pendulum:running"], since: 5 * MIN }]);
   for (const k of [1, 2]) {
     await outageEnd(gh, 8, 100 + k);
     assert.doesNotMatch(gh.blocks(8).at(-1).body, /@kirk/, "the stage's own outage notice mentions no one");
     const r = await tick(gh);
     assert.deepEqual(r.relaunched, [8], `outage ${k}: relaunched`);
     assert.deepEqual(r.relaunch, [8]);
-    assert.deepEqual(gh.labels(8), [OBJ, "factory:running"].sort());
+    assert.deepEqual(gh.labels(8), [OBJ, "pendulum:running"].sort());
     assert.deepEqual(recordOf(gh, 8).tries.map((t) => t.lost), Array(k).fill("outage"));
     assert.match(gh.issue(8).comments.find((c) => c.body.startsWith(marker(8, "relaunch"))).body, new RegExp(`relaunched this Objective's stage: ${k} of 2 [^]*ended on its network`));
   }
@@ -236,9 +236,9 @@ test("an outage exit is relaunched, twice, then Blocked once with cause outage a
   const used = await tick(gh);
   assert.deepEqual([used.relaunched, used.relaunchesUsed], [[], [8]]);
   const notice = gh.blocks(8).at(-1);
-  assert.match(notice.body, /^<!-- factory:8:blocked:relaunch:[^]*@kirk Blocked \(relaunch\): the stage was lost to its network again after Factory relaunched it 2 times/);
+  assert.match(notice.body, /^<!-- pendulum:8:blocked:relaunch:[^]*@kirk Blocked \(relaunch\): the stage was lost to its network again after Pendulum relaunched it 2 times/);
   assert.equal(blockCauseOf(notice.body), "outage");
-  assert.deepEqual(gh.labels(8), [OBJ, "factory:blocked"].sort());
+  assert.deepEqual(gh.labels(8), [OBJ, "pendulum:blocked"].sort());
   // The next tick finds the dispatcher's notice newest: no second notice, no relaunch.
   const after = await tick(gh);
   assert.deepEqual([after.relaunched, after.relaunchesUsed], [[], []]);
@@ -247,29 +247,29 @@ test("an outage exit is relaunched, twice, then Blocked once with cause outage a
 
 test("a non-network Block is not relaunched: the worker's own, validation, a crash; an outage Block beside them is", async () => {
   const gh = fakeGitHub([
-    { number: 8, labels: [OBJ, "factory:running"] },
-    { number: 9, labels: [OBJ, "factory:running"] },
-    { number: 10, labels: [OBJ, "factory:running"] },
-    { number: 11, labels: [OBJ, "factory:running"] },
+    { number: 8, labels: [OBJ, "pendulum:running"] },
+    { number: 9, labels: [OBJ, "pendulum:running"] },
+    { number: 10, labels: [OBJ, "pendulum:running"] },
+    { number: 11, labels: [OBJ, "pendulum:running"] },
   ]);
   await outageEnd(gh, 8, 201);
   await on(gh, async () => {
     process.env.GITHUB_RUN_ID = "202";
     await applyExit(REPO, { issue: 9, pr: null, exit: "blocked", reason: "the worker's own Block", cause: "work", notify: "kirk", stage: "work" }, { token: "t" });
-    await applyExit(REPO, { issue: 10, pr: null, exit: "blocked", reason: "worker crashed: TypeError: x is undefined", cause: "factory", notify: "kirk", stage: "crash" }, { token: "t" });
+    await applyExit(REPO, { issue: 10, pr: null, exit: "blocked", reason: "worker crashed: TypeError: x is undefined", cause: "pendulum", notify: "kirk", stage: "crash" }, { token: "t" });
   });
   // #11 ended on an outage once, and a later stage Blocked on its validation: that Block is the one standing.
   await outageEnd(gh, 11, 203);
   await on(gh, async () => {
     process.env.GITHUB_RUN_ID = "204";
-    await applyExit(REPO, { issue: 11, pr: null, exit: "blocked", reason: "validation red after Factory's last pass", cause: "work", notify: "kirk", stage: "validation" }, { token: "t" });
+    await applyExit(REPO, { issue: 11, pr: null, exit: "blocked", reason: "validation red after Pendulum's last pass", cause: "work", notify: "kirk", stage: "validation" }, { token: "t" });
   });
   const writes = gh.writes.length;
   const reads = gh.reads.length;
   const r = await tick(gh);
   assert.deepEqual(r.relaunched, [8]);
   for (const n of [9, 10, 11]) {
-    assert.deepEqual(gh.labels(n), [OBJ, "factory:blocked"].sort(), `#${n} stays Blocked`);
+    assert.deepEqual(gh.labels(n), [OBJ, "pendulum:blocked"].sort(), `#${n} stays Blocked`);
     assert.equal(recordOf(gh, n), null);
   }
   assert.ok(gh.writes.slice(writes).every((w) => /\/issues\/8\//.test(w)), "only #8 is written to");
@@ -277,30 +277,30 @@ test("a non-network Block is not relaunched: the worker's own, validation, a cra
 });
 
 test("a stopped, draft or restarting Objective is never relaunched; a started one beside them is", async () => {
-  const outage = (n) => ({ body: `${marker(n, "blocked", "outage:301-1")}\nBlocked (outage): this machine could not reach api.github.com (EAI_AGAIN)\n<!-- factory:block {"cause":"outage"} -->` });
+  const outage = (n) => ({ body: `${marker(n, "blocked", "outage:301-1")}\nBlocked (outage): this machine could not reach api.github.com (EAI_AGAIN)\n<!-- pendulum:block {"cause":"outage"} -->` });
   const gh = fakeGitHub([
     // #20 Running, its stage vanished, but a person took its label off (a stop, inside its grace); #21 Blocked on an
     // outage and stopped; #22 Blocked on an outage and made a draft; #23 Blocked on an outage with a restart applied by
     // someone who can push (it restarts: Queued, not Running); #24 the control.
-    { number: 20, labels: [OBJ, "factory:running"], since: 30 * MIN },
-    { number: 21, labels: [OBJ, "factory:blocked"], comments: [outage(21)] },
-    { number: 22, labels: [OBJ, "factory:blocked"], comments: [outage(22)] },
-    { number: 23, labels: [OBJ, "factory:blocked", "factory:restart"], comments: [outage(23)] },
-    { number: 24, labels: [OBJ, "factory:blocked"], comments: [outage(24)] },
+    { number: 20, labels: [OBJ, "pendulum:running"], since: 30 * MIN },
+    { number: 21, labels: [OBJ, "pendulum:blocked"], comments: [outage(21)] },
+    { number: 22, labels: [OBJ, "pendulum:blocked"], comments: [outage(22)] },
+    { number: 23, labels: [OBJ, "pendulum:blocked", "pendulum:restart"], comments: [outage(23)] },
+    { number: 24, labels: [OBJ, "pendulum:blocked"], comments: [outage(24)] },
   ]);
   gh.person(20, "unlabeled", OBJ);
   gh.person(21, "unlabeled", OBJ);
-  gh.person(22, "labeled", "factory:draft");
+  gh.person(22, "labeled", "pendulum:draft");
   const r = await tick(gh);
   assert.deepEqual(r.relaunched, [24]);
   assert.deepEqual(r.relaunch, [24]);
   for (const n of [20, 21, 22, 23]) assert.equal(recordOf(gh, n), null, `#${n}: no relaunch counted`);
-  assert.ok(!gh.labels(21).includes("factory:running") && !gh.labels(22).includes("factory:running"));
+  assert.ok(!gh.labels(21).includes("pendulum:running") && !gh.labels(22).includes("pendulum:running"));
   assert.deepEqual(r.restarted, [23], "the restart runs as before; its card goes back to Queued, not Running");
 });
 
 test("the count survives across ticks and dispatcher restarts, and starts over when a person re-applies the label", async () => {
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "factory:running"], since: 20 * MIN }]);
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since: 20 * MIN }]);
   await tick(gh);
   gh.age(20 * MIN);
   await tick(gh);
@@ -324,9 +324,9 @@ test("the count survives across ticks and dispatcher restarts, and starts over w
 });
 
 test("max_concurrent: a relaunch takes the slot its stage held, before any new pick; none is taken past the cap", async () => {
-  const outage = { body: `${marker(8, "blocked", "outage:401-1")}\nBlocked (outage): lost\n<!-- factory:block {"cause":"outage"} -->` };
+  const outage = { body: `${marker(8, "blocked", "outage:401-1")}\nBlocked (outage): lost\n<!-- pendulum:block {"cause":"outage"} -->` };
   const gh = fakeGitHub([
-    { number: 8, labels: [OBJ, "factory:blocked"], comments: [outage] },
+    { number: 8, labels: [OBJ, "pendulum:blocked"], comments: [outage] },
     { number: 9, labels: [OBJ, "P0"] },
   ]);
   const r = await tick(gh, { maxConcurrent: 1 });
@@ -335,12 +335,12 @@ test("max_concurrent: a relaunch takes the slot its stage held, before any new p
   assert.equal(r.running, 1);
   // With the slot taken by another Running Objective (inside its job's grace), the relaunch waits for it.
   const full = fakeGitHub([
-    { number: 8, labels: [OBJ, "factory:blocked"], comments: [outage] },
-    { number: 10, labels: [OBJ, "factory:running"], since: MIN },
+    { number: 8, labels: [OBJ, "pendulum:blocked"], comments: [outage] },
+    { number: 10, labels: [OBJ, "pendulum:running"], since: MIN },
   ]);
   const waits = await tick(full, { maxConcurrent: 1 });
   assert.deepEqual(waits.relaunched, []);
-  assert.deepEqual(full.labels(8), [OBJ, "factory:blocked"].sort());
+  assert.deepEqual(full.labels(8), [OBJ, "pendulum:blocked"].sort());
   assert.equal(recordOf(full, 8), null, "nothing counted while it waits");
   const later = await tick(full, { maxConcurrent: 2 });
   assert.deepEqual(later.relaunched, [8]);
@@ -350,7 +350,7 @@ test("the cloud sandbox: a stage whose lease ran out after its start is relaunch
   const now = Date.now();
   const iso = (ms) => new Date(now - ms).toISOString();
   const record = { vendor: "vercel", stage: "work", state: "running", claim: "c1", at: iso(25 * MIN), leaseUntil: iso(5 * MIN), launches: [{ stage: "work", event: "swept", ok: true, cue: "x", run: "1", at: iso(25 * MIN) }] };
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "factory:running"], since: 30 * MIN, comments: [{ body: `${marker(7, "sandbox")}\n${sandboxMarkerLine(record)}` }] }]);
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since: 30 * MIN, comments: [{ body: `${marker(7, "sandbox")}\n${sandboxMarkerLine(record)}` }] }]);
   const r = await tick(gh, { sandbox: "vercel" });
   assert.deepEqual(r.relaunched, [7]);
   assert.deepEqual(r.relaunch, [7], "the launcher starts its work stage: a new Running stint has no work start");
@@ -358,7 +358,7 @@ test("the cloud sandbox: a stage whose lease ran out after its start is relaunch
   assert.deepEqual(recordOf(gh, 7).tries.map((t) => t.lost), ["vanished"]);
 });
 
-const outageNotice = (n, extra = {}) => ({ body: `${marker(n, "blocked", "outage:601-1")}\nBlocked (outage): this machine could not reach api.github.com (EAI_AGAIN)\n<!-- factory:block {"cause":"outage"} -->`, ...extra });
+const outageNotice = (n, extra = {}) => ({ body: `${marker(n, "blocked", "outage:601-1")}\nBlocked (outage): this machine could not reach api.github.com (EAI_AGAIN)\n<!-- pendulum:block {"cause":"outage"} -->`, ...extra });
 const ago = (ms) => new Date(Date.now() - ms).toISOString();
 
 test("the cloud sandbox: a sandbox record that cannot be read is no absent record; that Objective waits for the next tick's read (#430)", async () => {
@@ -367,9 +367,9 @@ test("the cloud sandbox: a sandbox record that cannot be read is no absent recor
   const cfg = { failComments: [7, 8, 9, 10], prs: { 8: { number: 108, review: ago(30 * MIN) }, 9: { number: 109 } } };
   const gh = fakeGitHub(
     [
-      { number: 7, labels: [OBJ, "factory:running"], since: 30 * MIN },
-      { number: 8, labels: [OBJ, "factory:in-review"], since: 40 * MIN },
-      { number: 9, labels: [OBJ, "factory:in-review"], since: 40 * MIN },
+      { number: 7, labels: [OBJ, "pendulum:running"], since: 30 * MIN },
+      { number: 8, labels: [OBJ, "pendulum:in-review"], since: 40 * MIN },
+      { number: 9, labels: [OBJ, "pendulum:in-review"], since: 40 * MIN },
       { number: 10, labels: [OBJ], since: 40 * MIN },
     ],
     cfg,
@@ -395,28 +395,28 @@ test("the cloud sandbox: a sandbox record that cannot be read is no absent recor
 });
 
 test("an outage notice counts only when written since the Objective last became Running: a later Block whose notice never landed is not relaunched", async () => {
-  const gh = fakeGitHub([{ number: 8, labels: [OBJ, "factory:running"], since: 5 * MIN }]);
+  const gh = fakeGitHub([{ number: 8, labels: [OBJ, "pendulum:running"], since: 5 * MIN }]);
   await outageEnd(gh, 8, 501);
   assert.deepEqual((await tick(gh)).relaunched, [8]);
   // The relaunched stage Blocks for its own reason: applyExit sets the label first, and its notice never lands.
   await on(gh, () => setStateLabel(REPO, 8, "blocked", { token: "t" }));
   const r = await tick(gh);
   assert.deepEqual(r.relaunched, [], "the outage notice is from before the relaunch's Running stint");
-  assert.deepEqual(gh.labels(8), [OBJ, "factory:blocked"].sort());
+  assert.deepEqual(gh.labels(8), [OBJ, "pendulum:blocked"].sort());
   assert.equal(recordOf(gh, 8).tries.length, 1);
 });
 
 test("daily_usd: a lost stage is not relaunched while today's spend has reached the cap; it waits for the day's turn, unblocked", async () => {
-  const spend = [{ id: 900, user: SELF, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: `<!-- factory:9:progress:x -->\n<!-- factory:spend {"usd":5} -->` }];
+  const spend = [{ id: 900, user: SELF, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: `<!-- pendulum:9:progress:x -->\n<!-- pendulum:spend {"usd":5} -->` }];
   const open = () => [
-    { number: 7, labels: [OBJ, "factory:running"], since: 20 * MIN },
-    { number: 8, labels: [OBJ, "factory:blocked"], comments: [outageNotice(8)] },
+    { number: 7, labels: [OBJ, "pendulum:running"], since: 20 * MIN },
+    { number: 8, labels: [OBJ, "pendulum:blocked"], comments: [outageNotice(8)] },
   ];
   const gh = fakeGitHub(open(), { spend });
   const r = await tick(gh, { dailyUsd: 1 });
   assert.deepEqual([r.relaunched, r.vanished, r.relaunchesUsed], [[], [], []]);
   assert.ok(r.deadlines.some((d) => d.kind === "daily-cap"), "the day's turn is its wake, as for a Queued pick");
-  assert.deepEqual([gh.labels(7), gh.labels(8)], [[OBJ, "factory:running"].sort(), [OBJ, "factory:blocked"].sort()], "no Block, no relaunch");
+  assert.deepEqual([gh.labels(7), gh.labels(8)], [[OBJ, "pendulum:running"].sort(), [OBJ, "pendulum:blocked"].sort()], "no Block, no relaunch");
   assert.equal(recordOf(gh, 7), null);
   const under = fakeGitHub(open(), { spend });
   assert.deepEqual((await tick(under, { dailyUsd: 10 })).relaunched.sort(), [7, 8]);
@@ -425,14 +425,14 @@ test("daily_usd: a lost stage is not relaunched while today's spend has reached 
 test("used up with max_concurrent reached: the Block and its mention go at once; the slot check is for a relaunch only", async () => {
   const at = ago(30 * MIN);
   const tries = [1, 2].map((k) => ({ at, lost: "outage", key: `block:${k}@${at}`, start: at }));
-  const record = { body: `${marker(8, "relaunch")}\nFactory relaunched this Objective's stage: 2 of 2\n<!-- factory:relaunch ${JSON.stringify({ tries })} -->` };
+  const record = { body: `${marker(8, "relaunch")}\nPendulum relaunched this Objective's stage: 2 of 2\n<!-- pendulum:relaunch ${JSON.stringify({ tries })} -->` };
   const gh = fakeGitHub([
-    { number: 8, labels: [OBJ, "factory:blocked"], at, comments: [record, outageNotice(8, { created_at: ago(20 * MIN), updated_at: ago(20 * MIN) })] },
-    { number: 10, labels: [OBJ, "factory:running"], since: MIN },
+    { number: 8, labels: [OBJ, "pendulum:blocked"], at, comments: [record, outageNotice(8, { created_at: ago(20 * MIN), updated_at: ago(20 * MIN) })] },
+    { number: 10, labels: [OBJ, "pendulum:running"], since: MIN },
   ]);
   const r = await tick(gh, { maxConcurrent: 1 });
   assert.deepEqual([r.relaunched, r.relaunchesUsed], [[], [8]]);
-  assert.match(gh.blocks(8).at(-1).body, /^<!-- factory:8:blocked:relaunch:[^]*@kirk Blocked \(relaunch\): the stage was lost to its network again after Factory relaunched it 2 times/);
+  assert.match(gh.blocks(8).at(-1).body, /^<!-- pendulum:8:blocked:relaunch:[^]*@kirk Blocked \(relaunch\): the stage was lost to its network again after Pendulum relaunched it 2 times/);
 });
 
 test("a vanished stage that left a sign it was not the network keeps the vanished Block: a cancelled work job, a sandbox stage that recorded its end", async () => {
@@ -440,8 +440,8 @@ test("a vanished stage that left a sign it was not the network keeps the vanishe
   const job = (n, conclusion) => ({ name: `work (${n})`, status: "completed", conclusion, created_at: ago(since - 30_000) });
   const gh = fakeGitHub(
     [
-      { number: 7, labels: [OBJ, "factory:running"], since },
-      { number: 9, labels: [OBJ, "factory:running"], since },
+      { number: 7, labels: [OBJ, "pendulum:running"], since },
+      { number: 9, labels: [OBJ, "pendulum:running"], since },
     ],
     { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: [job(7, "cancelled"), job(9, "failure")] } },
   );
@@ -451,8 +451,8 @@ test("a vanished stage that left a sign it was not the network keeps the vanishe
   // The sandbox: #7's stage recorded its end (it reached GitHub); #9's lease ran out with no end.
   const sandboxed = (n, rec) => ({ body: `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", claim: "c1", at: ago(25 * MIN), launches: [{ stage: "work", event: "swept", ok: true, cue: "x", run: "1", at: ago(25 * MIN) }], ...rec })}` });
   const box = fakeGitHub([
-    { number: 7, labels: [OBJ, "factory:running"], since: 30 * MIN, comments: [sandboxed(7, { state: "ended", exitCode: 1, leaseUntil: null })] },
-    { number: 9, labels: [OBJ, "factory:running"], since: 30 * MIN, comments: [sandboxed(9, { state: "running", leaseUntil: ago(5 * MIN) })] },
+    { number: 7, labels: [OBJ, "pendulum:running"], since: 30 * MIN, comments: [sandboxed(7, { state: "ended", exitCode: 1, leaseUntil: null })] },
+    { number: 9, labels: [OBJ, "pendulum:running"], since: 30 * MIN, comments: [sandboxed(9, { state: "running", leaseUntil: ago(5 * MIN) })] },
   ]);
   const s = await tick(box, { sandbox: "vercel" });
   assert.deepEqual([s.vanished, s.relaunched], [[7], [9]]);
@@ -462,8 +462,8 @@ test("a relaunch whose record cannot be written is tried again next tick, never 
   const cfg = { failRecord: true };
   const gh = fakeGitHub(
     [
-      { number: 7, labels: [OBJ, "factory:running"], since: 120 * MIN },
-      { number: 8, labels: [OBJ, "factory:blocked"], since: 120 * MIN, comments: [outageNotice(8, { created_at: ago(90 * MIN), updated_at: ago(90 * MIN) })] },
+      { number: 7, labels: [OBJ, "pendulum:running"], since: 120 * MIN },
+      { number: 8, labels: [OBJ, "pendulum:blocked"], since: 120 * MIN, comments: [outageNotice(8, { created_at: ago(90 * MIN), updated_at: ago(90 * MIN) })] },
     ],
     cfg,
   );
@@ -476,40 +476,40 @@ test("a relaunch whose record cannot be written is tried again next tick, never 
 });
 
 // #390: the work job's own steps (GitHub's jobs API, the read stintWorkJob already makes) tell a set-up failure from a
-// runner that went away. Factory's own step is placed from the workflow file at the job's commit (Set up job is step 1,
+// runner that went away. Pendulum's own step is placed from the workflow file at the job's commit (Set up job is step 1,
 // the YAML steps follow), so steps the workflow names itself are placed too. One set-up failure may pass, so it is
 // relaunched once; the same step failing on the relaunch's job too Blocks with cause setup.
-test("a vanished stage whose work job failed before Factory's own step is relaunched once, then Blocks setup when the same step fails again; a lost runner is relaunched", async () => {
+test("a vanished stage whose work job failed before Pendulum's own step is relaunched once, then Blocks setup when the same step fails again; a lost runner is relaunched", async () => {
   const since = 20 * MIN;
-  const workflow = ["jobs:", "  work:", "    steps:", "      - name: Pick the account", "        uses: clockgrove/factory@v0.9", "        with: { mode: account }", "      - name: Get the code", "        uses: actions/checkout@v7", "      - name: Build it", "        uses: clockgrove/factory@v0.9", "        with: { mode: work }", "      - uses: actions/upload-artifact@v7", ""].join("\n");
+  const workflow = ["jobs:", "  work:", "    steps:", "      - name: Pick the account", "        uses: clockgrove/pendulum@v0.9", "        with: { mode: account }", "      - name: Get the code", "        uses: actions/checkout@v7", "      - name: Build it", "        uses: clockgrove/pendulum@v0.9", "        with: { mode: work }", "      - uses: actions/upload-artifact@v7", ""].join("\n");
   const step = (number, name, conclusion, status = "completed") => ({ number, name, status, conclusion });
   const job = (n, steps, created_at) => ({ name: `work (${n})`, status: "completed", conclusion: "failure", head_sha: "abc123", created_at, runner_id: 3, runner_name: "GitHub Actions 3", steps });
   const ran = (failedAt) => [step(1, "Set up job", "success"), step(2, "Pick the account", "skipped"), step(3, "Get the code", failedAt === 3 ? "failure" : "success"), step(4, "Build it", failedAt === 4 ? "failure" : failedAt === 3 ? "skipped" : null, failedAt ? "completed" : "in_progress"), step(5, "Run actions/upload-artifact@v7", "success")];
   const never = (n, created_at) => ({ name: `work (${n})`, status: "completed", conclusion: "failure", head_sha: "abc123", created_at, runner_id: null, runner_name: null, steps: [] });
   const at = ago(since - 30_000);
-  // #7: the checkout ("Get the code") failed; #8: GitHub never started it; #9: the runner went away; #10: Factory's own step failed.
+  // #7: the checkout ("Get the code") failed; #8: GitHub never started it; #9: the runner went away; #10: Pendulum's own step failed.
   const cfg = { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: [job(7, ran(3), at), never(8, at), job(9, ran(null), at), job(10, ran(4), at)] }, workflow, workflowSha: "abc123" };
-  const gh = fakeGitHub([7, 8, 9, 10].map((number) => ({ number, labels: [OBJ, "factory:running"], since })), cfg);
+  const gh = fakeGitHub([7, 8, 9, 10].map((number) => ({ number, labels: [OBJ, "pendulum:running"], since })), cfg);
   const first = await tick(gh, { run: 77 });
   assert.deepEqual([first.vanished, first.relaunched.sort((a, b) => a - b)], [[], [7, 8, 9, 10]], "a first set-up failure is relaunched");
   assert.deepEqual(recordOf(gh, 7).tries[0].setup, { step: "Get the code", number: 3 });
   assert.deepEqual(recordOf(gh, 8).tries[0].setup, { step: null, number: null });
   assert.equal(recordOf(gh, 9).tries[0].setup, undefined);
-  assert.deepEqual(gh.reads.filter((x) => x.startsWith("/contents/")), ["/contents/.github/workflows/factory.yml?ref=abc123", "/contents/.github/workflows/factory.yml?ref=abc123"], "one read at the job's commit for each job that failed after its set-up (#7, #10)");
+  assert.deepEqual(gh.reads.filter((x) => x.startsWith("/contents/")), ["/contents/.github/workflows/pendulum.yml?ref=abc123", "/contents/.github/workflows/pendulum.yml?ref=abc123"], "one read at the job's commit for each job that failed after its set-up (#7, #10)");
   // The relaunched stints vanish again: #7 and #8 the same way, #9 now at the checkout (a first time for it).
   gh.age(since);
-  const stint = (n) => gh.issue(n).timeline.filter((e) => e.label?.name === "factory:running").at(-1).created_at;
+  const stint = (n) => gh.issue(n).timeline.filter((e) => e.label?.name === "pendulum:running").at(-1).created_at;
   const after = (n) => new Date(Date.parse(stint(n)) + 10_000).toISOString();
   cfg.jobs = { 77: [job(7, ran(3), after(7)), never(8, after(8)), job(9, ran(3), after(9))] };
   const second = await tick(gh);
   assert.deepEqual([second.vanished.sort((a, b) => a - b), second.relaunched.sort((a, b) => a - b)], [[7, 8], [9, 10]]);
   const seven = gh.blocks(7)[0].body;
-  assert.match(seven, /worker job failed before Factory ran: its step "Get the code" failed, as it did on the job Factory relaunched it from; a set-up failure that fails the same way every time, so it was not relaunched again/);
+  assert.match(seven, /worker job failed before Pendulum ran: its step "Get the code" failed, as it did on the job Pendulum relaunched it from; a set-up failure that fails the same way every time, so it was not relaunched again/);
   assert.equal(blockCauseOf(seven), "setup");
-  assert.match(gh.blocks(8)[0].body, /GitHub never started it \(no runner was assigned\), nor the job Factory relaunched it from/);
+  assert.match(gh.blocks(8)[0].body, /GitHub never started it \(no runner was assigned\), nor the job Pendulum relaunched it from/);
   assert.equal(blockCauseOf(gh.blocks(8)[0].body), "setup");
   // The workflow file unread (here: not at the job's commit): the failed step cannot be placed, so the stage is lost.
-  const unread = fakeGitHub([7].map((number) => ({ number, labels: [OBJ, "factory:running"], since })), { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: [job(7, ran(3), at)] }, workflow, workflowSha: "other" });
+  const unread = fakeGitHub([7].map((number) => ({ number, labels: [OBJ, "pendulum:running"], since })), { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: [job(7, ran(3), at)] }, workflow, workflowSha: "other" });
   const u = await tick(unread);
   assert.deepEqual([u.vanished, u.relaunched], [[], [7]]);
   assert.equal(recordOf(unread, 7).tries[0].setup, undefined, "not placed: no set-up step on the record");
@@ -520,25 +520,25 @@ test("the cancelled-job sign is found on a busy repository: the run that started
   const cancelled = { name: "work (7)", status: "completed", conclusion: "cancelled", created_at: ago(since - 30_000) };
   // The dispatching run, created just before the label; ten later ticks within the next minute, none with the job.
   const later = Array.from({ length: 10 }, (_, i) => ({ id: 100 + i, created_at: ago(since - 5_000 - i * 1000) }));
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "factory:running"], since }], { runs: [{ id: 55, created_at: ago(since + 20_000) }, ...later], jobs: { 55: [cancelled] } });
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 20_000) }, ...later], jobs: { 55: [cancelled] } });
   const r = await tick(gh);
   assert.deepEqual([r.vanished, r.relaunched], [[7], []]);
   // A relaunched stint: its run is the one the record names, read directly, whatever the runs listing shows.
   const cfg = { runs: [], jobs: {} };
-  const re = fakeGitHub([{ number: 9, labels: [OBJ, "factory:running"], since }], cfg);
+  const re = fakeGitHub([{ number: 9, labels: [OBJ, "pendulum:running"], since }], cfg);
   assert.deepEqual((await tick(re, { run: 77 })).relaunched, [9]);
   assert.equal(recordOf(re, 9).tries[0].run, "77", "the relaunch names its run");
   // Its work job, in run 77, was cancelled; the runs listing shows nothing of it.
   re.age(since);
-  const stint = re.issue(9).timeline.filter((e) => e.label?.name === "factory:running").at(-1).created_at;
+  const stint = re.issue(9).timeline.filter((e) => e.label?.name === "pendulum:running").at(-1).created_at;
   cfg.jobs = { 77: [{ name: "work (9)", status: "completed", conclusion: "cancelled", created_at: new Date(Date.parse(stint) + 10_000).toISOString() }] };
   const second = await tick(re);
   assert.deepEqual([second.vanished, second.relaunched], [[9], []], "its job was cancelled: the vanished Block");
 });
 
 test("a held vanished stage costs no Actions reads and one timeline read per tick", async () => {
-  const spend = [{ id: 900, user: SELF, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: `<!-- factory:9:progress:x -->\n<!-- factory:spend {"usd":5} -->` }];
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "factory:running"], since: 20 * MIN }], { spend });
+  const spend = [{ id: 900, user: SELF, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: `<!-- pendulum:9:progress:x -->\n<!-- pendulum:spend {"usd":5} -->` }];
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since: 20 * MIN }], { spend });
   const r = await tick(gh, { dailyUsd: 1 });
   assert.deepEqual([r.relaunched, r.vanished], [[], []]);
   assert.deepEqual(gh.reads.filter((p) => /^\/actions\/runs\/|created=|^\/issues\/7\/timeline/.test(p)).map((p) => p.replace(/\?.*/, "")), ["/issues/7/timeline"]);

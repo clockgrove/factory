@@ -15,7 +15,7 @@ import { EDITED_REASON, editedSincePlan, objectiveSha, planGate, planStateNow, r
 import { MIN_CONFIDENCE } from "../scripts/lib/triage.mjs";
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
-const SELF = "factory-app[bot]";
+const SELF = "pendulum-app[bot]";
 const L0 = "2026-11-15T10:00:00Z";
 const L1 = "2026-11-15T12:00:00Z";
 const SCRIPTS = join(import.meta.dirname, "..", "scripts");
@@ -30,8 +30,8 @@ function fakeDecider(verdict, confidence = 0.95, error = null) {
   return { asked, check: openEditCheck({ decider: { name: "fake", decide: async (input, question) => (asked.push({ input, question }), error ? { verdict: null, confidence: null, error } : { verdict, confidence }) } }) };
 }
 
-/** Factory's plan comment on issue 7 with `record`. */
-const planComment = (record, plan = "## Plan\n- [ ] item") => ({ id: 2, user: { login: SELF }, body: `<!-- factory:7:plan -->${planTextMarker(record)}\n${plan}`, created_at: L0 });
+/** Pendulum's plan comment on issue 7 with `record`. */
+const planComment = (record, plan = "## Plan\n- [ ] item") => ({ id: 2, user: { login: SELF }, body: `<!-- pendulum:7:plan -->${planTextMarker(record)}\n${plan}`, created_at: L0 });
 
 /** Permission reads: `kirk` and `dev` can push, anyone else cannot. */
 const permission = async (_r, login) => (["kirk", "dev"].includes(login) ? "write" : "read");
@@ -91,7 +91,7 @@ test("edit check: wording keeps the plan only at the confidence floor; any other
 });
 
 test("edit check: the plan's record keeps its text and verdicts, escaped so no text closes the comment, and fits GitHub's limit in bytes", () => {
-  const hostile = { title: "Objective -->", body: "<!-- x --> <script>", labels: ["factory:model:claude-opus-5-5"] };
+  const hostile = { title: "Objective -->", body: "<!-- x --> <script>", labels: ["pendulum:model:claude-opus-5-5"] };
   const rec = { sha256: objectiveSha(hostile.title, hostile.body, hostile.labels), label: L0, text: hostile, verdicts: { [B]: "wording", [A]: "requirement" } };
   const line = planTextMarker(rec);
   assert.equal(line.indexOf("-->"), line.length - 3, "the only `-->` ends the comment");
@@ -113,9 +113,9 @@ test("edit check: the plan's record keeps its text and verdicts, escaped so no t
   assert.equal(planTextOf(planTextMarker(wide, full.length)).verdicts, undefined);
   assert.deepEqual(planTextOf(planTextMarker(wide, full.length)).text, wide.text);
   assert.equal(COMMENT_MAX, 65_536);
-  assert.equal(recordRoom(7, "é"), COMMENT_MAX - Buffer.byteLength("<!-- factory:7:plan -->\né"));
+  assert.equal(recordRoom(7, "é"), COMMENT_MAX - Buffer.byteLength("<!-- pendulum:7:plan -->\né"));
   // A text or verdict of the wrong shape is left out.
-  assert.deepEqual(planTextOf(`<!-- factory:plan-text ${JSON.stringify({ sha256: A, label: null, text: { title: 1, body: "b", labels: [] }, verdicts: { [B]: "maybe", short: "wording" } })} -->`), { sha256: A, label: null });
+  assert.deepEqual(planTextOf(`<!-- pendulum:plan-text ${JSON.stringify({ sha256: A, label: null, text: { title: 1, body: "b", labels: [] }, verdicts: { [B]: "maybe", short: "wording" } })} -->`), { sha256: A, label: null });
 });
 
 test("edit check: a write of the plan keeps the verdicts another process stamped on the same text since this one read it", async () => {
@@ -136,8 +136,8 @@ test("edit check: a write of the plan keeps the verdicts another process stamped
   } finally {
     globalThis.fetch = real;
   }
-  assert.deepEqual(planTextOf(writes[0].split("\n")[0].slice("<!-- factory:7:plan -->".length)).verdicts, { [other]: "wording", [B]: "requirement" });
-  assert.equal(planTextOf(writes[1].split("\n")[0].slice("<!-- factory:7:plan -->".length)).verdicts, undefined, "another text's verdicts are not its own");
+  assert.deepEqual(planTextOf(writes[0].split("\n")[0].slice("<!-- pendulum:7:plan -->".length)).verdicts, { [other]: "wording", [B]: "requirement" });
+  assert.equal(planTextOf(writes[1].split("\n")[0].slice("<!-- pendulum:7:plan -->".length)).verdicts, undefined, "another text's verdicts are not its own");
 });
 
 for (const work of [true, false]) {
@@ -211,7 +211,7 @@ test("edit check: today's rule with no decider, no verdict, a record without its
 test("edit check: a harness, model or host label changed is a changed requirement, never asked; a vouched rename is judged", async () => {
   setSelf(SELF);
   const record = { sha256: A, label: L0, text: recordText(BEFORE) };
-  const model = "factory:model:claude-opus-5-5";
+  const model = "pendulum:model:claude-opus-5-5";
   const labelled = { ...BEFORE, labels: [model] };
   const cases = [
     ["a model label added", record, labelled],
@@ -246,7 +246,7 @@ test("edit check: every stage hands the edit check only text the trust check rea
   assert.ok(merge.indexOf("objectiveTrusted(") < merge.indexOf("judgedEdit("), "the merge pass judges only after its own trust check");
 });
 
-test("edit check: a session's `factory issue` and post-review judge on the gateway's check and write nothing", async () => {
+test("edit check: a session's `pendulum issue` and post-review judge on the gateway's check and write nothing", async () => {
   setSelf(SELF);
   const list = [planComment({ sha256: A, label: L0, text: recordText(BEFORE) })];
   const d = fakeDecider("wording");
@@ -254,7 +254,7 @@ test("edit check: a session's `factory issue` and post-review judge on the gatew
   assert.equal((await planStateNow(repo, 7, now, { token: "t" }, { planComment: async () => planOf(list, 7) }, d.check)).state, "same");
   assert.equal((await planStateNow(repo, 7, now, { token: "t" }, { planComment: async () => planOf(list, 7) })).state, "changed", "no decider: as before");
   const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
-  assert.equal((local.match(/planStateNow\([^\n]*\(\) => openEditCheck\(\{ inputs \}\)\)/g) || []).length, 3, "`factory issue`, deliver and post-review");
+  assert.equal((local.match(/planStateNow\([^\n]*\(\) => openEditCheck\(\{ inputs \}\)\)/g) || []).length, 3, "`pendulum issue`, deliver and post-review");
   // deliver: an edit the check keeps keeps the plan's own record (its text the baseline); else the text the session was given.
   assert.match(local, /kept\.state === "same" && kept\.record && kept\.record\.sha256 !== trusted\.sha \? \{ \.\.\.kept\.record, label: labeledAt \} : \{ sha256: trusted\.sha, label: labeledAt, text: recordText\(/);
   const judged = await planStateNow(repo, 7, now, { token: "t" }, { planComment: async () => planOf(list, 7) }, fakeDecider("wording").check);

@@ -7,7 +7,7 @@
 // anything else, and no decider, refuses it as before. The decision model sits behind the one decision interface
 // (decider.mjs, docs/ADAPTERS.md), with red-check triage's key and model setting, and its confidence floor (triage.mjs
 // confidenceFloor), never under MIN_CONFIDENCE: a lower `triage_min_confidence` cannot weaken this gate. This runs in
-// Factory's own process, never in a harness. The diff, the failure lines, the plan and the comments are the worker's,
+// Pendulum's own process, never in a harness. The diff, the failure lines, the plan and the comments are the worker's,
 // its CI's and reviewers' text: they go in delimited, as data the model is told not to follow.
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
@@ -33,7 +33,7 @@ export const FENCE_QUESTION = {
 
 /** The most characters of each part of one question's input. */
 export const INPUT_CAPS = Object.freeze({ diff: 32 * 1024, lead: 4000, plan: 6000, comments: 6000 });
-/** The decider's codes that are its vendor's outage (adapters/decider.mjs DECIDER_ERRORS): the Block's cause `outage`, any other `factory`. */
+/** The decider's codes that are its vendor's outage (adapters/decider.mjs DECIDER_ERRORS): the Block's cause `outage`, any other `pendulum`. */
 const OUTAGE_ERRORS = new Set(["unavailable", "rate_limited"]);
 
 const cut = (s, n) => {
@@ -65,9 +65,9 @@ export function fenceInput({ path, diff, lead = "", comments = [], plan = "" }, 
  * `route-off`), and judge lets nothing go. judge({path, diff, lead, comments, plan}) resolves {allow, why, told} and
  * never throws: `fix` at the floor (`min`, else confidenceFloor, at least MIN_CONFIDENCE) or more allows; `weakens`,
  * `unrelated` or `fix` under it does not, nor does a diff with no textual change (never asked), nor the model refusing
- * to answer (`refused`: the diff, the agent's text, can cause that, so it is the work's). `why` is Factory's record, with the model's confidence; `told` the same for the
+ * to answer (`refused`: the diff, the agent's text, can cause that, so it is the work's). `why` is Pendulum's record, with the model's confidence; `told` the same for the
  * worker, without it. Any other missing answer is `undecided`, with the Block's `cause` (`outage` for the vendor's
- * outage, else `factory`), and `limited` when the stage harness's usage limit stopped the question: the caller ends the
+ * outage, else `pendulum`), and `limited` when the stage harness's usage limit stopped the question: the caller ends the
  * stage on it (harness.mjs UsageLimitReached).
  */
 export function openFenceCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null, min = null } = {}) {
@@ -92,7 +92,7 @@ export function openFenceCheck({ inputs = {}, env = process.env, home = homedir(
     const limited = ask.limited?.() ?? null;
     const error = a?.error || "no_answer";
     const said = `the decision model (${model}) gave no answer (${error})`;
-    return { allow: false, undecided: true, cause: OUTAGE_ERRORS.has(error) && !limited ? "outage" : "factory", why: `${item.path}: ${said}`, told: `${item.path}: ${said}`, ...(limited ? { limited } : {}) };
+    return { allow: false, undecided: true, cause: OUTAGE_ERRORS.has(error) && !limited ? "outage" : "pendulum", why: `${item.path}: ${said}`, told: `${item.path}: ${said}`, ...(limited ? { limited } : {}) };
   };
   return { model, off: ask.off, judge, asked: () => ask.asked(), limited: () => ask.limited?.() ?? null };
 }

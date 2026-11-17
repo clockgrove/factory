@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+// pendulum run <issue> [--wait] | serve [--once] [--all] [--interval N] | review <pr> [--wait] | issue <issue> [--out FILE] | deliver <issue> [--out DIR] | post-review <pr> <findings.json> | handover <issue> [--push] [--app ID] | wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--timeout S] | hold list | hold release <account> [--repo O/R] | doctor [--json] [--verbose] | token set | --version
+// Local mode from a clone of the repository: the same worker and reviewer as the Action, on this machine, in its
+// sandboxes (docs/LOCAL.md). A thin front for plugin/scripts/local.mjs, which checks the command line (--help, -h, every
+// flag) before it does anything; Claude Code puts a plugin's bin/ on PATH.
+import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { constants } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const script = join(dirname(realpathSync(fileURLToPath(import.meta.url))), "..", "scripts", "local.mjs");
+const child = spawn(process.execPath, [script, ...process.argv.slice(2)], { stdio: "inherit" });
+// A signal to this front (a closed terminal, a parent session's teardown, kill) goes on to local.mjs, which pauses its
+// work, stops every stage and its harness, and exits; this front exits with it. Ctrl-C reaches both (one process
+// group): local.mjs takes one stop for the two.
+for (const s of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(s, () => {
+    try {
+      child.kill(s);
+    } catch {
+      // gone already
+    }
+  });
+}
+child.on("error", (e) => {
+  process.stderr.write(`pendulum: ${e.message}\n`);
+  process.exit(1);
+});
+child.on("exit", (code, sig) => process.exit(code ?? 128 + (constants.signals[sig] || 1)));

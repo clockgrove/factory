@@ -111,7 +111,7 @@ test("longWaitCheck: a private repository is told its long waits fall back to th
 test("dispatch deadlines: a stage's lease, a quota retry and the UTC day's turn, or one retry when today's spend is unread", async () => {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const now = Date.now();
-  const self = { login: "factory-app[bot]", type: "Bot" };
+  const self = { login: "pendulum-app[bot]", type: "Bot" };
   setSelf(self.login);
   const iss = (number, labels) => ({ number, state: "open", labels: labels.map((name) => ({ name })), body: "", updated_at: iso(now), user: { login: "maintainer" } });
   const record = (n, rec) => ({ id: 100 + n, user: self, body: `${marker(n, "sandbox")}\n${sandboxMarkerLine(rec)}`, updated_at: iso(now) });
@@ -121,8 +121,8 @@ test("dispatch deadlines: a stage's lease, a quota retry and the UTC day's turn,
     10: [record(10, { vendor: "vercel", stage: "work", state: "running", at: iso(now - min), leaseUntil, claim: "abc", launches: [] })],
     11: [record(11, { vendor: "vercel", stage: "work", state: "failed", at: iso(now - min), quota: { since: iso(now - 3 * min), tries: 1, retryAt }, launches: [] })],
   };
-  const open = [iss(10, ["factory:objective", "factory:running"]), iss(11, ["factory:objective"]), iss(12, ["factory:objective"])];
-  const spend = { id: 900, user: self, updated_at: iso(now), body: `<!-- factory:9:progress:x -->\n<!-- factory:spend {"usd":5} -->` };
+  const open = [iss(10, ["pendulum:objective", "pendulum:running"]), iss(11, ["pendulum:objective"]), iss(12, ["pendulum:objective"])];
+  const spend = { id: 900, user: self, updated_at: iso(now), body: `<!-- pendulum:9:progress:x -->\n<!-- pendulum:spend {"usd":5} -->` };
   const tick = async ({ spendFails = false } = {}) => {
     const realFetch = globalThis.fetch;
     const saved = process.env.GITHUB_API_URL;
@@ -134,13 +134,13 @@ test("dispatch deadlines: a stage's lease, a quota retry and the UTC day's turn,
       if (method === "GET" && u.pathname === "/repos/acme/app/issues") return json(u.searchParams.get("state") === "closed" ? [] : open);
       if (method === "GET" && u.pathname === "/repos/acme/app/issues/comments") return spendFails ? json({ message: "Server Error" }, 500) : json([spend]);
       if (method === "GET" && /\/issues\/(\d+)\/comments$/.test(u.pathname)) return json(comments[Number(/\/issues\/(\d+)\//.exec(u.pathname)[1])] || []);
-      if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 30 * min) }]);
+      if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "pendulum:running" }, created_at: iso(now - 30 * min) }]);
       if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
       if (method !== "GET") return json({}, 200);
       return json({ message: "Not Found" }, 404);
     };
     try {
-      return await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 3, dailyUsd: 1, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now) });
+      return await dispatch({ repo: "acme/app", objectiveLabel: "pendulum:objective", maxConcurrent: 3, dailyUsd: 1, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now) });
     } finally {
       globalThis.fetch = realFetch;
       if (saved === undefined) delete process.env.GITHUB_API_URL;
@@ -165,7 +165,7 @@ test("workflow template: the wake job sleeps to the dispatcher's deadline in no 
   const { renderWorkflow } = await import("../scripts/setup.mjs");
   const { parseYaml } = await import("../scripts/lib/yaml.mjs");
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality" };
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
   const action = parseYaml(readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8")).outputs;
   for (const v of [values, { ...values, sandbox: "vercel", default_branch: "main" }]) {
     const doc = parseYaml(renderWorkflow(template, v));
@@ -177,7 +177,7 @@ test("workflow template: the wake job sleeps to the dispatcher's deadline in no 
     assert.ok(Number(wake["timeout-minutes"]) * 60 > 21000, "the job outlives its longest sleep");
     const run = wake.steps[0].run;
     assert.match(run, /sleep 21000/);
-    assert.match(run, /gh workflow run factory\.yml -f wake="\$WAKE_KIND \$WAKE_AT"/);
+    assert.match(run, /gh workflow run pendulum\.yml -f wake="\$WAKE_KIND \$WAKE_AT"/);
     assert.match(wake.steps[0].env.GH_REPO, /github\.repository/);
     assert.ok(doc.on.workflow_dispatch.inputs.wake, "the tick says which deadline it slept to");
     for (const k of ["wake_at", "wake_kind"]) {
@@ -191,7 +191,7 @@ test("ownedTickCheck: an installed workflow without the dispatcher's own ticks i
   const { ownedTickCheck } = await import("../scripts/doctor.mjs");
   const { renderWorkflow } = await import("../scripts/setup.mjs");
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality" };
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
   const sandbox = { ...values, sandbox: "vercel", default_branch: "main" };
   for (const v of [values, sandbox]) assert.equal(ownedTickCheck(renderWorkflow(template, v), {}).status, "PASS");
   // A runner workflow rendered before: no closed issue tick, no wake job.
@@ -240,7 +240,7 @@ test("workflow template: the sweep and the image job each have a wake job that s
   const { renderWorkflow } = await import("../scripts/setup.mjs");
   const { parseYaml } = await import("../scripts/lib/yaml.mjs");
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality" };
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
   const doc = parseYaml(renderWorkflow(template, { ...values, sandbox: "vercel", default_branch: "main" }));
   for (const job of ["sweep", "image"]) {
     const wake = doc.jobs[`${job}-wake`];
@@ -251,7 +251,7 @@ test("workflow template: the sweep and the image job each have a wake job that s
     assert.deepEqual(wake.permissions, { actions: "write" });
     assert.ok(Number(wake["timeout-minutes"]) >= 20, "it outlives a sweep wait (about 16 minutes at most)");
     assert.ok(Number(wake["timeout-minutes"]) <= 30, "no long sleeper");
-    assert.match(wake.steps[0].run, /gh workflow run factory\.yml -f wake="\$WAKE_KIND \$WAKE_AT"/, "the tick carries its deadline");
+    assert.match(wake.steps[0].run, /gh workflow run pendulum\.yml -f wake="\$WAKE_KIND \$WAKE_AT"/, "the tick carries its deadline");
     for (const k of ["wake_at", "wake_kind"]) assert.match(doc.jobs[job].outputs[k], new RegExp(`steps\\.f\\.outputs\\.${k}`));
     assert.ok(doc.jobs[job].permissions.actions === "read", "the job token lists the armed wakes");
   }
@@ -282,10 +282,10 @@ test("a hop wake covers only up to when it ticks, not the deadline it is named f
 test("closedIssueTicks: a closed issue runs the dispatcher only when it was an Objective or blocks one by GitHub's count", async () => {
   const { closedIssueTicks } = await import("../scripts/dispatch.mjs");
   const closed = (issue) => ({ action: "closed", issue });
-  const opts = { objectiveLabel: "factory:objective" };
+  const opts = { objectiveLabel: "pendulum:objective" };
   assert.equal(closedIssueTicks("issues", { action: "labeled", issue: { number: 3 } }, opts), true);
   assert.equal(closedIssueTicks("schedule", {}, opts), true);
-  assert.equal(closedIssueTicks("issues", closed({ number: 3, labels: [{ name: "factory:objective" }] }), opts), true);
+  assert.equal(closedIssueTicks("issues", closed({ number: 3, labels: [{ name: "pendulum:objective" }] }), opts), true);
   assert.equal(closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 1, blocked_by: 0 } }), opts), true);
   // GitHub's count of 0 is exact: the dispatcher reads those dependencies, not body lines, so nothing waited on it (#417).
   assert.equal(closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 0, blocked_by: 0 } }), opts), false, "blocks nothing by GitHub's count: no run");
@@ -301,10 +301,10 @@ test("a vendor's transient start failures back off 2, 4, 8, 16, then every 30 mi
   for (const code of ["unavailable", "rate_limited", "timeout"]) assert.equal(startFailure({ code }), "retry", code);
   assert.equal(startFailure({ code: "quota" }), "quota");
   assert.equal(startFailure({ code: "auth" }), "block", "any other error Blocks at once");
-  // Its Block's cause: the vendor's plan quota after the wait is external (provider-quota); any other failed start is Factory's.
+  // Its Block's cause: the vendor's plan quota after the wait is external (provider-quota); any other failed start is Pendulum's.
   const { failedStartCause } = await import("../scripts/launch.mjs");
   assert.equal(failedStartCause(startFailure({ code: "quota" })), "provider-quota");
-  assert.equal(failedStartCause(startFailure({ code: "auth" })), "factory");
+  assert.equal(failedStartCause(startFailure({ code: "auth" })), "pendulum");
   assert.deepEqual([1, 2, 3, 4, 5, 6, 9].map(startBackoffMs), [2, 4, 8, 16, 30, 30, 30].map((m) => m * min));
   // An hour-long outage: eight transient failures in the stint, no Block, the next try 30 minutes after the last.
   const outage = { state: "failed", launches: [1, 3, 7, 15, 31, 61, 91, 121].map((m) => fail(m, "unavailable")) };
@@ -370,7 +370,7 @@ test("every launch attempt ends stored: a marker whose launch job ended and a cu
   // The launch job's limit is the workflow template's own.
   const { parseYaml } = await import("../scripts/lib/yaml.mjs");
   const { renderWorkflow } = await import("../scripts/setup.mjs");
-  const doc = parseYaml(renderWorkflow(readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8"), { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality", sandbox: "vercel", default_branch: "main" }));
+  const doc = parseYaml(renderWorkflow(readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8"), { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality", sandbox: "vercel", default_branch: "main" }));
   assert.equal(doc.jobs.launch["timeout-minutes"] * 60_000, LAUNCH_JOB_MS);
   assert.equal(doc.jobs.launch.name.replace("${{ matrix.issue }}", "7"), launchJobName(7));
 });
@@ -426,7 +426,7 @@ test("recordFailedStart writes under the record lock: a sweep's destroy in betwe
   const HEAD = marker(N, "sandbox");
   for (let seed = 1; seed <= 30; seed += 1) {
     const s = githubStore({ seed });
-    s.put(N, `${HEAD}\n${recordBody({ vendor: "vercel", id: "factory-old", stage: "work", state: "stopped", claim: "000000000000", at: at(0), launches: [] })}`);
+    s.put(N, `${HEAD}\n${recordBody({ vendor: "vercel", id: "pendulum-old", stage: "work", state: "stopped", claim: "000000000000", at: at(0), launches: [] })}`);
     const fast = { api: s.api, base: BASE, tries: 400, pauseMs: 0, readBackPauseMs: 0 };
     const sweep = writeSandboxRecord(REPO, N, {}, (cur) => ({ ...cur, id: null, destroyedAt: at(1) }), fast);
     const failure = recordFailedStart({ inputs: { sandbox: "vercel" }, eventName: "workflow_dispatch", runId: "9", repo: REPO, n: N, opts: {}, claim: null, base: BASE }, { stage: "work", error: { code: "unavailable" }, at: at(1), api: s.api, lockOpts: { tries: 400, pauseMs: 0, readBackPauseMs: 0 } });
@@ -444,7 +444,7 @@ test("dispatch: a vendor's refusals hold the route's new picks by what other Obj
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const now = Date.now();
   setSelf(BOT.login);
-  const iss = (number, running = true) => ({ number, state: "open", labels: [{ name: "factory:objective" }, ...(running ? [{ name: "factory:running" }] : [])], body: "", updated_at: iso(now), user: { login: "maintainer" } });
+  const iss = (number, running = true) => ({ number, state: "open", labels: [{ name: "pendulum:objective" }, ...(running ? [{ name: "pendulum:running" }] : [])], body: "", updated_at: iso(now), user: { login: "maintainer" } });
   const record = (n, launches, state = "failed") => [{ id: 100 + n, user: BOT, updated_at: iso(now), body: `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", state, at: iso(now - 60 * min), launches })}` }];
   const f = (ms, code) => ({ stage: "work", ok: false, at: iso(now - ms), code });
   // #20: the vendor refused its start 30 s ago: its retry waits 2 minutes. #22: three real failures: named at once, so
@@ -467,7 +467,7 @@ test("dispatch: a vendor's refusals hold the route's new picks by what other Obj
       if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : [iss(20), iss(22), iss(24), iss(26), ...(other ? [iss(28)] : []), iss(30, false), iss(32, false)]);
       if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues/comments`) return json([]);
       if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) return json(comments[n] || []);
-      if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json(since[n] ? [{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - since[n]) }] : []);
+      if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json(since[n] ? [{ event: "labeled", label: { name: "pendulum:running" }, created_at: iso(now - since[n]) }] : []);
       if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
       // #26's launch job, of dispatcher run 1: running for two minutes; #28's, of run 9, running for ten seconds.
       if (method === "GET" && u.pathname === `/repos/${REPO.full}/actions/runs/9/jobs`) return json({ total_count: 1, jobs: [{ id: 3, name: "launch (28)", status: "in_progress", run_attempt: 1, started_at: iso(now - 10_000) }] });
@@ -476,7 +476,7 @@ test("dispatch: a vendor's refusals hold the route's new picks by what other Obj
       return json({ message: "Not Found" }, 404);
     };
     try {
-      return { r: await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 10, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now), failedLaunch: 24, recordWrites: { api: s.api, base: BASE } }), s };
+      return { r: await dispatch({ repo: REPO.full, objectiveLabel: "pendulum:objective", maxConcurrent: 10, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now), failedLaunch: 24, recordWrites: { api: s.api, base: BASE } }), s };
     } finally {
       globalThis.fetch = realFetch;
       if (saved === undefined) delete process.env.GITHUB_API_URL;
@@ -517,7 +517,7 @@ test("dispatch: a starting marker is settled by its launch job as GitHub lists i
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const now = Date.now();
   setSelf(BOT.login);
-  const iss = (number) => ({ number, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:running" }], body: "", updated_at: iso(now), user: { login: "maintainer" } });
+  const iss = (number) => ({ number, state: "open", labels: [{ name: "pendulum:objective" }, { name: "pendulum:running" }], body: "", updated_at: iso(now), user: { login: "maintainer" } });
   // Each Running for two hours, named by a dispatcher an hour ago (its marker far past any fixed window):
   // #41's launch job still waits for a runner; #42's ran and ended without writing any outcome; #43's run cannot be read
   // (a 502). #44's dispatch job completed and its run goes on, but GitHub has not listed the launch matrix yet: still to
@@ -553,14 +553,14 @@ test("dispatch: a starting marker is settled by its launch job as GitHub lists i
     if (method === "GET" && runOnly) return runs[runOnly] ? json(runs[runOnly]) : json({ message: "Server Error" }, 502);
     // #45's read here is older than its record: its marker still pending.
     if (method === "GET" && n === 45 && /\/comments$/.test(u.pathname)) return json([{ id: 145, user: BOT, updated_at: iso(now), body: named(45, "75") }]);
-    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 2 * HOUR) }]);
+    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "pendulum:running" }, created_at: iso(now - 2 * HOUR) }]);
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
     if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) return json([{ id: 100 + n, user: BOT, updated_at: iso(now), body: s.bodyOf(n, marker(n, "sandbox")) }]);
     if (method !== "GET") return json({}, 200);
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 10, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now), recordWrites: { api: s.api, base: BASE } });
+    const r = await dispatch({ repo: REPO.full, objectiveLabel: "pendulum:objective", maxConcurrent: 10, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now), recordWrites: { api: s.api, base: BASE } });
     const kinds = (n) => r.deadlines.filter((d) => d.issue === n).map((d) => d.kind);
     // #41: still in flight an hour on: not named again and no strike; its own end ticks (no wake of its own).
     assert.ok(!r.relaunch.includes(41), "a launch waiting for a runner is not named again");
@@ -607,7 +607,7 @@ test("dispatch: a launch whose run stays unreadable past a day Blocks with one n
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const now = Date.now();
   setSelf(BOT.login);
-  const iss = (number) => ({ number, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:running" }], body: "", updated_at: iso(now), user: { login: "maintainer" } });
+  const iss = (number) => ({ number, state: "open", labels: [{ name: "pendulum:objective" }, { name: "pendulum:running" }], body: "", updated_at: iso(now), user: { login: "maintainer" } });
   // #48 and #49 Running 26 hours, named 25 hours ago: run 78's jobs answer 403; run 79 lists no launch job for #49 and
   // the run itself answers 403. #50, named an hour ago, its run 80's jobs answer 403 too: inside the day, in flight.
   const named = (n, run, ago) => `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", state: "named", at: iso(now - ago), launches: [{ stage: "work", event: "dispatch", ok: null, run, at: iso(now - ago) }] })}`;
@@ -628,7 +628,7 @@ test("dispatch: a launch whose run stays unreadable past a day Blocks with one n
     if (method === "GET" && /\/actions\/runs\/(78|80)\/jobs$/.test(u.pathname)) return json({ message: "Resource not accessible by integration" }, 403);
     if (method === "GET" && u.pathname.endsWith("/actions/runs/79/jobs")) return json({ total_count: 1, jobs: [{ id: 1, name: "dispatch", status: "completed" }] });
     if (method === "GET" && u.pathname.endsWith("/actions/runs/79")) return json({ message: "Resource not accessible by integration" }, 403);
-    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 26 * HOUR) }]);
+    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "pendulum:running" }, created_at: iso(now - 26 * HOUR) }]);
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
     if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) return json([{ id: 100 + n, user: BOT, updated_at: iso(now), body: s.bodyOf(n, marker(n, "sandbox")) }]);
     if (method === "POST" && /\/issues\/\d+\/comments$/.test(u.pathname)) {
@@ -640,7 +640,7 @@ test("dispatch: a launch whose run stays unreadable past a day Blocks with one n
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 10, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now), recordWrites: { api: s.api, base: BASE } });
+    const r = await dispatch({ repo: REPO.full, objectiveLabel: "pendulum:objective", maxConcurrent: 10, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now), recordWrites: { api: s.api, base: BASE } });
     for (const [n, read] of [[48, "run 78's jobs"], [49, "run 79"]]) {
       assert.ok(r.vanished.includes(n), `#${n} Blocked`);
       assert.ok(!r.relaunch.includes(n), `#${n} not named again`);
@@ -648,8 +648,8 @@ test("dispatch: a launch whose run stays unreadable past a day Blocks with one n
       const notes = posted.filter((p) => p.n === n);
       assert.equal(notes.length, 1, `#${n}: one notice`);
       assert.ok(notes[0].body.includes(`${read} could not be read (HTTP 403)`), notes[0].body);
-      assert.ok(notes[0].body.includes('<!-- factory:block {"cause":"factory"} -->'), notes[0].body);
-      assert.ok(labelled.some(([m, label]) => m === n && label === "factory:blocked"), `#${n} labelled Blocked`);
+      assert.ok(notes[0].body.includes('<!-- pendulum:block {"cause":"pendulum"} -->'), notes[0].body);
+      assert.ok(labelled.some(([m, label]) => m === n && label === "pendulum:blocked"), `#${n} labelled Blocked`);
     }
     // #50: an hour in, the same 403 says nothing yet: in flight, read again on a retry, no notice.
     assert.ok(!r.vanished.includes(50) && !r.relaunch.includes(50));
@@ -678,8 +678,8 @@ test("a started stage whose lease lapsed is no cut-off launch: its own end and t
   const started = { stage: "work", event: "issues", ok: true, run: "1", cue: "stint-1", at: iso(now - 59 * min) };
   // The merged record's `at` is the stage's last beat (15 minutes ago), long after the start; the claim is older.
   for (const rec of [
-    { vendor: "vercel", id: "factory-abc", stage: "work", state: "running", claim: "abcabcabcabc", at: iso(now - 15 * min), leaseUntil: iso(now - 5 * min), launches: [started] },
-    { vendor: "vercel", id: "factory-abc", stage: "work", state: "running", claim: "abcabcabcabc", run: "1", claimedAt: iso(now - 60 * min), at: iso(now - 15 * min), leaseUntil: iso(now - 5 * min), launches: [started] },
+    { vendor: "vercel", id: "pendulum-abc", stage: "work", state: "running", claim: "abcabcabcabc", at: iso(now - 15 * min), leaseUntil: iso(now - 5 * min), launches: [started] },
+    { vendor: "vercel", id: "pendulum-abc", stage: "work", state: "running", claim: "abcabcabcabc", run: "1", claimedAt: iso(now - 60 * min), at: iso(now - 15 * min), leaseUntil: iso(now - 5 * min), launches: [started] },
   ]) {
     const settled = settleStale(rec, now);
     assert.equal(settled.state, "running");
@@ -715,7 +715,7 @@ test("dispatch: the run that names a launch owns it: a wake when its launch job 
   const now = Date.now();
   setSelf(BOT.login);
   const s = githubStore({ seed: 3 });
-  const open = [{ number: 40, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:running" }], body: "", updated_at: iso(now), user: { login: "maintainer" } }];
+  const open = [{ number: 40, state: "open", labels: [{ name: "pendulum:objective" }, { name: "pendulum:running" }], body: "", updated_at: iso(now), user: { login: "maintainer" } }];
   const realFetch = globalThis.fetch;
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -724,14 +724,14 @@ test("dispatch: the run that names a launch owns it: a wake when its launch job 
     const method = init.method || "GET";
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : open);
-    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 30 * min) }]);
+    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "pendulum:running" }, created_at: iso(now - 30 * min) }]);
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
     if (method === "GET" && /comments/.test(u.pathname)) return json([]);
     if (method !== "GET") return json({}, 200);
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 3, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now), recordWrites: { api: s.api, base: BASE } });
+    const r = await dispatch({ repo: REPO.full, objectiveLabel: "pendulum:objective", maxConcurrent: 3, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now), recordWrites: { api: s.api, base: BASE } });
     assert.deepEqual(r.relaunch, [40]);
     const marked = sandboxRecordOf(s.bodyOf(40, marker(40, "sandbox"))).launches.at(-1);
     assert.equal(marked.ok, null);
@@ -743,8 +743,8 @@ test("dispatch: the run that names a launch owns it: a wake when its launch job 
     setSelf(null);
   }
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const doc = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality", sandbox: "vercel", default_branch: "main" }));
-  for (const job of ["launch", "launch-event"]) assert.match(doc.jobs[job].steps.find((x) => /gh workflow run factory\.yml/.test(x.run || "")).if, /exit == 'skipped'/, `${job}: a launch that started nothing ticks`);
+  const doc = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality", sandbox: "vercel", default_branch: "main" }));
+  for (const job of ["launch", "launch-event"]) assert.match(doc.jobs[job].steps.find((x) => /gh workflow run pendulum\.yml/.test(x.run || "")).if, /exit == 'skipped'/, `${job}: a launch that started nothing ticks`);
 });
 
 test("an orphan starting marker: none over a live claim, and a skipping launcher drops its own (#42)", async () => {

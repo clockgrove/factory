@@ -1,6 +1,6 @@
 // Dollars per Objective, with the unit and basis per harness (PLAN.md, "Job
 // one and how 0.6 is measured"). The input is the usage artifact the worker
-// job uploads (`factory-usage-<issue>`, and `factory-usage-<issue>-review`
+// job uploads (`pendulum-usage-<issue>`, and `pendulum-usage-<issue>-review`
 // for the reviewer pass): its normalized `result.json` (action/scripts/lib/
 // usage.mjs: {harness, model, usd, tokens, basis, started, ended, runs,
 // passes, exit, reason, credential, turns, priceTableDate}). A raw Claude
@@ -90,7 +90,7 @@ export function fromClaudeResult(result, model = null) {
 
 /**
  * The prompt cache across an Objective's artifacts (the usage record's `cache`, session.mjs writeUsage): the TTLs
- * Factory asked for, and each run that followed a CI wait with its first request's cache writes. A/B the
+ * Pendulum asked for, and each run that followed a CI wait with its first request's cache writes. A/B the
  * `prompt_cache_ttl` setting on these: it is kept only if `afterWait[].first.written` drops.
  */
 export function cacheOf(records) {
@@ -225,7 +225,7 @@ export function parseUsageText(text, { model = null } = {}) {
 }
 
 /**
- * The stage a usage record came from, by its artifact's name: the review job's `factory-usage-<n>-review`, a local
+ * The stage a usage record came from, by its artifact's name: the review job's `pendulum-usage-<n>-review`, a local
  * loop's `usage-review-<stamp>/`, a spend line's `spend/review/<id>`; any other name is the work stage's.
  */
 export function stageOf(rec) {
@@ -258,10 +258,10 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       continue;
     }
     if (rec.source === "spend") {
-      // Factory's spend line (no usage artifact): the worker's own dollars, whatever the harness; never repriced.
+      // Pendulum's spend line (no usage artifact): the worker's own dollars, whatever the harness; never repriced.
       part.usd = num(rec.usd);
-      part.basis = rec.basis ?? "factory:spend line";
-      // A stage that did not finish, or whose harness reported no dollars: what Factory last knew, a lower bound.
+      part.basis = rec.basis ?? "pendulum:spend line";
+      // A stage that did not finish, or whose harness reported no dollars: what Pendulum last knew, a lower bound.
       if (rec.usdLowerBound) out.usdLowerBound = true;
       // A pass priced live at the table's dearest rates (a model with no price row): an estimate, not a lower bound.
       if (rec.usdUpperBound) out.usdEstimated = true;
@@ -331,7 +331,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     case "copilot":
       out.unit = "usd";
       out.basis = priced.length ? `${partial}harness-reported: ${out.aiCredits === null ? "?" : Math.round(out.aiCredits * 1000) / 1000} AI credits, ${out.premiumRequests ?? "?"} premium request(s); dollars at each run's $/credit${out.usdLowerBound ? "; a lower bound (AI credits partial)" : ""}` : unmetered.map((p) => p.basis).join("; ");
-      out.note = priced.length ? null : "This Copilot artifact carries no AI credits (written before Factory priced them, or the run reported none); attribute from the org's billing data by this row's time window, or leave unmetered";
+      out.note = priced.length ? null : "This Copilot artifact carries no AI credits (written before Pendulum priced them, or the run reported none); attribute from the org's billing data by this row's time window, or leave unmetered";
       break;
     default:
       out.unit = "usd";
@@ -342,7 +342,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     out.unit = "usd";
     out.priceTableDate = null;
     out.note = null;
-    out.basis = priced.length ? `${partial}factory:spend lines in ${parts.length} progress comment(s), the worker's own pricing (no usage artifact)${out.usdLowerBound ? "; a lower bound (a stage did not finish, or its harness reported no dollars)" : ""}${out.usdEstimated ? "; includes an estimate at the price table's dearest rates (a model with no price row)" : ""}` : "unmetered: no usage artifact and no factory:spend line";
+    out.basis = priced.length ? `${partial}pendulum:spend lines in ${parts.length} progress comment(s), the worker's own pricing (no usage artifact)${out.usdLowerBound ? "; a lower bound (a stage did not finish, or its harness reported no dollars)" : ""}${out.usdEstimated ? "; includes an estimate at the price table's dearest rates (a model with no price row)" : ""}` : "unmetered: no usage artifact and no pendulum:spend line";
   } else if (out.parts.length > 1) out.basis += `; ${out.parts.length} artifacts summed (worker + review)`;
   // The relayed worker key's dollars are inside the figure already: said, so no reader adds them again.
   if (out.workerKeyUsd > 0 && out.usd !== null) out.basis += `; includes ${out.workerKeyUsd} USD through a relayed worker key`;

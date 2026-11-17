@@ -1,4 +1,4 @@
-// The finding check (#368): after a review stage's answer pass, each finding Factory answered (its own reviewer's, a named
+// The finding check (#368): after a review stage's answer pass, each finding Pendulum answered (its own reviewer's, a named
 // reviewer's, code scanning's) is judged by the decision model: does the answer resolve it, fixed in the code, rebutted
 // with an acceptance entry or repository rule that holds, or settled by a maintainer's recorded decision (#474)? Only a
 // yes resolves the finding's thread, which is what marks it answered (session.mjs unaddressedReviewComments, github.mjs
@@ -6,7 +6,7 @@
 // for a check again in the next stage, with no worker pass (session.mjs openFindingsExit). A person's answer is never
 // judged here.
 // The decision model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md), with red-check triage's
-// key and model setting (triage.mjs). This runs in Factory's own process, never in a harness. Only the typed choice
+// key and model setting (triage.mjs). This runs in Pendulum's own process, never in a harness. Only the typed choice
 // reaches code; the finding, the reply, the diff, the rules and the decisions are data between random-tag markers,
 // never instructions. The decisions are the caller's trusted ones only (session.mjs objectiveDecisions: authors with
 // write access), so a comment by anyone else never settles a finding, whatever it says.
@@ -153,7 +153,7 @@ export function changeOf(diff, path) {
  */
 export function findingInput({ repo, prNumber, finding, reply, diff, issue = "", rules = "", decisions = [] }, tag = randomBytes(8).toString("hex")) {
   const data = (title, text) => [title, `<<<BEGIN ${tag}>>>`, String(text).trimEnd(), `<<<END ${tag}>>>`, ""];
-  const by = finding.from ? `${finding.from}, a reviewer outside Factory` : "Factory's reviewer";
+  const by = finding.from ? `${finding.from}, a reviewer outside Pendulum` : "Pendulum's reviewer";
   const { own, other } = changeOf(diff, finding.path);
   const entries = acceptanceEntries(issue);
   return redactSecrets(
@@ -213,9 +213,9 @@ export function openFindingCheck({ inputs = {}, env = process.env, home = homedi
 
 /**
  * Judge each finding of `findings` that has an answer (`repliesText`: the answer pass's replies.json, as postReplies read
- * it; or, for a check again, Factory's earlier answers) and resolve those the check reads as resolved (`resolves`): a
- * line comment's thread (GraphQL resolveReviewThread), a finding in the review body by a comment under Factory's
- * resolved marker (`<!-- factory:<issue>:resolved:<id> -->`). `diffOf(from)` gives git's diff of what the pull request
+ * it; or, for a check again, Pendulum's earlier answers) and resolve those the check reads as resolved (`resolves`): a
+ * line comment's thread (GraphQL resolveReviewThread), a finding in the review body by a comment under Pendulum's
+ * resolved marker (`<!-- pendulum:<issue>:resolved:<id> -->`). `diffOf(from)` gives git's diff of what the pull request
  * changed from `from` to its head (session.mjs answerDiff), `from` the commit a finding was raised on (`raisedOn`, else
  * `since`). `decisions`: the maintainers' recorded decisions the check may read a finding as settled by, only as
  * session.mjs objectiveDecisions returns them (authors with write access); never a comment whose author is not checked.
@@ -272,7 +272,7 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
   for (const f of answered.filter((x) => yes.has(String(x.id)))) {
     try {
       if (isBodyFindingId(f.id)) {
-        await rest(`repos/${repo.full}/issues/${prNumber}/comments`, { ...opts, method: "POST", body: { body: `${marker(issue, "resolved", f.id)}\nFactory: the answer to review finding ${f.id} (in the review body) resolves it.` } });
+        await rest(`repos/${repo.full}/issues/${prNumber}/comments`, { ...opts, method: "POST", body: { body: `${marker(issue, "resolved", f.id)}\nPendulum: the answer to review finding ${f.id} (in the review body) resolves it.` } });
       } else {
         const t = threads.get(String(f.id));
         if (!t) continue;

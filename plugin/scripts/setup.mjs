@@ -27,7 +27,8 @@
 //               browser posts it to GitHub, GitHub redirects back to a listener on 127.0.0.1, the code becomes the
 //               App's id and key, saved as the PENDULUM_APP_ID and PENDULUM_APP_PRIVATE_KEY secrets with `gh secret set`
 //               on stdin and the id as the repository variable PENDULUM_APP_ID (`gh variable set`; `pendulum report`
-//               reads it), and the browser goes on to the install page. Only when named: `all` leaves it out.
+//               reads it) and as its local copy (~/.config/pendulum/repos/<owner>/<name>.json, lib/app-id.mjs), and the
+//               browser goes on to the install page. Only when named: `all` leaves it out.
 //   labels      pendulum:objective, the state labels, P0..P2
 //   project     the Pendulum Project (v2) with Status = Queued, Running, In review, Blocked, Done (GraphQL)
 //   protection  the "pendulum" ruleset on the default branch: merge queue, required checks,
@@ -48,6 +49,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { appPermissionsText, mintInstallationToken } from "./lib/app-token.mjs";
 import { APP_SECRETS, appName, appPreflight, createAppFromManifest, manifestPermissions, saveAppIdVariable, webOrigin } from "./lib/app-manifest.mjs";
+import { saveLocalAppId } from "./lib/app-id.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { cloneRepo } from "./lib/local.mjs";
 import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, projectTitle, repoOf, requiredChecks, rest } from "./lib/github.mjs";
@@ -850,7 +852,7 @@ export async function latestRelease() {
 export function appPlan(repoData, secretScope = "repo") {
   const userAccount = repoData.owner?.type === "User";
   const perms = Object.entries(manifestPermissions({ userAccount })).map(([k, v]) => `${k}: ${v}`).join(", ");
-  return `create the GitHub App "${appName(repoData.name)}" for ${repoData.owner.login} from a pre-filled definition in your browser (permissions ${perms}; nothing else, never workflows; webhook inactive), save its id and private key as ${secretScope === "org" ? `${repoData.owner.login}'s organization secrets, shared with ${repoData.name} only,` : "the repository's secrets"} ${APP_SECRETS.id} and ${APP_SECRETS.key} with gh secret set (never printed or written to a file) and its id as the repository variable ${APP_SECRETS.id} (gh variable set), then open its install page; it first checks your gh login can save them and refuses to overwrite ones already there without --replace`;
+  return `create the GitHub App "${appName(repoData.name)}" for ${repoData.owner.login} from a pre-filled definition in your browser (permissions ${perms}; nothing else, never workflows; webhook inactive), save its id and private key as ${secretScope === "org" ? `${repoData.owner.login}'s organization secrets, shared with ${repoData.name} only,` : "the repository's secrets"} ${APP_SECRETS.id} and ${APP_SECRETS.key} with gh secret set (never printed or written to a file) and its id as the repository variable ${APP_SECRETS.id} (gh variable set) and as a local copy for \`pendulum report\` (~/.config/pendulum/repos/${repoData.full_name}.json), then open its install page; it first checks your gh login can save them and refuses to overwrite ones already there without --replace`;
 }
 
 /**
@@ -867,7 +869,15 @@ async function applyApp(repo, repoData, secretScope, { replace = false } = {}) {
   // The id beside the secret, as the repository variable `pendulum report` reads: a failure leaves the App and its secrets.
   const unsaved = await saveAppIdVariable(repo, app.appId, { env });
   const variable = unsaved ? `; the repository variable ${APP_SECRETS.id} was not saved (${unsaved}): save it with \`gh variable set ${APP_SECRETS.id} --repo ${repo.full} --body ${app.appId}\`` : ` and its id as the repository variable ${APP_SECRETS.id}`;
-  return `created the App ${app.slug} (id ${app.appId}) for ${repoData.owner.login} and saved ${app.saved.join(" and ")} as ${secretScope === "org" ? "organization" : "repository"} secrets${variable}; install it on ${repoData.full_name} only (Only select repositories): ${app.installUrl}`;
+  // And as its readable local copy beside local mode's token (lib/app-id.mjs), which `pendulum report` takes when the
+  // variable cannot be read: a failure leaves the rest.
+  let copy;
+  try {
+    copy = `; its id's local copy for \`pendulum report\` is ${saveLocalAppId(repo.full, app.appId).file}`;
+  } catch (e) {
+    copy = `; its id's local copy for \`pendulum report\` was not saved (${e.message})`;
+  }
+  return `created the App ${app.slug} (id ${app.appId}) for ${repoData.owner.login} and saved ${app.saved.join(" and ")} as ${secretScope === "org" ? "organization" : "repository"} secrets${variable}${copy}; install it on ${repoData.full_name} only (Only select repositories): ${app.installUrl}`;
 }
 
 /**

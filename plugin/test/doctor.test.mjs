@@ -476,6 +476,13 @@ test("doctor: an unknown flag exits 64 naming it before any check; --checkout an
       assert.equal(got.lockfile, "PASS", `${flag}: the clone's lockfile is found`);
       assert.equal(got["workflow settings"], undefined, `${flag}: the settings are the clone's workflow's, not GitHub's`);
     }
+    // A Node.js repository with no lockfile: a warning, until the workflow sets the fix it names, install: none (#514).
+    const bare = clone(wf("v0.9.32"));
+    execFileSync("git", ["init", "-q", bare]);
+    writeFileSync(join(bare, "package.json"), "{}\n");
+    assert.equal((await rows("--checkout", bare)).lockfile, "WARN", "no lockfile and no install setting");
+    writeFileSync(join(bare, ".github", "workflows", "pendulum.yml"), `env:\n  PENDULUM_INSTALL: none\n${wf("v0.9.32")}`);
+    assert.equal((await rows("--checkout", bare)).lockfile, "PASS", "install: none clears it");
     const here = await rows();
     assert.equal(here.repository, "WARN", "without one, doctor checks the directory it runs in, which is no clone");
     assert.equal(here.lockfile, undefined);

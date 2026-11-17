@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlink
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { autoInstalls, installCommand, installDeps, installTools } from "../scripts/lib/checkout.mjs";
+import { autoInstalls, installChoice, installCommand, installDeps, installTools } from "../scripts/lib/checkout.mjs";
 import { installEnd } from "../scripts/lib/continue.mjs";
 import { repositoryChecks } from "../scripts/doctor.mjs";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
@@ -143,4 +143,18 @@ test("doctor: the lockfile row warns for each program the automatic install runs
   writeFileSync(join(f.bin, "cargo"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   assert.equal((await row({})).status, "PASS");
   assert.equal((await row({ PENDULUM_INSTALL: "npm ci" })).detail, "npm ci", "a given command is listed as given");
+});
+
+test("doctor: install: none passes the lockfile row as installation turned off by choice; no lockfile and no setting still warns (#514)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "install-none-"));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "app", version: "1.0.0" }));
+  execFileSync("git", ["init", "-q", dir]);
+  const row = async (settings) => (await repositoryChecks({ inputs: resolveInputs({ env: settings }), checkout: dir, env: process.env })).find((c) => c.name === "lockfile");
+  assert.deepEqual(await row({}), { name: "lockfile", status: "WARN", detail: "no lockfile recognised", fix: "set install: <command> or install: none" });
+  assert.deepEqual(await row({ PENDULUM_INSTALL: "none" }), { name: "lockfile", status: "PASS", detail: "installation is turned off by choice (install: none)", fix: "" });
+  assert.deepEqual(await row({ PENDULUM_INSTALL: "make deps" }), { name: "lockfile", status: "PASS", detail: "make deps", fix: "" });
+  // The stages still install nothing for either: `none` and no lockfile differ only in their source.
+  assert.deepEqual(installChoice(dir, "none"), { source: "off", command: null, installs: [] });
+  assert.deepEqual(installChoice(dir, "auto"), { source: "unrecognised", command: null, installs: [] });
+  assert.equal(installCommand(dir, "none"), installCommand(dir, "auto"));
 });

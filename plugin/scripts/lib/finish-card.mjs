@@ -11,9 +11,9 @@
 import { DRAFT_LABEL } from "./stop.mjs";
 import { DEFAULTS } from "./inputs.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
-import { RUNNING_LABEL, STATE_LABELS, bodyFindings, isPlaceholder, isSelf, marker, pushAuthor, rebaseCostOf, selfLogin, spendParts } from "./logic.mjs";
+import { RUNNING_LABEL, STATE_LABELS, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
-import { BILLING_WORDS, addBilling, billingRead, passRead, unknownRuns } from "./usage.mjs";
+import { BILLING_WORDS, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
 
 const OBJECTIVE = DEFAULTS.objective_label;
 const ms = (at) => (typeof at === "number" ? at : at ? Date.parse(at) : NaN);
@@ -102,12 +102,20 @@ export function gateChecks(checks, mergedAt, required = []) {
 }
 
 /**
+ * The stage a usage record came from, by its artifact's name (as bench cost.mjs stageOf reads it): the review job's
+ * `pendulum-usage-<n>-review` is the review stage's, `pendulum-usage-<n>` the work stage's; a record with no artifact
+ * name is no stage's.
+ */
+export const artifactStage = (name) => (typeof name !== "string" ? null : /(^|[-/])review([-/]|$)/.test(name) ? "review" : "work");
+
+/**
  * An Objective's stages from its issue's comments and its stages' usage records (pure), each counted once: the card's
  * rows and the Objective's spend that max_objective_usd compares (objectiveSpend).
  *  comments   the issue's comments: each stage's progress comment (logic.mjs progress marker, its harness, spend and
  *             rebase lines) and each sandbox stage's vendor comment
- *  records    the stages' usage records (session.mjs writeUsage: the Actions artifacts), each naming its progress
- *             comment's key (`progressRun`), read for a stage whose comment has no spend line
+ *  records    the stages' usage records (objectiveRecords: the Actions artifacts), read for a stage whose comment has no
+ *             spend line: a record counts only for the comment of its own stage (artifactStage of its `artifact`) whose
+ *             key is its `progressRun`
  *  mine       whose comments are Pendulum's (pendulumOwn; logic.mjs isSelf by default): only their markers count
  *  pushed     whose comments are by someone who can push or came through another App (finishData): a progress or vendor
  *             comment of theirs that is not Pendulum's is a stage of unknown cost
@@ -115,8 +123,8 @@ export function gateChecks(checks, mergedAt, required = []) {
  *  partOf     the split part a stage started at a time worked on (1 for an Objective that never split)
  * Returns {stages, sandbox}: each stage {stage (work or review), rebase (a send-back's rebase line), conflict (that
  * line's conflict pass), part, at, start, end, model, usd (known dollars, null for none), unknown (runs of unknown cost),
- * byBilling, byPass (usage.mjs passRead: its dollars by pass kind, {} when its record names none)}, in time order; and
- * the cloud sandbox's own cost {usd, unknown}, or null.
+ * byBilling, byPass (usage.mjs passRead: its dollars by pass kind, {} when its record names none), rerun (usage.mjs
+ * rerunRead, or null), judgeOnly}, in time order; and the cloud sandbox's own cost {usd, unknown}, or null.
  */
 export function objectiveStages({ issue: n, comments = [], records = [], mine = isSelf, pushed = (c) => pushAuthor(c) || throughApp(c), inRun = () => true, partOf = () => 1 }) {
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
@@ -127,7 +135,14 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
   // Each stage: its progress comment, from its first write (the stage's start) to its last (its exit line).
   const progress = new RegExp(`^<!-- pendulum:${n}:progress:(work|review):([A-Za-z0-9:-]{1,100}) -->`);
   const vendorHead = new RegExp(`^<!-- pendulum:${n}:vendor:((?:work|review):[A-Za-z0-9:-]{1,100}) -->`);
-  const byRun = new Map(records.filter((r) => r && typeof r.progressRun === "string").map((r) => [r.progressRun, r]));
+  // A record by its own stage and key; two for one (a run's attempts both uploaded) name none, never the last one read.
+  const byRun = new Map();
+  for (const r of records) {
+    const stage = artifactStage(r?.artifact);
+    if (!stage || typeof r.progressRun !== "string") continue;
+    const k = `${stage}:${r.progressRun}`;
+    byRun.set(k, byRun.has(k) ? null : r);
+  }
   const endOf = (c) => (c.updated_at && ms(c.updated_at) >= ms(c.created_at) ? c.updated_at : c.created_at);
   const stages = [];
   const keys = new Set();
@@ -136,16 +151,17 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     if (!m || !inRun(c.created_at)) continue;
     const [, stage, key] = m;
     keys.add(`${stage}:${key}`);
-    // Its dollars: the spend line it carries (local, cloud sandbox), else its usage record; with neither, unknown.
+    // Its dollars: the spend line it carries (every route's), else its usage record; with neither, unknown.
     const line = spendParts(c.body);
-    const rec = line ? null : byRun.get(key);
+    const rec = line ? null : byRun.get(`${stage}:${key}`) || null;
     let usd = line ? (line.modelUsd ?? line.usd) : rec ? num(rec.usd) : null;
     const unknown = line ? (line.usdUnknown ?? 0) : rec ? unknownRuns(rec) : 1;
     // A record with no run of unknown cost (no harness pass ran) is a known $0; one with unknown runs and no dollars is unknown.
     if (!unknown && usd === null) usd = 0;
     if (unknown && !usd) usd = null;
     const rebase = rebaseCostOf(c.body);
-    stages.push({ stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? modelId(rec?.model), usd, unknown, byBilling: billingRead(line ? line.usdByBilling : rec?.usdByBilling), byPass: passRead(line ? line.usdByPass : rec?.usdByPass) });
+    const from = line ?? rec ?? {};
+    stages.push({ stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? modelId(rec?.model), usd, unknown, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true });
   }
   // The sandbox stages' vendor comments, matched to their stage's progress comment by key whenever they were written.
   // One with no progress comment (a stage that never wrote one) is a stage of its own, with the model dollars the vendor
@@ -159,13 +175,13 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     if (keys.has(key)) continue;
     const usd = parts.modelUsd;
     const unknown = Math.max((parts.usdUnknown ?? 0) - (parts.vendorUsd === null ? 1 : 0), usd === null ? 1 : 0);
-    stages.push({ stage: key.startsWith("review:") ? "review" : "work", rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: null, end: null, model: null, usd: unknown && !usd ? null : usd, unknown, byBilling: billingRead(parts.usdByBilling), byPass: {} });
+    stages.push({ stage: key.startsWith("review:") ? "review" : "work", rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: null, end: null, model: null, usd: unknown && !usd ? null : usd, unknown, byBilling: billingRead(parts.usdByBilling), byPass: {}, rerun: null, judgeOnly: false });
   }
   for (const c of vouched) {
     const m = progress.exec(c.body || "");
     if (m && inRun(c.created_at)) {
       keys.add(`${m[1]}:${m[2]}`);
-      stages.push({ stage: m[1], rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: null, usd: null, unknown: 1, byBilling: {}, byPass: {} });
+      stages.push({ stage: m[1], rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: null, usd: null, unknown: 1, byBilling: {}, byPass: {}, rerun: null, judgeOnly: false });
     } else if (vendorHead.test(c.body || "") && inRun(c.created_at)) sandbox = { usd: sandbox?.usd ?? 0, unknown: (sandbox?.unknown ?? 0) + 1 };
   }
   stages.sort((a, b) => ms(a.at) - ms(b.at));
@@ -173,56 +189,67 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
 }
 
 /**
- * The Objective's known spend across all its stages and parts (pure), as max_objective_usd compares it: the known
- * dollars of every stage objectiveStages counts and of the cloud sandbox, whenever written (`usd`), and the runs of
- * unknown cost beside them (`unknown`), which add nothing to it. `stages` counts the stages read.
+ * Where an Objective's run starts over (#517): the latest of its restart record (`pendulum:restart`, logic.mjs
+ * restartedAt) and its reopening (the timeline's `reopened` event), or null. The finish card's clock starts at the
+ * first label at or after it, and max_objective_usd counts from it.
  */
-export function objectiveSpend({ issue, comments = [], records = [], mine = isSelf, pushed }) {
-  const { stages, sandbox } = objectiveStages({ issue, comments, records, mine, ...(pushed ? { pushed } : {}) });
-  const usd = stages.reduce((s, x) => s + (x.usd ?? 0), 0) + (sandbox?.usd ?? 0);
-  return { usd: Math.round(usd * 1e6) / 1e6, unknown: stages.reduce((s, x) => s + (x.unknown || 0), 0) + (sandbox?.unknown ?? 0), byBilling: addBilling(...stages.map((s) => s.byBilling)), stages: stages.length };
+export function objectiveWindow(comments = [], timeline = []) {
+  const times = [restartedAt(comments), ...(timeline || []).filter((e) => e?.event === "reopened").map((e) => e.created_at)].filter((t) => Number.isFinite(ms(t)));
+  return times.length ? new Date(Math.max(...times.map(ms))).toISOString() : null;
+}
+
+/** The progress comment keys of Pendulum's stages that wrote no spend line, by stage: the usage artifacts to read for them. */
+export function unlinedStages(comments, n, mine = isSelf) {
+  const progress = new RegExp(`^<!-- pendulum:${n}:progress:(work|review):([A-Za-z0-9:-]{1,100}) -->`);
+  return comments.filter((c) => mine(c) && !spendParts(c.body)).map((c) => progress.exec(c.body || "")).filter(Boolean).map((m) => ({ stage: m[1], key: m[2] }));
 }
 
 /**
- * What of an Objective's spend Pendulum's own churn caused (#517), set on each such stage as `churn`, from recorded
- * fields only, never inferred; any other stage stays the work the issue asked for:
- * - `rebase`: a send-back's rebase after other PRs merged (its rebase line);
- * - `block`: a re-run after a Block: the first stage after a Blocked notice of Pendulum's, when it is the same kind of
- *   stage (work or review) as the last one started before the notice and that one spent something (known dollars or a
- *   run of unknown cost), so it runs again what had run; after a stage that ran no pass (a Block at a gate before any)
- *   the next stage is the work itself;
- * - `judge`: the first review stage after a finding check that left answers with no verdict and took no answer round
- *   (the answer-rounds record, session.mjs openFindingsExit): a review run again only to judge answers already made.
- * A stage takes the first of these that names it. `own` is Pendulum's comments, oldest first; `inRun` as finishData's.
+ * The Objective's known spend since `since` (objectiveWindow; null: all of it), as max_objective_usd compares it
+ * (pure): the known dollars of every stage objectiveStages counts and of the cloud sandbox (`stagesUsd`), and of the
+ * decision calls made outside any stage that Pendulum's comments on the issue record (logic.mjs decisionSpendEntries,
+ * `decisionsUsd`: every line of a comment written since, and a line of an older comment dated after the day it starts),
+ * together `usd`; the runs of unknown cost beside them (`unknown`), which add nothing to it. `stages` counts the stages.
  */
-export function markChurn(stages, { issue: n, own = [], inRun = () => true }) {
-  for (const s of stages) s.churn = s.kind === "rebase" ? "rebase" : null;
-  const next = (t, ok = () => true) => stages.find((s) => ms(s.at) > t && ok(s));
-  const sort = (s) => (s.kind === "review" ? "review" : "work");
-  const blocked = marker(n, "blocked", "").replace(/ -->$/, ":");
-  for (const c of own) {
-    if (!(c.body || "").startsWith(blocked) || !inRun(c.created_at)) continue;
-    const t = ms(c.created_at);
-    const before = stages.filter((s) => ms(s.at) < t).at(-1);
-    const s = next(t);
-    if (s && before && !s.churn && sort(s) === sort(before) && ((before.usd ?? 0) > 0 || before.unknown > 0)) s.churn = "block";
-  }
-  const head = `<!-- pendulum:${n}:answer-rounds-record `;
-  for (const c of own) {
-    if (!(c.body || "").startsWith(marker(n, "answer-rounds"))) continue;
-    const line = (c.body || "").split("\n").find((l) => l.startsWith(head) && l.endsWith(" -->"));
-    let rec = null;
-    try {
-      rec = line ? JSON.parse(line.slice(head.length, -4)) : null;
-    } catch {
-      rec = null;
+export function objectiveSpend({ issue, comments = [], records = [], mine = isSelf, pushed, since = null }) {
+  const inRun = (at) => !since || ms(at) >= ms(since);
+  const { stages, sandbox } = objectiveStages({ issue, comments, records, mine, inRun, ...(pushed ? { pushed } : {}) });
+  const stagesUsd = stages.reduce((s, x) => s + (x.usd ?? 0), 0) + (sandbox?.usd ?? 0);
+  const day = since ? new Date(ms(since)).toISOString().slice(0, 10) : null;
+  const lines = comments.filter((c) => mine(c) && /^<!-- pendulum:\d+:/.test(c.body || "")).flatMap((c) => decisionSpendEntries(c.body).filter((e) => !since || inRun(c.created_at) || e.date > day));
+  const decisionsUsd = lines.reduce((s, e) => s + e.usd, 0);
+  const round = (v) => Math.round(v * 1e6) / 1e6;
+  return {
+    usd: round(stagesUsd + decisionsUsd),
+    stagesUsd: round(stagesUsd),
+    decisionsUsd: round(decisionsUsd),
+    unknown: stages.reduce((s, x) => s + (x.unknown || 0), 0) + (sandbox?.unknown ?? 0) + lines.reduce((s, e) => s + (e.usdUnknown ?? 0), 0),
+    byBilling: addBilling(...stages.map((s) => s.byBilling), lines.length ? { api: round(decisionsUsd) } : {}),
+    stages: stages.length,
+  };
+}
+
+/**
+ * What of each stage Pendulum's own churn caused (#517), as `churn` (a list), from what the stage's own records say,
+ * never inferred; anything else stays the work the issue asked for:
+ * - `rebase-conflict` / `rebase-clean`, the whole stage: a send-back's rebase after other PRs merged (its rebase line);
+ * - `catch-up`, its `conflict` passes: the catch-up pass a work stage runs when the default branch changed a workflow
+ *   during the run and the branch conflicts with it (worker.mjs catchConflict), caused by another merge;
+ * - `block`, the pass kinds its `rerun` record says it ran again after a Block;
+ * - `judge`, all of it but its answer and fix passes: a review stage that records it was started only to judge answers
+ *   already made (`judgeOnly`, review.mjs: checkState's judgeOnly on the record's own PR since the last re-entry).
+ */
+export function markChurn(stages) {
+  for (const s of stages) {
+    s.churn = [];
+    if (s.kind === "rebase") {
+      s.churn.push({ row: s.conflict ? "rebase-conflict" : "rebase-clean", whole: true });
+      continue;
     }
-    const rounds = new Set(Array.isArray(rec?.rounds) ? rec.rounds.filter((t) => typeof t === "string") : []);
-    for (const x of Array.isArray(rec?.checks) ? rec.checks : []) {
-      if (typeof x?.at !== "string" || !Array.isArray(x.ids) || !x.ids.length || rounds.has(x.at) || !inRun(x.at)) continue;
-      const s = next(ms(x.at), (y) => y.kind === "review");
-      if (s && !s.churn) s.churn = "judge";
-    }
+    if (s.byPass?.conflict) s.churn.push({ row: "catch-up", kinds: ["conflict"] });
+    const repeated = (s.rerun?.repeated || []).filter((k) => k !== "conflict");
+    if (repeated.length) s.churn.push({ row: "block", kinds: repeated });
+    if (s.judgeOnly && s.kind === "review") s.churn.push({ row: "judge", remainder: true });
   }
   return stages;
 }
@@ -250,7 +277,8 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
   if (!merged.length) return null;
   const last = merged.at(-1).pr;
   const mergedAt = last.merged_at;
-  const started = labelTime(issue, timeline, label) ?? merged[0].pr.created_at;
+  // The clock: the first label at or after the run's last start over (a restart or a reopen), max_objective_usd's window too.
+  const started = labelTime(issue, timeline, label, objectiveWindow(comments.filter((c) => mine(c)), timeline)) ?? merged[0].pr.created_at;
   const inRun = (at) => ms(at) >= ms(started) && ms(at) <= ms(mergedAt);
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
   // Which merged part a stage worked on: the parts merged before it started (a split Objective's PRs merge in order).
@@ -268,7 +296,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     delete s.stage;
     delete s.rebase;
   }
-  markChurn(stages, { issue: n, own, inRun });
+  markChurn(stages);
 
   // The merge queue: each entry of a merged PR, from its addition to its removal (a drop) or the merge (the queue's own
   // removal of the PR it merged, stamped at the merge's second or the one before).
@@ -583,68 +611,89 @@ function costTable(d, t, rows) {
   return [`| Stage | Time | ${one ? `Cost (${one})` : "Cost"} |`, "| --- | ---: | ---: |", ...lines, `| **Total** | **${durationText(t.wall)}** | **${costText(t.usd, t.unknown)}${t.usd > 0 && !one ? billingWords(t.usd, t.byBilling) : ""}** |`].join("\n");
 }
 
-/** The pass kinds' and stages' words in the breakdown (usage.mjs PASS_KINDS), in its order. */
-const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answer passes", fix: "Fix passes", conflict: "Conflict passes" });
+/** The pass kinds' and stages' words in the breakdown (usage.mjs PASS_KINDS less `conflict`, which is churn), in its order. */
+const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answer passes", fix: "Fix passes" });
 /** The churn the breakdown names apart (markChurn), in its order. */
-const CHURN = Object.freeze({ "rebase-conflict": "Conflict rebases after other PRs merged", "rebase-clean": "Clean rebases after other PRs merged", judge: "Reviews run again only to judge answers already made", block: "Re-runs after a Block" });
+const CHURN = Object.freeze({
+  "rebase-conflict": "Conflict rebases after other PRs merged",
+  "rebase-clean": "Clean rebases after other PRs merged",
+  "catch-up": "Catch-up passes after the default branch changed a workflow",
+  judge: "Reviews run again only to judge answers already made",
+  block: "Passes run again after a Block",
+});
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 /**
  * Where the dollars went (#517), from the stages' records only (pure): `asked`, the work the issue asked for, per split
  * part and per kind (each stage's dollars by pass kind, usage.mjs usdByPass, with the rest under its stage's own kind,
- * work or review; a stage whose record names no pass kind, or whose kinds do not fit inside its own figure, stays whole
- * under its own kind); `churn`, the stages Pendulum's own churn caused (markChurn), whole, by what caused them, with how
- * many; and the cloud sandbox's own cost, a row of its own. Each row {name, usd (null: none known), unknown, byBilling,
- * stages?, cents}; the rows' cents add up to the total's. `shown` says whether it adds to the stage table: a split
- * Objective, any churn, or any answer, fix or conflict pass.
+ * work or review); `churn`, what Pendulum's own churn caused (markChurn: a whole stage, some of its pass kinds, or all
+ * of it but its answer and fix passes), by what caused it, with how many stages it came from; and the cloud sandbox's
+ * own cost, a row of its own. A stage whose kinds do not fit inside its own figure, or whose figure is unknown, cannot
+ * be split exactly: it stays whole, under its churn when the whole stage is churn, else under its own kind. Each row
+ * {name, usd (null: none known), unknown, byBilling, stages?, cents}; the rows' cents add up to the total's. `shown`
+ * says whether it adds to the stage table: a split Objective, any churn, or any answer or fix pass.
  */
 export function spendBreakdown(d) {
   const asked = new Map();
   const churn = new Map();
-  const add = (map, key, base, { usd, unknown = 0, byBilling = {} }, stage = false) => {
-    const r = map.get(key) ?? { ...base, usd: 0, known: false, unknown: 0, byBilling: {}, stages: 0 };
+  const add = (map, key, base, { usd, unknown = 0, byBilling = {} }, stage = null) => {
+    const r = map.get(key) ?? { ...base, usd: 0, known: false, unknown: 0, byBilling: {}, from: new Set() };
     if (usd !== null && usd !== undefined) {
       r.usd = round6(r.usd + usd);
       r.known = true;
     }
     r.unknown += unknown || 0;
     r.byBilling = addBilling(r.byBilling, byBilling);
-    if (stage) r.stages += 1;
+    if (stage) r.from.add(stage);
     map.set(key, r);
   };
   for (const s of d.stages) {
-    if (s.churn) {
-      add(churn, s.churn === "rebase" ? `rebase-${s.conflict ? "conflict" : "clean"}` : s.churn, {}, s, true);
-      continue;
-    }
     const own = s.kind === "review" ? "review" : "work";
+    const items = s.churn || [];
+    const whole = items.find((i) => i.whole);
     const kinds = Object.entries(s.byPass || {});
-    const fits = s.usd !== null && kinds.length > 0 && kinds.reduce((n, [, p]) => n + p.usd, 0) <= s.usd + 1e-6 && kinds.reduce((n, [, p]) => n + (p.usdUnknown ?? 0), 0) <= s.unknown;
-    if (!fits) {
-      add(asked, `${s.part}:${own}`, { part: s.part, what: own }, s, true);
+    const fits = s.usd !== null && kinds.reduce((n, [, p]) => n + p.usd, 0) <= s.usd + 1e-6 && kinds.reduce((n, [, p]) => n + (p.usdUnknown ?? 0), 0) <= s.unknown;
+    const remainder = items.find((i) => i.remainder);
+    // A whole stage of churn; or one that cannot be split: its churn row when all of it is churn (a judge-only review
+    // that ran no pass of a kind), else its own kind.
+    if (whole || !fits) {
+      const row = whole ?? (remainder && !kinds.length ? remainder : null);
+      if (row) add(churn, row.row, {}, s, s);
+      else add(asked, `${s.part}:${own}`, { part: s.part, what: own }, s, s);
       continue;
     }
+    const churnOf = new Map(items.filter((i) => i.kinds).flatMap((i) => i.kinds.map((k) => [k, i.row])));
     const left = { usd: s.usd, unknown: s.unknown, byBilling: { ...s.byBilling } };
     for (const [kind, p] of kinds) {
       const unknown = p.usdUnknown ?? 0;
-      add(asked, `${s.part}:${kind}`, { part: s.part, what: kind }, { usd: unknown && !p.usd ? null : p.usd, unknown, byBilling: p.usdByBilling });
+      const part = { usd: unknown && !p.usd ? null : p.usd, unknown, byBilling: p.usdByBilling };
+      const row = churnOf.get(kind) ?? (remainder && kind !== "answer" && kind !== "fix" ? remainder.row : null);
+      if (row) add(churn, row, {}, part, s);
+      else add(asked, `${s.part}:${kind}`, { part: s.part, what: kind }, part);
       left.usd = round6(left.usd - p.usd);
       left.unknown -= unknown;
       for (const [k, v] of Object.entries(p.usdByBilling || {})) left.byBilling[k] = round6((left.byBilling[k] ?? 0) - v);
     }
     left.byBilling = Object.fromEntries(Object.entries(left.byBilling).filter(([, v]) => v > 0));
-    if (left.usd > 0 || left.unknown > 0) add(asked, `${s.part}:${own}`, { part: s.part, what: own }, { ...left, usd: Math.max(0, left.usd) });
+    if (left.usd > 0 || left.unknown > 0 || !kinds.length) {
+      if (remainder) add(churn, remainder.row, {}, { ...left, usd: Math.max(0, left.usd) }, s);
+      else add(asked, `${s.part}:${own}`, { part: s.part, what: own }, { ...left, usd: Math.max(0, left.usd) });
+    }
   }
   const order = Object.keys(ASKED);
   const parts = d.prs.length > 1 || d.stages.some((s) => s.part > 1);
-  const done = (r) => ({ ...r, usd: r.known ? r.usd : r.unknown ? null : 0 });
-  const askedRows = [...asked.values()].sort((a, b) => a.part - b.part || order.indexOf(a.what) - order.indexOf(b.what)).map((r) => done({ ...r, name: parts ? `Part ${r.part}: ${ASKED[r.what].toLowerCase()}` : ASKED[r.what] }));
+  const done = (r) => {
+    const { known, from, ...row } = r;
+    return { ...row, usd: known ? r.usd : r.unknown ? null : 0, ...(from ? { stages: from.size } : {}) };
+  };
+  const word = (what) => ASKED[what] ?? ASKED.work;
+  const askedRows = [...asked.values()].sort((a, b) => a.part - b.part || order.indexOf(a.what) - order.indexOf(b.what)).map((r) => done({ ...r, name: parts ? `Part ${r.part}: ${word(r.what).toLowerCase()}` : word(r.what) }));
   if (d.sandbox) askedRows.push({ name: "Cloud sandbox, every stage", usd: d.sandbox.unknown && !d.sandbox.usd ? null : d.sandbox.usd, unknown: d.sandbox.unknown, byBilling: {} });
   const churnRows = Object.keys(CHURN).filter((k) => churn.has(k)).map((k) => done({ ...churn.get(k), name: CHURN[k] }));
   const c = centsOf([...askedRows, ...churnRows].map((r) => r.usd));
   askedRows.forEach((r, i) => (r.cents = c[i]));
   churnRows.forEach((r, i) => (r.cents = c[askedRows.length + i]));
-  return { asked: askedRows, churn: churnRows, shown: parts || churnRows.length > 0 || askedRows.some((r) => ["answer", "fix", "conflict"].includes(r.what)) };
+  return { asked: askedRows, churn: churnRows, shown: parts || churnRows.length > 0 || askedRows.some((r) => r.what === "answer" || r.what === "fix") };
 }
 
 /** The breakdown's tables (spendBreakdown): the work the issue asked for, then the churn apart, and where each item comes from. */
@@ -653,7 +702,7 @@ function breakdownTables(b, t) {
   const head = one ? `Cost (${one})` : "Cost";
   const out = [[`| What the issue asked for | ${head} |`, "| --- | ---: |", ...b.asked.map((r) => `| ${r.name} | ${costCell(r, one)} |`)].join("\n")];
   if (b.churn.length) out.push([`| Churn Pendulum caused | Stages | ${head} |`, "| --- | ---: | ---: |", ...b.churn.map((r) => `| ${r.name} | ${r.stages} | ${costCell(r, one)} |`)].join("\n"));
-  out.push("<sub>Each item comes from a record, never a guess. A stage is in the part after the PRs merged before it started; answer and fix passes are the passes a stage's spend record names by kind. Churn is a send-back's rebase (its rebase line), a stage that runs again what had run before one of Pendulum's Blocked notices (the first stage after it, of the same kind as the last one before it, which had spent something), and a review started again only to judge answers the finding check gave no verdict on (its answer-rounds record). Anything else stays in its stage, as that stage.</sub>");
+  out.push("<sub>Each item comes from a stage's own record, never a guess. A stage is in the part after the PRs merged before it started; its passes are split by the kinds its spend record names. Churn is a send-back's rebase (its rebase line), a catch-up pass after the default branch changed a workflow, the passes a stage records it ran again after a Block, and a review that records it was started only to judge answers already made (all of it but its answer and fix passes). Anything else stays in its stage, as that stage.</sub>");
   return out;
 }
 
@@ -738,23 +787,31 @@ export const FINISH_RETRY_MS = 24 * 3600_000;
 export const finishMarker = (n) => marker(n, "finish");
 
 /**
- * The usage records of an Objective's Actions stages: its `pendulum-usage-<n>` and `pendulum-usage-<n>-review`
- * artifacts (the job token's actions: read; a token that may not read them reads none). An artifact that cannot be
- * downloaded is no record: its stage shows as unknown. `download(artifact)` reads one's result.json (github.mjs
- * downloadArtifactResult).
+ * The usage records of an Objective's stages that wrote no spend line (`want`, unlinedStages: each {stage, key}): of
+ * its `pendulum-usage-<n>` (work) and `pendulum-usage-<n>-review` artifacts (the job token's actions: read; a token that
+ * may not read them reads none), only those of a stage asked for whose workflow run is the stage's own, its id the
+ * progress key's run (`<run id>` or `<run id>-<attempt>`), and only a run of this repository on this repository's own
+ * code: a run whose head repository is another (a fork's pull request, which can upload any artifact under any name) or
+ * that names none is never read. Each record carries its artifact's name, so it counts only for its own stage
+ * (artifactStage). An artifact that cannot be downloaded is no record: its stage shows as unknown. `download(artifact)`
+ * reads one's result.json (github.mjs downloadArtifactResult). Nothing is read when no stage is asked for.
  */
-export async function objectiveRecords(repo, n, { token, download }) {
+export async function objectiveRecords(repo, n, { token, download, want = [] }) {
   const out = [];
-  for (const name of [`pendulum-usage-${n}`, `pendulum-usage-${n}-review`]) {
+  for (const [stage, name] of [["work", `pendulum-usage-${n}`], ["review", `pendulum-usage-${n}-review`]]) {
+    const runs = new Set(want.filter((w) => w.stage === stage).map((w) => /^(\d{1,20})(?:-\d{1,3})?$/.exec(w.key)?.[1]).filter(Boolean).map(Number));
+    if (!runs.size) continue;
     // A token that may not read artifacts (403, 404) reads none; any other failure throws, for a later tick to read again.
     const page = await rest(`repos/${repo.full}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=100`, { token }).catch((e) => {
       if (e?.status === 403 || e?.status === 404) return null;
       throw e;
     });
     for (const a of page?.artifacts || []) {
-      if (a.expired || !Number.isSafeInteger(a.workflow_run?.id)) continue;
+      const run = a.workflow_run;
+      if (a.expired || a.name !== name || !Number.isSafeInteger(run?.id) || !runs.has(run.id)) continue;
+      if (!Number.isSafeInteger(run.repository_id) || run.head_repository_id !== run.repository_id) continue;
       const rec = await download(a).catch(() => null);
-      if (rec && typeof rec === "object") out.push(rec);
+      if (rec && typeof rec === "object") out.push({ ...rec, artifact: name });
     }
   }
   return out;
@@ -768,7 +825,7 @@ export async function objectiveRecords(repo, n, { token, download }) {
  * under a person's login), the merged PR's body gets the headline and badges at its top first, read just before it is
  * written; a refusal of that write (not a passing failure) leaves the PR as it is and the card is still posted.
  * Returns "posted", "had" (posted before), or why none is due: "not merged", "blocked", "no self" (Pendulum's own login
- * unknown, so no marker can be trusted). `records(n)`: the usage records of its Actions stages (objectiveRecords), read
+ * unknown, so no marker can be trusted). `records(n, want)`: the usage records of its stages with no spend line (objectiveRecords), read
  * only when a stage has no spend line. A failed read or write throws.
  */
 export async function postFinishCard(repo, issue, opts, { records = async () => [], label = OBJECTIVE, prBody = true, appId = null, log = () => {} } = {}) {
@@ -787,7 +844,7 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
   // Pendulum's own comments only (pendulumOwn): its login here, or its App by id.
   const mine = pendulumOwn(appId);
   if (comments.some((c) => mine(c) && (c.body || "").startsWith(finishMarker(n)))) return "had";
-  const started = labelTime(issue, timeline, label);
+  const started = labelTime(issue, timeline, label, objectiveWindow(comments.filter((c) => mine(c)), timeline));
   // The Objective's merged PRs since its clock (a split Objective's parts), oldest first, each read whole.
   const parts = prs.filter((p) => !started || ms(p.merged_at) >= ms(started)).sort((a, b) => ms(a.merged_at) - ms(b.merged_at));
   const pulls = [];
@@ -805,10 +862,9 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
     if (transientError(e)) throw e;
     return [];
   });
-  // The usage artifacts only when a stage has no spend line of its own to read.
-  const progress = new RegExp(`^<!-- pendulum:${n}:progress:(?:work|review):`);
-  const unlined = comments.some((c) => mine(c) && progress.test(c.body || "") && ms(c.created_at) >= ms(started) && !spendParts(c.body));
-  const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: unlined ? await records(n) : [], label, mine });
+  // The usage artifacts of the stages with no spend line of their own to read, and only theirs.
+  const unlined = unlinedStages(comments.filter((c) => ms(c.created_at) >= ms(started)), n, mine);
+  const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: unlined.length ? await records(n, unlined) : [], label, mine });
   if (!d) return "not merged";
   if (prBody) {
     const now = await getPr(repo, last.pr.number, opts);

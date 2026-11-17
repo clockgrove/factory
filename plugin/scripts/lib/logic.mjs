@@ -4,7 +4,7 @@
 import { parseToml } from "./toml.mjs";
 import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, passRead, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
+import { BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, passRead, rerunRead, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
 
 /** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
@@ -2782,14 +2782,16 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * runs of unknown cost (`usdUnknown`, `usdUnknownWhy`: usage.mjs UNKNOWN_WHY), never a figure for them.
  * `workerKeyUsd`: the relayed key's share, already in `usd`. `usdByBilling`: the known dollars by what they are (usage.mjs
  * BILLING), and `billing`, the kind its harness passes share, so the daily sum and the scorecard say how they are billed.
- * `usdByPass`: its known dollars by pass kind (usage.mjs usdByPass), which the finish card breaks the stage down by. `limitPaused`: the stage ended paused on its harness's
+ * `usdByPass`: its known dollars by pass kind (usage.mjs usdByPass), which the finish card breaks the stage down by;
+ * `rerun` (usage.mjs rerunRead) and `judgeOnly`: what the stage records it ran again, the card's churn. `limitPaused`: the stage ended paused on its harness's
  * usage limit (local mode), or waiting to go on on another account (GitHub Actions and the cloud sandbox, #268), which
  * the scorecard counts per account (#266).
  */
 export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
   const byPass = passRead(usage?.usdByPass);
-  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
+  const rerun = rerunRead(usage?.rerun);
+  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
@@ -2818,7 +2820,8 @@ export function spendOf(body) {
  * and `vendorUsd` (the sandbox's, booked by the launcher at the stage's end; null when the vendor reported none), and
  * the runs of unknown cost in it (`usdUnknown`, `usdUnknownWhy`; absent for none) and its known dollars by billing
  * (`usdByBilling`, usage.mjs BILLING; absent when the line names none) and by pass kind (`usdByPass`, usage.mjs passRead;
- * absent when it names none). Null when the body has no spend line.
+ * absent when it names none), and what the stage ran again (`rerun`, usage.mjs rerunRead; `judgeOnly`, a review stage
+ * started only to judge answers already made). Null when the body has no spend line.
  */
 export function spendParts(body) {
   const m = SPEND.exec(body || "");
@@ -2827,7 +2830,8 @@ export function spendParts(body) {
     const r = JSON.parse(m[1]);
     const n = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
     const byPass = passRead(r?.usdByPass);
-    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...billingParts(r), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}) };
+    const rerun = rerunRead(r?.rerun);
+    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...billingParts(r), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(r?.judgeOnly === true ? { judgeOnly: true } : {}) };
   } catch {
     return null;
   }

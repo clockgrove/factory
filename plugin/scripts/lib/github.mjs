@@ -1625,8 +1625,8 @@ const USAGE_DOWNLOADS = 8;
  * Pendulum or someone who can push, as `{usd, unknown, byBilling}` (logic.mjs spendOf and decisionSpendOf: the known
  * dollars, the runs of unknown cost, the dollars by billing; a decision call's are `api`, billed to the gateway key).
  * The comments read are those updated since the start of the day before, so a line written just after midnight still
- * counts on the day it names. Actions stages write no progress spend line, so nothing here is counted twice with the
- * artifacts.
+ * counts on the day it names. Every stage writes its spend line here and marks its usage artifact `spendInProgress`, so
+ * nothing here is counted twice with the artifacts.
  */
 export async function localSpendToday(repo, { dateIso = new Date().toISOString().slice(0, 10), token } = {}) {
   const since = new Date(Date.parse(`${dateIso}T00:00:00Z`) - 86_400_000).toISOString().replace(/\.\d{3}Z$/, "Z");

@@ -33,7 +33,7 @@ import { allowAgentEnv } from "./lib/agent.mjs";
 import { routeInputs, stageMoves } from "./lib/accounts.mjs";
 import { routeLimits } from "./lib/route-holds.mjs";
 import { accountGate, authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
-import { stageCapGate } from "./lib/objective-cap.mjs";
+import { stageStart } from "./lib/objective-cap.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
 import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
@@ -805,6 +805,12 @@ async function main() {
   // finish saves it and every other session this stage ran (the reviewer's own), so the review's spend can be checked.
   const session = { id: null, canResume: true };
   let reentry = null;
+  // What this stage runs again (#517), its own record: the Block it is the first stage after (objective-cap.mjs
+  // rerunAfter; a review runs its reviewer once per PR, so it names no pass as run again), and whether it was started
+  // only to judge answers already made (checkState judgeOnly on the PR's answer-rounds record since the last re-entry).
+  let afterBlock = null;
+  let judgeOnly = false;
+  const rerunRecord = () => (afterBlock ? { afterBlock, repeated: [] } : null);
   // The harness and model labels this Objective runs on (objective-trust.mjs choiceGate), recorded with its usage.
   let chosenLabels = [];
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
@@ -837,7 +843,7 @@ async function main() {
     await flushDecisionSpend(repo, token, { role: "review" });
     let usage;
     try {
-      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, usageLimit, reentry, workerKey, credentialBasis: "see worker", billing: credentialBilling, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, usageLimit, reentry, rerun: rerunRecord(), judgeOnly, workerKey, credentialBasis: "see worker", billing: credentialBilling, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Pendulum's temp directory (its TMPDIR).
       dropOwned(tmp.pendulum);
@@ -847,7 +853,7 @@ async function main() {
     if (limits && exit === "blocked" && usage.limitRefused) await limits.spent(usage.limitRefused).catch((e) => log(`the account's guess could not be written (${String(e?.message || e).slice(0, 120)})`));
     // The provider's quota reading for the account, kept on the holds issue for automatic account choice (#391).
     if (limits && (usage.quota || servedSilent(usage))) await limits.reading(usage.quota ?? { harness: inputs.harness, silent: true }, { warmUntil: usage.cacheWarmUntil ?? null }).catch((e) => log(`the account's quota reading could not be written (${String(e?.message || e).slice(0, 120)})`));
-    // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
+    // Every stage, on every route, writes its spend line: what daily_usd, the finish card and max_objective_usd count.
     // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
     if (spendInProgress()) {
       const line = stageSpendLine(usage);
@@ -962,7 +968,7 @@ async function main() {
     const secrets = [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
-    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", billing: credentialBilling, reentry, workerKey: relay ? relay.totals() : null });
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", billing: credentialBilling, reentry, rerun: rerunRecord(), judgeOnly, workerKey: relay ? relay.totals() : null });
     progress.flushNow();
   };
   const stopNow = async (cause) => {
@@ -1039,9 +1045,11 @@ async function main() {
     await finish("blocked", block.reason);
     return;
   }
-  // The Objective-wide dollar cap (lib/objective-cap.mjs, max_objective_usd): its known spend across every stage and part
-  // at or past it, the review starts nothing and the Objective Blocks naming the cap and the total.
-  const capped = await stageCapGate({ inputs, repo, issue, pr, opts: token, apply: applyExit, before: dropLabel, stage: "review", self: `review:${progress.runId}` });
+  // The stage's start read (lib/objective-cap.mjs stageStart): whether it is the first stage after a Block, and the
+  // Objective-wide dollar cap (max_objective_usd): its known spend at or past it, the review starts nothing and the
+  // Objective Blocks naming the cap and the total.
+  const capped = await stageStart({ inputs, repo, issue, pr, opts: token, apply: applyExit, before: dropLabel, stage: "review", self: `review:${progress.runId}` });
+  afterBlock = capped.afterBlock;
   if (!capped.ok) {
     log(capped.reason);
     await finish("blocked", capped.reason);
@@ -1658,6 +1666,7 @@ async function main() {
   // A stage started only to judge them (no answer round: checkState judgeOnly) gives the worker none of them, so a gateway
   // failure never buys an answer pass past the rounds; one read as not resolved waits for the round the exit takes.
   const lastCheck = findingCheck.judge && listedOpen.some((c) => c.earlier) ? checkState(await readAnswerRounds(repo, { issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel }, token).catch(() => null)) : { unjudged: [] };
+  judgeOnly = lastCheck.judgeOnly === true;
   const again = listedOpen.filter((c) => c.earlier && lastCheck.unjudged.some((id) => String(id) === String(c.id)));
   if (again.length) {
     await progress(`finding check: judging again ${again.length} answer(s) the last stage got no verdict on`);

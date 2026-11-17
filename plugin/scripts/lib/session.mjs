@@ -86,7 +86,7 @@ import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { stageAccountName } from "./choice.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, BILLING, addBilling, stageBilling } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, rerunRead, BILLING, addBilling, stageBilling } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
@@ -2033,7 +2033,7 @@ export function gatewayDecisionFields(records) {
   return { gatewayDecisionUsd: priced.length ? Math.round(priced.reduce((s, r) => s + Math.max(0, r.usd), 0) * 1e6) / 1e6 : null, gatewayDecisionCalls: recs.reduce((s, r) => s + (Number(r.calls) || 0), 0) };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false, rerun = null, judgeOnly = false }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
   // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
@@ -2106,6 +2106,10 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // labels), each with its runs of unknown cost and billing: what the finish card breaks the stage down by (#517). The
     // rest of `usd` (decision calls, the exit record, the relay's spend outside every pass) is the stage's own.
     ...((byPass) => (Object.keys(byPass).length ? { usdByPass: byPass } : {}))(usdByPass(records || [], billing)),
+    // What the stage ran again (#517), its own record: the Block it is the first stage after and the pass kinds it ran
+    // again (usage.mjs rerunRead), and a review stage started only to judge answers already made (review.mjs judgeOnly).
+    ...((r) => (r ? { rerun: r } : {}))(rerunRead(rerun)),
+    ...(judgeOnly === true ? { judgeOnly: true } : {}),
     turns: merged.turns ?? null,
     cache: cacheSummary(records),
     // Copilot: the premium requests and AI credits the stage used (the dollars are the credits at copilot_credit_usd).

@@ -256,6 +256,18 @@ export function usdByPass(records, billing) {
   );
 }
 
+/**
+ * A stage's own record of what it ran again after a Block (#517), as result.json and the spend line carry it (`rerun`):
+ * `afterBlock`, the time of the Pendulum Blocked notice it is the first stage after (no other stage of the Objective
+ * started between), and `repeated`, the pass kinds (PASS_KINDS) it ran again of what had run before that notice: the
+ * work stage's own prompt (`work`) when it ran in a fresh session over the PR an earlier stage made. Read back: null for
+ * none or a broken one.
+ */
+export function rerunRead(v) {
+  if (!v || typeof v !== "object" || typeof v.afterBlock !== "string" || !Number.isFinite(Date.parse(v.afterBlock))) return null;
+  return { afterBlock: v.afterBlock, repeated: Array.isArray(v.repeated) ? [...new Set(v.repeated.filter((k) => PASS_KINDS.includes(k)))] : [] };
+}
+
 /** A `usdByPass` read back from a stored record or line: its PASS_KINDS at finite non-negative dollars; {} for none or a broken one. */
 export function passRead(v) {
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};

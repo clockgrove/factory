@@ -12,7 +12,7 @@
 import { backend } from "./backend.mjs";
 import { githubNow, rest } from "./github.mjs";
 import { BLOCK_CAUSES } from "./logic.mjs";
-import { grantsWrite, parseYaml, workflowEvents } from "./yaml.mjs";
+import { parseYaml, workflowEvents, writeGrants } from "./yaml.mjs";
 
 /** A workflow file in .github/workflows, by its file name: what GitHub's workflow dispatch takes. */
 const WORKFLOW_FILE = /^[A-Za-z0-9._-]+\.ya?ml$/;
@@ -74,14 +74,19 @@ export function legsLine({ workflow, names, sha, runs = [] }) {
 /**
  * Why `doc` (the named workflow, parsed) cannot be dispatched for the legs, or null: no `workflow_dispatch` trigger, or a
  * token that can write. A dispatched run runs the branch tip's copy of the workflow on the branch's code, so a
- * `permissions:` that grants write (contents, pull-requests, issues or actions; yaml.mjs grantsWrite), at the top or on a
- * job, would hand the branch's code a token that writes. Unset permissions take the repository's default workflow token,
- * which doctor's own row requires to be read-only.
+ * `permissions:` that grants write (any scope at `write`, `write-all`, or any value but `read`, `none`, `read-all` and
+ * `{}`; yaml.mjs writeGrants), at the top or on a job, would hand the branch's code a token that writes; the problem
+ * names each grant. Unset permissions take the repository's default workflow token, which doctor's own row requires
+ * to be read-only.
  */
 export function workflowProblem(doc, workflow) {
   if (!workflowEvents(doc).includes("workflow_dispatch")) return `.github/workflows/${workflow} has no workflow_dispatch trigger, so Pendulum cannot run it on a branch`;
-  const writes = [...(grantsWrite(doc?.permissions) === true ? ["its top-level permissions"] : []), ...Object.entries(doc?.jobs || {}).filter(([, job]) => grantsWrite(job?.permissions) === true).map(([name]) => `job ${name}`)];
-  if (writes.length) return `.github/workflows/${workflow} grants write (${writes.join(", ")}), and a dispatched run would run the branch's code with that token`;
+  const top = writeGrants(doc?.permissions) || [];
+  const writes = [...(top.length ? [`its top-level permissions: ${top.join(", ")}`] : []), ...Object.entries(doc?.jobs || {}).flatMap(([name, job]) => {
+    const g = writeGrants(job?.permissions) || [];
+    return g.length ? [`job ${name}: ${g.join(", ")}`] : [];
+  })];
+  if (writes.length) return `.github/workflows/${workflow} grants write (${writes.join("; ")}), and a dispatched run would run the branch's code with that token`;
   return null;
 }
 

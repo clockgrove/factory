@@ -358,8 +358,30 @@ test("#518: a refused dispatch, or a workflow that grants write, Blocks as a set
   assert.match(no.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml has no workflow_dispatch trigger/);
   assert.deepEqual(no.dispatches, []);
   const writes = await stage({ settings: ON, github: { workflow: `${CI}    permissions:\n      contents: write\n` } });
-  assert.match(writes.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml grants write \(job test\), and a dispatched run would run the branch's code with that token/);
+  assert.match(writes.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml grants write \(job test: contents: write\), and a dispatched run would run the branch's code with that token/);
   assert.deepEqual(writes.dispatches, [], "refused before any dispatch");
+});
+
+test("#556: any scope at write or write-all, at the top or on a job, Blocks the dispatch and FAILs doctor's row naming the grant; read, none, read-all and {} pass", async () => {
+  const inputs = resolveInputs({ env: ON });
+  const scopes = ["id-token", "packages", "checks", "statuses", "deployments", "security-events", "pages", "attestations", "discussions", "repository-projects", "a-scope-github-adds-later"];
+  const top = (perms) => `name: CI\non:\n  workflow_dispatch:\npermissions:\n${perms}jobs:\n  test:\n    runs-on: \${{ matrix.os }}\n`;
+  for (const scope of scopes) {
+    const atTop = workflowProblem(parseYaml(top(`  contents: read\n  ${scope}: write\n`)), "ci.yml");
+    assert.equal(atTop, `.github/workflows/ci.yml grants write (its top-level permissions: ${scope}: write), and a dispatched run would run the branch's code with that token`, scope);
+    const onJob = crossOsRow(inputs, { doc: parseYaml(`${CI}    permissions:\n      contents: read\n      ${scope}: write\n`) });
+    assert.equal(onJob.status, "FAIL", scope);
+    assert.match(onJob.detail, new RegExp(`grants write \\(job test: ${scope}: write\\)`), scope);
+  }
+  assert.match(workflowProblem(parseYaml("on: workflow_dispatch\npermissions: write-all\njobs:\n  a:\n    permissions: write-all\n  b:\n    permissions: {id-token: write, packages: write}\n"), "ci.yml"), /grants write \(its top-level permissions: write-all; job a: write-all; job b: id-token: write, packages: write\)/);
+  for (const ok of ["{}", "read-all", "{contents: read, id-token: none, packages: read}"]) {
+    assert.equal(workflowProblem(parseYaml(`on: workflow_dispatch\npermissions: ${ok}\njobs:\n  t:\n    permissions: ${ok}\n`), "ci.yml"), null, ok);
+  }
+  // The stage reads the copy on the head and refuses before any dispatch, naming the grant.
+  const oidc = await stage({ settings: ON, github: { workflow: `${CI}    permissions:\n      contents: read\n      id-token: write\n` } });
+  assert.equal(oidc.result.stuck.cause, "setup");
+  assert.match(oidc.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml grants write \(job test: id-token: write\), and a dispatched run would run the branch's code with that token/);
+  assert.deepEqual(oidc.dispatches, [], "refused before any dispatch");
 });
 
 test("#518: half a setting Blocks once the other validation is green; the legs are one per line, never split on commas; the settings are workflow-file only", async () => {
@@ -382,7 +404,7 @@ test("#518 S1: doctor's row: the cost while on; no dispatch trigger or write per
   assert.match(on.detail, /waits up to 60 min per head for test \(macos-26, 1\/1\); test \(windows-2025, 1\/1\)/);
   assert.equal(crossOsRow(inputs, { doc: parseYaml("on: [pull_request]\njobs: {}\n") }).status, "FAIL");
   assert.equal(crossOsRow(inputs, { doc: parseYaml("on: [workflow_dispatch]\npermissions: write-all\njobs: {}\n") }).status, "FAIL");
-  assert.match(crossOsRow(inputs, { doc: parseYaml(`${CI}    permissions:\n      actions: write\n`) }).detail, /grants write \(job test\)/);
+  assert.match(crossOsRow(inputs, { doc: parseYaml(`${CI}    permissions:\n      actions: write\n`) }).detail, /grants write \(job test: actions: write\)/);
   assert.equal(workflowProblem(parseYaml("on: workflow_dispatch\njobs:\n  t:\n    permissions:\n      contents: read\n"), "ci.yml"), null);
   // #538: the cloud sandbox route dispatches through its launcher: a PASS naming the launch-event job's token, and the
   // write-grant check on the dispatched workflow holds there too.
@@ -523,7 +545,7 @@ test("#538: the launcher dispatches only the configured workflow, on the stage's
     const inputs = resolveInputs({ env: ON });
     await withGitHub({ work: root, legs: bothGreen, record: RECORD, workflow: `${CI}    permissions:\n      contents: write\n`, log: [] }, async (seen) => {
       const a = await launcherDispatch({ inputs, repo: REPO, issue: 4, ask: { workflow: "ci.yml", ref: "pendulum/4", sha }, token: "t", actionsToken: "job" });
-      assert.match(a.refused?.reason || "", /grants write \(job test\)/);
+      assert.match(a.refused?.reason || "", /^cross-OS CI: \.github\/workflows\/ci\.yml grants write \(job test: contents: write\), and a dispatched run would run the branch's code with that token; fix the workflow/);
       assert.equal(a.refused.cause, "setup");
       const off = await launcherDispatch({ inputs: resolveInputs({ env: {} }), repo: REPO, issue: 4, ask: { workflow: "ci.yml", ref: "pendulum/4", sha }, token: "t", actionsToken: "job" });
       assert.equal(off.refused?.cause, "setup", "cross-OS CI off in the launcher's settings dispatches nothing");
@@ -675,4 +697,13 @@ test("#538 review: stage.mjs passes the worker's ask over the real IPC channel t
   rmSync(dir, { recursive: true, force: true });
   assert.deepEqual(asked, [{ want: "cross-os", ask: "number", more: { sha, workflow: "ci.yml", ref: "pendulum/4" } }]);
   assert.deepEqual(done, { sha, run: 41, suite: 42, reused: false });
+});
+
+test("#538 with #556: a sandbox stage refuses a workflow that grants write before it asks its launcher, naming the grant", async () => {
+  const asked = [];
+  const r = await stage({ settings: ON, route: "sandbox", relay: async (a) => (asked.push(a), { timedOut: true }), github: { workflow: `${CI}    permissions:\n      id-token: write\n`, legs: bothGreen } });
+  assert.match(r.result.stuck?.reason || "", /^cross-OS CI: \.github\/workflows\/ci\.yml grants write \(job test: id-token: write\)/);
+  assert.equal(r.result.stuck.cause, "setup");
+  assert.deepEqual(asked, []);
+  assert.deepEqual(r.dispatches, []);
 });

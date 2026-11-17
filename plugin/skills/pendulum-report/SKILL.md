@@ -9,7 +9,7 @@ Run the report and present its figures. Pendulum is the data layer: its JSON car
 
 ## Run it
 
-1. From the user's words, pick the scope: a period (`--since 2026-11-01`, `--until 2026-11-15`; dates or times with their zone), or a set (`--issue 12,15`, `--label NAME`, `--parent N` for a parent issue's sub-issues). Neither: the last 30 days, and say so.
+1. From the user's words, pick the scope: a period (`--since 2026-11-01`, `--until 2026-11-15`; dates or times with their zone), or a set (`--issue 12,15`, `--label NAME`, `--parent N` for a parent issue's sub-issues). Neither: the last 30 days, and say so. Two experiment arms: `--compare A,B` (`pendulum:experiment:<name>` labels), or `--compare-label X --compare-label Y`.
 2. In a clone of the repository (else add `--repo OWNER/NAME`), run `pendulum report --json [scope]`. Add `--by account` only when the user asks per account. The App id comes from the repository variable `PENDULUM_APP_ID`; when `source.missing` says `app-not-given`, offer `--app ID` (the Pendulum App's numeric id) or the one-time `gh variable set` line in its text. Add `--self LOGIN` only for a login the user says posts Pendulum's comments (a teammate's local mode).
 3. Its stderr says first how many GitHub API calls it plans; it stops at `--max-calls` (300). Exit 3: the budget stopped it and the JSON is partial (`source.complete` false); say so, and offer a narrower scope or a higher `--max-calls` on the user's yes. Exit 64: the flags; fix them. Any other failure: relay its last line.
 4. Parse stdout as JSON. Check `schema` is `pendulum-report/1`; for another version, show the Markdown (`pendulum report` without `--json`) instead.
@@ -22,6 +22,7 @@ Shape it as the user asks: a table, a chart, an HTML page, a document. Every har
 - **Keep each kind apart**, labelled with `words`: `api` is billed per use; `subscription` reads "API-equivalent at list prices, on the subscription"; `credits` reads "Copilot AI credits, billed to the seat"; `unknown` is billing not recorded; `sandbox` is the cloud sandbox vendor's cost. A chart may stack kinds only with each labelled, never as one sum.
 - **Always show the unknown count** (`unknown.runs`), even at 0, with its reasons (`unknown.reasons[].text`). Never show unknown spend as $0 or as a number.
 - **Say what was read and what was missing**, from `source`: the calls made, the comments, artifacts and records read, and each `source.missing` entry's text. A partial report says it is partial.
+- **A comparison** (`comparison` set): the two `arms` side by side, each measure's median, p25..p75, n and `leftOut` as given. No difference or ratio between arms, no "better", no significance. A `small` arm: say so, show its `objectives`. Name `untrusted`, `unchecked` and `inBoth` issues. No `totals` figure is an arm's.
 - **Hot spots** are lists ranked by exact counts (`rankBy`); show them as ranked, without calling any one too high: the report sets no threshold.
 - Show no account unless `--by account` was asked for. The JSON holds no reasons, Block text, transcripts or credentials; add none from elsewhere.
 

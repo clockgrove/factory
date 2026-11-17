@@ -1,6 +1,6 @@
 # How Pendulum differs: sources
 
-The README's "How it differs" table compares Pendulum with GitHub Copilot coding agent and Agent Merge, anthropics/claude-code-action, and OpenHands' GitHub integration. Each claim about another tool is quoted below from that tool's own documentation, as the pages read on 2026-11-16. A comparison that no page settled is left out of the table, and listed at the end.
+The README's "How it differs" table compares Pendulum with GitHub Copilot coding agent and Agent Merge, anthropics/claude-code-action, and OpenHands' GitHub integration on its coding agent, review, where it runs and how the PR lands; this page also covers what starts the work. Each claim about another tool is quoted below from that tool's own documentation, as the pages read on 2026-11-16. A comparison that no page settled is left out of the table, and listed at the end.
 
 GitHub's documentation now calls Copilot coding agent "Copilot cloud agent"; the pages below use either name.
 

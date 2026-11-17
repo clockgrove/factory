@@ -1,6 +1,6 @@
 ---
 name: pendulum-kick
-description: "Kick the Clockgrove Pendulum Action's dispatcher now, on the user's yes: preview what it would start and its spend caps, then dispatch .github/workflows/pendulum.yml for the whole queue or one Objective, rather than wait for its next event or ten-minute tick; without the workflow, explain the harness-cloud path for this harness. Also names the three off-machine routes and how an Objective moves between local mode and the Action. Use when the user asks to kick or run the Clockgrove Pendulum dispatcher or the Action's queue now, or what running off this machine takes. Not for working Objectives on this machine (pendulum-serve, pendulum-run) or seeing what the queue is doing (pendulum-status)."
+description: "Kick the Pendulum Action's dispatcher now, on the user's yes: preview what it would start and its spend caps, then dispatch .github/workflows/pendulum.yml for the whole queue or one Objective, rather than wait for its next event or ten-minute tick; without the workflow, explain the harness-cloud path for this harness. Also names the three off-machine routes and how an Objective moves between local mode and the Action. Use when the user asks to kick or run the Pendulum dispatcher or the Action's queue now, or what running off this machine takes. Not for working Objectives on this machine (pendulum-serve, pendulum-run) or seeing what the queue is doing (pendulum-status)."
 ---
 
 # /pendulum:pendulum-kick [issue]

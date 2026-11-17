@@ -29,7 +29,7 @@
     "developerName": "Clockgrove",
     "category": "Developer Tools",
     "websiteURL": "https://github.com/clockgrove/pendulum#readme",
-    "defaultPrompt": "Set up Clockgrove Pendulum for this repository.",
+    "defaultPrompt": "Set up Pendulum for this repository.",
     "logo": "./assets/icon.png",
     "composerIcon": "./assets/icon.png"
   }

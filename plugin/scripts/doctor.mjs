@@ -11,7 +11,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { appPermissionsText, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
-import { PLUGIN_ROOT, installCommand, installTools } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, installChoice, installCommand } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, claudeLocalCheck, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { TOOLCHAIN_RULE, claudeEnvText, localPackageManager, localToolchain, localTools, packageManagerOf, pinnedVersion, prepareCopilotHome, repositoryTools, stageCommands } from "./lib/copilot-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
@@ -1531,13 +1531,13 @@ export async function commandCheck(row, command, { checkout, env = process.env, 
 export async function repositoryChecks({ inputs, checkout, env = process.env, runSetup = false, local = false, wf = readWorkflowEnv(checkout) }) {
   const out = [];
   if (!checkout || !existsSync(join(checkout, ".git"))) return [WARN("repository", "no checkout to inspect", "run from a clone or pass --checkout")];
-  const install = installCommand(checkout, inputs.install);
-  const auto = installTools(checkout, inputs.install);
+  const { source, command: install, installs: auto } = installChoice(checkout, inputs.install);
   // Each program the automatic install runs, looked up where doctor runs (a stage's install needs it on PATH).
   const noTool = [];
   for (const i of auto) if (!(await commandType(i.tool, { cwd: checkout, env }))) noTool.push(i);
   const lockfiles = auto.map((i) => `${i.lockfile}: ${i.command}`).join("; ");
-  if (!install) out.push(WARN("lockfile", "no lockfile recognised", "set install: <command> or install: none"));
+  if (source === "off") out.push(PASS("lockfile", "installation is turned off by choice (install: none)"));
+  else if (source === "unrecognised") out.push(WARN("lockfile", "no lockfile recognised", "set install: <command> or install: none"));
   else if (noTool.length) out.push(WARN("lockfile", `${lockfiles}; ${noTool.map((i) => `${i.tool} is not found here`).join(", ")}, so every stage's install fails unless setup installs it`, `install ${noTool.map((i) => i.tool).join(" and ")} in the setup command, or set install: to the command this repository needs (install: none skips)`));
   else out.push(PASS("lockfile", auto.length ? lockfiles : install));
   for (const cmd of inputs.validation.map(commandText)) out.push(await commandCheck("validation", cmd, { checkout, env, missing: "setup may install it" }));

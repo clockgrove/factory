@@ -205,7 +205,7 @@ test("plan-time Question: the exit is a Question even with no commit and no PR, 
   const planNeedsReason = ask("Needs-Repository: acme/world");
   const harness = { ok: true };
   assert.deepEqual(decideExit({ harness, pr: null, commits: 0, planNeeds: planNeedsReason }), { exit: "question", reason: planNeedsReason });
-  assert.deepEqual(decideExit({ harness: { ok: false, error: "stopped by Pendulum", unmetered: true }, pr: null, commits: 0, planNeeds: planNeedsReason }), { exit: "question", reason: planNeedsReason });
+  assert.deepEqual(decideExit({ harness: { ok: false, error: "stopped by Pendulum" }, pr: null, commits: 0, planNeeds: planNeedsReason }), { exit: "question", reason: planNeedsReason });
   assert.equal(decideExit({ harness, pr: null, commits: 0 }).reason, "worker ended without commits or a PR", "control: without it, an empty run Blocks");
   const pr = { exists: true, draft: true, body: "" };
   assert.equal(decideExit({ harness: { ok: false, error: "max turns" }, pr, commits: 3, validation: { passes: 1, green: false }, record: { exit: "blocked", reason: "x" }, planNeeds: planNeedsReason }).exit, "question");

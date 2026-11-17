@@ -78,7 +78,9 @@ export function quotaNow(body, resource, date = null) {
  * limit, whatever the answer's words: a secondary limit, or a refusal for another reason (no access, SAML) that met the
  * last quota point. With no count (`count` null: GET /rate_limit failed) the answer's own headers stand, as GitHub
  * documents them: no request until x-ratelimit-reset. The reset is moved onto this machine's clock by the Date header of
- * the answer it came from, so a clock ahead of GitHub's neither sends again into the limit nor resumes before it.
+ * the answer it came from, so a clock ahead of GitHub's neither sends again into the limit nor resumes before it. `now`
+ * is this machine's time once that answer (the count's, when there is one) has arrived: the Date drops the sub-second,
+ * so the reset read that way is never before the stated one.
  */
 export function spentResetOf(headers, count = null, now = OUTAGE.now()) {
   if (!spentCandidate(headers) || (count && count.remaining > 0)) return null;

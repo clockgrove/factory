@@ -131,7 +131,7 @@ The same setup runs as scripts from a clone of Factory, with no coding agent inv
 
 ### Run it on your own machine instead
 
-Local mode runs the same worker and reviewer on your machine. Claude Code and Codex run on the login you already have; Copilot uses the same seat token as on Actions. It needs no GitHub App and no secrets stored in GitHub, but more machine setup: Linux or WSL2 (macOS partly, below), a few sandbox packages, and a GitHub token for this one repository. It reads its settings (models, caps, validation commands) from the workflow file on your default branch and runs on defaults without one, so say "Set up Clockgrove Factory in local mode" and the factory-setup skill sets up both. macOS support is partial: Claude Code and Codex only, and not yet proven on a full run. See [docs/LOCAL.md](docs/LOCAL.md).
+Local mode runs the same worker and reviewer on your machine. Claude Code and Codex run on the login you already have; Copilot uses the same seat token as on Actions. It needs no GitHub App and no secrets stored in GitHub, but more machine setup: Linux or WSL2 (macOS partly, below), a few sandbox packages, and a GitHub token for this one repository. It reads its settings (models, caps, validation commands) from the workflow file on your default branch and runs on defaults without one, so say "Set up Clockgrove Factory in local mode" and the factory-setup skill sets up both. The local loop (`factory serve`) takes the Objectives labelled `factory:local`. Where no Action runs (GitHub lists no active `factory.yml` workflow for the repository), it takes every Objective, `factory:objective` alone included, and labels each `factory:local` as it picks it. With the Action active, an Objective without `factory:local` is the Action's, and `serve` says how many it leaves to it: add `factory:local` to run one on your machine. macOS support is partial: Claude Code and Codex only, and not yet proven on a full run. See [docs/LOCAL.md](docs/LOCAL.md).
 
 ### Local quick start
 
@@ -141,7 +141,7 @@ On Linux or WSL2, with the plugin installed (step 1) and Claude Code or Codex lo
 2. **Create a GitHub token for this one repository** and save it as [docs/LOCAL.md](docs/LOCAL.md) (Set it up, step 2) says.
 3. **Check the machine:** in your clone, ask "Is Clockgrove Factory set up for local mode here?" and fix what it names.
 4. **Start the loop:** say "Start the Clockgrove Factory local loop", or run `factory serve` in your clone and leave it running.
-5. **Label an Objective `factory:local`** beside `factory:objective`: the loop runs it on your machine, and GitHub Actions leaves it alone.
+5. **File an Objective** ("File a Clockgrove Factory Objective: ..."). With no Factory workflow active on GitHub, the loop takes it as filed and labels it `factory:local`. With one active, add `factory:local` beside `factory:objective`: the loop runs it on your machine, and GitHub Actions leaves it alone.
 
 ## Skills
 

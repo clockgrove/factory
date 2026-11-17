@@ -157,16 +157,16 @@
       "words": 689,
       "files": {
         "reference.md": {
-          "sha256": "c59c50524de0ee201084420fd280aa39d434f0ce4c2b04803e78a08dc602969b",
+          "sha256": "bede505f936f2b9b24dfe6546041ff933f01a6557ce9f0d0beef75bc241a3014",
           "lines": 52,
-          "words": 1263
+          "words": 1301
         }
       }
     },
     "factory-serve": {
-      "sha256": "f5b5563057ace77255e5955b112b8d72d2eeaa30afee6e98eef890ce96d3cde2",
+      "sha256": "825de476cd987a5a445444781a575a8df975aec20415e9cdef7be139a765d08f",
       "lines": 31,
-      "words": 610,
+      "words": 612,
       "files": {
         "reference.md": {
           "sha256": "e05a0b8d6e915318570215583ff1a3f8888641c0241f1828a3e50ec5b1383efa",
@@ -176,9 +176,9 @@
       }
     },
     "factory-setup": {
-      "sha256": "d409815546082a6ccd153d8a2966c404451323b3fd3a8e360d6ffd519caf3fc3",
+      "sha256": "25cc517ca9ffaf65cd248852e05382002a0c10dd70ab003204ccdee82a7dd4d8",
       "lines": 47,
-      "words": 683,
+      "words": 688,
       "files": {
         "local.md": {
           "sha256": "94ba14f2587a82b7686bc02b51eb2aa22c731ee4cafde0e0c84ab2046ca078a8",

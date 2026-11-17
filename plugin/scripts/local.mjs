@@ -3905,7 +3905,7 @@ const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`
 const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Pendulum never runs; start it first (take ${DRAFT_LABEL} off and apply the Objective label, or ask "Start Clockgrove Pendulum Objective ${issue}")`);
 
 /**
- * `pendulum issue <issue> [--out FILE]`: the issue as a session reads it (/pendulum:pendulum-run --here, /pendulum:pendulum-review), written
+ * `pendulum issue <issue> [--out FILE]`: the issue as a session reads it (/pendulum:pendulum-run --here, /pendulum:pendulum-review-here), written
  * to --out (default $PENDULUM_IN/issue.md, else <git dir>/pendulum-in/issue.md) as the worker writes it: the title and
  * body read with their author, last editor and latest title renamer, only when each can push or is a pinned maintainer. Otherwise nothing is
  * written, the reason and its fix go to stderr, and the exit code is 1: the body never reaches the session. Without
@@ -4254,7 +4254,7 @@ export function reviewPostFor({ issue, text, file, diff, entries, foundation = f
 }
 
 /**
- * `pendulum post-review <pr> <findings.json>`: post a reviewer pass made in a session (/pendulum:pendulum-review) as Pendulum's one
+ * `pendulum post-review <pr> <findings.json>`: post a reviewer pass made in a session (/pendulum:pendulum-review-here) as Pendulum's one
  * comment-only review (handoff.mjs reviewPost): the findings fitted to the diff and their text sanitised, a comment for
  * each entry judged not met without one, the judgments in the body, under the review marker.
  */

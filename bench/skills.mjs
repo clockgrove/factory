@@ -10,7 +10,8 @@
  * each, and no line is added without a scored Objective). The one-page cap applies to SKILL.md
  * only. `--check` exits 3 when the recorded entries differ from the tree (a skill or one of its
  * files changed without a new record). Both forms exit 4 when a skill or agent definition names something an installed
- * plugin does not hold (unshippedRefs), and 5 when a skill breaks a rule of how it is shown and loaded (skillRules).
+ * plugin does not hold (unshippedRefs), 5 when a skill breaks a rule of how it is shown and loaded (skillRules), and 6 when
+ * this checkout's plugin holds other skills than the pinned set (skillSet).
  */
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -140,11 +141,32 @@ export function unshippedRefs(pluginDir) {
 
 /**
  * The stage skills Pendulum's own runs load: the worker's four, by the task card, and the reviewer's, by the review job,
- * its reviewer agents and the pendulum-review skill. No user asks for them, and one that fires in a user's session works
+ * its reviewer agents and the pendulum-review-here skill. No user asks for them, and one that fires in a user's session works
  * without the run around it (the reviewer's without the trust check and the posting step), so each is hidden in every
  * harness that can hide a skill, and says it is internal where none can (Copilot).
  */
 export const INTERNAL_SKILLS = ["pendulum-objective-plan", "pendulum-implement-split", "pendulum-prove-acceptance", "pendulum-deliver-pr", "pendulum-review-pr"];
+
+/**
+ * The skills a user sees, one verb each: write, refine and start an Objective (file), see where they stand and what a
+ * Blocked one or a Question needs (status), stop, restart, run one here, serve the queue here, review a PR here, kick the
+ * Action's dispatcher, apply a workflow hand-over, score, check the setup (doctor) and install (setup). Every other skill
+ * is internal (INTERNAL_SKILLS); skillSet holds the plugin to exactly these.
+ */
+export const USER_SKILLS = [
+  "pendulum-file",
+  "pendulum-status",
+  "pendulum-stop",
+  "pendulum-restart",
+  "pendulum-run",
+  "pendulum-serve",
+  "pendulum-review-here",
+  "pendulum-kick",
+  "pendulum-handover",
+  "pendulum-score",
+  "pendulum-doctor",
+  "pendulum-setup",
+];
 
 /** The one sentence, word for word, by which every skill that runs a plugin command finds the plugin in each harness. */
 export const PLUGIN_ROOT_SENTENCE =
@@ -205,6 +227,31 @@ export function skillRules(pluginDir) {
   return out;
 }
 
+/**
+ * Every difference between the plugin's skills and the pinned set, as `{skill, why}`: a pinned skill (USER_SKILLS,
+ * INTERNAL_SKILLS) the plugin lacks, a skill it has that is pinned as neither, and a user skill whose description does
+ * not say when to use it (`Use when`) and what it is not for, against its nearest neighbour (`Not for`). The CLI holds
+ * this checkout's own plugin to it; a plugin tree made for a test has skills of its own.
+ */
+export function skillSet(pluginDir, { user = USER_SKILLS, internal = INTERNAL_SKILLS } = {}) {
+  const dir = join(pluginDir, "skills");
+  const have = existsSync(dir) ? readdirSync(dir).filter((n) => existsSync(join(dir, n, "SKILL.md"))).sort() : [];
+  const out = [];
+  for (const skill of [...user, ...internal].filter((n) => !have.includes(n)).sort()) out.push({ skill, why: "a pinned skill the plugin does not have" });
+  for (const skill of have) {
+    if (internal.includes(skill)) continue;
+    if (!user.includes(skill)) {
+      out.push({ skill, why: "a skill pinned as neither a user skill (USER_SKILLS) nor an internal one (INTERNAL_SKILLS)" });
+      continue;
+    }
+    const description = frontmatter(readFileSync(join(dir, skill, "SKILL.md"), "utf8"))?.description;
+    if (typeof description !== "string" || !/\bUse when\b/.test(description) || !/\bNot for\b/.test(description)) {
+      out.push({ skill, why: "a user skill's description says what it does, when to use it (`Use when`) and what it is not for (`Not for`)" });
+    }
+  }
+  return out;
+}
+
 /** The one digest over a record's skills (sorted by name, as recordSkills writes them). */
 export function skillsDigest(skills) {
   // One line per SKILL.md and one per other file, so a tree without reference files keeps the digest it had before them.
@@ -232,6 +279,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (rules.length) {
     process.stderr.write(`skills break how they are shown and loaded:\n${rules.map((r) => `  ${r.skill}: ${r.why}`).join("\n")}\n`);
     process.exit(5);
+  }
+  // The pinned set is this checkout's plugin's: a tree made for a test has skills of its own.
+  const set = plugin === resolve(import.meta.dirname, "..", "plugin") ? skillSet(plugin) : [];
+  if (set.length) {
+    process.stderr.write(`skills differ from the pinned set (USER_SKILLS, INTERNAL_SKILLS in bench/skills.mjs):\n${set.map((r) => `  ${r.skill}: ${r.why}`).join("\n")}\n`);
+    process.exit(6);
   }
   if (values.check) {
     const prev = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")).skills ?? null : null;

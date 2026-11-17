@@ -241,7 +241,7 @@ test("scorecard: a draft's clock starts when it is started, whatever the order o
     "draft label removed": [ev("labeled", DRAFT_LABEL, "2031-03-02T00:30:00Z"), ev("labeled", OBJ, "2031-03-02T00:30:00Z"), ev("unlabeled", DRAFT_LABEL, "2031-03-02T01:04:00Z")],
     // Filed as a draft only; started with the Objective label first, the draft label a few seconds later.
     "label, then draft off": [ev("labeled", DRAFT_LABEL, "2031-03-02T00:30:00Z"), ev("labeled", OBJ, "2031-03-02T01:03:55Z"), ev("unlabeled", DRAFT_LABEL, "2031-03-02T01:04:00Z")],
-    // The start skill on a draft with both labels: both off, then the Objective label on again.
+    // The pendulum-file skill's start on a draft with both labels: both off, then the Objective label on again.
     "both off, label on": [ev("labeled", DRAFT_LABEL, "2031-03-02T00:30:00Z"), ev("labeled", OBJ, "2031-03-02T00:30:00Z"), ev("unlabeled", OBJ, "2031-03-02T01:03:58Z"), ev("unlabeled", DRAFT_LABEL, "2031-03-02T01:03:59Z"), ev("labeled", OBJ, "2031-03-02T01:04:00Z")],
   };
   for (const [name, labels] of Object.entries(cases)) {

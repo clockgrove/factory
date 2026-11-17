@@ -7,7 +7,8 @@
 //   node scripts/local.mjs handover <issue> [--push] [--app ID]   (a person applies Factory's workflow hand-over: read it, then --push)
 //   node scripts/local.mjs wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--interval S] [--timeout S]   (an orchestrator waits on the queue)
 // Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
-// serve takes only those unless --all (FACTORY_LOCAL_ALL=1). A claim comment with a heartbeat marks one in flight.
+// serve takes only those unless --all (FACTORY_LOCAL_ALL=1). Where no Action runs (GitHub lists no active factory.yml
+// workflow), serve labels each Objective it picks factory:local first. A claim comment with a heartbeat marks one in flight.
 // Needs git, gh, the harness CLI (claude or codex logged in; copilot with a Copilot Requests token in
 // COPILOT_GITHUB_TOKEN or ~/.config/factory/copilot-token, plus slirp4netns and iptables on Linux), srt
 // (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
@@ -39,7 +40,7 @@ import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, read
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, bootId, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, adoptLocal, hasLocalLabel, markLocalRoute, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, queueHungMs, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueState, queueTimeoutMin, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -143,6 +144,8 @@ const SWITCHED_FROM = process.env[SWITCHED_FROM_ENV] || "";
 delete process.env[SWITCHED_FROM_ENV];
 /** The first wait before the start's read of the repository's variables is tried again (Local.startVariables). */
 export const START_VARIABLES_MS = 15_000;
+/** How many times backfillMark tries to write the mark of a factory:local label this process put on. */
+const MARK_TRIES = 5;
 /** How often a running serve fetches the default branch's workflow (refreshSettings); every tick uses the last read. */
 export const SETTINGS_EVERY_MS = 3 * 60_000;
 
@@ -633,6 +636,32 @@ async function retried(what, fn, { tries = 3, waitMs = 2_000 } = {}) {
   }
 }
 
+/**
+ * serve's line for the Queued Objectives it does not take because they lack factory:local (dispatch's `unrouted`): how
+ * many, which, and what to do. `action`: actionState's answer, "live" (the Action takes them) or null (unread).
+ */
+export function unroutedLine(numbers, action) {
+  const n = numbers.length;
+  const shown = numbers.slice(0, 10).map((x) => `#${x}`).join(", ") + (n > 10 ? ` and ${n - 10} more` : "");
+  const head = `${n} queued Objective${n === 1 ? "" : "s"} without ${LOCAL_LABEL} (${shown})`;
+  if (action !== "live") return `${head}: this loop takes only Objectives labelled ${LOCAL_LABEL}, and whether an Action runs them could not be read; add ${LOCAL_LABEL} to one to run it on this machine`;
+  return `${head} ${n === 1 ? "is" : "are"} the Action's: its factory.yml workflow is active. To run one on this machine instead, add ${LOCAL_LABEL} to it. (serve --all is for a repository whose Action should not run Objectives: with the Action active, both would race for every Objective without ${LOCAL_LABEL})`;
+}
+
+/**
+ * Whether GitHub's Action runs Objectives in `repo` (#455), from the repository's workflow list (one read): "live" when
+ * it lists .github/workflows/factory.yml as active, "none" when it lists it disabled or deleted, or answers with the
+ * whole list and no such workflow; null for anything else (a failed read, a 404 or 403 a token without Actions read
+ * gets, a list cut short, an unknown state): unknown, which changes nothing.
+ */
+export async function readActionState(repo, opts) {
+  const list = await rest(`repos/${repo.full}/actions/workflows?per_page=100`, { ...opts, noRateWait: true }).catch(() => null);
+  if (!list || !Array.isArray(list.workflows)) return null;
+  const w = list.workflows.find((x) => x?.path === ".github/workflows/factory.yml");
+  if (!w) return Number(list.total_count) === list.workflows.length ? "none" : null;
+  return w.state === "active" ? "live" : /^(disabled_\w+|deleted)$/.test(w.state ?? "") ? "none" : null;
+}
+
 /** The start's line when this plugin, which runs every stage here, is older than the release the committed workflow pins; else null. */
 export function pluginLine(committed) {
   const c = committed?.text ? pluginVersionCheck(committed.text) : null;
@@ -668,6 +697,63 @@ export class Local {
     this.workflowWf = wf.kept;
     this.wf = wf.kept;
     this.token = localToken(this.repoFull);
+  }
+
+  /**
+   * Whether the Action runs Objectives here (readActionState, for this loop's repository, --repo's when given), read at
+   * most once per settings interval (SETTINGS_EVERY_MS) and kept across an unknown read. Said when it is first known and
+   * when it changes: with none, the Objectives this loop picks without factory:local get the label (dispatch `adopt`).
+   */
+  async actionState() {
+    const every = this.settingsEveryMs ?? SETTINGS_EVERY_MS;
+    if (this.actionReadAt !== undefined && Date.now() - this.actionReadAt < every) return this.action ?? null;
+    this.actionReadAt = Date.now();
+    const now = await readActionState(this.repo, this.opts ?? { token: this.token });
+    if (now === null) {
+      if (this.action === undefined && !this.actionUnreadSaid) log(`whether GitHub's Action runs Objectives in ${this.repoFull} could not be read (its factory.yml workflow): this loop takes only those labelled ${LOCAL_LABEL} until it can`);
+      this.actionUnreadSaid = true;
+      return this.action ?? null;
+    }
+    if (now !== this.action) {
+      if (now === "none") log(`no Action runs Objectives in ${this.repoFull} (no active factory.yml workflow): this loop takes the Objectives without ${LOCAL_LABEL} too, and labels each ${LOCAL_LABEL} as it picks it`);
+      else if (this.action === "none") log(`GitHub's Action runs Objectives in ${this.repoFull} now (its factory.yml workflow is active): it takes the Objectives without ${LOCAL_LABEL}; those labelled ${LOCAL_LABEL} stay this machine's`);
+    }
+    this.action = now;
+    return now;
+  }
+
+  /**
+   * Factory's mark of the factory:local label this process itself put on `issue` (serve's pick or `factory run`, left in
+   * `unmarked` when its own write could not be made: a failed post, a timeline that did not show the event yet), written
+   * at the claim's start and its heartbeats (lib/local.mjs markLocalRoute), so the scorer counts the label as Factory's.
+   * Only those: Factory posts as the developer here, so any other factory:local label of this login may be their own,
+   * and stays a person's action. Ends when the mark is there, a person put the label on now, or after MARK_TRIES reads
+   * that show no such label event; an adoption whose loop stopped first stays unmarked, a person's action in the score.
+   */
+  async backfillMark(issue) {
+    if (!this.unmarked?.has(issue)) return;
+    const tries = (this.markTries ??= new Map());
+    const r = await markLocalRoute(this.repo, issue, this.opts ?? { token: this.token }, { check: true, timeline: (repo, n, opts) => timelineOf(repo, n, { ...opts, cache: (this.timelines ??= new Map()) }) });
+    const tried = (tries.get(issue) ?? 0) + 1;
+    tries.set(issue, tried);
+    if (r.marked || r.person || tried >= MARK_TRIES) {
+      this.unmarked.delete(issue);
+      if (!r.marked && !r.person) log(`#${issue}: Factory's mark of its ${LOCAL_LABEL} label is still not written after ${tried} tries (${r.why}); the label counts as a person's action`);
+      return;
+    }
+    if (tried === 1) log(`#${issue}: Factory's mark of its ${LOCAL_LABEL} label is not written yet (${r.why}); tried again at the next heartbeat, up to ${MARK_TRIES} times`);
+  }
+
+  /** Labels `issue` factory:local, said once, when no Action runs here: `factory run` on it, as serve's pick does (#455). */
+  async adoptForRun(issue, data) {
+    if (hasLocalLabel(data) || (await this.actionState()) !== "none") return;
+    await adoptLocal(this.repo, issue, this.opts ?? { token: this.token }).then(
+      (m) => {
+        if (!m.marked) (this.unmarked ??= new Set()).add(issue);
+        log(`#${issue}: labelled ${LOCAL_LABEL}, since no Action runs Objectives here: this machine's loop tends it${m.marked ? "" : `; Factory's mark of that label is not written yet (${m.why}), so a later tick of the loop that holds it writes it`}`);
+      },
+      (e) => log(`#${issue}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); add it, or no loop tends this Objective's merge while none runs here`),
+    );
   }
 
   /**
@@ -1750,6 +1836,8 @@ export class Local {
       return { exit: "skipped" };
     }
     this.ceded?.delete(issue);
+    // Factory's mark of the factory:local label this process put on it, when the pick could not write it (backfillMark).
+    await this.backfillMark(issue).catch((e) => log(`#${issue}: local-route mark: ${String(e?.message || e).slice(0, 120)}`));
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
     // beats due meanwhile are skipped rather than queued behind it. Each reads who holds the claim first: a claim it
     // cannot read is written as before (no answer is no other holder).
@@ -1774,6 +1862,7 @@ export class Local {
       // This loop's own claim read: rewritten in place, with no second read.
       if (now?.holder === this.holder && now.commentId) await beatClaim(this.repo, issue, now.commentId, this.holder, this.opts);
       else await writeClaim(this.repo, issue, this.holder, this.opts);
+      await this.backfillMark(issue);
     };
     const beat = setInterval(() => {
       if (beating || lost) return;
@@ -2819,6 +2908,7 @@ export class Local {
     if (data?.state === "closed") throw new Error(`#${issue} is closed; nothing to run`);
     // Before any claim: a draft is never run (lib/stop.mjs).
     if (isDraft(data)) throw draftRefusal(issue, "nothing to run");
+    await this.adoptForRun(issue, data);
     const pr = await retried(`reading the open PR of factory/${issue}`, () => gh.findPr(this.repo, `factory/${issue}`, this.opts), { waitMs });
     const next = stageFor({ pr, issue: data }) ?? "work";
     if (next === "review") log(`#${issue}: PR #${pr.number} waits for its review; starting there`);
@@ -3598,7 +3688,9 @@ export class Local {
       // localMarked: each pick the dispatch marks Running, named before its write, so a stop puts back even those of a
       // dispatch that threw midway.
       const marked = [];
-      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
+      // No Action runs here (actionState): this loop picks the Objectives without factory:local too, labelling each first.
+      const adopt = (await this.actionState().catch(() => null)) === "none";
+      this.dispatching = dispatch(inputs, { token: this.token, adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -3629,6 +3721,13 @@ export class Local {
       if (result.halted) {
         slots.spare();
         break;
+      }
+      // Picks labelled factory:local whose mark is not written yet: their claim's start writes it (backfillMark).
+      for (const n of result.unmarked || []) (this.unmarked ??= new Set()).add(n);
+      // Queued Objectives this loop does not take only for want of factory:local: said once per start (#455).
+      if (result.unrouted?.length && !this.unroutedSaid) {
+        this.unroutedSaid = true;
+        log(unroutedLine(result.unrouted, this.action ?? null));
       }
       if (result.refused) {
         slots.spare();

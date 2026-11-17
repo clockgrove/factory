@@ -1122,3 +1122,42 @@ test("Done pass under a person's login (#2668): its removal of a closed Objectiv
   assert.equal(localFactoryActions(reopened)("2031-03-02T04:10:00Z", op, "unlabeled factory:in-review"), false, "a removal while the issue is open is a person's");
   assert.equal(localFactoryActions(reopened)("2031-03-02T04:20:06Z", op, "unlabeled factory:in-review"), true, "re-closed, the Done pass's removal is Factory's again");
 });
+
+test("local mode where no Action runs: the factory:local label a loop applied is Factory's when its local-route mark names that exact event; a person's own factory:local label stays a person's (#455)", async () => {
+  const picked = { id: 9001, event: "labeled", label: { name: "factory:local" }, actor: OPERATOR, created_at: "2031-03-02T01:00:40Z" };
+  const mark = (id, user = OPERATOR) => ({ id: 8000 + id, user, created_at: "2031-03-02T01:00:42Z", updated_at: "2031-03-02T01:00:42Z", body: `<!-- factory:60:local-route:${id} -->\nFactory: no Action runs Objectives in this repository, so a local loop took this Objective and labelled it \`factory:local\`; it stays that machine's.` });
+  // The loop's pick: the label event and Factory's mark naming it. No human action.
+  const serve = localMerge(60);
+  serve.issueTimeline.splice(1, 0, picked);
+  serve.issueComments.push(mark(9001));
+  const row = scoreObjective(serve, { prices, now: NOW });
+  assert.equal(row.walkAway.value, true, row.walkAway.reason);
+  assert.equal(row.walkAway.humanActions, 0);
+  // No mark: the same label is a person's decision.
+  const unmarked = localMerge(60);
+  unmarked.issueTimeline.splice(1, 0, picked);
+  const miss = scoreObjective(unmarked, { prices, now: NOW });
+  assert.equal(miss.walkAway.value, false);
+  assert.equal(miss.walkAway.firstHumanAction.kind, "labeled factory:local");
+  // A person's own factory:local label (another event) stays theirs beside the loop's mark; a mark by another login, or
+  // naming another event, counts for nothing.
+  const own = localMerge(60);
+  own.issueTimeline.splice(1, 0, picked);
+  own.issueTimeline.push({ id: 9002, event: "labeled", label: { name: "factory:local" }, actor: OPERATOR, created_at: "2031-03-02T01:30:00Z" });
+  own.issueComments.push(mark(9001));
+  const person = scoreObjective(own, { prices, now: NOW });
+  assert.equal(person.walkAway.humanActions, 1);
+  assert.equal(person.walkAway.firstHumanAction.at, "2031-03-02T01:30:00Z");
+  const check = localFactoryActions({ ...own, issueComments: [...own.issueComments, mark(9002, { login: "someone", type: "User" })] });
+  assert.equal(check("2031-03-02T01:00:40Z", OPERATOR, "labeled factory:local", 9001), true);
+  assert.equal(check("2031-03-02T01:30:00Z", OPERATOR, "labeled factory:local", 9002), false, "a mark by another login");
+  assert.equal(check("2031-03-02T01:00:40Z", OPERATOR, "labeled factory:local", null), false, "no event id, no mark");
+  // Two marks naming one event, by two logins: each pair counts on its own, never the last one only.
+  const both = localFactoryActions({ ...serve, issueComments: [...serve.issueComments, mark(9001, { login: "someone", type: "User" })] });
+  assert.equal(both("2031-03-02T01:00:40Z", OPERATOR, "labeled factory:local", 9001), true);
+  // Factory's activity spans count the marked label as its act too.
+  const { factoryActivity } = await import("../lib/objective.mjs");
+  const at = Date.parse("2031-03-02T01:00:40Z");
+  assert.ok(factoryActivity(serve).some(([a, b]) => a === at && b === at));
+  assert.ok(!factoryActivity(unmarked).some(([a, b]) => a === at && b === at));
+});

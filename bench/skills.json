@@ -98,21 +98,21 @@
       "words": 700,
       "files": {
         "reference.md": {
-          "sha256": "c59c50524de0ee201084420fd280aa39d434f0ce4c2b04803e78a08dc602969b",
+          "sha256": "bede505f936f2b9b24dfe6546041ff933f01a6557ce9f0d0beef75bc241a3014",
           "lines": 52,
-          "words": 1263
+          "words": 1301
         }
       }
     },
     "factory-serve": {
-      "sha256": "5f15a6c6360f2617b17962e9352c62cae112609ac9ad31d7f6da84fcf981f6ab",
+      "sha256": "e7b4b18c8de23893f5846694f9ab99821da2167ba7b907c246874de204c7a822",
       "lines": 34,
-      "words": 696
+      "words": 697
     },
     "factory-setup": {
-      "sha256": "207fa3395a0b55101c80a834c5b6eefbef9ca86d3d4f886b9fc52fe81178d8b8",
+      "sha256": "923970486bcba011c9322b00fea25532f1fdd3bbfb3acb049dec906c4ea59438",
       "lines": 47,
-      "words": 675,
+      "words": 680,
       "files": {
         "local.md": {
           "sha256": "94ba14f2587a82b7686bc02b51eb2aa22c731ee4cafde0e0c84ab2046ca078a8",

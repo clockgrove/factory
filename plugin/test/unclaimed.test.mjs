@@ -4,14 +4,14 @@
 import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { budgetHome, fakeProc } from "./fixtures/machine.mjs";
-import { Local, STAGE_RECORD, holderId, machineIdentity } from "../scripts/local.mjs";
+import { Local, STAGE_RECORD, holderId, machineIdentity, unroutedLine } from "../scripts/local.mjs";
 import { claimBody, claimMarker } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
@@ -24,9 +24,12 @@ const LOCAL = pathToFileURL(join(import.meta.dirname, "..", "scripts", "local.mj
  * on every request as it arrives and may return a promise its answer waits for (its write is made at once); one that
  * resolves to {status} answers with that status instead. `listed`: the labels the issue listings show (a listing older
  * than GitHub), else the issue's own. `clockMs`: how far GitHub's clock (its Date header) is from this machine's.
+ * `workflow`: the repository's workflow list as GitHub answers it: factory.yml's `state` in it, "none" for a list without
+ * it, or an HTTP status its read gets (null: not served). `lag`: how many timeline reads after a factory:local label
+ * event still miss it (a timeline that lags behind the label write).
  */
-async function fakeGitHub({ labels = ["factory:objective", "factory:local"], listed = null, comments = [], timeline = [], clockMs = 0, hook = () => {} } = {}) {
-  const state = { labels: new Set(labels), listed: listed && new Set(listed), comments, timeline, writes: [] };
+async function fakeGitHub({ labels = ["factory:objective", "factory:local"], listed = null, comments = [], timeline = [], clockMs = 0, workflow = null, lag = 0, hook = () => {} } = {}) {
+  const state = { labels: new Set(labels), listed: listed && new Set(listed), comments, timeline, workflow, lag, workflowReads: [], writes: [] };
   let id = 500;
   const issue = () => ({ number: 7, title: "t", body: "", state: "open", user: { login: "maintainer" }, labels: [...state.labels].map((name) => ({ name })), created_at: "2026-11-01T00:00:00Z", updated_at: new Date().toISOString() });
   const server = createServer((req, res) => {
@@ -49,6 +52,13 @@ async function fakeGitHub({ labels = ["factory:objective", "factory:local"], lis
         });
       };
       if (p === "/user") return send(200, { login: "maintainer", type: "User" });
+      // The repository's workflow list: factory.yml at `workflow`'s state, a list without it ("none"), or an HTTP status.
+      if (/^\/repos\/[^/]+\/[^/]+\/actions\/workflows$/.test(p) && state.workflow !== null) {
+        state.workflowReads.push(p);
+        if (typeof state.workflow === "number") return send(state.workflow, { message: "Resource not accessible by personal access token" });
+        const workflows = [{ id: 1, path: ".github/workflows/ci.yml", state: "active" }, ...(state.workflow === "none" ? [] : [{ id: 2, path: ".github/workflows/factory.yml", state: state.workflow }])];
+        return send(200, { total_count: workflows.length, workflows });
+      }
       if (p === "/repos/o/r/collaborators") return send(200, [{ login: "maintainer", permissions: { push: true } }, { login: "other", permissions: { push: true } }]);
       if (p === "/repos/o/r/issues" && req.method === "GET") {
         const want = (url.searchParams.get("labels") || "").split(",").filter(Boolean);
@@ -57,7 +67,7 @@ async function fakeGitHub({ labels = ["factory:objective", "factory:local"], lis
       }
       if (p === "/repos/o/r/issues/7" && req.method === "GET") return send(200, issue());
       if (p === "/repos/o/r/issues/7/labels" && req.method === "POST") {
-        for (const l of body.labels) state.labels.add(l), state.timeline.push({ event: "labeled", label: { name: l }, actor: { login: "maintainer" }, created_at: new Date().toISOString() });
+        for (const l of body.labels) state.labels.add(l), state.timeline.push({ id: (id += 1), event: "labeled", label: { name: l }, actor: { login: "maintainer", type: "User" }, created_at: new Date().toISOString() });
         return send(200, []);
       }
       const label = /^\/repos\/o\/r\/issues\/7\/labels\/(.+)$/.exec(p);
@@ -67,7 +77,11 @@ async function fakeGitHub({ labels = ["factory:objective", "factory:local"], lis
         state.timeline.push({ event: "unlabeled", label: { name: l }, actor: { login: "maintainer" }, created_at: new Date().toISOString() });
         return send(200, []);
       }
-      if (p === "/repos/o/r/issues/7/timeline") return send(200, state.timeline);
+      if (p === "/repos/o/r/issues/7/timeline") {
+        if (state.lag <= 0 || !state.timeline.some((e) => e.label?.name === "factory:local")) return send(200, state.timeline);
+        state.lag -= 1;
+        return send(200, state.timeline.filter((e) => e.label?.name !== "factory:local"));
+      }
       if (p === "/repos/o/r/issues/7/comments" && req.method === "GET") return send(200, state.comments);
       if (p === "/repos/o/r/issues/7/comments" && req.method === "POST") {
         const at = new Date().toISOString();
@@ -176,9 +190,9 @@ test("serve stopped by SIGINT while a pick reads its claim writes no claim and p
   }
 });
 
-/** The real serve, one tick at a time in this process, against `fake`; the work stage itself is not run (`picks`). */
-async function serveTicks(fake, { ticks = 1, live = false } = {}) {
-  const saved = { GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+/** The real serve, one tick at a time in this process, against `fake`; the work stage itself is not run (`picks`). `extra`: the loop's own fields. */
+async function serveTicks(fake, { ticks = 1, live = false, extra = {} } = {}) {
+  const saved = { GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL, FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL };
   process.env.GITHUB_API_URL = fake.url;
   process.env.FACTORY_LOCAL = "1";
   const dev = mkdtempSync(join(tmpdir(), "unclaimed-dev-"));
@@ -199,6 +213,7 @@ async function serveTicks(fake, { ticks = 1, live = false } = {}) {
     stopOnSignals: () => {},
     cleanup: async () => {},
     runObjective: async (n) => (picks.push(n), { exit: "skipped" }),
+    ...extra,
   });
   const write = process.stdout.write;
   process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
@@ -208,7 +223,7 @@ async function serveTicks(fake, { ticks = 1, live = false } = {}) {
     process.stdout.write = write;
     for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v);
   }
-  return { picks, log: lines.join("") };
+  return { picks, log: lines.join(""), loop };
 }
 
 const runningSince = (ms) => [{ event: "labeled", label: { name: "factory:running" }, actor: { login: "maintainer" }, created_at: new Date(Date.now() - ms).toISOString() }];
@@ -527,6 +542,233 @@ test("a resume that steps aside on a changed stint leaves its own claim resumabl
     assert.deepEqual(await loop.pausedHere(new Map()), [7], "this machine's own claim stays resumable");
   } finally {
     restore();
+    await fake.close();
+  }
+});
+
+/**
+ * A repository's origin and a developer's clone of it, its default branch `main` with no Factory workflow; `addWorkflow`
+ * pushes .github/workflows/factory.yml to it.
+ */
+function cloneOf() {
+  const root = mkdtempSync(join(tmpdir(), "route-"));
+  const origin = join(root, "origin.git");
+  const dev = join(root, "dev");
+  const ident = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@e", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@e" };
+  const git = (...a) => execFileSync("git", ["-C", dev, ...a], { encoding: "utf8", env: ident, stdio: ["ignore", "pipe", "ignore"] });
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  execFileSync("git", ["clone", "-q", origin, dev], { stdio: "ignore" });
+  git("checkout", "-q", "-b", "main");
+  writeFileSync(join(dev, "README.md"), "app\n");
+  git("add", "README.md");
+  git("commit", "-q", "-m", "app");
+  git("push", "-q", "origin", "main");
+  const addWorkflow = () => {
+    mkdirSync(join(dev, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(dev, ".github", "workflows", "factory.yml"), "name: Factory\nenv:\n  FACTORY_MODEL: m\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: clockgrove/factory@v0.9.30\n");
+    git("add", ".github");
+    git("commit", "-q", "-m", "workflow");
+    git("push", "-q", "origin", "main");
+  };
+  return { dev, addWorkflow };
+}
+
+test("serve: where no Action runs (no factory.yml workflow, or a disabled one), the Objective it picks without factory:local is labelled factory:local, said once, and runs (#455)", async () => {
+  for (const workflow of ["none", "disabled_manually"]) {
+    // The default branch carries a workflow file all the same: only GitHub's answer counts.
+    const repo = cloneOf();
+    repo.addWorkflow();
+    const fake = await fakeGitHub({ labels: ["factory:objective"], workflow });
+    try {
+      const { picks, log } = await serveTicks(fake, { ticks: 2, extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+      assert.deepEqual(picks, [7], `${workflow}: ${log}`);
+      assert.ok(fake.state.labels.has("factory:local") && fake.state.labels.has("factory:running"), String(workflow));
+      const added = fake.state.writes.filter((w) => w === "POST /repos/o/r/issues/7/labels");
+      assert.equal(added.length, 2, "factory:local first, then the Running mark");
+      // Factory's mark names that exact label event, so the scorer counts the label as Factory's.
+      const event = fake.state.timeline.find((e) => e.event === "labeled" && e.label.name === "factory:local");
+      assert.deepEqual(fake.state.comments.filter((c) => c.body.includes(":local-route:")).map((c) => c.body.split("\n")[0]), [`<!-- factory:7:local-route:${event.id} -->`]);
+      assert.equal((log.match(/#7: no Action runs Objectives here, so this loop takes it and labels it factory:local/g) || []).length, 1, log);
+      assert.match(log, /no Action runs Objectives in o\/r \(no active factory\.yml workflow\)/);
+      assert.equal(process.env.FACTORY_LOCAL_ALL, undefined, "no routing flag: the label is the route");
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
+test("serve: with the Action active, Objectives without factory:local are the Action's, said once per start; an unread answer labels nothing and takes nothing (#455)", async () => {
+  // No workflow file on the default branch: GitHub's answer decides, never origin's tree.
+  const repo = cloneOf();
+  const fake = await fakeGitHub({ labels: ["factory:objective"], workflow: "active" });
+  try {
+    const { picks, log } = await serveTicks(fake, { ticks: 3, extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+    assert.deepEqual(picks, [], "never taken");
+    assert.ok(!fake.state.labels.has("factory:local"));
+    const said = log.split("\n").filter((l) => l.includes("without factory:local ("));
+    assert.equal(said.length, 1, log);
+    assert.match(said[0], /1 queued Objective without factory:local \(#7\) is the Action's: its factory\.yml workflow is active\. To run one on this machine instead, add factory:local to it\. \(serve --all is for a repository whose Action should not run Objectives: with the Action active, both would race/);
+  } finally {
+    await fake.close();
+  }
+  // A failed read, and a token without Actions: read (GitHub's 403 or 404): unknown, so nothing is labelled.
+  for (const workflow of [500, 403, 404]) {
+    const failing = await fakeGitHub({ labels: ["factory:objective"], workflow });
+    try {
+      const { picks, log } = await serveTicks(failing, { ticks: 2, extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+      assert.deepEqual(picks, [], `${workflow}: ${log}`);
+      assert.ok(!failing.state.labels.has("factory:local"), String(workflow));
+      assert.equal(process.env.FACTORY_LOCAL_ALL, undefined);
+      assert.equal((log.match(/whether GitHub's Action runs Objectives in o\/r could not be read/g) || []).length, 1, log);
+      assert.doesNotMatch(log, /is the Action's/, "nothing said that the read did not tell");
+    } finally {
+      await failing.close();
+    }
+  }
+  assert.match(unroutedLine([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], "live"), /^12 queued Objectives without factory:local \(#1, #2, #3, #4, #5, #6, #7, #8, #9, #10 and 2 more\) are the Action's/);
+});
+
+test("serve: an Objective labelled factory:local by a pick where no Action ran stays this machine's once the Action is active: a start that never wrote its claim is Queued again and picked here (#304, #455)", async () => {
+  const repo = cloneOf();
+  const fake = await fakeGitHub({ labels: ["factory:objective"], workflow: "none" });
+  try {
+    const first = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+    assert.deepEqual(first.picks, [7], first.log);
+    // Its start died before its claim; the Action's workflow is enabled since, and the Running label is 10 minutes old.
+    for (const e of fake.state.timeline) e.created_at = ago(10 * 60_000);
+    fake.state.workflow = "active";
+    repo.addWorkflow();
+    const { picks, log } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+    assert.match(log, /#7: Running since \S+ with no claim and no stage on any machine \(a start that never wrote its claim\); back to Queued/);
+    assert.deepEqual(picks, [7], log);
+    assert.ok(!fake.state.labels.has("factory:blocked"));
+  } finally {
+    await fake.close();
+  }
+});
+
+test("local mode reads whether the Action runs for --repo's repository, whatever the clone's origin holds; factory run labels an Objective it runs where none does (#455)", async () => {
+  const keys = ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "FACTORY_LOCAL_TOKEN", "GITHUB_API_URL"];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  // The clone's origin (a fork or mirror) carries the workflow; GitHub lists none for o/r.
+  const repo = cloneOf();
+  repo.addWorkflow();
+  const fake = await fakeGitHub({ labels: ["factory:objective"], workflow: "none" });
+  try {
+    process.env.FACTORY_LOCAL_TOKEN = "t";
+    process.env.GITHUB_API_URL = fake.url;
+    const loop = new Local({ repo: "o/r", checkout: repo.dev });
+    assert.equal(await loop.actionState(), "none");
+    assert.deepEqual(fake.state.workflowReads, ["/repos/o/r/actions/workflows"]);
+    assert.equal(await loop.actionState(), "none");
+    assert.equal(fake.state.workflowReads.length, 1, "read once per settings interval, never per tick");
+    await loop.adoptForRun(7, { labels: [{ name: "factory:objective" }] });
+    assert.ok(fake.state.labels.has("factory:local"), "factory run's Objective is this machine's to tend");
+    assert.ok(fake.state.comments.some((c) => c.body.startsWith("<!-- factory:7:local-route:")), "with Factory's mark of its label event");
+    // The other way round: GitHub's Action active, no workflow file on origin.
+    const bare = cloneOf();
+    fake.state.workflow = "active";
+    assert.equal(await new Local({ repo: "o/r", checkout: bare.dev }).actionState(), "live");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+    await fake.close();
+  }
+});
+
+test("serve: a pick whose mark could not be posted, or whose label event the timeline did not show yet, starts all the same, and the loop that holds it writes the mark later, naming that exact event once (#455 review)", async () => {
+  const marks = (state) => state.comments.filter((c) => c.body.includes(":local-route:"));
+  const labelEvent = (state) => state.timeline.find((e) => e.event === "labeled" && e.label.name === "factory:local");
+  for (const why of ["post", "lag"]) {
+    const repo = cloneOf();
+    let failing = why === "post";
+    const fake = await fakeGitHub({
+      labels: ["factory:objective"],
+      workflow: "none",
+      lag: why === "lag" ? 1 : 0,
+      // The mark's posts fail during the pick, retries included, before they land (GitHub's 502): each write is taken
+      // back, its answer an error.
+      hook: (req, p, state) => {
+        if (!failing || req.method !== "POST" || p !== "/repos/o/r/issues/7/comments") return;
+        setImmediate(() => state.comments.splice(state.comments.findIndex((c) => c.body.includes(":local-route:")), 1));
+        return { status: 502 };
+      },
+    });
+    try {
+      const { picks, log, loop } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+      assert.deepEqual(picks, [7], `${why}: the pick starts: ${log}`);
+      assert.ok(fake.state.labels.has("factory:local"));
+      assert.equal(marks(fake.state).length, 0, why);
+      assert.match(log, why === "post" ? /#7: no Action runs Objectives here, so this loop takes it and labels it factory:local; Factory's mark of that label is not written yet \(the mark could not be posted/ : /#7: no Action runs Objectives here, so this loop takes it and labels it factory:local; Factory's mark of that label is not written yet \(the timeline does not show this login's factory:local label event yet\)/);
+      assert.doesNotMatch(log, /could not be added/, "the label is on: never said otherwise");
+      failing = false;
+      assert.deepEqual([...loop.unmarked], [7], "its claim's start writes the mark");
+      // The loop that holds it (its claim's start, then each heartbeat) writes the mark, once.
+      const api = process.env.GITHUB_API_URL;
+      process.env.GITHUB_API_URL = fake.url;
+      try {
+        await loop.backfillMark(7);
+        await loop.backfillMark(7);
+        assert.equal(loop.unmarked.size, 0);
+      } finally {
+        api === undefined ? delete process.env.GITHUB_API_URL : (process.env.GITHUB_API_URL = api);
+      }
+      assert.deepEqual(marks(fake.state).map((c) => c.body.split("\n")[0]), [`<!-- factory:7:local-route:${labelEvent(fake.state).id} -->`], why);
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
+test("Factory's local-route mark names only the label on now, and only this login's: never one taken off since, never a person's; no login, no mark (#455 review)", async () => {
+  const { localRouteEvent, markLocalRoute } = await import("../scripts/lib/local.mjs");
+  const { setSelf } = await import("../scripts/lib/logic.mjs");
+  const me = { login: "maintainer", type: "User" };
+  const ev = (id, event, actor = me) => ({ id, event, label: { name: "factory:local" }, actor });
+  setSelf("maintainer");
+  try {
+    assert.deepEqual(localRouteEvent([ev(1, "labeled"), ev(2, "unlabeled"), ev(3, "labeled")]), { id: "3", mine: true });
+    assert.equal(localRouteEvent([ev(1, "labeled"), ev(2, "unlabeled")]), null, "taken off since: no label on");
+    assert.deepEqual(localRouteEvent([ev(1, "labeled"), ev(2, "unlabeled"), ev(3, "labeled", { login: "someone", type: "User" })]), { id: "3", mine: false });
+    setSelf(null);
+    const repo = { owner: "o", name: "r", full: "o/r" };
+    const saved = process.env.GITHUB_API_URL;
+    const fake = await fakeGitHub({ labels: ["factory:objective", "factory:local"], timeline: [ev(5, "labeled")], hook: (req, p) => (p === "/user" ? { status: 500 } : undefined) });
+    process.env.GITHUB_API_URL = fake.url;
+    try {
+      const r = await markLocalRoute(repo, 7, { token: "t" });
+      assert.equal(r.marked, false);
+      assert.match(r.why, /Factory's own login could not be read/);
+      assert.equal(fake.state.comments.length, 0, "no mark accepting any actor");
+    } finally {
+      saved === undefined ? delete process.env.GITHUB_API_URL : (process.env.GITHUB_API_URL = saved);
+      await fake.close();
+    }
+  } finally {
+    setSelf(null);
+  }
+});
+
+test("a factory:local label the developer applied by hand is never marked as Factory's: a claimed Objective's heartbeats leave it a person's action (#455 review)", async () => {
+  const { localFactoryActions } = await import("../../bench/lib/objective.mjs");
+  const repo = cloneOf();
+  repo.addWorkflow();
+  const by = { login: "maintainer", type: "User" };
+  // The Action is active; the developer labelled #7 factory:local by hand (event 99), under the login Factory posts as.
+  const fake = await fakeGitHub({ labels: ["factory:objective", "factory:local"], workflow: "active", timeline: [{ id: 98, event: "labeled", label: { name: "factory:objective" }, actor: by, created_at: ago(3600_000) }, { id: 99, event: "labeled", label: { name: "factory:local" }, actor: by, created_at: ago(1800_000) }] });
+  const api = process.env.GITHUB_API_URL;
+  try {
+    const { picks, loop } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+    assert.deepEqual(picks, [7]);
+    // Its stage holds the claim through several heartbeats.
+    process.env.GITHUB_API_URL = fake.url;
+    loop.heartbeatMs = 20;
+    await loop.withClaim(7, () => new Promise((done) => setTimeout(() => done({ exit: "skipped" }), 150)));
+    assert.ok(fake.state.writes.filter((w) => w.startsWith("PATCH /repos/o/r/issues/comments/")).length >= 2, `the heartbeats ran: ${fake.state.writes.join(", ")}`);
+    assert.equal(fake.state.comments.filter((c) => c.body.includes(":local-route:")).length, 0, "no mark");
+    const collected = { issue: { number: 7, labels: [...fake.state.labels].map((name) => ({ name })) }, issueTimeline: fake.state.timeline, issueComments: fake.state.comments };
+    assert.equal(localFactoryActions(collected)(ago(1800_000), by, "labeled factory:local", 99), false, "it scores as the person's");
+  } finally {
+    api === undefined ? delete process.env.GITHUB_API_URL : (process.env.GITHUB_API_URL = api);
     await fake.close();
   }
 });

@@ -35,7 +35,7 @@ Committed copies of the skills and agents, for vendors' cloud sessions only: off
 
 ## Local mode, instead of or beside the Action
 
-On the user's machine, walk [local.md](local.md) instead of steps 1 to 3: no App, no model secret, and WSL2 only on Windows. The user creates and saves the tokens with its commands; never ask for or read them. Then offer `node "${CLAUDE_PLUGIN_ROOT}/scripts/local.mjs" serve --once` from the clone: it lists anything missing and creates the `factory:local` label. Objectives with that label are the local loop's, not the Action's.
+On the user's machine, walk [local.md](local.md) instead of steps 1 to 3: no App, no model secret, and WSL2 only on Windows. The user creates and saves the tokens with its commands; never ask for or read them. Then offer `node "${CLAUDE_PLUGIN_ROOT}/scripts/local.mjs" serve --once` from the clone: it lists anything missing and creates the `factory:local` label. Objectives with that label, and every one where no Action is active, are the local loop's.
 
 ## Several accounts
 

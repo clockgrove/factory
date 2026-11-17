@@ -162,6 +162,10 @@ export function decisionsOf(actions) {
  * it removes a closed Objective's state labels: each label its `removed:` line names, removed by the record's author
  * after the record while the issue is closed, is Factory's (#2668). No upper bound: a removal that failed waits for a
  * later tick, and the record's edit time need not move on a retry that writes the same body.
+ * A local loop where no Action runs labels the Objective it picks factory:local itself (plugin lib/local.mjs adoptLocal)
+ * and marks that exact label event: a `labeled factory:local` event is Factory's when a comment by the event's own actor
+ * opens with `<!-- factory:N:local-route:ID -->` naming the event's id. Any other factory:local label is a person's.
+ * The returned check takes the event's id as its fourth argument.
  */
 // A restart's label is the person's (a human action); its removal is Factory's, once it has restarted the Objective.
 const LOCAL_STATE_KIND = /^(?:(un)?labeled factory:(running|in-review|blocked|question|review)|unlabeled factory:restart)$/;
@@ -169,7 +173,9 @@ const LOCAL_STATE_KIND = /^(?:(un)?labeled factory:(running|in-review|blocked|qu
 const DONE_LABELS = /^factory:(running|in-review|blocked|question)$/;
 export function localFactoryActions(collected, { label = OBJECTIVE_LABEL } = {}) {
   const { records: done, closedAt } = doneRecords(collected);
-  const tidied = (at, actor, kind) => {
+  const routes = localRouteMarks(collected);
+  const tidied = (at, actor, kind, id = null) => {
+    if (kind === "labeled factory:local" && id !== null && id !== undefined && routes.has(`${id} ${actor?.login ?? actor?.name}`)) return true;
     const name = /^unlabeled (\S+)$/.exec(kind)?.[1];
     return !!name && closedAt(at) && done.some((r) => r.login === (actor?.login ?? actor?.name) && r.labels.has(name) && ms(at) >= r.at);
   };
@@ -191,8 +197,8 @@ export function localFactoryActions(collected, { label = OBJECTIVE_LABEL } = {})
     const block = labels.filter((e) => e.label?.name === BLOCKED_LABEL && ms(e.created_at) <= ms(at)).at(-1);
     return !!block && labels.some((e) => e.label?.name === label && ms(e.created_at) >= ms(block.created_at) && ms(e.created_at) <= ms(at));
   };
-  return (at, actor, kind) => {
-    if (tidied(at, actor, kind)) return true;
+  return (at, actor, kind, id = null) => {
+    if (tidied(at, actor, kind, id)) return true;
     if ((actor?.login ?? actor?.name) !== login) return false;
     if (kind === `labeled ${HANDOVER_LABEL}`) return handoverLabel(at);
     if (kind === `unlabeled ${HANDOVER_LABEL}`) return inRun(at) && (dropped || relabeled(at));
@@ -220,6 +226,17 @@ function doneRecords(collected) {
       at: ms(c.created_at),
     }));
   return { records, closedAt };
+}
+
+/** Factory's local-route marks (localFactoryActions): each `<labeled event id> <login that posted it>` pair. */
+function localRouteMarks(collected) {
+  const head = new RegExp(`^<!-- factory:${collected.issue?.number}:local-route:(\\d+) -->`);
+  const out = new Set();
+  for (const c of collected.issueComments || []) {
+    const id = head.exec(c.body || "")?.[1];
+    if (id && c.user?.login) out.add(`${id} ${c.user.login}`);
+  }
+  return out;
 }
 
 /** The login a local-mode Objective's Factory posts as: its first progress comment's author. Null off local mode. */
@@ -324,8 +341,8 @@ export function humanActions(collected, since, { bots = new Set(), label = OBJEC
   const out = [];
   const after = (at) => Number.isFinite(ms(at)) && ms(at) > ms(since);
   const factoryLocal = localFactoryActions(collected, { label });
-  const push = (at, where, kind, actor, detail = "") => {
-    if (after(at) && isHuman(actor, bots) && !factoryLocal(at, actor, kind)) out.push({ at, where, kind, by: actor.login ?? actor.name ?? "unknown", detail });
+  const push = (at, where, kind, actor, detail = "", id = null) => {
+    if (after(at) && isHuman(actor, bots) && !factoryLocal(at, actor, kind, id)) out.push({ at, where, kind, by: actor.login ?? actor.name ?? "unknown", detail });
   };
   const issue = `#${collected.issue.number}`;
   const branch = branchPulls(collected);
@@ -344,7 +361,7 @@ export function humanActions(collected, since, { bots = new Set(), label = OBJEC
       push(e.created_at, issue, "comment", e.user ?? e.actor, (e.body || "").slice(0, 80));
       continue;
     }
-    push(e.created_at, issue, e.event === "labeled" || e.event === "unlabeled" ? `${e.event} ${e.label?.name ?? ""}` : e.event, e.actor);
+    push(e.created_at, issue, e.event === "labeled" || e.event === "unlabeled" ? `${e.event} ${e.label?.name ?? ""}` : e.event, e.actor, "", e.id ?? null);
   }
   for (const c of collected.issueComments || []) if (!/<!-- factory:/.test(c.body || "")) push(c.created_at, issue, "comment", c.user, (c.body || "").slice(0, 80));
   for (const pr of collected.pulls || []) {
@@ -514,13 +531,13 @@ export function splitInterventions(actions, requests) {
 export function factoryActivity(collected, { app = null } = {}) {
   const self = factoryLogin(collected.issueTimeline, app);
   const local = localFactoryActions(collected);
-  const mine = (at, actor, kind) => (!!self && String(actor?.login ?? "").toLowerCase() === self) || local(at, actor, kind);
+  const mine = (at, actor, kind, id = null) => (!!self && String(actor?.login ?? "").toLowerCase() === self) || local(at, actor, kind, id);
   const spans = [];
-  const point = (at, actor, kind) => {
-    if (Number.isFinite(ms(at)) && mine(at, actor, kind)) spans.push([ms(at), ms(at)]);
+  const point = (at, actor, kind, id = null) => {
+    if (Number.isFinite(ms(at)) && mine(at, actor, kind, id)) spans.push([ms(at), ms(at)]);
   };
   const n = collected.issue.number;
-  for (const e of collected.issueTimeline || []) point(e.created_at, e.actor ?? e.user, e.label ? `${e.event} ${e.label.name}` : e.event);
+  for (const e of collected.issueTimeline || []) point(e.created_at, e.actor ?? e.user, e.label ? `${e.event} ${e.label.name}` : e.event, e.id ?? null);
   for (const c of collected.issueComments || []) {
     if ((c.body || "").startsWith(`<!-- factory:${n}:vendor:`)) continue;
     if ((c.body || "").startsWith(`<!-- factory:${n}:progress`) && mine(c.created_at, c.user, "progress")) {

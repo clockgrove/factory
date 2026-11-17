@@ -392,7 +392,7 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.totals), ["cost", "objectives", "passes", "stages", "tokens"]);
   const cost = [".unknownRuns:number", ".unknownWhy[]", ".usd.api:number", ".usd.credits:number", ".usd.sandbox:number", ".usd.subscription:number", ".usd.unknown:number"];
   assert.deepEqual(shape(r.objectives.find((o) => o.issue === 5).cost).map((s) => s.replace(/\[\]:string$/, "[]")), cost);
-  assert.deepEqual(keys(r.unknown), ["items", "reasons", "runs"]);
+  assert.deepEqual(keys(r.unknown), ["items", "reasons", "runs", "stages"]);
   assert.deepEqual(keys(r.unknown.reasons[0]), ["code", "runs", "stages", "text"]);
   assert.deepEqual(keys(r.unknown.items[0]), ["issue", "runs", "stage", "why"]);
   assert.deepEqual(keys(r.breakdowns), ["account", "harness", "model", "pass", "stage", "version"]);
@@ -1176,6 +1176,9 @@ test("report (#566 S3): a merged Objective whose PR lies past the PR list's earl
   for (let i = 0; i < 98; i += 1) w.pulls.push(ownPull(500 + i, { created: "2026-11-15T00:00:00Z", updated: `2026-11-1${i % 2 ? 6 : 5}T12:00:00Z` }));
   w.pulls.push(ownPull(700, { created: "2026-10-20T00:00:00Z", updated: "2026-10-21T00:00:00Z" }));
   w.pulls.push(ownPull(1, { created: "2026-09-02T00:00:00Z", merged: "2026-09-02T01:00:00Z" }));
+  // An older closed Objective with only a stranger's paste of a marker in the period: it counts nothing, so no PR is read for it.
+  w.issues.push(objectiveIssue(3, { created: "2026-09-01T00:00:00Z" }));
+  w.comments.push(comment(3, `<!-- pendulum:3:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 1, usd: 9 })}`, { user: { login: "stranger", type: "User" }, association: "NONE", at: "2026-11-17T03:00:00Z" }));
   const { json: r, calls } = await report(w, { since: "2026-11-01" });
   assert.deepEqual(r.objectives.map((o) => [o.issue, o.outcome]), [[1, "merged"], [2, "merged"]]);
   assert.deepEqual(r.hotSpots.blockedOrUnmergedSpend.items, []);
@@ -1283,6 +1286,8 @@ test("report (#566 R8, R9): each missing entry gives its Objectives and the stag
   const w = world();
   // A stage that names two reasons for its one run of unknown cost: two reasons, one stage.
   w.comments = w.comments.map((c) => (c.body.startsWith("<!-- pendulum:8:progress:review:local-u1 -->") ? { ...c, body: c.body.replace(/^<!-- pendulum:spend [^\n]*$/m, spendMarker(0, { usdUnknown: 1, usdUnknownWhy: ["failed-request", "unreported"] })) } : c));
+  // A vendor comment with no stage of its own, by a member who is not Pendulum: a run of unknown cost, but no stage.
+  w.comments.push(comment(7, ["<!-- pendulum:7:vendor:work:777-abcdef012345 -->", "Pendulum's sandbox cost for this stage:", spendMarker(0.01, { vendorUsd: 0.01 })].join("\n"), { user: { login: "teammate", type: "User" }, association: "MEMBER", at: "2026-11-17T04:55:00Z" }));
   const { json: r } = await report(w, { since: "2026-11-17" });
   const entry = (code) => r.source.missing.find((m) => m.code === code);
   // #5 (two local stages), #7 (its Actions build's older record and two local stages) and #8 (its expired Actions build
@@ -1293,20 +1298,25 @@ test("report (#566 R8, R9): each missing entry gives its Objectives and the stag
   for (const m of r.source.missing) assert.deepEqual(Object.keys(m.counts), ["objectives", "stages"], m.code);
   const md = renderReport(r);
   const runs = r.unknown.runs;
-  const stagesWithUnknown = r.unknown.items.filter((x) => x.stage !== "decisions").length;
-  assert.equal(r.unknown.reasons.reduce((t, x) => t + x.stages, 0), stagesWithUnknown + 1, "a stage with two reasons is under each");
-  assert.match(md, new RegExp(`^- Runs of unknown cost: ${runs} in ${stagesWithUnknown} stage\\(s\\)\\. By reason \\(a stage that names two is under each\\): `, "m"));
+  // The vendor comment with no stage is an item but no stage.
+  const stagesWithUnknown = r.unknown.items.length - 1;
+  assert.equal(r.unknown.stages, stagesWithUnknown);
+  assert.equal(r.unknown.reasons.reduce((t, x) => t + x.stages, 0), r.unknown.items.length + 1, "a stage with two reasons is under each");
+  assert.match(md, new RegExp(`^- Runs of unknown cost: ${runs} in ${stagesWithUnknown} stage\\(s\\) and 1 record\\(s\\) outside a stage \\(decision calls, or a vendor comment with no stage\\)\\. By reason \\(a stage that names two is under each\\): `, "m"));
   assert.match(md, new RegExp(`^\\*\\*Answer and fix passes\\*\\*: [^\\n]*; not recorded \\(a stage with no per-pass ledger\\): ${r.hotSpots.answerAndFixPasses.unrecorded.map((n) => `#${n}`).join(", ")}$`, "m"));
   assert.match(md, /^- Missing: stages with no per-pass ledger[^\n]* \(3 Objective\(s\), 7 stage\(s\): #5, #7, #8\)$/m);
 });
 
-test("report (#566): one name per model: a Claude id's dotted version is its hyphenated one, and an OpenAI id is the price table's row, through its aliases and provider prefix", async () => {
+test("report (#566): one name per model: a Claude model's Copilot catalog id is its Anthropic API id by the table, and an OpenAI id is the price table's row, through its aliases and provider prefix", async () => {
   const { modelName } = await import("../scripts/lib/report.mjs");
   const prices = loadPrices();
   assert.deepEqual(
-    ["claude-sonnet-5.5", "claude-sonnet-5-5", "claude-3.5-sonnet-20241022", "claude-fable-5-2", "openai/gpt-6.1-sol", "gpt-6.1-sol", "gpt-5.6", "gpt-6-luna-2026-08-07", "openai/gpt-7-nova", "gpt-5-mini", "us.anthropic.claude-sonnet-5.5-v1:0", "Claude-Sonnet-5.5", "decisions", null].map((m) => modelName(m, prices)),
-    ["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-3-5-sonnet-20241022", "claude-fable-5-2", "gpt-6.1-sol", "gpt-6.1-sol", "gpt-5.6-sol", "gpt-6-luna-2026-08-07", "openai/gpt-7-nova", "gpt-5-mini", "us.anthropic.claude-sonnet-5.5-v1:0", "Claude-Sonnet-5.5", "decisions", null],
+    ["claude-sonnet-5.5", "claude-sonnet-5-5", "claude-opus-5.5", "claude-2.1", "claude-3.5-sonnet-20241022", "claude-fable-5-2", "openai/gpt-6.1-sol", "gpt-6.1-sol", "gpt-5.6", "gpt-6-luna-2026-08-07", "openai/gpt-7-nova", "gpt-5-mini", "us.anthropic.claude-sonnet-5.5-v1:0", "Claude-Sonnet-5.5", "decisions", null].map((m) => modelName(m, prices)),
+    ["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-2.1", "claude-3.5-sonnet-20241022", "claude-fable-5-2", "gpt-6.1-sol", "gpt-6.1-sol", "gpt-5.6-sol", "gpt-6-luna-2026-08-07", "openai/gpt-7-nova", "gpt-5-mini", "us.anthropic.claude-sonnet-5.5-v1:0", "Claude-Sonnet-5.5", "decisions", null],
   );
+  // Every row of the table names an API id the report keeps as it is.
+  const { CLAUDE_MODELS } = await import("../scripts/lib/report.mjs");
+  for (const [from, to] of Object.entries(CLAUDE_MODELS.aliases)) assert.deepEqual([modelName(from, prices), modelName(to, prices)], [to, to], from);
   const w = blank();
   const stage = (n, h, model, usd) => {
     w.issues.push(objectiveIssue(n));

@@ -57,17 +57,21 @@ const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?$/;
 const HARNESSES = new Set(["claude", "codex", "copilot"]);
 const modelKey = (v) => (typeof v === "string" && MODEL.test(v) ? v : null);
 
+/** Other names of Claude models (GitHub Copilot's model catalog ids) and the Anthropic API id each names. */
+export const CLAUDE_MODELS = JSON.parse(readFileSync(join(import.meta.dirname, "claude-models.json"), "utf8"));
+
 /**
  * A model id as the report names it, one name per model: a model the Codex price table lists (usage.mjs codexRow: its id
  * after any provider prefix, or an alias the table records as OpenAI documents it) by the table's own id, a dated
- * snapshot suffix kept (`openai/gpt-6.1-sol` is `gpt-6.1-sol`; `gpt-5.6` is `gpt-5.6-sol`); a Claude id (`claude-`, lower
- * case) with each dot between two digits written as a hyphen, as Anthropic's API names its models (`claude-sonnet-5.5`,
- * as Copilot's model catalog writes it, is `claude-sonnet-5-5`). Any other id as recorded; null for none.
+ * snapshot suffix kept (`openai/gpt-6.1-sol` is `gpt-6.1-sol`; `gpt-5.6` is `gpt-5.6-sol`); a Claude model's other name
+ * that claude-models.json lists (Copilot's catalog id `claude-sonnet-5.5`) by the Anthropic API id it maps it to
+ * (`claude-sonnet-5-5`). Any other id as recorded; null for none.
  */
-export function modelName(model, prices) {
+export function modelName(model, prices, claude = CLAUDE_MODELS) {
   const m = modelKey(model);
   if (!m) return null;
-  if (/^claude-[a-z0-9.-]+$/.test(m)) return m.replace(/(\d)\.(?=\d)/g, "$1-");
+  const named = claude?.aliases && typeof claude.aliases === "object" && Object.hasOwn(claude.aliases, m) ? modelKey(claude.aliases[m]) : null;
+  if (named) return named;
   const row = codexRow(prices, m, { at: null });
   if (!row.rate && row.why !== "price-ended") return m;
   const bare = bareModel(m);
@@ -507,7 +511,7 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
       let early = false;
       pulls.push(...(await paged(`${base}/pulls?state=all&sort=updated&direction=desc`, budget, "pulls", opts, { stop: (items) => (early = !!floor && ms(items.at(-1)?.updated_at) < ms(floor)) })));
       source.pullsRead = true;
-      if (early) await olderPulls({ base, repo, floor, issues, pulls, comments, setMode, budget, opts, source });
+      if (early) await olderPulls({ base, repo, floor, issues, pulls, comments, mine, setMode, budget, opts, source });
     }
     source.comments = comments.length;
     // The merged Objectives read from their finish card's summary: none of their stages' usage artifacts is read.
@@ -605,11 +609,12 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
  * whose end its PRs decide (no state label) and whose issue was created before the floor, with no PR from the repository
  * itself on its branch created since then in the list, may have its newest PR past the stop: its branch's own PRs are
  * read (one paged read each, planned), as `--issue` reads them. Only the Objectives the report can show: in a set, each;
- * in a period, each with one of Pendulum's markers among the comments read. `source.pullsUnread` keeps those whose read
+ * in a period, each with a marker among the comments read that counts (`mine`, Pendulum's own, or one by someone who can
+ * push or through another App, which counts as unknown cost); a stranger's paste reads no PR. `source.pullsUnread` keeps those whose read
  * the call budget stopped (their outcome is then null).
  */
-async function olderPulls({ base, repo, floor, issues, pulls, comments, setMode, budget, opts, source }) {
-  const marked = new Set(comments.map(markerIssue).filter((n) => n !== null));
+async function olderPulls({ base, repo, floor, issues, pulls, comments, mine, setMode, budget, opts, source }) {
+  const marked = new Set(comments.filter((c) => mine(c) || pushAuthor(c) || throughApp(c)).map(markerIssue).filter((n) => n !== null));
   const decided = (i) => (i.labels || []).some((l) => ["Blocked", "Question"].includes(STATE_LABELS[typeof l === "string" ? l : l?.name]));
   const want = [...issues.values()]
     .filter((i) => i.state === "closed" && !decided(i) && ms(i.created_at) < ms(floor) && (setMode || marked.has(i.number)) && !(ms(newestPull(i.number, pulls)?.created_at) >= ms(floor)))
@@ -797,6 +802,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   const totals = zeroCost();
   const totalTokens = zeroTokens();
   const unknownItems = [];
+  // The stages among them (a decision record, or a vendor comment with no stage of its own, is none).
+  let unknownStages = 0;
   const mixes = mixBook(prices);
   const views = { stage: breakdown(), pass: breakdown(), model: breakdown(), harness: breakdown(), version: breakdown(), account: breakdown() };
   const passMinutes = new Map();
@@ -977,6 +984,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
           if (!model && !s.unattributed) missing.noModel.add(n);
         }
         if (c.unknownRuns) unknownItems.push({ issue: n, stage: kind, runs: c.unknownRuns, why: c.unknownWhy });
+        if (c.unknownRuns && stage) unknownStages += 1;
         // A review stage's dollars and model, by its run key, for the findings it raised (#546), as the stage path keeps them.
         if (stage && kind === "review" && s.key && !s.unattributed) {
           const r = reviewStages.get(s.key) ?? { cost: zeroCost(), model };
@@ -1063,6 +1071,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
         if (!version && !rec.unattributed) missing.noVersion.add(n);
       }
       if (c.unknownRuns) unknownItems.push({ issue: n, stage: stageKind, runs: c.unknownRuns, why: c.unknownWhy });
+      if (c.unknownRuns && rec.source !== "decisions" && !rec.notStage) unknownStages += 1;
       // The stage's passes, from its per-pass ledger.
       if (rec.unattributed && !rec.notStage) unattributedStages += 1;
       if (rec.source === "decisions" || rec.unattributed || unmatched) return;
@@ -1115,6 +1124,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     totals: { objectives: objectives.length, stages: stagesSeen, passes: passesSeen, cost: totals, tokens: totalTokens },
     unknown: {
       runs: totals.unknownRuns,
+      stages: unknownStages,
       reasons: reasonsOf(unknownItems),
       items: unknownItems,
     },
@@ -1574,9 +1584,8 @@ export function renderReport(r) {
   out.push("", "## Totals", "", "Each kind's dollars are apart; they are never added together.", "", table(COST_HEAD, [costCells(r.totals.cost)]));
   out.push("", `- API: ${r.words.api}. Subscription: ${r.words.subscription}. Copilot: ${r.words.credits}. Sandbox: ${r.words.sandbox}.`);
   // The stages (and decision records) with runs of unknown cost, then each reason's: a stage naming two reasons is under both.
-  const items = r.unknown.items;
-  const decisionItems = items.filter((x) => x.stage === "decisions").length;
-  const where = items.length ? ` in ${items.length - decisionItems} stage(s)${decisionItems ? ` and ${decisionItems} decision record(s)` : ""}` : "";
+  const others = r.unknown.items.length - r.unknown.stages;
+  const where = r.unknown.items.length ? ` in ${r.unknown.stages} stage(s)${others ? ` and ${others} record(s) outside a stage (decision calls, or a vendor comment with no stage)` : ""}` : "";
   out.push(`- Runs of unknown cost: ${r.unknown.runs}${where}.${r.unknown.reasons.length ? ` By reason (a stage that names two is under each): ${r.unknown.reasons.map((x) => `${x.stages} stage(s)${x.runs === null ? "" : `, ${x.runs} run(s)`}: ${x.text}`).join("; ")}.` : ""}`);
   const t = r.totals.tokens;
   if (t.input !== null || t.output !== null) out.push(`- Tokens reported: ${t.input ?? "?"} in (${t.cached ?? "?"} cache reads, ${t.written ?? "?"} cache writes), ${t.output ?? "?"} out.`);
@@ -1620,7 +1629,7 @@ function renderRates(rates) {
   const out = ["", "## Rate ratios", "", `Each ratio is the ${rates.words}: the candidate's published rates over the recorded model's, on that model's recorded tokens in this report (its long-context share at the long-context rates), within one vendor's rates. It is no cost, and no figure here is dollars.`];
   if (rates.basis) out.push("", `Rates: ${rates.basis}.`);
   const longIn = (x) => x.long.uncached + x.long.cached + x.long.written;
-  out.push("", rates.items.length ? table(["Recorded model", "Candidate", "Ratio", "Uncached in", "Cache reads", "Cache writes", "Out", "Long-context in, out"], rates.items.map((x) => [x.model, x.candidate, `${x.ratio}×`, x.mix.uncached, x.mix.cached, x.mix.written, x.mix.output, longIn(x) || x.long.output ? `${longIn(x)}, ${x.long.output}` : "—"])) : "No ratio.");
+  out.push("", rates.items.length ? table(["Model", "Candidate", "Ratio", "Uncached in", "Cache reads", "Cache writes", "Out", "Long-context in, out"], rates.items.map((x) => [x.model, x.candidate, `${x.ratio}×`, x.mix.uncached, x.mix.cached, x.mix.written, x.mix.output, longIn(x) || x.long.output ? `${longIn(x)}, ${x.long.output}` : "—"])) : "No ratio.");
   for (const s of rates.skipped) out.push(`- No ratio for ${[s.model, s.candidate].filter(Boolean).map((m) => `\`${m}\``).join(" to ")}: ${s.text}.`);
   return out;
 }

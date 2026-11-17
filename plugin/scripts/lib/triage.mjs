@@ -4,8 +4,10 @@
 // MIN_CONFIDENCE), and no failure points at a file the PR changes, are the failed jobs rerun, once per head. The jobs
 // are asked one at a time, up to the first answer that already sends the red to the fix pass. Anything else (a change
 // verdict, a low confidence, an error, a refusal, a failure already rerun once on the Objective, an earlier refused
-// rerun, no decider) goes to the fix pass exactly as before. Each triage line (each verdict, its confidence and the
-// floor), and why triage is off at a red, goes to the job log and the run's progress comment.
+// rerun, no decider) goes to the fix pass exactly as before. A job that was cancelled, at its own time limit or by a
+// person, is no question and no flake: it is named as cancelled (jobCancel) and goes to the fix pass, never rerun. Each
+// triage line (each verdict, its confidence and the floor), and why triage is off at a red, goes to the job log and the
+// run's progress comment.
 // "The same failure" (already rerun once here; failing on the default branch, reds.mjs) is the failure signature when
 // both sides have one and they are equal; when either has none, or they differ in the same job's same failed step, it is
 // a decision call given both logs' failure windows (openTriage `same`).
@@ -770,20 +772,8 @@ function plainExpression(n) {
 export function workflowJobs(text, runs) {
   const coe = new Map();
   const needs = new Map();
-  let doc;
-  try {
-    doc = parseYaml(String(text || ""), { typed: true });
-  } catch {
-    return { coe, needs };
-  }
-  const jobs = Object.entries(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {}).filter(([, j]) => j && typeof j === "object");
-  const own = (id, j) => (typeof j.name === "string" || typeof j.name === "number" ? String(j.name) : id);
-  const called = (j) => typeof j.uses === "string" && !!j.uses.trim();
-  // A caller's runs are named `<caller> / <the called workflow's job>` (workflowChecks).
-  const jobOf = (name) => {
-    const hits = jobs.filter(([id, j]) => reports(called(j) ? `${own(id, j)} / \${{ callee }}` : own(id, j), name));
-    return hits.length === 1 ? hits[0] : null;
-  };
+  const jobs = workflowJobList(text);
+  if (!jobs) return { coe, needs };
   const needsOf = (j) => (Array.isArray(j?.needs) ? j.needs : j?.needs ? [j.needs] : []).map(String);
   const byId = new Map(jobs);
   // Every job a job needs, directly or through others: a roll-up red because a job it needs was skipped after its own
@@ -799,7 +789,7 @@ export function workflowJobs(text, runs) {
     }
     return seen;
   };
-  const found = new Map((runs || []).map((r) => [r.id, jobOf(r.name)]));
+  const found = new Map((runs || []).map((r) => [r.id, jobReporting(jobs, r.name)]));
   for (const r of runs || []) {
     const hit = found.get(r.id);
     if (!hit) {
@@ -808,11 +798,118 @@ export function workflowJobs(text, runs) {
       continue;
     }
     const [id, job] = hit;
-    coe.set(r.id, called(job) ? null : continueOnError(job, legValues(job, own(id, job), r.name)));
+    coe.set(r.id, callsWorkflow(job) ? null : continueOnError(job, legValues(job, jobCheckName(id, job), r.name)));
     const wants = closure(id);
     needs.set(r.id, (runs || []).filter((o) => o !== r && wants.has(found.get(o.id)?.[0])).map((o) => o.name));
   }
   return { coe, needs };
+}
+
+/** A workflow file's jobs as [id, job] pairs, read as GitHub Actions reads them (typed), or null when it does not parse. */
+function workflowJobList(text) {
+  let doc;
+  try {
+    doc = parseYaml(String(text || ""), { typed: true });
+  } catch {
+    return null;
+  }
+  return Object.entries(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {}).filter(([, j]) => j && typeof j === "object");
+}
+/** The check name a workflow job reports, as a template: its `name`, else its id. */
+const jobCheckName = (id, j) => (typeof j.name === "string" || typeof j.name === "number" ? String(j.name) : id);
+/** Whether a workflow job calls a reusable workflow (`uses`). */
+const callsWorkflow = (j) => typeof j.uses === "string" && !!j.uses.trim();
+/** The one job of `jobs` (workflowJobList) whose check name reports `name` (reports), or null; a caller's runs are named `<caller> / <the called workflow's job>` (workflowChecks). */
+function jobReporting(jobs, name) {
+  const hits = jobs.filter(([id, j]) => reports(callsWorkflow(j) ? `${jobCheckName(id, j)} / \${{ callee }}` : jobCheckName(id, j), name));
+  return hits.length === 1 ? hits[0] : null;
+}
+
+// ------------------------------------------------------------------ a cancelled job, at its time limit or not (#519)
+
+/**
+ * An Actions job's conclusions that say it was stopped rather than failed: GitHub concludes `cancelled` for a job that
+ * reached its own `timeout-minutes`, one a person cancelled and one a concurrency group replaced alike; `timed_out` is
+ * the checks API's own word for a time-out. A cancelled job is never a flake and never rerun as one.
+ */
+export const CANCELLED = ["cancelled", "timed_out"];
+/** The time limit GitHub gives a job whose workflow sets no `timeout-minutes` (jobs.<job_id>.timeout-minutes). */
+export const DEFAULT_TIMEOUT_MINUTES = 360;
+
+/**
+ * A workflow job's time limit in minutes: its `timeout-minutes`, a number or a `${{ }}` expression over its leg's
+ * `matrix` (matrixExpression, the bounded part of the language only), else DEFAULT_TIMEOUT_MINUTES. Null when it cannot
+ * be known: an expression over another context or a leg whose values are not known, or a value that is no positive number.
+ */
+export function timeoutMinutes(job, matrix) {
+  const v = job?.["timeout-minutes"];
+  if (v === undefined || v === null) return DEFAULT_TIMEOUT_MINUTES;
+  const positive = (n) => (Number.isFinite(n) && n > 0 ? n : null);
+  if (typeof v === "number") return positive(v);
+  const s = String(v).trim();
+  if (/^\d+(?:\.\d+)?$/.test(s)) return positive(Number(s));
+  const m = /^\$\{\{([\s\S]*)\}\}$/.exec(s);
+  const value = m ? matrixExpression(m[1], matrix) : null;
+  const text = value === null ? "" : value.coerceString();
+  return /^\d+(?:\.\d+)?$/.test(text) ? positive(Number(text)) : null;
+}
+
+/**
+ * The time limit in minutes of the job whose check run is named `name`, from the workflow file `text` its run came from
+ * (at the run's head): the one job reporting that name (reports), its leg's matrix values for an expression
+ * (legValues). Null when the file does not parse, no single job reports the name, the job calls a reusable workflow
+ * (the called job's limit is in another file), or its limit cannot be known (timeoutMinutes).
+ */
+export function workflowTimeLimit(text, name) {
+  const jobs = workflowJobList(text);
+  const hit = jobs ? jobReporting(jobs, name) : null;
+  if (!hit || callsWorkflow(hit[1])) return null;
+  const [id, job] = hit;
+  return timeoutMinutes(job, legValues(job, jobCheckName(id, job), name));
+}
+
+/**
+ * Whether an Actions job (the jobs API's: `conclusion`, `started_at`, `completed_at`) was cancelled, and if so whether
+ * at its own time limit, on structure only: its conclusion is one of CANCELLED, and it ran (completed_at less
+ * started_at) as long as the time limit its workflow file at the run's head gives it (`workflow`, workflowTimeLimit) or
+ * longer. Null when the job was not cancelled. Otherwise {name, limit, ranMs, atLimit, said, text}: `limit` null when the
+ * workflow could not say; `said` how a triage line words it after the job's name, and `text` the sentence a fix pass and
+ * a Block read. A cancelled job not known to be at its limit (a person, a concurrency group, a limit that could not be
+ * read) is said to be cancelled, nothing more.
+ */
+export function jobCancel(job, workflow = "", name = job?.name) {
+  if (!job || !CANCELLED.includes(job.conclusion)) return null;
+  const ran = Date.parse(job.completed_at) - Date.parse(job.started_at);
+  const ranMs = Number.isFinite(ran) && ran >= 0 ? ran : null;
+  const limit = workflow ? workflowTimeLimit(workflow, name) : null;
+  const atLimit = limit !== null && ranMs !== null && ranMs >= limit * 60_000;
+  const after = ranMs === null ? "" : ` after ${Math.floor(ranMs / 60_000)} min`;
+  const said = atLimit ? `cancelled at its ${limit}-minute limit` : limit === null ? `cancelled${after} (its time limit could not be read)` : ranMs === null ? "cancelled (how long it ran could not be read)" : `cancelled${after}, before its ${limit}-minute limit`;
+  return { name, limit, ranMs, atLimit, said, text: `the ${name} job was ${said}` };
+}
+
+/**
+ * The workflow file an Actions job's run (`runId`) came from, at that run's head commit (falling back to `sha`): "" when
+ * GitHub names none or it cannot be read. `token` reads the file, `actionsToken` the run.
+ */
+export async function runWorkflow(repo, runId, { token, actionsToken = token, sha = "" }) {
+  const run = await rest(`repos/${repo.full}/actions/runs/${runId}`, { token: actionsToken }).catch(() => null);
+  const path = String(run?.path || "").replace(/@.*$/, "");
+  const ref = /^[0-9a-f]{40}$/.test(run?.head_sha || "") ? run.head_sha : sha;
+  if (!path || !ref) return "";
+  return rest(`repos/${repo.full}/contents/${path}?ref=${ref}`, { token, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => "");
+}
+
+/**
+ * Whether a failing check run (`r`: {id, name, conclusion}) is an Actions job that was cancelled (jobCancel), read only
+ * when the check run's own conclusion is one of CANCELLED: its job, then its workflow file at its run's head
+ * (runWorkflow). Null otherwise, or when its job cannot be read.
+ */
+export async function checkCancel(repo, r, { token, actionsToken = token, sha = "" }) {
+  if (!CANCELLED.includes(r?.conclusion)) return null;
+  const job = await rest(`repos/${repo.full}/actions/jobs/${r.id}`, { token: actionsToken }).catch(() => null);
+  if (!job || !CANCELLED.includes(job.conclusion)) return null;
+  return jobCancel(job, job.run_id ? await runWorkflow(repo, job.run_id, { token, actionsToken, sha }) : "", r.name);
 }
 
 /** Triggers that never start a workflow on a PR's head commit: they run on the queue's, the default branch's or a tag's. */
@@ -1039,7 +1136,8 @@ export function triageLine({ sha, model, jobs, outcome, floor = confidenceFloor(
   const each = jobs.map((j) => {
     const again = j.repeat ? `, ${typeof j.repeat === "string" ? j.repeat : "seen before"}` : "";
     const sig = j.sig.id ? `${j.sig.id}${again}${j.sig.line ? ` \`${j.sig.line.replace(/`/g, "'")}\`` : ""}` : `no failure line found${again}`;
-    if (j.notAsked) return `${j.name}: not read nor asked, ${j.notAsked}'s answer already sends the red to the fix pass`;
+    if (j.notAsked) return `${j.name}: not read nor asked, ${j.notAsked} already sends the red to the fix pass`;
+    if (j.cancel) return `${j.name}: ${j.cancel.said}, never a flake: no model asked, no rerun`;
     if (j.infra) return `${j.name}: failed in its ${j.infra} step (${j.step}), no model asked [${sig}]`;
     return `${j.name}: ${j.verdict ?? `no verdict (${j.error || "?"})`}${typeof j.confidence === "number" ? ` ${j.confidence.toFixed(2)}` : ""}${j.as ? ` (asked as ${j.as}: the same failure)` : ""} [${sig}]`;
   });
@@ -1125,18 +1223,23 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     }
     return null;
   };
-  // A job's workflow file at the head, read once per workflow run: what tells its checkout steps apart (setupFailure).
+  // A job's workflow file at its run's head, read once per workflow run: what tells its checkout steps apart
+  // (setupFailure) and gives its time limit (jobCancel).
   const workflows = new Map();
   const workflowOf = (sha, job) => {
-    if (!workflows.has(job.run_id)) {
-      workflows.set(
-        job.run_id,
-        rest(`repos/${repo.full}/actions/runs/${job.run_id}`, actions)
-          .then((run) => (run?.path ? rest(`repos/${repo.full}/contents/${String(run.path).replace(/@.*$/, "")}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }) : ""))
-          .then(String, () => ""),
-      );
-    }
+    if (!workflows.has(job.run_id)) workflows.set(job.run_id, runWorkflow(repo, job.run_id, { token, actionsToken, sha }));
     return workflows.get(job.run_id);
+  };
+  // Whether a failing job was cancelled, at its time limit or not (jobCancel): its workflow is read only for a cancelled job.
+  const cancelOf = async (sha, r, job) => (CANCELLED.includes(job?.conclusion) ? jobCancel(job, await workflowOf(sha, job), r.name) : null);
+  // The cancelled jobs among a red's failing check runs (checkCancel), read only for a check run concluded so.
+  const cancelsOf = async (sha, failedRuns) => {
+    const out = [];
+    for (const r of failedRuns) {
+      const c = await checkCancel(repo, r, { token, actionsToken, sha }).catch(() => null);
+      if (c) out.push(c);
+    }
+    return out;
   };
 
   // This process's triage answers by head (red()), so again() never reruns a red the model read as the change's.
@@ -1155,6 +1258,8 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   // or network failure (serverSide), and its failure pointing at no file the PR changes (changedPathIn). Returns the
   // kind, or null.
   const githubSide = async (sha, job, text, sig, names) => {
+    // A cancelled job is no failure of GitHub's side, whatever its steps say (jobCancel).
+    if (CANCELLED.includes(job?.conclusion)) return null;
     const step = failedStep(job);
     if (!step || !serverSide(text) || changedPathIn(sig, names)) return null;
     return setupFailure(job, step.number === 1 ? null : await workflowOf(sha, job));
@@ -1218,10 +1323,13 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     return "";
   };
 
-  const offRed = async ({ failedRuns = [] } = {}) => {
-    if (!failedRuns.length || offSaid) return { rerun: false };
+  // Triage off: said once per stage, and at every red with a cancelled job, which is named (no flake either way).
+  const offRed = async ({ sha = "", failedRuns = [] } = {}) => {
+    if (!failedRuns.length) return { rerun: false };
+    const cancels = await cancelsOf(sha, failedRuns);
+    if (offSaid && !cancels.length) return { rerun: false };
     offSaid = true;
-    const line = `triage: off (${code}); fix pass`;
+    const line = `triage: off (${code}); ${cancels.map((c) => `${c.text}, no flake; `).join("")}fix pass`;
     log(line);
     if (progress) await progress(line);
     return { rerun: false };
@@ -1294,13 +1402,17 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       if (!jobsToTriage(runs, required, sigs).includes(r)) continue;
       const one = await askJob({ sha, r, job, text, sig, names, files, seen, questions });
       jobs.push(one);
-      if (decides(one, floorNow().min)) decided = r.name;
+      if (decides(one, floorNow().min)) decided = `${r.name}'s ${one.cancel ? "cancellation" : "answer"}`;
     }
     return { jobs, runIds };
   };
   // One job's question (askJobs).
   const askJob = async ({ sha, r, job, text, sig, names, files, seen, questions }) => {
     const step = failedStep(job)?.name || "";
+    // A cancelled job (at its time limit, or by a person or a concurrency group) is never a flake: no model is asked, no
+    // verdict given, so the red goes to the fix pass and is never rerun (jobCancel).
+    const cancel = await cancelOf(sha, r, job);
+    if (cancel) return { id: r.id, name: r.name, sig, repeat: "", step, verdict: null, confidence: null, cancel, error: cancel.said };
     // GitHub's side (githubSide): no code of the change ran and the far side failed, so no model is asked and nothing
     // a rerun could hide; rerun once on this head like a flake. Any other checkout failure is asked like any red.
     const infra = await githubSide(sha, job, text, sig, names);
@@ -1334,7 +1446,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     asked.set(sha, jobs);
     const floor = floorNow();
     const flaky = rerunWanted(jobs, floor.min);
-    await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : "the change's: fix pass", floor }), {});
+    await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : jobs.some((j) => j.cancel) ? "a cancelled job is no flake: fix pass" : "the change's: fix pass", floor }), {});
     return { flaky, jobs, off: false };
   };
   // Whether a failing job's failure names what the PR changes: a changed path (changedPathIn), or a changed file or added
@@ -1386,6 +1498,9 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     for (const r of failedRuns) {
       const job = await actionsJobOf(r);
       if (!job) return { rerun: false, skipped: `${r.name} is not an Actions job, so it cannot be rerun` };
+      // A cancelled job is never rerun as a flake (jobCancel).
+      const cancel = await cancelOf(sha, r, job);
+      if (cancel) return { rerun: false, skipped: `${cancel.text}, which is no flake` };
       runIds.add(job.run_id);
       const { text, sig } = await readJob(r);
       if (sig.id && seen.sigs.has(sig.id)) return { rerun: false, skipped: `the failure of ${r.name} was already rerun once on this Objective` };

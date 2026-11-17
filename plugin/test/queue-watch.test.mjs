@@ -44,6 +44,7 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     logs: {}, // Actions job logs by job id
     mainCommits: [], // the default branch's newest commits, newest first
     prFiles: [{ filename: "src/add.js", patch: "+export const add = (a, b) => a - b;" }], // the PR's files
+    workflow: null, // the workflow file every Actions run came from (.github/workflows/ci.yml), at any ref
   };
   let id = 200;
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -90,7 +91,8 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
       const t = Date.parse("2026-11-01T00:00:00Z");
       return json(200, { jobs: [{ name: "Quality", steps: Object.entries(steps).map(([name, ms]) => ({ name, conclusion: "success", started_at: new Date(t).toISOString(), completed_at: new Date(t + ms).toISOString() })) }] });
     }
-    if (method === "GET" && /\/actions\/runs\/\d+$/.test(u)) return json(200, { workflow_id: 77 });
+    if (method === "GET" && /\/actions\/runs\/\d+$/.test(u)) return json(200, { workflow_id: 77, ...(s.workflow ? { path: ".github/workflows/ci.yml" } : {}) });
+    if (method === "GET" && s.workflow && /\/contents\/\.github\/workflows\/ci\.yml\?ref=[0-9a-f]{40}$/.test(u)) return new Response(s.workflow, { status: 200 });
     if (method === "GET" && /\/actions\/runs\?/.test(u)) {
       const q = new URL(u).searchParams;
       const from = Date.parse((q.get("created") || "").replace(/^>=/, ""));
@@ -883,6 +885,52 @@ test("queue red: a deterministic failure only the queue's jobs run (another OS) 
     assert.match(step.red.lead, /test \(windows-latest\)[^\n]*\n?[\s\S]*null == 'SIGKILL'/, "the job named, with its first failing test");
     assert.match(step.line, /test \(windows-latest\)/);
   });
+});
+
+// ------------------------------------------------------------------ a queue job cancelled at its time limit (#519)
+
+// assetgrove's queue CI of 2026-11-16: the Windows leg under `timeout-minutes: 20`, Quality the required roll-up.
+const LIMIT_CI = "on: merge_group\njobs:\n  test:\n    strategy:\n      matrix:\n        os: [ubuntu-26.04, windows-2025]\n    name: test (${{ matrix.os }}, 1/1)\n    runs-on: ${{ matrix.os }}\n    timeout-minutes: 20\n    steps:\n      - run: pnpm test\n  Quality:\n    needs: test\n    if: always()\n    runs-on: ubuntu-26.04\n    steps:\n      - run: test \"${{ needs.test.result }}\" = success\n";
+
+/** The queue's run on `sha` whose Windows leg (id) was cancelled after `ranMs`, and the Quality roll-up red after it. */
+function queueCancel(fake, { sha, id, ranMs }) {
+  const start = Date.now() - 40 * MIN;
+  const at = (ms) => new Date(start + ms).toISOString();
+  const leg = "test (windows-2025, 1/1)";
+  fake.s.workflow = LIMIT_CI;
+  fake.s.queueRuns.push({ id: 900 + id, event: "merge_group", head_branch: `gh-readonly-queue/main/pr-${PR}-${"f".repeat(40)}`, head_sha: sha, created_at: at(0), conclusion: "failure" });
+  fake.s.runs[sha] = [
+    { id, name: leg, status: "completed", conclusion: "cancelled", app: ACTIONS, check_suite: { id: 802 }, started_at: at(0), completed_at: at(ranMs) },
+    { id: id + 1, name: "Quality", status: "completed", conclusion: "failure", app: ACTIONS, check_suite: { id: 802 }, started_at: at(ranMs + 2000), completed_at: at(ranMs + 5000) },
+  ];
+  fake.s.jobs[id] = { id, run_id: 900 + id, name: leg, status: "completed", conclusion: "cancelled", started_at: at(0), completed_at: at(ranMs), steps: [{ name: "Set up job", conclusion: "success", number: 1 }, { name: "Run pnpm test", conclusion: "cancelled", number: 3 }], runner_id: 7, runner_name: "w" };
+  fake.s.jobs[id + 1] = { id: id + 1, run_id: 900 + id, name: "Quality", status: "completed", conclusion: "failure", started_at: at(ranMs + 2000), completed_at: at(ranMs + 5000), steps: [{ name: "Run test", conclusion: "failure", number: 2 }], runner_id: 8, runner_name: "l" };
+  fake.s.logs[id] = ["##[group]Run pnpm test", "ok 41 - search indexes 3 assets", "# Subtest: transcodes the sample video", "##[error]The operation was canceled."].join("\n");
+  fake.s.logs[id + 1] = 'test "$RESULT" = success\n##[error]Process completed with exit code 1.';
+  return leg;
+}
+
+test("queue red: a job cancelled at its time limit is never a flake, never enqueued again as one: its fix pass and the Block say it was cancelled at its limit (#519)", async () => {
+  const { queueFailureLines, redLines } = await import("../scripts/lib/session.mjs");
+  for (const [ranMs, said] of [[20 * MIN + 11_000, "cancelled at its 20-minute limit"], [3 * MIN, "cancelled after 3 min, before its 20-minute limit"]]) {
+    const fake = fakeGitHub();
+    await withGitHub(fake, async () => {
+      const leg = queueCancel(fake, { sha: "8".repeat(40), id: ranMs > 10 * MIN ? 9630 : 9640, ranMs });
+      fake.s.removals = [queueDrop(ago(5 * MIN))];
+      assert.equal(await merge({}), "queue-red");
+      // A decider that calls every job a flake never decides it: the leg is not asked.
+      const step = await reviewReads(fake, { verdict: "flaky_or_infra", confidence: 0.95 });
+      assert.equal(step.state, "fixing", `${said}: no re-enqueue as a flake`);
+      assert.notEqual(records(fake)[0].kind, "flaky");
+      const text = `the ${leg} job was ${said}`;
+      assert.equal(step.red.lead.split("\n")[0], `--- Quality (required check), from ${leg}: ${text}`);
+      assert.match(step.line, new RegExp(`${text.replace(/[()]/g, "\\$&")}; the PR's own change, one fix pass`));
+      // The answer pass's ask: the leg's exit is the cancel.
+      assert.ok(redLines(step.red, { files: false }).includes(`Exit: ${text}`), redLines(step.red, { files: false }).join("\n"));
+      // The queue Block's failed-job lines say it too.
+      assert.match(await queueFailureLines(repo, { prNumber: PR, base: "main", since: ago(3600_000), actionsToken: "job" }, { token: "t" }), new RegExp(`^\`${leg.replace(/[()]/g, "\\$&")}\`: ${text.replace(/[()]/g, "\\$&")}`));
+    });
+  }
 });
 
 // ------------------------------------------------------------------ the queue's fix passes: bounded, recorded once done (#312 review)

@@ -4,7 +4,7 @@
 // equal failure signatures, else, where the signatures cannot tell, a decision call (triage.mjs openTriage `same`).
 import { checkRuns, getRepo, jobLog, logWindow, rest } from "./github.mjs";
 import { filesDiff, trustedAuthor } from "./logic.mjs";
-import { MAX_JOBS, failedStep, failureSignature, failureWindow, isAggregate, sameFailure, workflowJobs } from "./triage.mjs";
+import { MAX_JOBS, checkCancel, failedStep, failureSignature, failureWindow, isAggregate, sameFailure, workflowJobs } from "./triage.mjs";
 
 /** The largest log or diff handed to the harness as one file; past it the head is cut and the tail kept. */
 export const RED_FILE_CAP = 8 * 1024 * 1024;
@@ -108,12 +108,13 @@ export function evidenceText({ branch, job, evidence, lines }) {
 }
 
 /**
- * The detail of a checks red on `sha`: {jobs: [{name, id, required, log, window, sig, base, baseUndecided, evidence}],
+ * The detail of a checks red on `sha`: {jobs: [{name, id, required, log, window, sig, base, baseUndecided, evidence, cancel}],
  * truncated, branch, green, diff, diffError}. `base` is {sha, said} when the job fails the same way, steadily, on the
  * default branch (baseMatch, with `same`: triage.mjs openTriage `same`, which the caller passes only when nothing on the
  * head points at the change, session.mjs baseJudge; else the signature alone), else null;
  * `baseUndecided` ({cause, said, limited?}) when a judgement that could have made it so got no answer; `evidence` is
- * what the base's newest runs of it show (baseEvidence), for the prompt. `green` is the PR's last green head; `diff` the
+ * what the base's newest runs of it show (baseEvidence), for the prompt; `cancel` (triage.mjs checkCancel) when the job
+ * was cancelled, at its time limit or not, else null. `green` is the PR's last green head; `diff` the
  * two-dot diff from it to `sha`, made by `diffOf(from, to)` (Pendulum's own mirror) or, when the red head descends from
  * it, GitHub's compare; `diffError` says why there is none.
  * With `sinceGreen` false (a merge queue commit, no head of the PR) neither is read: `green` and `diff` are null.
@@ -167,7 +168,9 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
     const base = match.base ? { sha: runs[0].sha, said: match.said, exact: match.exact } : null;
     const u = match.undecided;
     const baseUndecided = u ? { cause: u.cause || "pendulum", said: u.said, ...(u.limited ? { limited: u.limited } : {}) } : null;
-    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000, job), sig, base, baseUndecided, aggregate, evidence: baseEvidence(runs) });
+    // A job that was cancelled, at its time limit or not (triage.mjs jobCancel): what the fix pass and a Block say of it.
+    const cancel = await checkCancel(repo, r, { token, actionsToken, sha }).catch(() => null);
+    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000, job), sig, base, baseUndecided, aggregate, evidence: baseEvidence(runs), cancel });
   }
   // A red required check whose run has other failing jobs: its workflow file at the run's head says which of them it
   // needs and which may fail without failing the run (triage.mjs workflowJobs), so the Block's lead (leadJobs) quotes a
@@ -217,7 +220,8 @@ async function workflowAt(repo, suite, opts, actions) {
  * None when no failing job printed a failure line: the Block then quotes the output's tail.
  */
 export function leadJobs(jobs) {
-  const all = jobs || [];
+  // A cancelled job's line is that it was cancelled (triage.mjs jobCancel), before anything its log printed.
+  const all = (jobs || []).map((j) => (j.cancel ? { ...j, sig: { ...j.sig, line: j.cancel.text, lines: j.sig?.lines || [] } } : j));
   const lined = (j) => !!(j.sig?.line || j.sig?.lines?.length);
   if (!all.some(lined)) return [];
   const rank = (j) => (j.coe === false ? 0 : j.coe === true ? 2 : 1);

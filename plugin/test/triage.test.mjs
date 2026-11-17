@@ -2089,3 +2089,143 @@ test("#413 review: the stage harness's usage limit that stopped a same-failure q
   await assert.rejects(freshRun({ ...movedRed, onMain: true, logMain: movedLog, triageWith: limited(afterRerun) }), (e) => e.code === USAGE_LIMIT);
   assert.equal(afterRerun.length, 1);
 });
+
+// ------------------------------------------------------------------ a job cancelled at its time limit (#519)
+
+// clockgrove/assetgrove's merge-queue run of 2026-11-16: the Windows leg of a matrix whose include is an expression,
+// under `timeout-minutes: 20`, cancelled by GitHub 20 min 11 s after it started (the jobs API's own times).
+const LIMIT_YML = `on: [pull_request, merge_group]
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include: \${{ fromJSON('[{"os":"ubuntu-26.04","shard":"1/1"},{"os":"windows-2025","shard":"1/1"}]') }}
+    name: test (\${{ matrix.os }}, \${{ matrix.shard }})
+    runs-on: \${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - run: pnpm test
+`;
+const WIN = "test (windows-2025, 1/1)";
+const cancelledJob = (id, completed_at = "2026-11-16T21:12:04Z") => ({
+  id, run_id: 700 + id, name: WIN, status: "completed", conclusion: "cancelled", started_at: "2026-11-16T20:51:53Z", completed_at, runner_id: 9, runner_name: "GitHub Actions 9",
+  steps: [{ name: "Set up job", status: "completed", conclusion: "success", number: 1 }, { name: "Test", status: "completed", conclusion: "cancelled", number: 9 }],
+});
+// What the leg printed before it was stopped: a test still running, then the runner's own cancel lines.
+const cancelledLog = ["##[group]Run pnpm test", "ok 41 - search indexes 3 assets", "# Subtest: transcodes the sample video", "##[error]The operation was canceled."].join("\n");
+const cancelRun = (id, completed_at = "2026-11-16T21:12:04Z") => ({ id, name: WIN, conclusion: "cancelled", suite: 9, started_at: "2026-11-16T20:51:53Z", completed_at });
+
+test("#519 jobCancel: a cancelled job is at its time limit only when it ran as long as the timeout-minutes its workflow gives it; anything else is just cancelled", async () => {
+  const { DEFAULT_TIMEOUT_MINUTES, jobCancel, timeoutMinutes, workflowTimeLimit } = await import("../scripts/lib/triage.mjs");
+  assert.equal(workflowTimeLimit(LIMIT_YML, WIN), 20, "a plain limit needs no matrix leg");
+  assert.equal(jobCancel(cancelledJob(1), LIMIT_YML).text, "the test (windows-2025, 1/1) job was cancelled at its 20-minute limit");
+  assert.equal(jobCancel({ ...cancelledJob(1), completed_at: "2026-11-16T21:11:53Z" }, LIMIT_YML).atLimit, true, "exactly the limit");
+  assert.equal(jobCancel({ ...cancelledJob(1), completed_at: "2026-11-16T21:11:52Z" }, LIMIT_YML).said, "cancelled after 19 min, before its 20-minute limit");
+  assert.equal(jobCancel({ ...cancelledJob(1), conclusion: "timed_out" }, LIMIT_YML).atLimit, true);
+  assert.equal(jobCancel({ ...cancelledJob(1), conclusion: "failure" }, LIMIT_YML), null, "a failed job is no cancel");
+  assert.equal(jobCancel(cancelledJob(1), "").said, "cancelled after 20 min (its time limit could not be read)", "no workflow file: no limit guessed");
+  assert.equal(jobCancel({ ...cancelledJob(1), started_at: null }, LIMIT_YML).said, "cancelled (how long it ran could not be read)", "no start time: no limit reached");
+  // The limit: GitHub's default with none set, an expression over the leg's matrix, never another context.
+  assert.equal(DEFAULT_TIMEOUT_MINUTES, 360);
+  assert.equal(timeoutMinutes({}, null), 360);
+  assert.equal(timeoutMinutes({ "timeout-minutes": "45" }, null), 45);
+  assert.equal(timeoutMinutes({ "timeout-minutes": "${{ matrix.os == 'windows-2025' && 30 || 10 }}" }, { os: "windows-2025" }), 30);
+  assert.equal(timeoutMinutes({ "timeout-minutes": "${{ vars.LIMIT }}" }, { os: "windows-2025" }), null);
+  assert.equal(timeoutMinutes({ "timeout-minutes": 0 }, null), null);
+  const legs = "jobs:\n  unit:\n    strategy:\n      matrix:\n        os: [linux, windows]\n    timeout-minutes: ${{ matrix.os == 'windows' && 30 || 10 }}\n    steps: [{ run: x }]\n  plain:\n    steps: [{ run: x }]\n  called:\n    uses: ./.github/workflows/test.yml\n";
+  assert.deepEqual([workflowTimeLimit(legs, "unit (windows)"), workflowTimeLimit(legs, "unit (linux)"), workflowTimeLimit(legs, "plain"), workflowTimeLimit(legs, "called / test"), workflowTimeLimit(legs, "elsewhere"), workflowTimeLimit("jobs: [", "plain")], [30, 10, 360, null, null, null]);
+});
+
+test("#519 triage: a job cancelled at its time limit is said so on the progress line, never asked, never a flake and never rerun", async () => {
+  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.99 });
+  const lines = [];
+  await withHead({ runs: [], jobs: { 801: cancelledJob(801) }, logs: { 801: cancelledLog }, workflow: LIMIT_YML }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async (l) => lines.push(l) });
+    const r = await t.red({ sha: "d".repeat(40), failedRuns: [cancelRun(801)], required: [WIN] });
+    assert.equal(r.rerun, false);
+    assert.equal(decider.asked.length, 0, "no model asked: a decider that calls everything a flake never sees it");
+    assert.equal(seen.reruns, 0);
+    assert.match(lines.at(-1), /: test \(windows-2025, 1\/1\): cancelled at its 20-minute limit, never a flake: no model asked, no rerun → fix pass$/);
+    // The merge queue's red, the same job: no flake, so never enqueued again as one.
+    const c = await t.classify({ sha: "e".repeat(40), failedRuns: [cancelRun(801)], required: [WIN] });
+    assert.equal(c.flaky, false);
+    assert.match(lines.at(-1), /cancelled at its 20-minute limit, never a flake.* → a cancelled job is no flake: fix pass$/);
+    // The unchanged head after a fix pass that committed nothing: not rerun either, and the reason says why.
+    assert.deepEqual(await t.again({ sha: "d".repeat(40), failedRuns: [cancelRun(801)] }), { rerun: false, skipped: "the test (windows-2025, 1/1) job was cancelled at its 20-minute limit, which is no flake" });
+    assert.equal(await t.infra({ sha: "d".repeat(40), failedRuns: [cancelRun(801)] }), false, "no failure of GitHub's side");
+    assert.equal(seen.reruns, 0);
+  });
+});
+
+test("#519 triage: a job cancelled before its limit (by hand) is said to be cancelled, never a flake; a test failure and a flake are triaged as before", async () => {
+  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.99 });
+  const lines = [];
+  await withHead({ runs: [], jobs: { 802: cancelledJob(802, "2026-11-16T20:55:01Z") }, logs: { 802: cancelledLog }, workflow: LIMIT_YML }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async (l) => lines.push(l) });
+    assert.equal((await t.red({ sha: "d".repeat(40), failedRuns: [cancelRun(802, "2026-11-16T20:55:01Z")], required: [WIN] })).rerun, false);
+    assert.equal(decider.asked.length, 0);
+    assert.equal(seen.reruns, 0);
+    assert.match(lines.at(-1), /test \(windows-2025, 1\/1\): cancelled after 3 min, before its 20-minute limit, never a flake/);
+    assert.doesNotMatch(lines.at(-1), /flaky_or_infra/);
+    assert.match((await t.again({ sha: "d".repeat(40), failedRuns: [cancelRun(802, "2026-11-16T20:55:01Z")] })).skipped, /^the test \(windows-2025, 1\/1\) job was cancelled after 3 min, before its 20-minute limit, which is no flake$/);
+  });
+  // The same leg failing a test: asked, and the model's verdict acts as before, change or flake.
+  const failed = (id) => ({ ...cancelledJob(id), conclusion: "failure", steps: [{ name: "Set up job", conclusion: "success", number: 1 }, { name: "Test", conclusion: "failure", number: 9 }] });
+  const failRun = (id) => ({ ...cancelRun(id), conclusion: "failure" });
+  for (const [id, answer, rerun] of [[803, { verdict: "change_caused", confidence: 0.95 }, false], [804, { verdict: "flaky_or_infra", confidence: 0.95 }, true]]) {
+    const ask = asking(answer);
+    const said = [];
+    await withHead({ runs: [], jobs: { [id]: failed(id) }, logs: { [id]: legLog(WINDOWS) }, workflow: LIMIT_YML }, async (seen) => {
+      const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: ask, progress: async (l) => said.push(l) });
+      assert.equal((await t.red({ sha: "d".repeat(40), failedRuns: [failRun(id)], required: [WIN] })).rerun, rerun, said.join("\n"));
+      assert.equal(ask.asked.length, 1);
+      assert.equal(seen.reruns, rerun ? 1 : 0);
+      assert.equal(seen.contents, 0, "a job that failed reads no workflow file for a time limit");
+      assert.match(said.at(-1), new RegExp(`${answer.verdict} 0\\.95 \\[`));
+      assert.match(said.at(-1), rerun ? /→ failed jobs rerun$/ : /→ fix pass$/);
+      assert.doesNotMatch(said.at(-1), /cancelled/);
+    });
+  }
+  // Triage off: the red's line still names the cancel, at every red.
+  const home = mkdtempSync(join(tmpdir(), "nokey-"));
+  const off = [];
+  await withHead({ runs: [], jobs: { 805: cancelledJob(805) }, logs: { 805: cancelledLog }, workflow: LIMIT_YML }, async () => {
+    const t = openTriage({ inputs: {}, env: {}, home, repo: repo165, issue: 1, prNumber: 2, token: "t", progress: async (l) => off.push(l) });
+    assert.equal(t.off, "no-key");
+    for (const sha of ["d", "e"]) assert.equal((await t.red({ sha: sha.repeat(40), failedRuns: [cancelRun(805)] })).rerun, false);
+    assert.deepEqual(off, Array(2).fill("triage: off (no-key); the test (windows-2025, 1/1) job was cancelled at its 20-minute limit, no flake; fix pass"));
+  });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("#519 validation loop: a required job cancelled at its time limit goes to the fix pass, unrerun, and the Block and the fix pass's ask say so", async () => {
+  const { validationLoop, redLines, redOfDetail } = await import("../scripts/lib/session.mjs");
+  const { redDetail } = await import("../scripts/lib/reds.mjs");
+  const sha = "a".repeat(40);
+  const checkRun = { ...cancelRun(806), status: "completed", check_suite: { id: 9 } };
+  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.99 });
+  const lines = [];
+  const said = "the test (windows-2025, 1/1) job was cancelled at its 20-minute limit";
+  await withHead({ runs: [checkRun], jobs: { 806: cancelledJob(806) }, logs: { 806: cancelledLog }, workflow: LIMIT_YML }, async (seen) => {
+    const triage = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 4, prNumber: 5, token: "t", decider, progress: async (l) => lines.push(l) });
+    const result = await validationLoop({
+      checkout: "/nonexistent", commands: [], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env,
+      // Under a minute left: the fix pass is reached but never started.
+      deadlineAt: Date.now() + 30_000,
+      checks: { repo: repo165, issue: 4, prNumber: 5, names: [WIN], token: "t" },
+      outbox: { push: async () => true, expected: () => sha },
+      triage,
+    });
+    assert.equal(seen.reruns, 0, "never rerun");
+    assert.equal(decider.asked.length, 0);
+    assert.deepEqual(result.harness, { timedOut: true }, "on to the fix pass");
+    assert.ok(lines.some((l) => l.includes("cancelled at its 20-minute limit, never a flake")), lines.join("\n"));
+    assert.ok(result.lastOutput.startsWith(`--- ${WIN} (required check): ${said}`), result.lastOutput.slice(0, 300));
+    // What the fix pass is handed: the job's exit is that it was cancelled at its limit.
+    const detail = await redDetail({ repo: repo165, issue: 4, prNumber: 5, sha, failedRuns: [checkRun], required: [WIN], token: "t" });
+    assert.equal(detail.jobs[0].cancel.text, said);
+    const ask = redLines(redOfDetail(detail), { files: false }).join("\n");
+    assert.match(ask, new RegExp(`^Command: CI job ${WIN.replace(/[()]/g, "\\$&")}\nExit: ${said.replace(/[()]/g, "\\$&")}$`, "m"));
+  });
+});

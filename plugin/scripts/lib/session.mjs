@@ -87,7 +87,7 @@ import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { stageAccountName } from "./choice.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
-import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
+import { ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
@@ -1732,7 +1732,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
  */
 export function redOfDetail(detail, { failures = null, failed = null, refusal = null } = {}) {
   const out = detail?.jobs.length
-    ? detail.jobs.map((j) => ({ command: `CI job ${j.name}`, code: 1, output: j.window, full: j.log, evidence: j.evidence ? evidenceText({ branch: detail.branch, job: j.name, evidence: j.evidence, lines: j.sig.lines }) : "" }))
+    ? detail.jobs.map((j) => ({ command: `CI job ${j.name}`, code: 1, output: j.window, full: j.log, evidence: j.evidence ? evidenceText({ branch: detail.branch, job: j.name, evidence: j.evidence, lines: j.sig.lines }) : "", ...(j.cancel ? { cancel: j.cancel.text } : {}) }))
     : failures?.length
       ? failures
       : [failed];
@@ -1743,7 +1743,8 @@ export function redOfDetail(detail, { failures = null, failed = null, refusal = 
 /**
  * A red's part of a pass's ask (a fix pass, or review.mjs's answer pass): each failing command or job, its exit, its
  * whole output's file in $PENDULUM_IN (with `files`), the evidence and its tail (one 6000-character window shared by the
- * failures; each full log is on disk), and the diff since the PR's last green head. `red` is {failures, detail}.
+ * failures; each full log is on disk), and the diff since the PR's last green head. `red` is {failures, detail}. A job
+ * that was cancelled says so as its exit (`cancel`, triage.mjs jobCancel).
  */
 export function redLines({ failures, detail }, { files = true } = {}) {
   const share = Math.floor(6000 / failures.length);
@@ -1751,7 +1752,7 @@ export function redLines({ failures, detail }, { files = true } = {}) {
     ...failures.flatMap((f, i) => [
       "",
       `Command: ${f.command}`,
-      `Exit: ${f.timedOut ? "timed out" : f.code}`,
+      `Exit: ${f.cancel ? f.cancel : f.timedOut ? "timed out" : f.code}`,
       ...(files ? [`Whole output: $PENDULUM_IN/${checkFile(i, f.command)}`] : []),
       // Evidence, never an instruction: the fix pass weighs it like any other output.
       ...(f.evidence ? [f.evidence] : []),
@@ -3232,7 +3233,7 @@ export async function mirrorOwnStat(mgit, from, to) {
 
 /**
  * The failed jobs of the PR's newest failed merge-queue run since `since`, each with its first failure line (triage.mjs
- * failureSignature), at most three: "`<job>`: <line>; ...", "" when none could be read (Actions read with
+ * failureSignature; for a cancelled job, that it was cancelled: checkCancel), at most three: "`<job>`: <line>; ...", "" when none could be read (Actions read with
  * `actionsToken`, else `opts.token`).
  */
 export async function queueFailureLines(repo, { prNumber, base, since, actionsToken = null }, opts) {
@@ -3243,7 +3244,9 @@ export async function queueFailureLines(repo, { prNumber, base, since, actionsTo
   const failedRuns = (await checkRuns(repo, run.sha, opts).catch(() => [])).filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
   const out = [];
   for (const r of failedRuns.slice(0, 6)) {
-    const line = failureSignature(r.name, await jobLog(repo, r.id, aopts).catch(() => "")).line;
+    // A cancelled job is said to be cancelled, at its time limit or not (triage.mjs checkCancel), not quoted from its log.
+    const cancel = await checkCancel(repo, r, { token: opts.token, actionsToken: aopts.token, sha: run.sha }).catch(() => null);
+    const line = cancel?.text || failureSignature(r.name, await jobLog(repo, r.id, aopts).catch(() => "")).line;
     if (line) out.push(`${checkName(r.name)}: ${line.slice(0, 200)}`);
     if (out.length >= 3) break;
   }

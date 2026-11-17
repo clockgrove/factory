@@ -162,7 +162,13 @@ test("serve's start: the repository's variables over the workflow, each setting 
     const text = await withApi(host.url, async () => {
       await loop.readVariables();
       loop.startSettings();
+      loop.logSettings(true);
     });
+    // Without --verbose (#457): the settings set and the variables ignored, never the names left at Factory's defaults.
+    const brief = await withApi(host.url, async () => loop.logSettings(false));
+    assert.match(brief, /  FACTORY_MAX_CONCURRENT: "5" \(repository variable\)\n/);
+    assert.match(brief, /repository variable FACTORY_NOTIFY ignored/);
+    assert.doesNotMatch(brief, /Factory's defaults: |FACTORY_DAILY_USD/);
     assert.deepEqual(host.asked, ["/repos/o/r/actions/variables"]);
     assert.deepEqual(loop.wf, { FACTORY_MAX_CONCURRENT: "5", FACTORY_MODEL: "m" });
     assert.match(text, /settings, each over the one below \(Factory's defaults, the workflow on origin\/main, the repository's variables, this machine\):/);
@@ -201,6 +207,13 @@ test("doctor: the settings row names each setting's layer; in local mode a token
     assert.match(rows[0].detail, /FACTORY_LOCAL_MAX_CONCURRENT: "3" \(this machine\)/);
     assert.deepEqual([rows[1].status, rows[1].detail], ["WARN", "repository variable FACTORY_SANDBOX ignored: only the reviewed workflow file sets it"]);
     assert.equal(r.inputs.sandbox, "", "ignored");
+    // doctor without --verbose (#457): the same rows, with no line naming the settings left at Factory's defaults.
+    assert.match(rows[0].detail, /Factory's defaults: .*FACTORY_MAX_USD/);
+    const brief = settingsRows(r.layers, { verbose: false });
+    assert.match(brief[0].detail, /FACTORY_DAILY_USD: "40" \(repository variable\)/);
+    assert.doesNotMatch(brief[0].detail, /Factory's defaults: |FACTORY_MAX_USD/);
+    assert.deepEqual(brief.slice(1), rows.slice(1));
+    assert.match(settingsRows({ values: {}, from: {} }, { verbose: false })[0].detail, /^every one at Factory's defaults; --verbose names/);
 
     answer = { status: 404 };
     await withApi(host.url, async () => {

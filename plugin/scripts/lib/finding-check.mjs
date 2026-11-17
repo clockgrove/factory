@@ -1,10 +1,13 @@
 // The finding check (#368): after a review stage's answer pass, each finding Pendulum answered (its own reviewer's, a named
-// reviewer's, code scanning's) is judged by the decision model: does the answer resolve it, fixed in the code, rebutted
-// with an acceptance entry or repository rule that holds, or settled by a maintainer's recorded decision (#474)? Only a
-// yes resolves the finding's thread, which is what marks it answered (session.mjs unaddressedReviewComments, github.mjs
-// reviewThreads); a no leaves it open for the next answer round within the bound, and no verdict (the gateway failed)
-// for a check again in the next stage, with no worker pass (session.mjs openFindingsExit). A person's answer is never
-// judged here.
+// reviewer's, code scanning's) is checked before any answer round is spent on it. An answer that says fixed and names a
+// test has that test run on the head by the repository's validation command (#516): the exact check. Any other answer is
+// judged by the decision model: does it resolve the finding, fixed in the code, rebutted with an acceptance entry or
+// repository rule that holds, or settled by a maintainer's recorded decision (#474)? Only a passing test or a yes at the
+// confidence floor resolves the finding's thread, with that evidence posted in it, which is what marks it answered
+// (session.mjs unaddressedReviewComments, github.mjs reviewThreads); a failed test, a no or a test that cannot be run
+// leaves it open for the next answer round within the bound, named with what was found, and no verdict (the gateway
+// failed) for a check again in the next stage, with no worker pass (session.mjs openFindingsExit). A person's answer is
+// never judged here.
 // The decision model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md), with red-check triage's
 // key and model setting (triage.mjs). This runs in Pendulum's own process, never in a harness. Only the typed choice
 // reaches code; the finding, the reply, the diff, the rules and the decisions are data between random-tag markers,
@@ -13,10 +16,12 @@
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
-import { rest, resolveThread, reviewThreads } from "./github.mjs";
+import { postReply, rest, resolveThread, reviewThreads } from "./github.mjs";
 import { parseReplies } from "./handoff.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
-import { CODE_SCANNING, acceptanceEntries, isBodyFindingId, marker } from "./logic.mjs";
+import { CODE_SCANNING, acceptanceEntries, commandText, isBodyFindingId, marker } from "./logic.mjs";
+import { runValidation } from "./checkout.mjs";
+import { shellQuote } from "./handover.mjs";
 import { MIN_CONFIDENCE, TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question each answered finding is asked. */
@@ -39,10 +44,10 @@ export const FINDING_QUESTION = {
   ],
 };
 
-/** The verdicts that resolve a finding only at the confidence floor: a judgement of an argument, not a change shown. */
-const AT_FLOOR = new Set(["rebutted", "decided"]);
-/** The verdicts that resolve a finding; `rebutted` and `decided` only at the floor (`min`, triage.mjs confidenceFloor) or more, a missing one no. */
-export const resolves = (v, min = MIN_CONFIDENCE) => v?.verdict === "fixed" || (AT_FLOOR.has(v?.verdict) && typeof v.confidence === "number" && v.confidence >= min);
+/** The verdicts that resolve a finding. */
+const RESOLVING = new Set(["fixed", "rebutted", "decided"]);
+/** Whether a verdict resolves its finding: one of RESOLVING at the floor (`min`, triage.mjs confidenceFloor) or more; a missing confidence never does. */
+export const resolves = (v, min = MIN_CONFIDENCE) => RESOLVING.has(v?.verdict) && typeof v.confidence === "number" && v.confidence >= min;
 
 /** The most characters of each part of one question's input. */
 export const INPUT_CAPS = Object.freeze({ finding: 4000, reply: 4000, diff: 12_000, other: 8000, entries: 4000, rules: 8000, decisions: 8000, decision: 2000 });
@@ -211,53 +216,118 @@ export function openFindingCheck({ inputs = {}, env = process.env, home = homedi
   return { model, off: null, floor, judge, asked: () => ask.asked(), limited: () => ask.limited() };
 }
 
+/** A commit as a note names it. */
+const short = (sha) => String(sha || "").slice(0, 7);
+
+/**
+ * The runner of the test a reply names (#516) for checkAnswers: the test a reply that says `fixed` names (handoff.mjs
+ * namedTest) runs on the PR's head (`head`) by the repository's own validation command, through the stage's validation
+ * path (checkout.mjs runValidation: the stage's sandbox, its env, and `timeoutMs()`, the stage's time left). Its `command`
+ * must be one of the validation commands (`commands`, as the task card lists them, the `parallel:` mark off) exactly; its
+ * `args` follow it each shell-quoted, so they reach that command as data, never as shell. A test named twice runs once.
+ * Returns `{ok, head, run, code, timedOut}` (`run`, the command line as it ran), or `{unchecked: why}`: no such validation
+ * command, no head, a checkout on another commit, or a run that could not start.
+ */
+export function namedTestRunner({ checkout, commands = [], env = process.env, head = null, timeoutMs = () => 10 * 60_000 }) {
+  const known = new Set(commands.map((c) => commandText(c).trim()).filter(Boolean));
+  const runs = new Map();
+  return async (test) => {
+    if (!known.has(test.command)) return { unchecked: `it names \`${test.command}\`, which is not one of the repository's validation commands` };
+    if (!head) return { unchecked: "the PR's head could not be read" };
+    const run = [test.command, ...test.args.map(shellQuote)].join(" ");
+    if (!runs.has(run)) runs.set(run, runValidation(checkout, [run], { timeoutMs: Math.max(1000, timeoutMs()), env }).catch((e) => ({ error: String(e?.message || e).slice(0, 160) })));
+    const r = await runs.get(run);
+    if (r.error) return { unchecked: `\`${run}\` could not start (${r.error})` };
+    if (r.head !== head) return { unchecked: `the checkout is on ${short(r.head) || "no commit"}, not the PR's head ${short(head)}` };
+    return { ok: !!r.green, head, run, code: r.failed?.code ?? 0, timedOut: !!r.failed?.timedOut };
+  };
+}
+
+/** What the check found on a finding it leaves open, as a Block names it (session.mjs openFindingsExit). */
+export const FOUND = Object.freeze({ testFailed: "test-failed", notFixed: "not-fixed", notCheckable: "not-checkable" });
+
 /**
  * Judge each finding of `findings` that has an answer (`repliesText`: the answer pass's replies.json, as postReplies read
- * it; or, for a check again, Pendulum's earlier answers) and resolve those the check reads as resolved (`resolves`): a
- * line comment's thread (GraphQL resolveReviewThread), a finding in the review body by a comment under Pendulum's
- * resolved marker (`<!-- pendulum:<issue>:resolved:<id> -->`). `diffOf(from)` gives git's diff of what the pull request
- * changed from `from` to its head (session.mjs answerDiff), `from` the commit a finding was raised on (`raisedOn`, else
- * `since`). `decisions`: the maintainers' recorded decisions the check may read a finding as settled by, only as
- * session.mjs objectiveDecisions returns them (authors with write access); never a comment whose author is not checked.
- * A `decided` verdict never resolves code scanning's finding, nor any finding when a decision newer than the oldest one
- * the question showed was left out for length (newerLeftOut).
- * With the check off, every answer resolves its finding, as the progress comment says. Returns {resolved,
- * open, unjudged}: ids, `unjudged` the ones the gateway gave no verdict on, each {id, error}.
+ * it; or, for a check again, Pendulum's earlier answers) and resolve those it finds fixed or settled.
+ * - A reply that says `fixed` and names a test (handoff.mjs parseReplies: `fixed`, `test`) has that test run on the head
+ *   (`runTest`, namedTestRunner): the exact check, and the only one for it. A pass resolves the finding; a failure leaves
+ *   it open (`test-failed`); a test that cannot be run there (no `runTest`, or namedTestRunner's `unchecked`) leaves it
+ *   open (`not-checkable`), never resolved.
+ * - Every other reply goes to the decision model (`check`, openFindingCheck): a verdict that `resolves` at the check's
+ *   floor resolves the finding; any other verdict leaves it open (`not-fixed`); no verdict leaves it to be judged again
+ *   (`unjudged`). A `decided` verdict never resolves code scanning's finding, nor any finding when a decision newer than
+ *   the oldest one the question showed was left out for length (newerLeftOut). With the check off, such a reply resolves
+ *   its finding unjudged, as the progress comment says.
+ * A finding resolved on the test or the verdict gets that evidence in its thread first (a reply under Pendulum's resolved
+ * marker, `<!-- pendulum:<issue>:resolved:<id> -->`), then its thread resolved (GraphQL resolveReviewThread); a finding in
+ * the review body gets the evidence in a PR comment under that marker, which is what resolves it. `diffOf(from)` gives
+ * git's diff of what the pull request changed from `from` to its head (session.mjs answerDiff), `from` the commit a
+ * finding was raised on (`raisedOn`, else `since`). `decisions`: the maintainers' recorded decisions the check may read a
+ * finding as settled by, only as session.mjs objectiveDecisions returns them (authors with write access).
+ * Returns {resolved, open, unjudged, found}: ids; `unjudged`, the ones the decider gave no verdict on, each {id, error};
+ * `found`, what the check found on each finding it left open, each {id, kind (FOUND), note}.
  */
-export async function checkAnswers({ repo, issue, prNumber, findings = [], repliesText, check, diffOf = async () => null, since = null, issueBody = "", rules = "", decisions = [], opts, progress = null }) {
-  const replies = new Map(parseReplies(repliesText, findings.map((f) => f.id)).map((r) => [String(r.id), r.body]));
+export async function checkAnswers({ repo, issue, prNumber, findings = [], repliesText, check, runTest = null, diffOf = async () => null, since = null, issueBody = "", rules = "", decisions = [], opts, progress = null }) {
+  const replies = new Map(parseReplies(repliesText, findings.map((f) => f.id)).map((r) => [String(r.id), r]));
   const answered = findings.filter((f) => replies.has(String(f.id)));
-  if (!answered.length) return { resolved: [], open: [], unjudged: [] };
-  let yes;
+  if (!answered.length) return { resolved: [], open: [], unjudged: [], found: [] };
+  // Each finding resolved, by id, with the evidence posted in its thread (null: the check is off, so there is none).
+  const yes = new Map();
   const unjudged = [];
-  if (!check?.judge) {
-    const line = `finding check: off (${check?.off || "no-key"}); a reply answers its finding`;
+  const found = [];
+  const say = async (line) => {
     log(line);
     if (progress) await progress(line);
-    yes = new Set(answered.map((f) => String(f.id)));
-  } else {
+  };
+  // The exact check: the test the reply names, on the head. No decision call is made for these.
+  const tested = answered.filter((f) => replies.get(String(f.id)).test);
+  for (const f of tested) {
+    const test = replies.get(String(f.id)).test;
+    const r = runTest ? await Promise.resolve(runTest(test)).catch((e) => ({ unchecked: `the test could not be run (${String(e?.message || e).slice(0, 120)})` })) : { unchecked: "no test can be run where this check runs" };
+    if (r.unchecked) found.push({ id: f.id, kind: FOUND.notCheckable, note: `not checkable: ${r.unchecked}` });
+    else if (r.ok) yes.set(String(f.id), `the test this answer names passed on ${short(r.head)}: \`${r.run}\`, by the repository's validation command \`${test.command}\`. The finding is resolved.`);
+    else found.push({ id: f.id, kind: FOUND.testFailed, note: `test failed: \`${r.run}\` ${r.timedOut ? "timed out" : `exited ${r.code}`} on ${short(r.head)}` });
+    log(`finding check: ${findingPlace(f)} (comment ${f.id}): ${yes.has(String(f.id)) ? `the named test passed: ${r.run}` : found.at(-1).note}`);
+  }
+  if (tested.length) {
+    const left = found.filter((x) => tested.some((f) => String(f.id) === String(x.id)));
+    const at = (x) => findingPlace(tested.find((f) => String(f.id) === String(x.id)));
+    await say(`finding check: ${tested.length - left.length} of ${tested.length} named test(s) passed on the head${left.length ? `; still open: ${left.slice(0, 5).map((x) => `${at(x)} (${x.kind === FOUND.testFailed ? "test failed" : "not checkable"})`).join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}` : ""}`);
+  }
+  const judged = answered.filter((f) => !replies.get(String(f.id)).test);
+  if (judged.length && !check?.judge) {
+    await say(`finding check: off (${check?.off || "no-key"}); a reply answers its finding`);
+    for (const f of judged) yes.set(String(f.id), null);
+  } else if (judged.length) {
     const diffs = new Map();
-    for (const from of new Set(answered.map((f) => f.raisedOn || since))) diffs.set(from, from ? await Promise.resolve(diffOf(from)).catch(() => null) : null);
-    const items = answered.map((f) => ({ id: f.id, path: f.path ?? null, line: f.line ?? f.original_line ?? null, body: f.body, ...(f.from ? { from: f.from } : {}), ...(f.raisedAt ? { raisedAt: f.raisedAt } : {}), reply: replies.get(String(f.id)), diff: diffs.get(f.raisedOn || since) ?? null }));
+    for (const from of new Set(judged.map((f) => f.raisedOn || since))) diffs.set(from, from ? await Promise.resolve(diffOf(from)).catch(() => null) : null);
+    const items = judged.map((f) => ({ id: f.id, path: f.path ?? null, line: f.line ?? f.original_line ?? null, body: f.body, ...(f.from ? { from: f.from } : {}), ...(f.raisedAt ? { raisedAt: f.raisedAt } : {}), reply: replies.get(String(f.id)).body, fixed: !!replies.get(String(f.id)).fixed, diff: diffs.get(f.raisedOn || since) ?? null }));
     const verdicts = await check.judge(items, { repo: repo.full, prNumber, issue: issueBody, rules, decisions });
     // The question may have shown a decision a later one, left out for length, overruled: then `decided` settles nothing.
     const overruled = newerLeftOut(decisionsPart(decisions));
     const floor = check.floor?.() ?? confidenceFloor();
     const byId = new Map(verdicts.map((v) => [String(v.id), v]));
-    yes = new Set();
+    // Who answered, as the evidence and the Block name it: the gateway's model, or the stage's harness once it refused.
+    const who = check.asked?.()?.model || check.model;
+    const left = [];
     for (const it of items) {
       const v = byId.get(String(it.id));
       // A maintainer's decision never settles code scanning's alert: only a fix or a rebuttal does.
       const alertDecided = v?.verdict === "decided" && codeScanning(it);
       const unsure = v?.verdict === "decided" && !alertDecided && overruled;
-      const said = v?.verdict ? `${v.verdict}${typeof v.confidence === "number" ? ` ${v.confidence.toFixed(2)}` : ""}${alertDecided ? " (code scanning's alert: a decision does not settle it: open)" : unsure ? " (a newer decision did not fit the question: open)" : AT_FLOOR.has(v.verdict) && !resolves(v, floor.min) ? ` (under ${floor.text}: open)` : ""}` : `no verdict (${v?.error || "no_answer"}); judged again next stage`;
+      const at = v?.verdict ? `${v.verdict}${typeof v.confidence === "number" ? ` ${v.confidence.toFixed(2)}` : ""}` : "";
+      const said = v?.verdict ? `${at}${alertDecided ? " (code scanning's alert: a decision does not settle it: open)" : unsure ? " (a newer decision did not fit the question: open)" : RESOLVING.has(v.verdict) && !resolves(v, floor.min) ? ` (under ${floor.text}: open)` : ""}` : `no verdict (${v?.error || "no_answer"}); judged again next stage`;
       log(`finding check (${check.model}): ${findingPlace(it)} (comment ${it.id}): ${said}`);
-      if (resolves(v, floor.min) && !alertDecided && !unsure) yes.add(String(it.id));
-      else if (!v?.verdict) unjudged.push({ id: it.id, error: v?.error || "no_answer" });
+      if (resolves(v, floor.min) && !alertDecided && !unsure) yes.set(String(it.id), `the finding check (${who}) judged this answer ${v.verdict}, at confidence ${v.confidence.toFixed(2)} (${floor.text}). The finding is resolved.`);
+      else if (!v?.verdict) {
+        unjudged.push({ id: it.id, error: v?.error || "no_answer" });
+        left.push(it);
+      } else {
+        found.push({ id: it.id, kind: FOUND.notFixed, note: `judged not ${it.fixed ? "fixed" : "resolved"}: ${said} (${who})` });
+        left.push(it);
+      }
     }
-    const left = items.filter((it) => !yes.has(String(it.id)));
-    const line = `finding check (${check.model}): ${yes.size} of ${items.length} answer(s) resolve their findings${left.length ? `; still open: ${left.slice(0, 5).map(findingPlace).join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}` : ""}${unjudged.length ? `; no verdict on ${unjudged.length} (${[...new Set(unjudged.map((u) => u.error))].join(", ")})` : ""}`;
-    if (progress) await progress(line);
+    await say(`finding check (${check.model}): ${items.length - left.length} of ${items.length} answer(s) resolve their findings${left.length ? `; still open: ${left.slice(0, 5).map(findingPlace).join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}` : ""}${unjudged.length ? `; no verdict on ${unjudged.length} (${[...new Set(unjudged.map((u) => u.error))].join(", ")})` : ""}`);
   }
   const resolved = [];
   const lines = answered.filter((f) => yes.has(String(f.id)) && !isBodyFindingId(f.id));
@@ -270,13 +340,18 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     }
   }
   for (const f of answered.filter((x) => yes.has(String(x.id)))) {
+    const evidence = yes.get(String(f.id));
     try {
       if (isBodyFindingId(f.id)) {
-        await rest(`repos/${repo.full}/issues/${prNumber}/comments`, { ...opts, method: "POST", body: { body: `${marker(issue, "resolved", f.id)}\nPendulum: the answer to review finding ${f.id} (in the review body) resolves it.` } });
+        await rest(`repos/${repo.full}/issues/${prNumber}/comments`, { ...opts, method: "POST", body: { body: `${marker(issue, "resolved", f.id)}\nPendulum: ${evidence ? `on review finding ${f.id} (in the review body): ${evidence}` : `the answer to review finding ${f.id} (in the review body) resolves it.`}` } });
       } else {
         const t = threads.get(String(f.id));
         if (!t) continue;
-        if (!t.resolved) await resolveThread(t.id, opts);
+        if (!t.resolved) {
+          // The evidence goes up first: a thread resolved without it would say nothing of why.
+          if (evidence) await postReply(repo, prNumber, f.id, `${marker(issue, "resolved", f.id)}\nPendulum: ${evidence}`, opts);
+          await resolveThread(t.id, opts);
+        }
       }
       resolved.push(f.id);
     } catch (e) {
@@ -284,5 +359,5 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     }
   }
   const done = new Set(resolved.map(String));
-  return { resolved, open: answered.filter((f) => !done.has(String(f.id))).map((f) => f.id), unjudged };
+  return { resolved, open: answered.filter((f) => !done.has(String(f.id))).map((f) => f.id), unjudged, found };
 }

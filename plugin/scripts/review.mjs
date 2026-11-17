@@ -45,7 +45,7 @@ import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { openFenceCheck } from "./lib/fence-check.mjs";
 import { openProgressCheck } from "./lib/fix-progress.mjs";
-import { checkAnswers, openFindingCheck } from "./lib/finding-check.mjs";
+import { checkAnswers, namedTestRunner, openFindingCheck } from "./lib/finding-check.mjs";
 import {
   TASK_CARD_TEMPLATE,
   applyExit as applyExitNow,
@@ -644,7 +644,7 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
     ? `${red.queue ? `The merge queue's run of the required checks on its integrated commit ${String(red.sha || "").slice(0, 7)} (this PR on top of the default branch and the PRs queued ahead of it) failed in this PR's own change, and Pendulum took the PR out of the queue.` : `Pendulum's validation found the required checks red on the head the reviewer read (${String(red.sha || "").slice(0, 7)}).`} Fix that cause in the code too (never weaken, skip or delete a test unless the issue asks) and update the Validation section of \`$PENDULUM_OUT/pr.md\`; the failures are below, each whole output in \`$PENDULUM_IN/checks/\`. A failing policy check is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy.`
     : "";
   const ask = comments.length
-    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$PENDULUM_IN/review-comments.json\`). Load the $pendulum-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$PENDULUM_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}]; Pendulum posts them.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}${red ? ` ${redAsk}` : ""}`
+    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$PENDULUM_IN/review-comments.json\`). Load the $pendulum-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$PENDULUM_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}], adding "fixed": true to a reply whose fix is in the code and, when a test shows it, "test": {"command": "<one validation command, exactly as the task card lists it>", "args": ["<what makes it run only that test>"]}; Pendulum posts them and runs each named test on the head before it spends another round on the finding.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}${red ? ` ${redAsk}` : ""}`
     : afterPush
       ? `A maintainer commented on PR #${prNumber} after the last pass read the decisions (new or edited comments). Apply the decisions below to the branch: they are the specification where they differ from the code or your assumptions. If a decision asks for nothing to change, change nothing for it.${red ? ` ${redAsk}` : ""}`
       : question
@@ -1634,14 +1634,20 @@ async function main() {
   // finding (#474).
   const findingCheck = openFindingCheck({ inputs, stage: decisionStage });
   const unjudged = [];
+  // What the check found on each finding it left open (a failed test, a no, a test it could not run), for the exit (#516).
+  const checkFound = [];
   const findingRules = async (head) => {
     const agents = head ? await outbox.git(["show", `${head}:AGENTS.md`], { maxBytes: 64 * 1024 }).catch(() => null) : null;
     return [agents?.code === 0 ? `AGENTS.md:\n${agents.stdout}` : "", `Protected paths (no pass may change them): ${protectedList.join(", ")}`, inputs.validation.length ? `Validation commands: ${inputs.validation.join("; ")}` : ""].filter(Boolean).join("\n\n");
   };
+  // A reply that says fixed and names a test has it run on the head by the validation command it names, through the
+  // stage's own validation path (runValidation, its sandbox and env), before any answer round is spent (#516).
   const judgeAnswers = async (findings, repliesText) => {
     const head = outbox.expected() || pr.head.sha;
-    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [] }));
+    const runTest = namedTestRunner({ checkout, commands: inputs.validation, env: passEnv, head, timeoutMs: () => remainingMs(deadlineAt) });
+    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, runTest, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [], found: [] }));
     unjudged.push(...r.unjudged);
+    checkFound.push(...(r.found || []));
   };
   // Answers the last stage's check got no verdict on are judged again first, with no worker pass for them (a gateway
   // failure costs no answer round); one still without a verdict waits for the exit (session.mjs openFindingsExit).
@@ -1814,9 +1820,10 @@ async function main() {
   if (validation.question) answerRecord = exitFromOut(io.files()) || answerRecord;
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
 
-  // The finding check (#368): each finding the answer pass replied to is judged by the decision model against the reply and
-  // what the PR changed since the finding was raised; only a yes resolves its thread (finding-check.mjs). Not after a
-  // refused push.
+  // The finding check (#368): each finding the answer pass replied to is checked before another answer round is spent
+  // on it: the test a "fixed" reply names, run on the head (#516), else the decision model's verdict on the reply and
+  // what the PR changed since the finding was raised; only a passing test or a yes at the floor resolves its thread, with
+  // the evidence posted there (finding-check.mjs). Not after a refused push.
   if (repliesPosted && !outbox.failed) await judgeAnswers(toAnswer, repliesPosted);
   // Threads a person answered (and no-finding ones) are resolved so a ruleset that requires thread resolution
   // can merge; they stay visible on the PR. Not after a refused push: the answers never reached the branch.
@@ -1880,7 +1887,7 @@ async function main() {
   await dropLabel();
   // Findings still open after the answer pass (no answer, or one the finding check did not read as resolving them), with
   // the rest of the exit delivered: another answer round within the bound, else the Block names them (session.mjs).
-  if (decision.findingsOpen && !publishRefused && !overBudget && !conflict && decideExit({ ...exitArgs, reviewUnaddressed: 0 }).exit === "delivered") await openFindingsExit(decision, { repo, issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel, open: stillOpen, unjudged, decider: findingCheck.asked?.() ?? null, limit: findingCheck.limited?.() ?? null }, token);
+  if (decision.findingsOpen && !publishRefused && !overBudget && !conflict && decideExit({ ...exitArgs, reviewUnaddressed: 0 }).exit === "delivered") await openFindingsExit(decision, { repo, issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel, open: stillOpen, unjudged, found: checkFound, decider: findingCheck.asked?.() ?? null, limit: findingCheck.limited?.() ?? null }, token);
   // The finding check met the stage harness's usage limit with nothing else to answer: the stage ends as a pass meeting
   // it does (paused locally until the reset, held or Blocked `provider-quota` elsewhere), never the check's own Block.
   if (decision.usageLimit) throw new UsageLimitReached(decision.usageLimit, { since: Date.now(), label: "finding check" });

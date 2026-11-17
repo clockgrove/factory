@@ -3445,7 +3445,9 @@ const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limi
 
 /**
  * The review stage's exit with findings still open after its answer pass (decideExit's `findingsOpen`; `open`, those
- * findings as unaddressedReviewComments lists them; `unjudged`, checkAnswers' answers the gateway gave no verdict on).
+ * findings as unaddressedReviewComments lists them; `unjudged`, checkAnswers' answers the gateway gave no verdict on;
+ * `found`, what checkAnswers found on each it left open: a test that failed, an answer judged not fixed, a test that
+ * could not be run, each named beside its finding in the reason).
  * - A finding with no answer, or one the finding check read as not resolving it: within the answer rounds
  *   (takeAnswerRound), the review label goes back on and the exit is delivered with `rerun`, so the next review stage's
  *   answer pass takes it, with its earlier answer; past the bound the Block stands, naming each one and how to clear it.
@@ -3458,7 +3460,7 @@ const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limi
  * A record that cannot be read or written, or a label that cannot go back on, Blocks as any exit step does (exitStep).
  * Returns `decision`, changed.
  */
-export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [], decider = null, limit = null }, opts) {
+export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [], found = [], decider = null, limit = null }, opts) {
   delete decision.findingsOpen;
   const ctx = { issue, prNumber, objectiveLabel };
   const rec = await exitStep(decision, `the answer rounds on PR #${prNumber} could not be read`, () => readAnswerRounds(repo, ctx, opts));
@@ -3468,7 +3470,9 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
   const judged = open.filter((c) => !errors.has(String(c.id)));
   const codes = [...new Set(pending.map((c) => errors.get(String(c.id))))];
   const check = { ids: pending.map((c) => c.id), error: codes.join(",") || null, ...(limit && pending.length ? { limit: true } : {}) };
-  const where = (list) => listed(list.map((c) => placeOf({ path: c.path, line: c.line ?? c.original_line ?? null })));
+  // What the finding check found on each one it left open (finding-check.mjs FOUND): named beside its place.
+  const notes = new Map(found.map((x) => [String(x.id), x.note]));
+  const where = (list) => listed(list.map((c) => `${placeOf({ path: c.path, line: c.line ?? c.original_line ?? null })}${notes.has(String(c.id)) ? ` (${notes.get(String(c.id))})` : ""}`));
   const tries = pending.length ? checkState({ checks: [...rec.checks, check] }).failed : 0;
   // Who was asked, as each line names it: the stage's harness or the AI Gateway's model.
   const who = decider?.name === "harness" ? `the stage's own harness (${decider.model})` : `the AI Gateway's decision model${decider?.model ? ` (${decider.model})` : ""}`;

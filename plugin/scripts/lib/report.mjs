@@ -206,6 +206,9 @@ export class Budget {
     this.planned = 0;
     this.byKind = {};
     this.open = false;
+    // The paged reads that ended at a full page with no Link header (paged), by path: {what, issue} (the issue whose
+    // thread it read, else null).
+    this.unlinked = new Map();
     this.log = log;
   }
   plan(n, what, { atLeast = false } = {}) {
@@ -224,27 +227,38 @@ export class Budget {
 class NothingToRead extends Error {}
 
 /**
- * One paged read, a call per page of 100 (the page number in the query), each counted; its first page was planned. After
- * the first page the rest is planned from its Link header's last page (GitHub's `rel="last"`), else as at least one more.
- * `stop(items)` ends it early. Returns the items.
+ * One paged read, a call per page of 100 (the page number in the query), each counted. `into` collects the items as
+ * each page is read, so a BudgetStop keeps the pages read before it; `planned`: the pages the caller planned (its first
+ * at least). The read ends at the page whose Link header names no next page (GitHub's `rel="next"`), or at one short of
+ * 100, or when `stop(items)` ends it early. Each page past the planned ones is planned before it is read: the rest at
+ * once from a Link header's last page (GitHub's `rel="last"`), else one at a time, said as "at least"; with `stop`, one
+ * at a time, so no page is planned that an early stop leaves unread. Returns `into`.
  */
-async function paged(path, budget, what, opts, { stop = () => false } = {}) {
-  const out = [];
-  let last = null;
+async function paged(path, budget, what, opts, { stop = null, into = [], planned = 1 } = {}) {
   for (let page = 1; ; page += 1) {
     budget.take(what);
     let link = null;
     const data = await rest(`${path}${path.includes("?") ? "&" : "?"}per_page=${PER_PAGE}&page=${page}`, { ...opts, onLink: (l) => (link = l) });
     const items = Array.isArray(data) ? data : (data && typeof data === "object" ? Object.values(data).find(Array.isArray) : null) || [];
-    out.push(...items);
-    if (items.length < PER_PAGE || stop(items)) return out;
-    if (page === 1) {
-      last = Number(/[?&]page=(\d+)[^>]*>;\s*rel="last"/.exec(link || "")?.[1]) || null;
-      if (last && last > 1) budget.plan(last - 1, `the other ${last - 1} page(s) of ${what}`);
-      else budget.plan(1, `the next page of ${what}`, { atLeast: true });
-    } else if (!last) budget.plan(1, `the next page of ${what}`, { atLeast: true });
+    into.push(...items);
+    // A full first page whose answer carries no Link header at all: exactly one page, or a server that names no pages.
+    // The read ends here, and the report says it could not tell (after a first page with one, none means the end).
+    if (page === 1 && items.length >= PER_PAGE && !link && !stop?.(items)) budget.unlinked.set(path, { what, issue: Number(/\/issues\/(\d+)\//.exec(path)?.[1]) || null });
+    if (!linkTo(link, "next") || items.length < PER_PAGE || stop?.(items)) return into;
+    if (page < planned) continue;
+    const last = stop ? null : Number(/[?&]page=(\d+)/.exec(linkTo(link, "last") ?? "")?.[1]) || null;
+    if (last && last > page) {
+      budget.plan(last - page, `the other ${last - page} page(s) of ${what}`);
+      planned = last;
+    } else {
+      budget.plan(1, `the next page of ${what}`, { atLeast: true });
+      planned = page + 1;
+    }
   }
 }
+
+/** The URL a Link header names for `rel` (GitHub's `next`, `last`), or null. */
+const linkTo = (link, rel) => [...String(link || "").matchAll(/<([^>]*)>\s*;\s*rel="([^"]*)"/g)].find((m) => m[2].split(/\s+/).includes(rel))?.[1] ?? null;
 
 // ------------------------------------------------------------------ the artifact cache
 
@@ -396,7 +410,7 @@ export function summaryFor(n, comments, scope, { mine, pushed = (c) => pushAutho
 export async function readReport(repo, scope, { token, fallback = null, maxCalls = DEFAULT_MAX_CALLS, appId = null, localCopy = null, envAppId = null, self = [], by = [], stages = false, download = downloadArtifactResult, checkout = null, cacheDir = reportCacheDir(repo.full), log = () => {} } = {}) {
   const opts = { token };
   const budget = new Budget(maxCalls, log);
-  const source = { stopped: null, comments: 0, pullsRead: false, artifactsRead: new Set(), artifacts: { listed: 0, downloaded: 0, cached: 0, expired: 0, noResult: 0, failed: 0, unreadable: 0, foreign: 0 }, foreignIssues: new Set(), localRecords: 0, selfKnown: false, login: null, appFrom: appId !== null ? "flag" : null };
+  const source = { stopped: null, comments: 0, pullsRead: false, artifactsRead: new Set(), artifacts: { listed: 0, downloaded: 0, cached: 0, expired: 0, noResult: 0, failed: 0, unreadable: 0, foreign: 0 }, foreignIssues: new Set(), cut: new Map(), localRecords: 0, selfKnown: false, login: null, appFrom: appId !== null ? "flag" : null };
   const issues = new Map();
   const pulls = [];
   let comments = [];
@@ -425,6 +439,11 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
   // Per vetted label: the issues listed under it, and those whose latest `labeled` event is by someone who can push or not.
   const arms = vetted.map((label) => ({ label, listed: [], trusted: [], untrusted: [], unverifiable: [] }));
   const started = new Map();
+  // Which comment read a BudgetStop cuts short ({n}: a named issue's own, null: the repository's), and the Objectives
+  // whose comments from before the floor are still to be read (null until known): source.cut, below.
+  let floor = null;
+  let reading = null;
+  let threadsLeft = null;
   let app = appId;
   try {
     // What is known before any read: Pendulum's own login and App, the set, the comments, the Objectives' issues and PRs.
@@ -486,8 +505,9 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
         issues.set(n, i);
         const pages = Math.max(1, Math.ceil((Number(i.comments) || 0) / PER_PAGE));
         if (pages > 1) budget.plan(pages - 1, `the other comment pages of #${n} (${i.comments} comments)`);
-        const theirs = await paged(`${base}/issues/${n}/comments`, budget, "comments", opts);
-        comments.push(...theirs);
+        reading = { n };
+        await paged(`${base}/issues/${n}/comments`, budget, "comments", opts, { into: comments, planned: pages });
+        reading = null;
       }
       for (const n of issues.keys()) pulls.push(...(await paged(`${base}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${n}`)}`, budget, "pulls", opts)));
       source.pullsRead = true;
@@ -508,9 +528,13 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       }
       if (scope.parent) for (const i of await paged(`${base}/issues/${scope.parent}/sub_issues`, budget, "issues", opts)) if (isIssue(i)) issues.set(i.number, i);
       // The comments: one paged read of the repository's, since the period's start or the set's oldest issue.
-      const floor = scope.since ?? (setMode ? [...issues.values()].map((i) => i.created_at).filter(Boolean).sort()[0] ?? null : null);
+      floor = scope.since ?? (setMode ? [...issues.values()].map((i) => i.created_at).filter(Boolean).sort()[0] ?? null : null);
       if (setMode && !issues.size) throw new NothingToRead();
-      comments = await paged(`${base}/issues/comments${floor ? `?since=${encodeURIComponent(floor)}` : ""}`, budget, "comments", opts);
+      // GitHub filters it by when each comment was last updated: an Objective's comments last updated before the floor are
+      // not in it (read from its own thread, below). A BudgetStop keeps the pages read.
+      reading = { n: null };
+      await paged(`${base}/issues/comments${floor ? `?since=${encodeURIComponent(floor)}` : ""}`, budget, "comments", opts, { into: comments });
+      reading = null;
       // The period's Objectives: the labelled ones touched since its start, and each other issue with a stage of Pendulum's in it.
       if (!setMode) {
         for (const i of await paged(`${base}/issues?labels=${encodeURIComponent(objectiveLabel)}&state=all${floor ? `&since=${encodeURIComponent(floor)}` : ""}`, budget, "issues", opts)) if (isIssue(i)) issues.set(i.number, i);
@@ -524,6 +548,32 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
           } catch (e) {
             if (e?.status !== 404) throw e;
           }
+        }
+      }
+      // Each Objective with a record in the comments read whose issue was opened before the floor: its own thread, as
+      // --issue reads it, so every figure comes from all its records (a finding an earlier review round raised, the stage
+      // a vendor comment books for). Only the comments the repository-wide read lacks are read: each was written before
+      // the floor, so the thread is read page by page until a comment written at or after it, each kept once.
+      threadsLeft = new Set();
+      if (floor) {
+        const pushed = (c) => mine(c) || pushAuthor(c) || throughApp(c);
+        const recorded = new Set(comments.filter(pushed).map(markerIssue).filter((n) => n !== null));
+        const begun = [...issues.values()].filter((i) => recorded.has(i.number) && !(ms(i.created_at) >= ms(floor))).map((i) => i.number).sort((a, b) => a - b);
+        threadsLeft = new Set(begun);
+        if (begun.length) budget.plan(begun.length, `the comments from before ${floor} of ${begun.length} Objective(s) with a record since (a thread's first page each, each further page planned as it is reached)`, { atLeast: true });
+        const seen = new Set(comments.map((c) => c.id));
+        for (const n of begun) {
+          const theirs = [];
+          try {
+            await paged(`${base}/issues/${n}/comments`, budget, "comments", opts, { into: theirs, stop: (items) => !(ms(items.at(-1)?.created_at) < ms(floor)) });
+          } finally {
+            for (const c of theirs) {
+              if (seen.has(c.id)) continue;
+              seen.add(c.id);
+              comments.push(c);
+            }
+          }
+          threadsLeft.delete(n);
         }
       }
       // The PRs on pendulum/<n> branches, newest first, until they are older than the comments read.
@@ -612,6 +662,16 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
   } catch (e) {
     if (e instanceof BudgetStop) source.stopped = e.what;
     else if (!(e instanceof NothingToRead)) throw e;
+  }
+  // The Objectives whose comments the call budget stopped the report before reading in full (buildReport): `later`, the
+  // comments after those read (the repository-wide read, or a named issue's own, cut short); `earlier`, those from before
+  // the floor (its thread unread, or an issue not read that may be older than the floor).
+  if (source.stopped) {
+    for (const n of new Set(comments.map(markerIssue).filter((x) => x !== null))) {
+      const later = !!reading && (reading.n === null || reading.n === n);
+      const earlier = !!floor && (threadsLeft ? threadsLeft.has(n) : !(ms(issues.get(n)?.created_at) >= ms(floor)));
+      if (later || earlier) source.cut.set(n, { later, earlier });
+    }
   }
   // A budget stop during the label check leaves issues no label was found to count for: none of their records is read.
   if (arms.length) for (const n of [...issues.keys()]) if (!armCounted(arms, n)) issues.delete(n);
@@ -953,7 +1013,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   const findingStages = [];
   const findingTotals = { findings: 0, outcomes: zeroOutcomes(), reviewStages: 0, cost: zeroCost(), unnamed: 0 };
   const trust = { own: 0, vouched: 0, ignored: 0 };
-  const missing = { noRecord: tally(), stopped: tally(), unattributed: tally(), noLedger: tally(), noVersion: tally(), noModel: tally(), modelStopped: tally(), unreadIssue: new Set() };
+  const missing = { noRecord: tally(), stopped: tally(), unattributed: tally(), noLedger: tally(), noVersion: tally(), noModel: tally(), modelStopped: tally(), unreadIssue: new Set(), commentsStopped: new Set() };
   // The merged Objectives read from their finish card's summary (readReport, summaryFor), unless `by` or `rates` needs
   // their stages.
   const summaries = rates || by.some((b) => STAGE_DETAIL.includes(b)) ? new Map() : read.summaries ?? new Map();
@@ -1000,7 +1060,13 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     const allVendors = sorted(own.filter((c) => vendorHead.test(c.body || "")));
     const stages = allStages.filter((c) => inWindow(c.created_at, scope));
     const stageKeys = new Set(stages.map((c) => keyOf(c.body, "progress")));
-    const vendors = allVendors.filter((c) => stageKeys.has(keyOf(c.body, "vendor")) || (!allStages.some((p) => keyOf(p.body, "progress") === keyOf(c.body, "vendor")) && inWindow(c.created_at, scope)));
+    // The call budget stopped before all this Objective's comments were read (readReport source.cut): a vendor comment
+    // whose stage's progress comment was not read may book for a stage before the period, so it is a run of unknown cost
+    // (`stopped`) and no stage; and the comments after those read, when they were not read, are one more.
+    const cut = source.cut?.get(n) ?? null;
+    const alone = (c) => !allStages.some((p) => keyOf(p.body, "progress") === keyOf(c.body, "vendor")) && inWindow(c.created_at, scope);
+    const vendors = allVendors.filter((c) => stageKeys.has(keyOf(c.body, "vendor")) || (!cut && alone(c)));
+    const unread = cut ? allVendors.filter(alone) : [];
     // The comments Pendulum cannot attribute to itself: a progress comment is a stage of unknown cost; a vendor comment
     // of a stage that has a progress comment adds nothing, and one alone is a run of unknown cost but no stage; one with
     // decision-spend lines is decision calls of unknown cost.
@@ -1009,8 +1075,9 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     const theirVendors = sorted(vouched.filter((c) => vendorHead.test(c.body || "") && !progressKeys.has(keyOf(c.body, "vendor")) && inWindow(c.created_at, scope)));
     const theirDecisions = sorted(vouched.filter((c) => !progress.test(c.body || "") && !vendorHead.test(c.body || "") && decisionSpendRecords(n, [c], { keep: (e) => dayInWindow(e.date, scope) }).length));
     const decisions = decisionSpendRecords(n, sorted(own), { keep: (e) => dayInWindow(e.date, scope) });
-    if (!summary && !stages.length && !vendors.length && !theirStages.length && !theirVendors.length && !theirDecisions.length && !decisions.length && !setMode) continue;
+    if (!summary && !stages.length && !vendors.length && !unread.length && !theirStages.length && !theirVendors.length && !theirDecisions.length && !decisions.length && !setMode) continue;
     if (!issue) missing.unreadIssue.add(n);
+    if (cut) missing.commentsStopped.add(n);
 
     // Every stage once (cost-join.mjs withLines): a stage with no spend line by its usage record when one was read, else
     // as unknown; a stage with a spend line by its line, its usage record giving only its per-pass ledger, version and
@@ -1052,7 +1119,10 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     const unattributed = [...theirStages.map((c) => unattributedRec(c, progress.exec(c.body || "")[1])), ...theirVendors.map((c) => unattributedRec(c, vendorHead.exec(c.body || "")[1], { notStage: true }))];
     const theirCalls = theirDecisions.map((c) => ({ source: "decisions", unattributed: true, harness: null, model: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unattributed"], tokens: zeroTokens(), basis: `unknown: decision-spend lines in comment ${c.id}, not attributed` }));
     if (unattributed.length || theirCalls.length) missing.unattributed.add(n, theirStages.length);
-    const all = [...joined, ...unattributed, ...decisions, ...theirCalls];
+    // What the call budget stopped the report before reading: runs of unknown cost (`stopped`), no stage.
+    const stoppedRec = (artifact, extra = {}) => ({ source: "spend", stopped: true, notStage: true, harness: null, model: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["stopped"], tokens: zeroTokens(), runs: 1, artifact, ...extra });
+    const notRead = [...unread.map((c) => stoppedRec(`spend/${vendorHead.exec(c.body || "")[1]}/${c.id}`)), ...(cut?.later ? [stoppedRec(`comments/${n}`, { rest: true })] : [])];
+    const all = [...joined, ...unattributed, ...notRead, ...decisions, ...theirCalls];
     // Each sandbox booking once, on the last record that carries its claim (cost-join.mjs vendorOf).
     const claimOf = (r) => (typeof r?.vendor?.claim === "string" && /^[0-9a-f]{12}$/.test(r.vendor.claim) ? r.vendor.claim : null);
     const lastByClaim = new Map(all.map((r, i) => [claimOf(r), i]).filter(([k]) => k !== null));
@@ -1151,7 +1221,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       const rec = all[i];
       const c = partCost(part, rec, claimOf(rec) === null || lastByClaim.get(claimOf(rec)) === i);
       const at = rec.source === "decisions" ? null : comment(rec);
-      const stageKind = rec.source === "decisions" ? "decisions" : stageOf(rec) === "review" ? "review" : at && rebaseCostOf(at.body) ? "rebase" : "work";
+      const stageKind = rec.source === "decisions" ? "decisions" : rec.rest ? null : stageOf(rec) === "review" ? "review" : at && rebaseCostOf(at.body) ? "rebase" : "work";
       const line = at ? stageHarnessOf(at.body) : null;
       const key = at ? runOf(at.body) : typeof rec.progressRun === "string" ? rec.progressRun : null;
       const localRec = key ? localRecs.get(key) : null;
@@ -1222,7 +1292,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       if (c.unknownRuns && rec.source !== "decisions" && !rec.notStage) unknownStages += 1;
       // The stage's passes, from its per-pass ledger.
       if (rec.unattributed && !rec.notStage) unattributedStages += 1;
-      if (rec.source === "decisions" || rec.unattributed || unmatched) return;
+      if (rec.source === "decisions" || rec.unattributed || rec.stopped || unmatched) return;
       if (!ledger) {
         unledgered += 1;
         // The call budget stopped before this Objective's usage records were read: said by stage, apart from a record
@@ -1489,6 +1559,7 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   add("unattributed", missing.unattributed, UNKNOWN_WHY.unattributed);
   add("no-record", missing.noRecord, UNKNOWN_WHY["no-record"]);
   add("stopped-before-records", missing.stopped, UNKNOWN_WHY.stopped);
+  add("comments-stopped", missing.commentsStopped, "Objectives whose comments the call budget stopped the report before reading in full: the comments after those read, when unread, and each sandbox comment whose stage's progress comment was not read are runs of unknown cost, and their review findings may count an earlier round's again");
   add("artifact-foreign", source.foreignIssues ?? new Set(), `usage artifacts uploaded by runs from forks, or naming no repository (${source.artifacts.foreign}), never read as Pendulum's`);
   add("no-ledger", missing.noLedger, "stages with no per-pass ledger in their progress comment or usage record (an older stage, or a local stage whose ledger did not fit its comment and that has no local record on this machine): no pass breakdown, answer and fix passes or cost per model minute for them");
   if (missing.ledgerStopped?.length) out.push({ code: "ledger-stopped", count: missing.ledgerStopped.length, counts: { objectives: new Set(missing.ledgerStopped.map((x) => x.issue)).size, stages: missing.ledgerStopped.length }, issues: issuesOf(new Set(missing.ledgerStopped.map((x) => x.issue))), stages: missing.ledgerStopped, text: "stages whose per-pass ledger is in a usage record the call budget stopped the report before reading: no pass breakdown for them" });
@@ -1502,6 +1573,10 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   add("label-unverifiable", new Set(arms.flatMap((a) => a.unverifiable)), "issues whose label's last applier's permission the token may not read (403): not vouched for, so not counted for it");
   add("label-unchecked", new Set(arms.flatMap((a) => a.listed.filter((n) => !checked(a, n)))), "issues whose label's applier the call budget stopped the report before reading: not counted");
   if (arms.length === 2) add("in-both-arms", new Set(arms[0].trusted.filter((n) => arms[1].trusted.includes(n))), "issues both arms' labels count for: in neither arm");
+  if (calls.unlinked?.size) {
+    const reads = [...calls.unlinked.values()];
+    out.push({ code: "no-link", count: reads.length, counts: none, issues: issuesOf(new Set(reads.map((r) => r.issue).filter((n) => n !== null))), text: `paged reads that ended at a full first page whose answer carried no Link header, so whether more followed is not known, and the figures from them may be partial: ${reads.map((r) => (r.issue === null ? `the repository's ${r.what}` : `#${r.issue}'s ${r.what}`)).join(", ")}` });
+  }
   if (source.artifacts.expired) out.push({ code: "artifact-expired", count: source.artifacts.expired, counts: none, issues: [], text: "usage artifacts past GitHub's retention, not cached here" });
   if (source.artifacts.failed) out.push({ code: "artifact-failed", count: source.artifacts.failed, counts: none, issues: [], text: "usage artifacts that could not be downloaded" });
   if (source.artifacts.unreadable) out.push({ code: "artifacts-unreadable", count: source.artifacts.unreadable, counts: none, issues: [], text: "artifact lists the token may not read (it needs actions: read), or artifacts that name no workflow run" });

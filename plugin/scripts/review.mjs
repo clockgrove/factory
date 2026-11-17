@@ -87,6 +87,8 @@ import {
   readAnswerRounds,
   validationLoop,
   writeUsage,
+  onCancel,
+  cancelledEnd,
   questionRaisedAt,
   answeredDuringJob,
   recordMergeable,
@@ -989,6 +991,16 @@ async function main() {
   // Automatic account choice on GitHub Actions and the cloud sandbox (lib/route-holds.mjs routeLimits, #268): a usage
   // limit holds this stage's account in Pendulum's records on GitHub, and the review goes on on a free one.
   let limits = null;
+  // A cancelled job (the runner's stop signal) still leaves the stage's own usage record (session.mjs onCancel).
+  onCancel((sig) =>
+    cancelledEnd(sig, {
+      usageDir,
+      mask: [eventsFile, join(usageDir, CALL_LOG)],
+      secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey],
+      fields: () => ({ progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), account: process.env.PENDULUM_STAGE_ACCOUNT ?? null, spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, passes, credentialBasis: "see worker", billing: credentialBilling, reentry, rerun: rerunRecord(), judgeOnly, workerKey: relay ? relay.totals() : null }),
+      sessionOf: (recs) => ({ harness: inputs.harness, sessionId: session.id, also: stageThreads(recs), checkout }),
+    }),
+  );
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
   const finish = async (exit, reason, outage = null, usageLimit = null) => {
     watch?.stop();

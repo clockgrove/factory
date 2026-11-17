@@ -355,6 +355,7 @@ test("a local harness loads no settings or hooks from the clone, and no sandbox 
 
 test("a local harness's own git never enters a submodule or runs an fsmonitor; package caches are no added directory", async () => {
   const { harnessCommand } = await import("../scripts/lib/harness.mjs");
+  const { AGENT_SHELL_TELEMETRY_OFF } = await import("../scripts/lib/local.mjs");
   const local = { addDirs: ["/s/npm", "/s/tmp"], cacheDirs: ["/s/npm"], readDirs: [], domains: [], clone: "/c", readOnly: [] };
   for (const harness of ["claude", "codex", "copilot"]) {
     const { env, args } = harnessCommand({ harness, prompt: "x", local });
@@ -367,7 +368,7 @@ test("a local harness's own git never enters a submodule or runs an fsmonitor; p
   }
   const c = harnessCommand({ harness: "claude", prompt: "x", local });
   assert.deepEqual(JSON.parse(c.args[c.args.indexOf("--settings") + 1]).sandbox.filesystem.allowWrite, ["/s/npm"]);
-  assert.deepEqual(harnessCommand({ harness: "codex", prompt: "x", local: null }).env, {}, "the Action's runner is unchanged");
+  assert.deepEqual(harnessCommand({ harness: "codex", prompt: "x", local: null }).env, AGENT_SHELL_TELEMETRY_OFF, "the Action's runner: only the agent shell's telemetry variables");
 });
 
 test("a Claude agent file becomes an --agents entry with only its description, prompt, tools and model", async () => {

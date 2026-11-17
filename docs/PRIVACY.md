@@ -49,4 +49,12 @@ Pendulum has no telemetry: its code calls no analytics, crash-reporting or usage
 - **your model provider's host,** with a bare request that tells an outage from a failed run;
 - **the token exchange URL you set,** if you use workload identity federation for Claude (`anthropic_oidc_exchange_url`).
 
-The coding agent CLIs are their vendors' own programs, and they may report usage to their vendor under that vendor's own settings; Pendulum does not change them. In local mode, Claude Code's and Copilot CLI's reporting hosts are among the hosts their sandbox lets them reach. Local mode starts the processes it runs, the agent's commands included, with `DO_NOT_TRACK=1`, `NEXT_TELEMETRY_DISABLED=1` and `TURBO_TELEMETRY_DISABLED=1` set.
+## The coding agent CLIs' own reporting
+
+The coding agent CLIs are their vendors' own programs, with their own usage reporting. Pendulum turns it off with each vendor's documented switch, for every pass and every decision call, on GitHub Actions, in local mode and in the cloud sandbox:
+
+- **Claude Code:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (telemetry, error reporting, feature flags, auto-update and feedback), with `DISABLE_TELEMETRY=1` and `DISABLE_ERROR_REPORTING=1`; see Anthropic's [Data usage](https://code.claude.com/docs/en/data-usage#telemetry-services).
+- **Codex:** `analytics.enabled=false`, which turns off its analytics and its built-in metrics exporter; see OpenAI's [Advanced Configuration](https://learn.chatgpt.com/docs/config-file/config-advanced), Metrics.
+- **GitHub Copilot CLI:** `--disable-client-telemetry`; see GitHub's [Copilot CLI command reference](https://docs.github.com/en/copilot/reference/cli-command-reference). Its automatic update is off as well.
+
+These switches cover what each CLI sends from your machine or runner. What the vendor's service records of the model calls themselves is under that vendor's terms. In local mode, the hosts each CLI's sandbox lets it reach are its model, sign-in and token hosts; no reporting host is among them. On every route the agent's commands run with `DO_NOT_TRACK=1` and `GH_TELEMETRY=false`, which turn off the GitHub CLI's usage reporting (see GitHub's [GitHub CLI telemetry](https://docs.github.com/en/github-cli/github-cli/github-cli-telemetry)) and that of other tools that honour `DO_NOT_TRACK`. In local mode every process Pendulum starts gets them, with `NEXT_TELEMETRY_DISABLED=1` and `TURBO_TELEMETRY_DISABLED=1` as well.

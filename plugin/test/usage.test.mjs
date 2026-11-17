@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { SHELL_SECRET_KEYS, credentialEnv, finalText, harnessCommand, promptCacheTtl, scrubbedEnv } from "../scripts/lib/harness.mjs";
-import { localSandbox } from "../scripts/lib/local.mjs";
+import { SHELL_SECRET_KEYS, VENDOR_TELEMETRY_OFF, credentialEnv, finalText, harnessCommand, promptCacheTtl, scrubbedEnv } from "../scripts/lib/harness.mjs";
+import { AGENT_SHELL_TELEMETRY_OFF, localSandbox } from "../scripts/lib/local.mjs";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { CODEX_PRICES, cacheSummary, copilotSessionTotal, mergeUsage, parseClaude, parseCodex, parseCopilot, parseUsage, priceCodex, sinceSession } from "../scripts/lib/usage.mjs";
 import { copilotCount, decideExit, sumSpend, unmeteredRun } from "../scripts/lib/logic.mjs";
@@ -184,7 +184,7 @@ test("harness command lines are the documented headless flags; the prompt goes o
   assert.ok(xe.args.includes('model_reasoning_effort="high"') && xe.args.includes("model_auto_compact_token_limit=300000") && !xe.args.includes("--effort"));
   const pe = harnessCommand({ harness: "copilot", prompt: "P", effort: "high", compaction: "300000" });
   assert.deepEqual(pe.args.slice(pe.args.indexOf("--reasoning-effort"), pe.args.indexOf("--reasoning-effort") + 2), ["--reasoning-effort", "high"]);
-  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "P", compaction: "300000" }).env, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "300000" });
+  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "P", compaction: "300000" }).env, { ...AGENT_SHELL_TELEMETRY_OFF, ...VENDOR_TELEMETRY_OFF.claude.env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: "300000" });
   assert.ok(c.args.includes("--output-format") && c.args.includes("--max-budget-usd") && c.args.includes("25"));
   assert.equal(c.stdin, "P");
   const r = harnessCommand({ harness: "claude", prompt: "fix", maxUsd: 0, resume: "sid" });
@@ -516,8 +516,8 @@ test("prompt cache TTL: off by default; auto asks Claude Code for an hour on an 
   assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "1H", CLAUDE_CODE_OAUTH_TOKEN: "t" }), "1h");
   assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "2h", ANTHROPIC_API_KEY: "k" }), null, "a value Claude Code would ignore is not sent");
   for (const h of ["codex", "copilot"]) assert.equal(promptCacheTtl(h, { ANTHROPIC_API_KEY: "k", PENDULUM_PROMPT_CACHE_TTL: "1h" }), null);
-  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "p", cacheTtl: "1h" }).env, { CLAUDE_CODE_PROMPT_CACHE_TTL: "1h" });
-  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "p" }).env, {});
+  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "p", cacheTtl: "1h" }).env, { ...AGENT_SHELL_TELEMETRY_OFF, ...VENDOR_TELEMETRY_OFF.claude.env, CLAUDE_CODE_PROMPT_CACHE_TTL: "1h" });
+  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "p" }).env, { ...AGENT_SHELL_TELEMETRY_OFF, ...VENDOR_TELEMETRY_OFF.claude.env });
 });
 
 test("prompt cache: each harness's first request (or turn) after a CI wait and the stage's write share go in the usage record", () => {

@@ -55,7 +55,7 @@ import { DEFAULTS, PENDULUM_VERSION, SECRET_INPUTS, VARIABLE_SETTINGS, mask, par
 import { ADAPTERS } from "./lib/adapters/sandbox.mjs";
 import { parseMaintainer, protectedPaths, unprotectedFiles } from "./lib/logic.mjs";
 import { ciRunner, ciWorkflowTriggers, neededSecrets, pinRow, secretReferences, runnerLabels, setupRuns, unreadableRunners } from "./doctor.mjs";
-import { parseYaml, workflowEvents } from "./lib/yaml.mjs";
+import { parseYaml, workflowEvents, writeGrants } from "./lib/yaml.mjs";
 import { ACCOUNT_HARNESSES, ROUTE_AUTO_ENV, ROUTE_CREDENTIAL_INPUTS, routeAccounts, routeAccountsText, routeCredentialRef, validAccountName } from "./lib/accounts.mjs";
 
 export const LABELS = [
@@ -894,8 +894,8 @@ export function defaultTokenJobs(doc) {
   return jobs.filter(([, job]) => job?.permissions === undefined || job?.permissions === null).map(([id]) => id);
 }
 
-/** Whether a `permissions:` value asks for more than a read-only token gives: `write-all`, or any scope at `write`. */
-export const asksWrite = (perms) => (typeof perms === "string" ? perms.trim() === "write-all" : Boolean(perms) && typeof perms === "object" && Object.values(perms).some((v) => String(v ?? "").trim() === "write"));
+/** Whether a `permissions:` value asks for more than a read-only token gives: any grant yaml.mjs writeGrants names. */
+export const asksWrite = (perms) => Boolean(writeGrants(perms)?.length);
 
 /** Whether a parsed workflow, at its top level or in any job, asks for write (asksWrite). */
 const workflowAsksWrite = (doc) => asksWrite(doc?.permissions) || Object.values(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {}).some((j) => asksWrite(j?.permissions));

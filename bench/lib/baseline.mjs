@@ -1,14 +1,6 @@
-// baseline.mjs: the before-and-after line for a wave, computed from scorecard rows.
-const quantile = (xs, q, digits = 1) => {
-  const s = xs.filter((x) => typeof x === "number" && Number.isFinite(x)).sort((a, b) => a - b);
-  if (!s.length) return null;
-  const pos = (s.length - 1) * q;
-  const lo = Math.floor(pos);
-  const hi = Math.ceil(pos);
-  const k = 10 ** digits;
-  return Math.round((s[lo] + (s[hi] - s[lo]) * (pos - lo)) * k) / k;
-};
-const spread = (xs, digits = 1, leftOut = 0) => ({ median: quantile(xs, 0.5, digits), p25: quantile(xs, 0.25, digits), p75: quantile(xs, 0.75, digits), n: xs.filter((x) => typeof x === "number").length, ...(leftOut ? { leftOut } : {}) });
+// baseline.mjs: the before-and-after line for a wave, computed from scorecard rows. The median and spread are the
+// plugin's (plugin/scripts/lib/spread.mjs), which `pendulum report --compare` shares.
+import { spread } from "../../plugin/scripts/lib/spread.mjs";
 
 /**
  * Whether a row's dollars hold runs of unknown cost (plugin usage.mjs UNKNOWN_WHY: the model's, a relayed key's or a

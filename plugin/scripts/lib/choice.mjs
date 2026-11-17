@@ -27,6 +27,17 @@ export const FOUNDATION_LABEL = "pendulum:foundation";
 /** The foundation label's own name among `names` (names, or GitHub's label objects), or null. */
 export const foundationLabel = (names = []) => (names || []).map((n) => (typeof n === "string" ? n : n?.name)).find((n) => typeof n === "string" && n.trim().toLowerCase() === FOUNDATION_LABEL) ?? null;
 
+/**
+ * The prefix of an experiment label (#545): `pendulum:experiment:<name>` tags an Objective as one of a named experiment's
+ * arms, for `pendulum report --compare`. It changes nothing Pendulum runs (it is no choice label and not in the plan's
+ * record); the report counts it only when the person who last applied it can push (objective-trust.mjs labelsVouched).
+ * A name is letters, digits, `.`, `_` and `-`, and fits in LABEL_MAX less the prefix (30 characters).
+ */
+export const EXPERIMENT_PREFIX = "pendulum:experiment:";
+export const EXPERIMENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,29}$/;
+/** Whether a label name is an experiment label. */
+export const isExperimentLabel = (name) => typeof name === "string" && name.toLowerCase().startsWith(EXPERIMENT_PREFIX) && EXPERIMENT_NAME.test(name.slice(EXPERIMENT_PREFIX.length));
+
 /** The words a reason uses for each choice. */
 const WHAT = { harness: "harness", model: "worker model", subagent_model: "sub-agent model", reviewer_model: "reviewer model" };
 const tick = (s) => `\`${s}\``;

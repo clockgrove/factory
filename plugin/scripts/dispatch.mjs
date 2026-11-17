@@ -104,7 +104,7 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 /** Whether an Objective carries two account labels on GitHub Actions or the cloud sandbox with accounts declared (#267). */
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.FACTORY_ACCOUNTS).declared && !!accountPin(issue.labels).two;
-const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], relationSource: null, project: null, queue: null });
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
 
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
@@ -1581,6 +1581,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // A local loop told to stop (localStopping) marks no more: its picks from there on stay Queued, and it returns only
   // the ones it marked. It is told each one before its write (localMarked), so a dispatch that throws midway still
   // leaves it the list to put back to Queued (local.mjs serve).
+  // Picks labelled factory:local here (adopt) whose mark of that label could not be written yet (lib/local.mjs adoptLocal).
+  const unmarked = [];
   if (!dryRun) {
     const unlabelled = new Set();
     for (const [i, n] of picked.ready.entries()) {
@@ -1607,6 +1609,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             unlabelled.add(n);
             continue;
           }
+          if (!adopted.marked) unmarked.push(n);
           log(`#${n}: no Action runs Objectives here, so this loop takes it and labels it ${LOCAL_LABEL}${adopted.marked ? "" : `; Factory's mark of that label is not written yet (${adopted.why}), so a later tick of the loop that holds it writes it`}`);
         }
       }
@@ -1637,7 +1640,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   watch.mark("mark");
   // The Queued Objectives this route leaves to the other one: a local loop says how many once (#455).
   const unrouted = inputs.issue ? [] : issues.filter((i) => !wanted.includes(i) && stateOf(i, statuses[i.number] ?? null) === "Queued").map((i) => i.number);
-  return { ...picked, unrouted, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
+  return { ...picked, unrouted, unmarked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**

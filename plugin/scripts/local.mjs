@@ -725,16 +725,20 @@ export class Local {
   /**
    * Factory's mark of the factory:local label this login put on `issue` (lib/local.mjs markLocalRoute), written by a later
    * tick when the pick's own write could not be (a failed post, a timeline that did not show the event yet), so the
-   * scorer counts the label as Factory's. Checked once per Objective this loop claims, in this process (its claim's
-   * start, then its heartbeats until settled): a conditional timeline read, and the comments only when the label is this
-   * login's. Settled when the mark is there or a person put the label on; a timeline that shows no label event is read
+   * scorer counts the label as Factory's. At the claim's start when this process's own pick or run left it unmarked
+   * (`unmarked`), and at the heartbeats of every Objective this loop claims, until settled once per process (so a mark a
+   * loop that stopped meanwhile left unwritten is written too): a conditional timeline read, and the comments only when
+   * the label is this login's. Settled when the mark is there or a person put the label on; a timeline that shows no label event is read
    * at most MARK_TRIES times (an Objective taken with --all has none); a failed read or write is tried at the next beat.
    */
   async backfillMark(issue) {
     const tries = (this.markTries ??= new Map());
     if ((tries.get(issue) ?? 0) < 0 || (tries.get(issue) ?? 0) >= MARK_TRIES) return;
     const r = await markLocalRoute(this.repo, issue, this.opts ?? { token: this.token }, { check: true, timeline: (repo, n, opts) => timelineOf(repo, n, { ...opts, cache: (this.timelines ??= new Map()) }) });
-    if (r.marked || r.person) return void tries.set(issue, -1);
+    if (r.marked || r.person) {
+      this.unmarked?.delete(issue);
+      return void tries.set(issue, -1);
+    }
     if (r.id === null) return void tries.set(issue, (tries.get(issue) ?? 0) + 1);
     log(`#${issue}: Factory's mark of its ${LOCAL_LABEL} label is not written yet (${r.why}); tried again at the next heartbeat`);
   }
@@ -743,7 +747,10 @@ export class Local {
   async adoptForRun(issue, data) {
     if (hasLocalLabel(data) || (await this.actionState()) !== "none") return;
     await adoptLocal(this.repo, issue, this.opts ?? { token: this.token }).then(
-      (m) => log(`#${issue}: labelled ${LOCAL_LABEL}, since no Action runs Objectives here: this machine's loop tends it${m.marked ? "" : `; Factory's mark of that label is not written yet (${m.why}), so a later tick of the loop that holds it writes it`}`),
+      (m) => {
+        if (!m.marked) (this.unmarked ??= new Set()).add(issue);
+        log(`#${issue}: labelled ${LOCAL_LABEL}, since no Action runs Objectives here: this machine's loop tends it${m.marked ? "" : `; Factory's mark of that label is not written yet (${m.why}), so a later tick of the loop that holds it writes it`}`);
+      },
       (e) => log(`#${issue}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); add it, or no loop tends this Objective's merge while none runs here`),
     );
   }
@@ -1829,7 +1836,7 @@ export class Local {
     }
     this.ceded?.delete(issue);
     // Factory's mark of the factory:local label this loop put on it, when the pick could not write it (backfillMark).
-    await this.backfillMark(issue).catch((e) => log(`#${issue}: local-route mark: ${String(e?.message || e).slice(0, 120)}`));
+    if (this.unmarked?.has(issue)) await this.backfillMark(issue).catch((e) => log(`#${issue}: local-route mark: ${String(e?.message || e).slice(0, 120)}`));
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
     // beats due meanwhile are skipped rather than queued behind it. Each reads who holds the claim first: a claim it
     // cannot read is written as before (no answer is no other holder).
@@ -3714,6 +3721,8 @@ export class Local {
         slots.spare();
         break;
       }
+      // Picks labelled factory:local whose mark is not written yet: their claim's start writes it (backfillMark).
+      for (const n of result.unmarked || []) (this.unmarked ??= new Set()).add(n);
       // Queued Objectives this loop does not take only for want of factory:local: said once per start (#455).
       if (result.unrouted?.length && !this.unroutedSaid) {
         this.unroutedSaid = true;

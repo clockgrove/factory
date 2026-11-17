@@ -701,12 +701,14 @@ test("serve: a pick whose mark could not be posted, or whose label event the tim
       assert.match(log, why === "post" ? /#7: no Action runs Objectives here, so this loop takes it and labels it factory:local; Factory's mark of that label is not written yet \(the mark could not be posted/ : /#7: no Action runs Objectives here, so this loop takes it and labels it factory:local; Factory's mark of that label is not written yet \(the timeline does not show this login's factory:local label event yet\)/);
       assert.doesNotMatch(log, /could not be added/, "the label is on: never said otherwise");
       failing = false;
+      assert.deepEqual([...loop.unmarked], [7], "its claim's start writes the mark");
       // The loop that holds it (its claim's start, then each heartbeat) writes the mark, once.
       const api = process.env.GITHUB_API_URL;
       process.env.GITHUB_API_URL = fake.url;
       try {
         await loop.backfillMark(7);
         await loop.backfillMark(7);
+        assert.equal(loop.unmarked.size, 0);
       } finally {
         api === undefined ? delete process.env.GITHUB_API_URL : (process.env.GITHUB_API_URL = api);
       }

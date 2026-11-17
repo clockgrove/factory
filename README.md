@@ -12,7 +12,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/clockgrove/pendulum" alt="License: MIT"></a>
 </p>
 
-Pendulum turns a GitHub issue into a pull request (PR), using the coding agent you choose: Claude Code, Codex or GitHub Copilot CLI. You write what you want and what "done" means, and label the issue `pendulum:objective`. The coding agent plans and builds the change, Pendulum opens the PR, and a separate agent run reviews it. Then you merge it yourself, or, with auto-merge on, Pendulum merges it once your required CI checks pass.
+Clockgrove Pendulum turns a GitHub issue into a pull request (PR), using the coding agent you choose: Claude Code, Codex or GitHub Copilot CLI. You write what you want and what "done" means, and label the issue `pendulum:objective`. The coding agent plans and builds the change, Pendulum opens the PR, and a separate agent run reviews it. Then you merge it yourself, or, with auto-merge on, Pendulum merges it once your required CI checks pass.
 
 It is for maintainers of a GitHub repository with CI on pull requests who want to hand bounded, well-specified changes to a coding agent and keep their own issues, checks and merge queue as the workflow. It runs on GitHub Actions or on your own machine and keeps all its state in GitHub, so there is no server or database to host.
 
@@ -95,9 +95,9 @@ The plugin follows Pendulum's `main` branch. The workflow it writes into your re
 
 Open a session of your coding agent in a local clone of **the repository you want Pendulum to work on** (not a clone of Pendulum), and say:
 
-> Set up Clockgrove Pendulum for this repository.
+> Set up Pendulum for this repository.
 
-Use the full name in requests like this: it is what Pendulum's skills answer to, and a bare "Pendulum" can mean something else to your agent, such as the Python date-time library of that name.
+If your agent takes "Pendulum" for something else of that name, such as the Python date-time library, say "Clockgrove Pendulum" instead, or run the skill's slash command (here `/pendulum:pendulum-setup`).
 
 Setup asks three questions: which coding agent and credential, the spending limits, and whether Pendulum merges its own PRs. Choose its recommended **first-run preset**:
 
@@ -107,13 +107,13 @@ Setup asks three questions: which coding agent and credential, the spending limi
 | `max_concurrent`, Objectives running at once | 3 | 1 |
 | `auto_merge` | on | off: Pendulum's PRs wait for you to merge them |
 
-Setup then shows each change and waits for your yes. It creates a GitHub App for this one repository (a few clicks in your browser) and saves the App's two repository secrets, then has you save your model credential as a secret. It creates Pendulum's labels and a ruleset that requires your CI's checks, and offers to make your default workflow token read-only. Finally it opens a PR titled "Add the Clockgrove Pendulum workflow" that adds `.github/workflows/pendulum.yml` ([everything setup adds](#what-it-adds-to-your-repository)).
+Setup then shows each change and waits for your yes. It creates a GitHub App for this one repository (a few clicks in your browser) and saves the App's two repository secrets, then has you save your model credential as a secret. It creates Pendulum's labels and a ruleset that requires your CI's checks, and offers to make your default workflow token read-only. Finally it opens a PR that adds `.github/workflows/pendulum.yml` ([everything setup adds](#what-it-adds-to-your-repository)).
 
 ### 3. Merge the setup PR, then check
 
 Pendulum starts once the workflow file is on your default branch. Merge the setup PR, then ask:
 
-> Is Clockgrove Pendulum set up correctly here?
+> Is Pendulum set up correctly here?
 
 This runs Pendulum's doctor, which changes nothing. Each line reads PASS, WARN or FAIL with the fix, and the last line says `ready` when nothing fails. Fix what a FAIL names and ask again. Setup also runs doctor before you merge; a warning then that the workflow file is not on your default branch yet is expected.
 
@@ -121,7 +121,7 @@ This runs Pendulum's doctor, which changes nothing. Each line reads PASS, WARN o
 
 Pick a small behaviour change in this repository, one a test your CI runs can prove and that touches no workflow files. Then ask, describing it in your own words:
 
-> File a Clockgrove Pendulum Objective: `mytool --version` should print the version from package.json.
+> File a Pendulum Objective: `mytool --version` should print the version from package.json.
 
 The session writes the issue in the shape Pendulum reads and shows it to you. Its title is the outcome in a few words, and its body looks like this:
 
@@ -192,7 +192,7 @@ Your tests check only what they test. A green check is evidence about those prop
 
 ## When it needs you
 
-A run that goes well needs nothing from you. When one needs you, Pendulum does all the work it can, then hands the Objective back as **Blocked** or with a **Question**. Your other Objectives keep running. Ask "Why is Clockgrove Pendulum Objective 12 Blocked?" and your session reads the notice and offers the next step.
+A run that goes well needs nothing from you. When one needs you, Pendulum does all the work it can, then hands the Objective back as **Blocked** or with a **Question**. Your other Objectives keep running. Ask "Why is Pendulum Objective 12 Blocked?" and your session reads the notice and offers the next step.
 
 | Situation | What you do |
 | --- | --- |
@@ -200,9 +200,9 @@ A run that goes well needs nothing from you. When one needs you, Pendulum does a
 | **Blocked:** Pendulum could not finish, for example a check still fails or a spending limit was reached. One comment on the issue gives the reason, and the PR becomes a draft | Fix what the comment names, then label the issue `pendulum:objective` again. It resumes from its branch and PR. |
 | **Question** in a draft PR: the work depends on a decision that should be yours, such as changing a public interface | Comment your decision on the issue or the PR, then mark the PR ready. |
 | **Question** on the issue: the work needs another repository | Split it into one Objective per repository and label them, or comment how to do it in this repository alone: the next run picks up your answer, with no relabelling. |
-| The work needs a workflow change | Pendulum leaves the change in a comment on the issue, labelled `pendulum:handover`. After the PR merges, ask "Apply the Clockgrove Pendulum workflow hand-over for Objective 12" ([Workflow changes](docs/USAGE.md#workflow-changes)). |
-| Stop one Objective | Remove its `pendulum:objective` label, close its issue, or ask "Stop Clockgrove Pendulum Objective 12". A run in progress ends within about two minutes with its spend recorded; label it again to resume. |
-| Start over from revised text | Label the issue `pendulum:restart`, or ask "Restart Clockgrove Pendulum Objective 12". The earlier PR is closed and its branch deleted. |
+| The work needs a workflow change | Pendulum leaves the change in a comment on the issue, labelled `pendulum:handover`. After the PR merges, ask "Apply the Pendulum workflow hand-over for Objective 12" ([Workflow changes](docs/USAGE.md#workflow-changes)). |
+| Stop one Objective | Remove its `pendulum:objective` label, close its issue, or ask "Stop Pendulum Objective 12". A run in progress ends within about two minutes with its spend recorded; label it again to resume. |
+| Start over from revised text | Label the issue `pendulum:restart`, or ask "Restart Pendulum Objective 12". The earlier PR is closed and its branch deleted. |
 | Stop everything | `gh workflow disable pendulum.yml` and cancel any runs in the Actions tab. In local mode, stop `pendulum serve` with Ctrl-C. With the cloud sandbox, also stop the Objective's sandboxes in your Vercel project. |
 
 [Blocked and Question](docs/USAGE.md#blocked-and-question) and [An Objective's lifecycle](docs/USAGE.md#an-objectives-lifecycle) cover each case in full.
@@ -255,7 +255,7 @@ Wherever it runs, each Objective's state lives in GitHub: the branch, the PR, th
 
 Local mode runs the same worker and reviewer on your machine: Claude Code and Codex on the login you already have, with no API key, and Copilot on the same seat token as on Actions. It needs no GitHub App and no secrets stored in GitHub, but more machine setup: sandbox packages and a GitHub token for this one repository. It runs on Linux and WSL2; on macOS, Claude Code and Codex work in the sandbox but have not yet been proven on a full run ([Platforms](docs/LOCAL.md#platforms)).
 
-With the plugin installed, say "Set up Clockgrove Pendulum in local mode" in your repository's clone; the session walks you through each step on your machine. Then say "Start the Clockgrove Pendulum local loop" (or run `pendulum serve`, which is on your PATH in Claude Code) and file Objectives as in the [Quick start](#4-file-your-first-objective). Where Pendulum's workflow is also active on GitHub, add the `pendulum:local` label to run an Objective on your machine. [Set it up](docs/LOCAL.md#set-it-up) and [Routing](docs/LOCAL.md#routing) have the details.
+With the plugin installed, say "Set up Pendulum in local mode" in your repository's clone; the session walks you through each step on your machine. Then say "Start the Pendulum local loop" (or run `pendulum serve`, which is on your PATH in Claude Code) and file Objectives as in the [Quick start](#4-file-your-first-objective). Where Pendulum's workflow is also active on GitHub, add the `pendulum:local` label to run an Objective on your machine. [Set it up](docs/LOCAL.md#set-it-up) and [Routing](docs/LOCAL.md#routing) have the details.
 
 ## How it differs
 
@@ -284,7 +284,7 @@ Each cell about another tool comes from that tool's own documentation; [docs/COM
 | See how runs are scored | [bench/README.md](bench/README.md) |
 | Read release notes | [Releases](https://github.com/clockgrove/pendulum/releases) |
 
-Pendulum is a plugin of [Agent Skills](https://agentskills.io) that Claude Code, Codex and GitHub Copilot CLI load the same way; plain-words requests that use the full name, Clockgrove Pendulum, reach them.
+Pendulum is a plugin of [Agent Skills](https://agentskills.io) that Claude Code, Codex and GitHub Copilot CLI load the same way; plain-words requests reach them, and each is also a slash command ([Commands](docs/USAGE.md#commands)).
 
 ## Versioning
 

@@ -111,7 +111,7 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
     if (inputs.credential !== "plan" && oauth) out.push(WARN("claude credential", "CLAUDE_CODE_OAUTH_TOKEN is set on an api run", "remove it; a present API key silently wins, but a plan token must never reach unattended runs"));
   }
   if (h === "codex") {
-    // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is unmetered.
+    // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is of unknown cost.
     if (!inputs.model) out.push(WARN("codex model", "no model input", "set model (for example gpt-6.1-sol) so Codex tokens are priced; the CLI's default is not reported in its output"));
     for (const m of new Set([inputs.model, inputs.reviewerModel].filter(Boolean))) {
       const unpriced = unpricedCodex("codex", m, { gateway: !!inputs.codexGatewayKey });
@@ -160,14 +160,13 @@ export function defaultsCheck(inputs) {
 export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
   const h = (ms) => `${Number((ms / 3600_000).toFixed(2))} h`;
   const min = (ms) => `${Number((ms / 60_000).toFixed(2))} min`;
-  const { stall, relay } = inputs;
+  const { stall } = inputs;
   const lines = [
     `a usage limit waited out in place ${inputs.usageLimitWaits} time(s) per pass, and on Actions and the cloud sandbox a reset over ${min(inputs.usageLimitMoveMs)} away moves to a free account`,
     `a quiet local claim Blocked after ${h(inputs.claimPauseMs)}`,
     `a sibling waited for ${h(inputs.siblingWaitMs)} at most`,
     `${inputs.maxParts} part(s) per Objective at most`,
     `a queue check's step hung past ${stall.factor} x its normal duration and at least ${min(stall.floorMs)} over it, a queue commit with no CI begun stalled after ${min(stall.queueMs)}`,
-    `the gateway relay shut at ${relay.unknownShut} calls of unknown cost (never counted against max_usd)`,
   ];
   const own = local ? localLimits(stage) : null;
   if (own) lines.push(`a local stage waits in place ${min(own.waitMs)}, and an Objective paused on one outage Blocks after ${h(own.outageMs)}`);

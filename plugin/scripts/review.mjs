@@ -23,7 +23,7 @@ import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, h
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { openStageHosts, refusalExit } from "./lib/local.mjs";
@@ -698,9 +698,9 @@ async function main() {
   // that ends at or past it (Codex and Copilot have no in-run cap) is marked and ends the job Blocked.
   let overBudget = false;
   const over = (...pending) => capReached(inputs.maxUsd, [...records, ...pending]);
-  // A Copilot run that did work but reported no priced AI credits leaves the cap unenforceable: the same stop.
-  let unmetered = false;
-  const capReason = () => (unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached");
+  // A run of unknown cost (a Copilot run with no priced credits among them, usage.mjs UNKNOWN_WHY) adds nothing to the
+  // known dollars the cap compares: the stage goes on.
+  const capReason = () => "dollar cap reached";
   const mark = (rec, ...pending) => {
     // A run that hit its cap (Claude's in-run cap, or Copilot's 30-credit floor that starts no run) is over budget too.
     if (rec?.budgetExceeded) overBudget = true;
@@ -708,21 +708,16 @@ async function main() {
       rec.budgetExceeded = true;
       overBudget = true;
     }
-    if (rec && inputs.maxUsd > 0 && unmeteredRun(rec)) {
-      Object.assign(rec, { budgetExceeded: true, unmetered: true });
-      overBudget = true;
-      unmetered = true;
-    }
     return rec;
   };
-  // A Block's reason with what the gateway relay saw named first (gateway-relay.mjs stageBlockReason): its shutdown is no
-  // max_usd overrun.
-  const relayReason = (reason) => (relay ? stageBlockReason(reason, relay.totals(), maxUsdReached(inputs.maxUsd, records, relay.totals())) : reason);
-  // Its cause beside it (logic.mjs BLOCK_CAUSES): the gateway's own refusal, or a relay shutdown that is no max_usd overrun.
-  const relayCause = (cause) => (relay ? stageBlockCause(cause, relay.totals(), maxUsdReached(inputs.maxUsd, records, relay.totals())) : cause);
-  const capCause = () => (unmetered ? "pendulum" : "max-usd");
+  // A Block's reason with what the gateway relay saw named first (gateway-relay.mjs stageBlockReason): the gateway's own
+  // budget or credits refusal.
+  const relayReason = (reason) => (relay ? stageBlockReason(reason, relay.totals()) : reason);
+  // Its cause beside it (logic.mjs BLOCK_CAUSES): the gateway's own refusal.
+  const relayCause = (cause) => (relay ? stageBlockCause(cause, relay.totals()) : cause);
+  const capCause = () => "max-usd";
   const blockedAtCap = async (before) => {
-    log(`max_usd ${inputs.maxUsd} ${unmetered ? "cannot be enforced (a run reported no priced AI credits)" : "spent"} before ${before}; not running it`);
+    log(`max_usd ${inputs.maxUsd} spent before ${before}; not running it`);
     await dropLabel();
     const reason = relayReason(capReason());
     await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: relayCause(capCause()), notify: inputs.notify, stage: "review" }, token);
@@ -1647,7 +1642,7 @@ async function main() {
   let answering = toAnswer.length > 0 || answerQuestion || !!heldRed;
   // With the cap spent the answer pass is not run; the job Blocks below with what the reviewer left.
   if (answering && (over() || overBudget)) {
-    log(`max_usd ${inputs.maxUsd} ${unmetered ? "cannot be enforced" : "spent"} before the answer pass; not running it`);
+    log(`max_usd ${inputs.maxUsd} spent before the answer pass; not running it`);
     overBudget = true;
     answering = false;
   }
@@ -1760,7 +1755,7 @@ async function main() {
     if (replied) repliesPosted = out["replies.json"];
     // An exit file the pass wrote is read as ever; with the cap unenforceable the harness is not asked for one.
     // A provider's refusal is not asked again: the answer Blocks with it.
-    const asked = rec.refusal ? { record: { exit: "blocked", reason: refusalReason(rec.refusal), questions: [] }, usage: [] } : unmetered && typeof io.files()["exit.json"] !== "string" ? { record: { exit: "blocked", reason: capReason(), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd, unmetered });
+    const asked = rec.refusal ? { record: { exit: "blocked", reason: refusalReason(rec.refusal), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd });
     records.push(...asked.usage);
     for (const r of asked.usage) mark(r);
     answerRecord = asked.record;
@@ -1784,7 +1779,7 @@ async function main() {
     if (answerRecord.exit === "question") log(`answer pass raised a question: ${(answerRecord.questions[0] || answerRecord.reason || "").slice(0, 160)}`);
   }
   // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
-  const validation = answering && !unmetered && !outbox.failed && !heldQuestion && !answerRun?.refusal
+  const validation = answering && !outbox.failed && !heldQuestion && !answerRun?.refusal
     ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: stageProgress })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);

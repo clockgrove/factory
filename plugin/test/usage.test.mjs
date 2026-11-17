@@ -8,7 +8,7 @@ import { SHELL_SECRET_KEYS, credentialEnv, finalText, harnessCommand, promptCach
 import { localSandbox } from "../scripts/lib/local.mjs";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { CODEX_PRICES, cacheSummary, copilotSessionTotal, mergeUsage, parseClaude, parseCodex, parseCopilot, parseUsage, priceCodex, sinceSession } from "../scripts/lib/usage.mjs";
-import { copilotCount, decideExit, sumSpend, unmeteredRun } from "../scripts/lib/logic.mjs";
+import { capReached, copilotCount, decideExit, sumSpend } from "../scripts/lib/logic.mjs";
 import { clampTotal } from "../scripts/lib/usage.mjs";
 import { copilotCreditUsd } from "../scripts/lib/harness.mjs";
 import { exec } from "../scripts/lib/proc.mjs";
@@ -645,7 +645,7 @@ test("copilot metering cannot be talked down: negative or forged-low credits, un
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("copilot caps: --max-ai-credits from what is left (per process, at least 30); an unmetered run stops further passes; a bad rate is refused", () => {
+test("copilot caps: --max-ai-credits from what is left (per process, at least 30); a run with no priced credits is of unknown cost and stops nothing; a bad rate is refused", () => {
   const credits = (maxUsd, creditUsd) => {
     const a = harnessCommand({ harness: "copilot", prompt: "P", maxUsd, creditUsd }).args;
     return a.includes("--max-ai-credits") ? a[a.indexOf("--max-ai-credits") + 1] : null;
@@ -654,19 +654,16 @@ test("copilot caps: --max-ai-credits from what is left (per process, at least 30
   assert.equal(credits(0.1, 0.01), "30", "Copilot refuses fewer than 30");
   assert.equal(credits(25, 0.02), "1250");
   assert.equal(credits(0, 0.01), null, "no cap set, no flag");
-  assert.equal(unmeteredRun({ harness: "copilot", usd: null, turns: 3 }), true);
-  assert.equal(unmeteredRun({ harness: "copilot", usd: null, turns: 0 }), false);
-  assert.equal(unmeteredRun({ harness: "copilot", usd: 0.4, turns: 3 }), false);
-  assert.equal(unmeteredRun({ harness: "codex", usd: null, turns: 3 }), false);
-  assert.equal(decideExit({ harness: { budgetExceeded: true, unmetered: true } }).reason, "unmetered: max_usd cannot be enforced");
+  // The cap compares the known dollars only: a run of unknown cost adds none, and the stage goes on (#483).
+  assert.equal(capReached(25, [{ harness: "copilot", usd: null, usdUnknown: 1, usdUnknownWhy: ["credits"], turns: 3 }, { usd: 24.9 }]), false);
   assert.equal(decideExit({ harness: { budgetExceeded: true } }).reason, "dollar cap reached");
   assert.equal(copilotCreditUsd({ PENDULUM_INPUT_COPILOT_CREDIT_USD: "0.02" }), 0.02);
   for (const bad of ["0", "-1", "abc"]) assert.equal(copilotCreditUsd({ PENDULUM_INPUT_COPILOT_CREDIT_USD: bad }), 0.01, bad);
   assert.equal(copilotCreditUsd({}), 0.01);
 });
 
-test("copilot follow-ups: the session's running total is recorded and bounds a restored seed; no exit-record ask when unmetered; no run under the 30-credit floor", async () => {
-  const { writeUsage, exitRecord } = await import("../scripts/lib/session.mjs");
+test("copilot follow-ups: the session's running total is recorded and bounds a restored seed; no run under the 30-credit floor", async () => {
+  const { writeUsage } = await import("../scripts/lib/session.mjs");
   const { runHarness } = await import("../scripts/lib/harness.mjs");
   // A three-stage session: this stage's own spend is small, the session's total is not; the seed is bounded by the total.
   const dir = mkdtempSync(join(tmpdir(), "pendulum-usage-"));
@@ -679,12 +676,7 @@ test("copilot follow-ups: the session's running total is recorded and bounds a r
   assert.equal(clampTotal(seed, result).usd, 0.4, "bounded by the session's total, not the stage's own $0.06");
   assert.equal(clampTotal(seed, { usd: 0.06 }).usd, 0.06, "an older result.json with no session total: the stage's own figures");
   assert.equal(clampTotal({ ...seed, usd: 7 }, result).usd, 0.5);
-  // With max_usd unenforceable the harness is not asked for an exit record; an exit file it wrote is still read.
-  const asked = await exitRecord({ text: undefined, harness: "copilot", deadlineAt: Date.now() + 3600_000, maxUsd: 25, unmetered: true });
-  assert.deepEqual([asked.record.exit, asked.record.reason, asked.usage.length], ["blocked", "unmetered: max_usd cannot be enforced", 0]);
-  assert.equal((await exitRecord({ text: '{"exit":"delivered"}', harness: "copilot", deadlineAt: Date.now() + 3600_000, maxUsd: 25, unmetered: true })).record.exit, "delivered");
-  assert.equal(decideExit({ harness: { budgetExceeded: true, unmetered: true } }).reason, "unmetered: max_usd cannot be enforced");
-  // Under 30 AI credits left no Copilot run starts: a zero-cost record over budget, never an unmetered one.
+  // Under 30 AI credits left no Copilot run starts: a zero-cost record over budget, never one of unknown cost.
   const floor = await runHarness({ harness: "copilot", prompt: "p", maxUsd: 0.29, cwd: tmpdir(), env: { HOME: process.env.HOME }, timeoutMs: 1000, label: "work-1" });
-  assert.deepEqual([floor.budgetExceeded, floor.usd, floor.ok, floor.error, unmeteredRun(floor)], [true, 0, false, "dollar cap reached", false]);
+  assert.deepEqual([floor.budgetExceeded, floor.usd, floor.ok, floor.error, floor.usdUnknown], [true, 0, false, "dollar cap reached", undefined]);
 });

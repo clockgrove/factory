@@ -21,7 +21,7 @@ import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
 import { CODEX_GATEWAY_ENV, PENDULUM_CONTROL_KEYS, PENDULUM_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, localLimits, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
-import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
+import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText } from "./gateway-relay.mjs";
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
 import { harnessActivity } from "./logic.mjs";
@@ -1191,6 +1191,14 @@ export function joinLost(lost, rec, { limit = false, busy = false, jobs = false 
   };
 }
 
+/** The usage record of a pass that never ran (refused before its start): a known $0, never a run of unknown cost. */
+function noRunUsage(harness, model, extra = {}) {
+  const rec = parseUsage(harness, "", model || null, 0, extra);
+  delete rec.usdUnknown;
+  delete rec.usdUnknownWhy;
+  return rec;
+}
+
 /**
  * runHarness's single pass: runOnce, and a fresh session once after a refused resume: a Codex thread written through
  * another credential (usage.mjs rotatedPin), or a refusal of the request the session sends alone (usage.mjs
@@ -1237,7 +1245,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   if (stageStopped()) {
     const now = new Date().toISOString();
     log(`${label}: the Objective was stopped; not starting the run`);
-    return { ...parseUsage(harness, "", model || null, 0, {}), label, usd: 0, ok: false, noRun: true, stopped: true, error: "stopped: the Objective was stopped", basis: "no run: the Objective was stopped", started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
+    return { ...noRunUsage(harness, model), label, usd: 0, ok: false, noRun: true, stopped: true, error: "stopped: the Objective was stopped", basis: "no run: the Objective was stopped", started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
   }
   const signal = own ? AbortSignal.any([own, stageStopSignal()]) : stageStopSignal();
   // The worker's shell secrets (lib/worker-secrets.mjs): out of every env here but the harness child's own, and out of a
@@ -1274,7 +1282,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   if (harness === "copilot" && maxUsd > 0 && maxUsd < COPILOT_MIN_CREDITS * creditUsd) {
     const now = new Date().toISOString();
     log(`${label}: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap; not starting the run`);
-    return { ...parseUsage(harness, "", model || null, 0, { creditUsd }), label, usd: 0, ok: false, budgetExceeded: true, error: "dollar cap reached", basis: `no run: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap`, started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
+    return { ...noRunUsage(harness, model, { creditUsd }), label, usd: 0, ok: false, budgetExceeded: true, error: "dollar cap reached", basis: `no run: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap`, started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
   }
   const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, cacheTtl, creditUsd, local: backend(env).sandbox.harness(env), runner, shellSecrets, gateway: codexGatewayOf(harness, env) });
   if (cleared?.submodules?.length) Object.assign(extraEnv, harnessGitEnv(cleared.submodules));
@@ -1433,7 +1441,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     const pass = await relay.endPass();
     addKeySpend(rec, pass);
     metered.more(rec);
-    if (pass.calls || pass.usd || pass.gatewayRefused || pass.unpriced) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.unknown ? `; ${pass.unknown} call${pass.unknown === 1 ? "" : "s"} of unknown cost, not counted` : ""}${pass.unpriced ? `; ${pass.shut ? relayShutText(pass.shut) : "a call's cost could not be determined"}, so the relay refused every later call` : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
+    if (pass.calls || pass.usd || pass.gatewayRefused || pass.unknown) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.unknown ? `; ${pass.unknown} call${pass.unknown === 1 ? "" : "s"} of unknown cost, not counted` : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
     // Commands ran but none reached the relay's forwarder: the harness's sandbox no longer starts them through the shim.
     if (!pass.pings && commandsRan(harness, r.stdout)) {
       rec.workerKeyUnreached = true;
@@ -1752,7 +1760,7 @@ export const effortRefused = (r) => !!r && r.status === 400 && r.param === "reas
  */
 export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision", effort = "low", signal = null }) {
   const at = () => new Date().toISOString();
-  const none = (error) => ({ ...parseUsage(harness, "", model || null, 0, {}), label, usd: 0, ok: false, noRun: true, error, started: at(), ended: at(), timedOut: false, answer: "" });
+  const none = (error) => ({ ...noRunUsage(harness, model), label, usd: 0, ok: false, noRun: true, error, started: at(), ended: at(), timedOut: false, answer: "" });
   if (stageStopped()) return { ...none("stopped: the Objective was stopped"), stopped: true };
   const creditUsd = copilotCreditUsd();
   const agent = agentUser();

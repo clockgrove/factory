@@ -29,7 +29,7 @@ import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { ROUTE_CREDENTIAL_INPUTS, ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeAccountsText, routeAutoSetting, routeCredentialEnv, routeCredentialSecrets, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
 import { LOCAL_DOMAINS, PREVIOUS_NAME, TOKEN_LINK_FIX, pendulumKeyDir, previousKeyDirProblem, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
-import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
+import { parseYaml, workflowEvents, writeGrants } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, promoCodex, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
@@ -825,9 +825,9 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
  * Doctor's row for the setting, from the resolved inputs, the named workflow as the default branch has it (`doc`, parsed:
  * null when it could not be read, with `readError`) and the route: off, nothing; a problem, FAIL; the cloud sandbox,
  * FAIL (its App token cannot dispatch); a workflow that cannot be dispatched for the legs (cross-os.mjs workflowProblem:
- * no `workflow_dispatch` trigger, or `permissions:` granting write at the top or on any job), FAIL; one it could not read,
- * WARN; else a PASS that names the legs, the bound and the cost, since macOS and Windows runner minutes bill at a higher
- * rate.
+ * no `workflow_dispatch` trigger, or `permissions:` granting write at the top or on any job, named), FAIL; one it could
+ * not read, WARN; else a PASS that names the legs, the bound and the cost, since macOS and Windows runner minutes bill
+ * at a higher rate.
  */
 export function crossOsRow(inputs, { doc = null, readError = "", route = "actions" } = {}) {
   const { setting, problem } = crossOs(inputs);
@@ -836,7 +836,7 @@ export function crossOsRow(inputs, { doc = null, readError = "", route = "action
   if (route === "sandbox") return FAIL("cross-OS CI", `${setting.workflow} cannot be dispatched from a cloud sandbox stage: its App token has no Actions write, and Pendulum's App does not ask for one`, "run Objectives on Actions or locally, or empty cross_os_workflow");
   if (doc === null) return WARN("cross-OS CI", `could not read .github/workflows/${setting.workflow}${readError ? ` (${readError})` : ""}`, "check cross_os_workflow names a workflow file on the default branch");
   const bad = workflowProblem(doc, setting.workflow);
-  if (bad) return FAIL("cross-OS CI", bad, "give the workflow a `workflow_dispatch:` trigger running its macOS and Windows legs, and read-only permissions (contents: read, no pull-requests, issues or actions write) at the top and on every job");
+  if (bad) return FAIL("cross-OS CI", bad, "give the workflow a `workflow_dispatch:` trigger running its macOS and Windows legs, and read-only permissions at the top and on every job: each scope `read` or `none` (contents: read), or `read-all` or `{}`; no scope at `write` and no `write-all`");
   const token = route === "local" ? "the repository token's Actions read and write" : "the work job's `actions: write`";
   return PASS("cross-OS CI", `on: the work stage runs ${setting.workflow} on each head it validates (with ${token}) and waits up to ${Math.round(setting.waitMs / 60_000)} min per head for ${setting.checks.join("; ")}; macOS and Windows runner minutes bill at a higher rate than Linux minutes`);
 }
@@ -864,9 +864,10 @@ export async function crossOsRows({ inputs, repo, branch, token, local = backend
 
 /**
  * Branch code runs in CI, so CI's own token must not write: the repository's default workflow token is read-only, and no
- * workflow that runs on `pull_request`, `pull_request_target` or `merge_group` asks for contents, pull-requests, issues
- * or actions write. Each workflow is parsed (lib/yaml.mjs); one doctor cannot read, or cannot parse, FAILs. When the
- * default cannot be read with this token, every such workflow must set read-only permissions itself. Pendulum's own
+ * workflow that runs on `pull_request`, `pull_request_target` or `merge_group` grants write at the top or on any job
+ * (lib/yaml.mjs writeGrants: anything but `read`, `none`, `read-all` and `{}`), each grant named. Every page of the
+ * workflow list is read and each workflow parsed (lib/yaml.mjs); one doctor cannot read, or cannot parse, FAILs. When
+ * the default cannot be read with this token, every such workflow must set read-only permissions itself. Pendulum's own
  * workflow is the exception: it runs branch code only as the agent uid, which cannot read the job's env.
  */
 export async function workflowTokenChecks({ repo, token }) {
@@ -878,7 +879,7 @@ export async function workflowTokenChecks({ repo, token }) {
   else out.push(PASS("default workflow token", "read-only by default"));
   let list;
   try {
-    list = (await rest(`repos/${repo.full}/actions/workflows?per_page=100`, { token }))?.workflows || [];
+    list = (await rest(`repos/${repo.full}/actions/workflows?per_page=100`, { token, paginate: true })) || [];
   } catch (e) {
     return [...out, FAIL("ci token", `could not list workflows (${e.status || e.message})`, "give the job token actions: read")];
   }
@@ -897,16 +898,15 @@ export async function workflowTokenChecks({ repo, token }) {
       continue;
     }
     if (!workflowEvents(doc).some((e) => ["pull_request", "pull_request_target", "merge_group"].includes(e))) continue;
-    const top = grantsWrite(doc?.permissions);
-    const topWrites = top === null ? defaultRead !== true : top;
+    const top = writeGrants(doc?.permissions);
     if (top === null && defaultRead !== true) bad.push(`${w.path} (no read-only permissions of its own${defaultRead === false ? "; the default can write" : ""})`);
-    else if (topWrites) bad.push(`${w.path} (top-level permissions write)`);
+    else if (top?.length) bad.push(`${w.path} (top-level permissions grant ${top.join(", ")})`);
     for (const [name, job] of Object.entries(doc?.jobs || {})) {
-      const g = grantsWrite(job?.permissions);
-      if (g === true) bad.push(`${w.path} job ${name} (permissions write)`);
+      const g = writeGrants(job?.permissions);
+      if (g?.length) bad.push(`${w.path} job ${name} (permissions grant ${g.join(", ")})`);
     }
   }
-  out.push(bad.length ? FAIL("ci token", `branch code would run with a token that can write: ${bad.join("; ")}`, "set permissions: contents: read (and no pull-requests, issues or actions write) on every workflow that runs on pull_request or merge_group") : PASS("ci token", "no pull_request or merge_group workflow can write"));
+  out.push(bad.length ? FAIL("ci token", `branch code would run with a token that can write: ${bad.join("; ")}`, "give every workflow that runs on pull_request or merge_group read-only permissions at the top and on every job: each scope `read` or `none` (contents: read), or `read-all` or `{}`; no scope at `write` and no `write-all`") : PASS("ci token", "no pull_request or merge_group workflow can write"));
   return out;
 }
 

@@ -81,13 +81,20 @@ Offer to commit the skills Pendulum's workers load and the agent definitions, wh
 
 Several subscriptions or keys of one harness can share the work as accounts. Each stage runs on one account for its whole run: its harness's default, or the one a trusted `pendulum:account:<name>` label pins. With automatic choice on, a stage with no pin starts on the free account with the most quota left instead (as Claude Code and Codex last reported it; Copilot reports none, so its accounts take turns): a usage limit sets aside only the account that met it, stages go on on the others, and that account comes back into use on its own. Automatic choice is off by default.
 
-**GitHub Actions and the cloud sandbox:**
+**GitHub Actions and the cloud sandbox.** To add an account ("add a second Claude account"):
 
-- Add the accounts to the workflow's env block, each harness's names in order, the first its default: `PENDULUM_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'`. For automatic choice, add `PENDULUM_AUTO_ACCOUNT: "1"` beside it. Only the workflow file sets these, never a repository variable, since they steer which credential a stage gets. Then re-render the workflow: setup names each declared account's secrets in its jobs, so every change to `PENDULUM_ACCOUNTS` needs a re-render, which keeps both lines.
-- Each account's credential is its own secret: the harness's usual secret name, then `_` and the account's name upper-cased, each hyphen an underscore (`claude-2`: `ANTHROPIC_API_KEY_CLAUDE_2`, or `CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2` with `--credential plan`; `codex-2`: `CODEX_API_KEY_CODEX_2` or `PENDULUM_CODEX_GATEWAY_KEY_CODEX_2`; Copilot: `COPILOT_GITHUB_TOKEN_<NAME>`). The user sets each with `gh secret set`. An account named after its harness (`claude`) uses the usual secrets.
+1. Ask together: its name (lowercase letters, digits and hyphens, such as `claude-2`; another harness's as `codex:codex-2`), and whether to turn on automatic choice.
+2. Preview `--apply workflow --add-account <name>`, with `--auto-account on` on a yes to automatic choice. Show its note: the accounts, each one's default, and each new secret to save. On a yes, write it with `--yes` and land it through a pull request as on first setup (After).
+3. Name the secret the note gives: the harness's usual secret name, then `_` and the account's name upper-cased, each hyphen an underscore. For `claude-2` that is `ANTHROPIC_API_KEY_CLAUDE_2`, or `CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2` with `--credential plan`. For `codex-2` it is `CODEX_API_KEY_CODEX_2` or `PENDULUM_CODEX_GATEWAY_KEY_CODEX_2`, and for Copilot `COPILOT_GITHUB_TOKEN_<NAME>`. The user runs `gh secret set <NAME>` and pastes the value at its prompt, which does not echo it; never `--body`, which leaves it in shell history. Never ask for or read the value.
+4. Once the pull request is merged, run the pendulum-doctor skill: it checks the declaration, that the workflow names each account's secret, and each secret by name.
+
+To remove one, use `--remove-account <name>`; its note names the secrets the jobs no longer name, which the user may delete with `gh secret delete`. `--auto-account off` turns automatic choice off, and `--accounts '<JSON>'` sets the whole list. A re-render without these options keeps the file's accounts. Setup refuses a set the jobs would refuse, with the reason. What holds:
+
+- Only the workflow file sets the accounts and automatic choice, never a repository variable, since they steer which credential a stage gets.
+- An account named after its harness (`claude`) uses the usual secrets. A harness's first account is its default; adding to a harness with none keeps its usual account first.
+- All Claude accounts use one credential kind, `--credential` (`api` or `plan`).
 - A Codex ChatGPT login is refused on these routes (OpenAI advises an API key for CI): run that account in local mode.
 - With automatic choice on, holds live as comments on Pendulum's own closed, locked holds issue, which Pendulum makes at the first usage limit; no other App permission is needed.
-- Doctor checks the declaration and each account's secret by name.
 
 **Local mode** ([local.md](local.md), Several accounts):
 

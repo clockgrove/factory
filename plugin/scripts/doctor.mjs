@@ -329,9 +329,9 @@ export function neededSecrets(inputs, accounts = "") {
  */
 export function routeAccountChecks(accounts = "", auto = "") {
   const d = routeAccounts(accounts);
-  if (!d.ok) return [FAIL("accounts", d.problem, 'set PENDULUM_ACCOUNTS in .github/workflows/pendulum.yml to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]} (docs/INSTALL.md, Several accounts)')];
+  if (!d.ok) return [FAIL("accounts", d.problem, 're-render the workflow with setup\'s --accounts set to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]}, and merge it (docs/INSTALL.md, Several accounts)')];
   const setting = routeAutoSetting({ PENDULUM_AUTO_ACCOUNT: auto });
-  const warn = setting.problem ? [WARN("automatic account choice", setting.problem, "set PENDULUM_AUTO_ACCOUNT in .github/workflows/pendulum.yml to 1 (on) or 0 (off) (docs/INSTALL.md, Several accounts)")] : [];
+  const warn = setting.problem ? [WARN("automatic account choice", setting.problem, "re-render the workflow with setup's --auto-account on or off and merge it (docs/INSTALL.md, Several accounts)")] : [];
   if (!d.declared) return warn;
   const each = Object.entries(d.accounts).filter(([, l]) => l.length).map(([h, l]) => `${h}: ${l.join(", ")} (default ${l[0]})`);
   const how = setting.on ? "the one a trusted pendulum:account:<name> label pins, else a free one by automatic account choice (PENDULUM_AUTO_ACCOUNT)" : "its harness's default or the one a trusted pendulum:account:<name> label pins";

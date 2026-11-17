@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Pendulum setup: apply the GitHub fixes doctor names, on consent.
 //   node scripts/setup.mjs [--repo OWNER/NAME] --yes [--apply app|labels|project|protection|workflow|all]  (several: repeat --apply, or a,b)
-//                          [--secret-scope repo|org]   where the app step saves the App's secrets (default: the repository)
+//                          [--secret-scope repo|org] [--replace]   where the app step saves the App's secrets (default: the
+//                                                                    repository); --replace overwrites ones already there
 //                          [--ci-checks "Quality,Tests"] [--merge-queue false] [--harness claude] [--out .github/workflows/pendulum.yml]
 //                          [--action clockgrove/pendulum@vX.Y.Z]   (default: the latest Pendulum release)   the `uses:` the workflow calls (a path inside the repo works: owner/repo/dir@ref)
 //                          [--sandbox vercel [--ci-workflow NAME]]   stages run in a cloud sandbox, started by launch jobs (docs/ADAPTERS.md)
@@ -31,7 +32,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { appPermissionsText, mintInstallationToken } from "./lib/app-token.mjs";
-import { APP_SECRETS, appName, createAppFromManifest, manifestPermissions } from "./lib/app-manifest.mjs";
+import { APP_SECRETS, appName, appPreflight, createAppFromManifest, ghEnv, manifestPermissions, webOrigin } from "./lib/app-manifest.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { cloneRepo } from "./lib/local.mjs";
 import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, projectTitle, repoOf, requiredChecks, rest } from "./lib/github.mjs";
@@ -613,12 +614,20 @@ export async function latestRelease() {
 export function appPlan(repoData, secretScope = "repo") {
   const userAccount = repoData.owner?.type === "User";
   const perms = Object.entries(manifestPermissions({ userAccount })).map(([k, v]) => `${k}: ${v}`).join(", ");
-  return `create the GitHub App "${appName(repoData.name)}" for ${repoData.owner.login} from a pre-filled definition in your browser (permissions ${perms}; nothing else, never workflows; webhook inactive), save its id and private key as ${secretScope === "org" ? `${repoData.owner.login}'s organization secrets, shared with ${repoData.name} only,` : "the repository's secrets"} ${APP_SECRETS.id} and ${APP_SECRETS.key} with gh secret set (never printed or written to a file), then open its install page`;
+  return `create the GitHub App "${appName(repoData.name)}" for ${repoData.owner.login} from a pre-filled definition in your browser (permissions ${perms}; nothing else, never workflows; webhook inactive), save its id and private key as ${secretScope === "org" ? `${repoData.owner.login}'s organization secrets, shared with ${repoData.name} only,` : "the repository's secrets"} ${APP_SECRETS.id} and ${APP_SECRETS.key} with gh secret set (never printed or written to a file), then open its install page; it first checks your gh login can save them and refuses to overwrite ones already there without --replace`;
 }
 
-/** setup's App step: the manifest flow (lib/app-manifest.mjs); its note names the App and the install page. */
-async function applyApp(repo, repoData, secretScope) {
-  const app = await createAppFromManifest(repo, repoData, { org: secretScope === "org" });
+/**
+ * setup's App step: the pre-flight, then the manifest flow (lib/app-manifest.mjs); its note names the App and the
+ * install page. The pre-flight's refusal stops it before the browser opens, so no App is made that cannot be kept.
+ */
+async function applyApp(repo, repoData, secretScope, { replace = false } = {}) {
+  const web = webOrigin();
+  const env = ghEnv(web);
+  const org = secretScope === "org";
+  const problems = await appPreflight(repo, repoData, { org, replace, env });
+  if (problems.length) throw new Error(`the app step made nothing: ${problems.join("; ")}`);
+  const app = await createAppFromManifest(repo, repoData, { org, web, env });
   return `created the App ${app.slug} (id ${app.appId}) for ${repoData.owner.login} and saved ${app.saved.join(" and ")} as ${secretScope === "org" ? "organization" : "repository"} secrets; install it on ${repoData.full_name} only (Only select repositories): ${app.installUrl}`;
 }
 
@@ -699,7 +708,7 @@ async function main() {
   }
   for (const s of steps) {
     let note;
-    if (s === APP_STEP) note = await applyApp(repo, repoData, secretScope);
+    if (s === APP_STEP) note = await applyApp(repo, repoData, secretScope, { replace: args.replace === "true" });
     else if (s === "labels") note = await applyLabels(repo, opts);
     else if (s === "project") note = await projectStep({ repo, opts, args, explicit, steps, outPath, checkout });
     else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, queue: args.merge_queue !== "false" }, { token: null });

@@ -115,9 +115,9 @@
       "words": 675,
       "files": {
         "local.md": {
-          "sha256": "64616104b76cae29b9cc5a25cc26103744339b9de4df43e2abe3601ab8d27333",
+          "sha256": "95722204fb36e6faa11caf8520d8e9582a483ac400b3495fbe96cb0d2349f474",
           "lines": 36,
-          "words": 661
+          "words": 669
         },
         "reference.md": {
           "sha256": "a7d23f96ca525c99ddf11679da7cfc0302edaf88322cb741d0d930079a6c415c",

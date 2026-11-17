@@ -345,14 +345,15 @@ test("the Action's work and review steps are the stage's own process, so a cance
 
 /**
  * A stage as worker.mjs wires it on Actions with the agent set up (systemd), its reap's sudo, systemctl and pkill fakes in
- * a directory of their own (onCancel's `resolve`): sudo runs what it is given; systemctl and pkill log their arguments
+ * a directory of their own (onCancel's `resolve`): sudo runs what it is given; `timeout` logs its arguments and runs the
+ * system's (with `noTimeout`, it is not found); systemctl and pkill log their arguments
  * and how far the stage's end had got (its record written, its stream masked, its finished pass's session saved);
  * `systemctl kill` kills a process started outside the stage's tree, the agent's unit as far as this test goes; with
  * `hang`, every systemctl call never returns; with `written`, the stage wrote its own record before the signal. Signals
  * the stage with `signal` and returns its exit, the ms from the signal to it, its log, the tools' log, its record, its
- * stream and whether the unit is alive.
+ * stream, the `timeout` arguments and whether the unit is alive.
  */
-async function cancelledOnRunner({ signal = "SIGINT", hang = false, written = false, env = {} } = {}) {
+async function cancelledOnRunner({ signal = "SIGINT", hang = false, written = false, noTimeout = false, env = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), "cancel-reap-"));
   const tools = join(root, "tools");
   mkdirSync(tools);
@@ -364,6 +365,9 @@ async function cancelledOnRunner({ signal = "SIGINT", hang = false, written = fa
   const seen = `"$(test -e ${q("result.json")} && echo record || echo no-record) $(grep -q s3cret-value ${q("events.jsonl")} && echo unmasked || echo masked) $(test -e ${q("transcript")} && echo session || echo no-session)"`;
   writeFileSync(join(tools, "sudo"), `#!/bin/sh\n[ "$1" = -n ] && shift\nexec "$@"\n`, { mode: 0o755 });
   writeFileSync(join(tools, "systemctl"), `#!/bin/sh\necho "systemctl $*" ${seen} >> ${JSON.stringify(calls)}\n${hang ? "exec sleep 30\n" : ""}[ "$1" = kill ] && kill -KILL ${unit.pid}\nexit 0\n`, { mode: 0o755 });
+  const cuts = join(root, "cuts");
+  const systemTimeout = ["/usr/bin/timeout", "/bin/timeout"].find((f) => existsSync(f));
+  writeFileSync(join(tools, "timeout"), `#!/bin/sh\necho "$*" >> ${JSON.stringify(cuts)}\nexec ${systemTimeout} "$@"\n`, { mode: 0o755 });
   writeFileSync(join(tools, "pkill"), `#!/bin/sh\necho "pkill $*" ${seen} >> ${JSON.stringify(calls)}\nexit 1\n`, { mode: 0o755 });
   const ready = join(root, "ready");
   const script = `
@@ -384,7 +388,10 @@ async function cancelledOnRunner({ signal = "SIGINT", hang = false, written = fa
     writeFileSync(join(cap, "proj", id + ".jsonl"), '{"note":"s3cret-value"}\\n');
     keepSession(id, { tar: execFileSync("tar", ["-cf", "-", "-C", cap, "proj/" + id + ".jsonl"], { env: { PATH: "/usr/bin:/bin" } }), files: ["proj/" + id + ".jsonl"] });
     setAgent({ user: "pendulum-agent", home: ${JSON.stringify(join(root, "agent-home"))}, tmp: ${JSON.stringify(join(root, "agent-home", "tmp"))}, allow: new Set(), launcher: "systemd" });
-    const resolve = (name, env) => [join(${JSON.stringify(tools)}, name), env];
+    const resolve = (name, env) => {
+      if (${noTimeout} && name === "timeout") throw new Error("timeout is not in the system directories");
+      return [join(${JSON.stringify(tools)}, name), env];
+    };
     onCancel((sig) => cancelledEnd(sig, { usageDir, mask: [join(usageDir, "events.jsonl")], secrets: ["s3cret-value"], fields: () => ({ harness: "claude", model: "claude-opus-5-5", progressRun: "4242", account: null, passes: 1, credentialBasis: "none" }), sessionOf: () => ({ harness: "claude", sessionId: id, also: [], checkout: "/c" }) }), process.env, { resolve });
     writeFileSync(${JSON.stringify(ready)}, "");
     setInterval(() => {}, 1000);
@@ -412,7 +419,7 @@ async function cancelledOnRunner({ signal = "SIGINT", hang = false, written = fa
     // The unit is this process's child: a killed one is gone once the event loop has collected it.
     await until(() => !alive(), 1_000);
     const file = join(usage, "result.json");
-    return { end: { code: end.code, sig: end.sig }, ms: end.at - sent, out, calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [], record: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null, stream: readFileSync(join(usage, "events.jsonl"), "utf8"), unitAlive: alive() };
+    return { end: { code: end.code, sig: end.sig }, ms: end.at - sent, out, calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [], record: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null, stream: readFileSync(join(usage, "events.jsonl"), "utf8"), cuts: existsSync(cuts) ? readFileSync(cuts, "utf8").trim().split("\n") : [], tools, unitAlive: alive() };
   } finally {
     child.kill("SIGKILL");
     kill(unit.pid);
@@ -430,6 +437,8 @@ test("a stage cancelled on Actions writes its record, stops the agent's units an
   assert.equal(r.unitAlive, false, "the agent's unit is stopped");
   assert.ok(r.ms < CANCEL_GRACE_MS.SIGINT, `the stage exited ${r.ms} ms after the signal`);
   assert.match(r.out, /agent reaped: units kill exit 0, units stop exit 0, uid kill exit 1/);
+  // Each step's tool under the system's timeout inside sudo, so root makes the cut: KILL, then KILL again 0.1 s on.
+  assert.deepEqual(r.cuts.map((c) => c.replace(/ \d+\.\d{3} /, " <secs> ")), [`-s KILL -k 0.1 <secs> ${join(r.tools, "systemctl")} kill --signal=SIGKILL pendulum-agent-*`, `-s KILL -k 0.1 <secs> ${join(r.tools, "systemctl")} stop pendulum-agent-*`, `-s KILL -k 0.1 <secs> ${join(r.tools, "pkill")} -KILL -u pendulum-agent`]);
   // The masking and the session copy still ran after the reap.
   assert.equal(r.stream, '{"note":"***"}\n');
   assert.equal(r.record.session?.id, "5b0c3a1e-7d6f-4a40-9a51-0c1e2f3a4b5c", r.out);
@@ -450,8 +459,21 @@ test("a reap that hangs is cut off at its bound, the agent's uid still killed, a
   assert.deepEqual(r.end, { code: 143, sig: null }, r.out);
   assert.equal(r.record?.exit, "cancelled", "the record, written before the reap");
   assert.deepEqual(r.calls, ["systemctl kill --signal=SIGKILL pendulum-agent-* record unmasked no-session", "systemctl stop pendulum-agent-* record unmasked no-session", "pkill -KILL -u pendulum-agent record unmasked no-session"], "each hung step cut at its share, the next still run");
+  // Cut by the root-side timeout, inside each step's share, not by Pendulum's own kill of sudo.
   assert.match(r.out, /agent reaped: units kill cut, units stop cut, uid kill exit 1/);
+  const { REAP_CUT_EARLY_MS } = await import("../scripts/lib/proc.mjs");
+  const secs = r.cuts.map((c) => Number(/-k 0\.1 (\S+) /.exec(c)?.[1]));
+  assert.equal(secs.length, 3, r.cuts.join("\n"));
+  assert.ok(secs[0] > 0 && secs[0] * 1000 <= REAP_NOW_MS / 3 - REAP_CUT_EARLY_MS + 1, `the first step's cut at ${secs[0]} s: before its share ends`);
   assert.ok(r.ms < Math.min(CANCEL_GRACE_MS.SIGTERM, REAP_NOW_MS) + 1_000, `the stage exited ${r.ms} ms after the signal`);
+});
+
+test("with no system timeout the reap runs its steps without it and says so", async () => {
+  const r = await cancelledOnRunner({ noTimeout: true });
+  assert.deepEqual(r.cuts, [], "no timeout ran");
+  assert.equal(r.calls.length, 3, r.out);
+  assert.equal(r.unitAlive, false);
+  assert.match(r.out, /agent reaped: root-side timeout not started, units kill exit 0, units stop exit 0, uid kill exit 1/);
 });
 
 test("only an Actions stage reaps the agent on a cancel: never in local mode or a cloud sandbox stage", async () => {

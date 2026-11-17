@@ -212,13 +212,27 @@ function reapSteps(launcher, user, tool) {
 /** The most the cancel path's reap (reapAgentNow) takes: it comes after the stage's record, inside the runner's grace. */
 export const REAP_NOW_MS = 2_000;
 
+/** How much before its share ends a reap step's root-side timeout fires: room for its 0.1 s KILL and sudo's exit. */
+export const REAP_CUT_EARLY_MS = 200;
+/** The least a reap step's root-side timeout gives it. */
+const REAP_CUT_MIN_MS = 50;
+/** How long past a reap step's share Pendulum's own wait goes on, the root-side timeout's backstop. */
+export const REAP_BACKSTOP_MS = 150;
+
 /**
  * reapAgent at once, with no await, for a stage exiting on a stop signal (session.mjs onCancel): the same steps, sudo and
- * every tool under it the system's own (runnerCommand, or `resolve` in its place), all of them within `ms`. Each step
- * gets an even share of the time left, so one that hangs (a systemctl waiting on D-Bus) is killed at its share and the
- * next still runs. Returns each step's {step, end}: `exit N`, `cut` (killed at its share, or no time was left for it) or
- * `not started` (its tool or sudo not in the system directories, or a spawn that failed); an empty list when no agent is
- * set up.
+ * every tool under it the system's own (runnerCommand, or `resolve` in its place), within `ms`. Each step gets an even
+ * share of the time left, so one that hangs (a systemctl waiting on D-Bus) does not hold the stage and the next still
+ * runs. The cut is made as root: the step's tool runs under the system's `timeout` inside sudo (`timeout -s KILL -k 0.1
+ * <secs>`, REAP_CUT_EARLY_MS before its share ends), so once sudo has started it the step ends near its share whatever
+ * sudo does with signals. Pendulum's own wait is only a backstop, REAP_BACKSTOP_MS past the share: it kills sudo as the
+ * runner's user, which a sudo that runs wholly as root (sudo 1.8) refuses, and the wait then lasts as long as sudo does.
+ * So a sudo that hangs before it starts the tool, or a system with no `timeout` (the steps then run without it, and the
+ * result says so), is bounded only where the runner's user may kill sudo; past that, by the runner's own kill.
+ * Returns each step's {step, end}: `exit N`, `cut` (the root-side timeout ended it, or no time was left for it), `cut
+ * (backstop)` (Pendulum's kill of sudo ended the wait) or `not started` (its tool or sudo not in the system directories,
+ * or a spawn that failed), led by {step: "root-side timeout", end: "not started"} when `timeout` was not found; an
+ * empty list when no agent is set up.
  */
 export function reapAgentNow(ms = REAP_NOW_MS, { resolve = runnerCommand } = {}) {
   if (!AGENT) return [];
@@ -231,16 +245,23 @@ export function reapAgentNow(ms = REAP_NOW_MS, { resolve = runnerCommand } = {})
     }
   };
   const sudo = tool("sudo");
+  const timeout = tool("timeout");
   const steps = reapSteps(AGENT.launcher === "namespace" ? "namespace" : "systemd", AGENT.user, tool);
-  return steps.map(({ step, args }, i) => {
+  const ends = steps.map(({ step, args }, i) => {
     if (!sudo || !args[1]) return { step, end: "not started" };
     const share = Math.floor((until - Date.now()) / (steps.length - i));
     if (share <= 0) return { step, end: "cut" };
-    // No pipes (stdio ignored): killing sudo at its share ends the wait, whatever sudo started.
-    const r = spawnSync(sudo, args, { cwd: "/", env: { PATH: SAFE_PATH }, stdio: "ignore", timeout: share, killSignal: "SIGKILL" });
-    if (r.error?.code === "ETIMEDOUT") return { step, end: "cut" };
-    return { step, end: r.error ? "not started" : `exit ${r.status}` };
+    // ["-n", tool, ...] as ["-n", timeout, -s KILL -k 0.1 <secs>, tool, ...]: root kills the step, whatever sudo is.
+    const cutMs = Math.max(REAP_CUT_MIN_MS, share - REAP_CUT_EARLY_MS);
+    const run = timeout ? [args[0], timeout, "-s", "KILL", "-k", "0.1", (cutMs / 1000).toFixed(3), ...args.slice(1)] : args;
+    // No pipes (stdio ignored): the wait ends when sudo exits, whatever sudo started.
+    const r = spawnSync(sudo, run, { cwd: "/", env: { PATH: SAFE_PATH }, stdio: "ignore", timeout: share + (timeout ? REAP_BACKSTOP_MS : 0), killSignal: "SIGKILL" });
+    if (r.error?.code === "ETIMEDOUT") return { step, end: timeout ? "cut (backstop)" : "cut" };
+    if (r.error) return { step, end: "not started" };
+    // timeout's own exit when it cut the step: 124, or 137 where its KILL reached itself too (GNU coreutils).
+    return { step, end: timeout && (r.status === 124 || r.status === 137) ? "cut" : `exit ${r.status}` };
   });
+  return timeout ? ends : [{ step: "root-side timeout", end: "not started" }, ...ends];
 }
 
 /** How often a `fileStdio` run's output files are read for what was added. */

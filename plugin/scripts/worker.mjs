@@ -287,10 +287,10 @@ async function main() {
     // The provider's quota reading for the account, kept on the holds issue for automatic account choice (#391).
     if (limits && (usage.quota || servedSilent(usage))) await limits.reading(usage.quota ?? { harness: inputs.harness, silent: true }, { warmUntil: usage.cacheWarmUntil ?? null }).catch((e) => log(`the account's quota reading could not be written (${String(e?.message || e).slice(0, 120)})`));
     // Every stage, on every route, writes its spend line: what daily_usd, the finish card and max_objective_usd count.
-    // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
+    // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine), with its per-pass ledger line beside it.
     if (spendInProgress()) {
       const line = stageSpendLine(usage);
-      progress.spend(line.usd, line.parts);
+      progress.spend(line.usd, line.parts, line.ledger);
     }
     // A rebase's dollars on every route, with the spend line's bound marks: 0 when no harness pass ran, else its passes'
     // (a conflict pass, fix passes).

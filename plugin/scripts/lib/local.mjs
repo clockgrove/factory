@@ -1577,11 +1577,14 @@ fi
 exec ${JSON.stringify(realGit)} "$@"
 `;
 
-/** The hosts each harness CLI itself reaches for its model, sign-in and token refresh, beside the commands' LOCAL_DOMAINS. */
+/**
+ * The hosts each harness CLI itself reaches for its model, sign-in and token refresh, beside the commands' LOCAL_DOMAINS.
+ * No reporting host: every harness runs with its vendor's reporting off (harness.mjs VENDOR_TELEMETRY_OFF).
+ */
 export const HARNESS_API_DOMAINS = {
-  claude: ["api.anthropic.com", "statsig.anthropic.com", "console.anthropic.com", "platform.claude.com", "claude.ai"],
+  claude: ["api.anthropic.com", "console.anthropic.com", "platform.claude.com", "claude.ai"],
   codex: ["api.openai.com", "chatgpt.com", "auth.openai.com", "ai-gateway.vercel.sh"],
-  copilot: ["api.githubcopilot.com", "api.individual.githubcopilot.com", "api.business.githubcopilot.com", "api.enterprise.githubcopilot.com", "copilot-proxy.githubusercontent.com", "telemetry.individual.githubcopilot.com"],
+  copilot: ["api.githubcopilot.com", "api.individual.githubcopilot.com", "api.business.githubcopilot.com", "api.enterprise.githubcopilot.com", "copilot-proxy.githubusercontent.com"],
 };
 
 /** A harness CLI's own state (its login, settings, sessions), which it reads and writes; Copilot's home is Pendulum's. */
@@ -2217,8 +2220,16 @@ export function localBaseEnv(env = process.env, extra = [], { workerSecrets = ""
   const out = {};
   for (const [k, v] of Object.entries(env)) if (keep.test(k) || wanted.has(k)) out[k] = v;
   // Tool telemetry would only hit the sandbox's network allow-list (a Codex sandbox reports each refusal as an error).
-  return { TURBO_TELEMETRY_DISABLED: "1", NEXT_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1", ...out };
+  return { TURBO_TELEMETRY_DISABLED: "1", NEXT_TELEMETRY_DISABLED: "1", ...AGENT_SHELL_TELEMETRY_OFF, ...out };
 }
+
+/**
+ * The variables that keep the tools an agent's commands run from reporting usage, given to the harness on every route
+ * (harness.mjs harnessCommand), whose commands inherit them, and locally to every process (localBaseEnv): the
+ * DO_NOT_TRACK convention, and the GitHub CLI's own GH_TELEMETRY, which gh reads before DO_NOT_TRACK
+ * (docs.github.com/en/github-cli/github-cli/github-cli-telemetry).
+ */
+export const AGENT_SHELL_TELEMETRY_OFF = { DO_NOT_TRACK: "1", GH_TELEMETRY: "false" };
 
 /** Where local mode's token for a repository lives: ~/.config/pendulum/tokens/<owner>/<name> (the sandboxes hide ~/.config/pendulum). */
 export function tokenFile(repoFull, home = homedir()) {

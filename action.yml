@@ -44,6 +44,9 @@ inputs:
   resume_policy:
     description: Which re-entries resume the worker's saved session instead of starting fresh, on every harness. `fresh` (default) resumes none; `fix-passes` resumes the review job's fix and answer passes and a rebase send-back that conflicts. An answered Question always starts fresh.
     required: false
+  publish_transcripts:
+    description: '`true` uploads the harness''s event stream (`events.jsonl`) and saved sessions (`transcript/`) readable in the usage artifact on a public repository, where anyone signed in to GitHub can download them for 90 days. `false` (default) seals them there: encrypted with AES-256-GCM under a key derived from the App''s private key, so only this workflow''s jobs open them (a later stage resuming the session); the usage record (`result.json`) stays readable. A private repository''s artifacts carry them readable either way, since only those who can read the repository can download them. Doctor warns while this is on for a public repository. Only the workflow file sets it, never a repository variable.'
+    required: false
   compaction_window:
     description: The context size, in tokens such as 300000, at which the worker and reviewer sessions compact (Claude and Codex; Copilot has no such setting and compacts on its own); the CLI default when empty. A measured lever for large Objectives, off by default.
     required: false
@@ -330,7 +333,7 @@ outputs:
     description: "(account) The account the job's stage runs on, for the next step's `account` input and its credential inputs, which name each declared account's secret and pass this one's alone; `-` when none can be picked, empty when the workflow was rendered for other accounts (the stage then holds no credential, and Blocks or waits with why)."
     value: ${{ steps.run.outputs.account }}
   usage_dir:
-    description: (work, review) The directory holding usage/events.jsonl and usage/result.json to upload as `pendulum-usage-<issue>`; (launch) an ended sandbox stage's, named by `usage_name`.
+    description: (work, review) The directory to upload as `pendulum-usage-<issue>`, the usage record `result.json` with the event stream and saved sessions sealed in `transcript.sealed` (or readable, on a private repository or with `publish_transcripts`); (launch) an ended sandbox stage's, named by `usage_name`.
     value: ${{ steps.run.outputs.usage_dir }}
 
 runs:
@@ -446,6 +449,7 @@ runs:
         PENDULUM_INPUT_PROMPT_CACHE_TTL: ${{ inputs.prompt_cache_ttl }}
         PENDULUM_INPUT_ALLOWED_DOMAINS: ${{ inputs.allowed_domains }}
         PENDULUM_INPUT_RESUME_POLICY: ${{ inputs.resume_policy }}
+        PENDULUM_INPUT_PUBLISH_TRANSCRIPTS: ${{ inputs.publish_transcripts }}
         PENDULUM_INPUT_SIBLING_HOLD: ${{ inputs.sibling_hold }}
         PENDULUM_INPUT_DECISION_ROUTE: ${{ inputs.decision_route }}
         PENDULUM_INPUT_CREDENTIAL: ${{ inputs.credential }}
@@ -517,8 +521,9 @@ runs:
         PENDULUM_PLUGIN_ROOT: ${{ github.action_path }}/plugin
       run: |
         set -euo pipefail
-        # The launcher sets its own (an ended sandbox stage's usage, or none).
-        case "$PENDULUM_INPUT_MODE" in work|review) echo "usage_dir=$PENDULUM_USAGE_DIR" >> "$GITHUB_OUTPUT" ;; esac
+        # The launcher sets its own (an ended sandbox stage's usage, or none). Work and review upload the directory the next
+        # step fills from the stage's (never the stage's own), so a stage cut off before that step uploads nothing of its stream.
+        case "$PENDULUM_INPUT_MODE" in work|review) echo "usage_dir=$RUNNER_TEMP/pendulum-upload" >> "$GITHUB_OUTPUT" ;; esac
         mkdir -p "$PENDULUM_USAGE_DIR"
         case "$PENDULUM_INPUT_MODE" in
           dispatch) node "$PENDULUM_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" ;;
@@ -532,3 +537,18 @@ runs:
           account)  node "$PENDULUM_PLUGIN_ROOT/scripts/objective-account.mjs" --repo "$GITHUB_REPOSITORY" --issue "${PENDULUM_INPUT_ISSUE:-0}" --branch "${GITHUB_HEAD_REF:-none}" ;;
           *) echo "mode must be dispatch, work, review, gate, launch, image, sweep, watch or account" >&2; exit 1 ;;
         esac
+
+    # The usage artifact the job uploads (`usage_dir`), whatever the stage's outcome: the usage record and the stage's
+    # files, with the harness's event stream and saved sessions sealed unless the repository is private or
+    # publish_transcripts is on (scripts/usage-upload.mjs, lib/seal.mjs).
+    - name: Seal the usage artifact
+      if: always() && (inputs.mode == 'work' || inputs.mode == 'review')
+      shell: bash
+      env:
+        PENDULUM_INPUT_APP_PRIVATE_KEY: ${{ inputs.app_private_key }}
+        PENDULUM_INPUT_PUBLISH_TRANSCRIPTS: ${{ inputs.publish_transcripts }}
+        PENDULUM_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+        # What the sealed file is bound to: the Objective (the review job's, from its PR's branch) and the stage.
+        PENDULUM_INPUT_ISSUE: ${{ steps.run.outputs.issue || inputs.issue }}
+        PENDULUM_INPUT_MODE: ${{ inputs.mode }}
+      run: node "$GITHUB_ACTION_PATH/plugin/scripts/usage-upload.mjs" --repo "$GITHUB_REPOSITORY" --issue "$PENDULUM_INPUT_ISSUE" --stage "$PENDULUM_INPUT_MODE" --from "$RUNNER_TEMP/pendulum-usage" --to "$RUNNER_TEMP/pendulum-upload"

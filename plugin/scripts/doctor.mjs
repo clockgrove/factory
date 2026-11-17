@@ -20,7 +20,7 @@ import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offLi
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
-import { commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
+import { REVIEW_LABEL, commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
@@ -636,6 +636,25 @@ export function jobTokenCheck(text) {
   return bad.length ? FAIL("job token", `a job's token may write repository contents: ${bad.join("; ")}`, fix) : PASS("job token", "every job's token reads repository contents at most");
 }
 
+/**
+ * A workflow on pull_request (or pull_request_target) starts a job only for the review label the App applies: some job's
+ * `if:` compares the event's label with REVIEW_LABEL. Read from the parsed jobs, so a comment naming the label is no guard.
+ * Null when the workflow has no such trigger, or its YAML does not parse (the job token row FAILs on that).
+ */
+export function reviewGuardCheck(text) {
+  let doc;
+  try {
+    doc = parseYaml(text);
+  } catch {
+    return null;
+  }
+  if (!workflowEvents(doc).some((e) => e === "pull_request" || e === "pull_request_target")) return null;
+  const guard = `github.event.label.name == '${REVIEW_LABEL}'`;
+  const jobs = doc?.jobs && typeof doc.jobs === "object" && !Array.isArray(doc.jobs) ? Object.entries(doc.jobs) : [];
+  const guarded = jobs.filter(([, job]) => typeof job?.if === "string" && job.if.includes(guard)).map(([id]) => id);
+  return guarded.length ? PASS("workflow triggers", `pull_request trigger; the ${REVIEW_LABEL} label guards ${guarded.join(", ")}`) : WARN("workflow triggers", `pull_request trigger without the ${REVIEW_LABEL} label guard`, `the review job must be guarded by the label the App applies: if: ${guard}`);
+}
+
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.PENDULUM_ACCOUNTS }) {
   const out = [];
   if (!token && env.GITHUB_ACTIONS) {
@@ -670,7 +689,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     // A session's skills and scripts are the installed plugin's, not the Action's: in a job they are the same tree.
     const plugin = job ? null : pluginVersionCheck(text);
     if (plugin) out.push(plugin);
-    if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/pendulum:pendulum-review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the pendulum:review label guard", "the review job must be guarded by the label the App applies"));
+    const guard = reviewGuardCheck(text);
+    if (guard) out.push(guard);
     out.push(mergeTickCheck(text, env, { job }));
     const vars = varsInputCheck(text);
     if (vars) out.push(vars);
@@ -779,7 +799,7 @@ export async function workflowTokenChecks({ repo, token }) {
   const perms = await rest(`repos/${repo.full}/actions/permissions/workflow`, { token }).catch((e) => ({ error: e.status || e.message }));
   const defaultRead = perms?.error ? null : perms?.default_workflow_permissions === "read";
   if (perms?.error) out.push(WARN("default workflow token", `could not read the repository's default (${perms.error}; it needs admin), so every pull_request and merge_group workflow must set read-only permissions itself`, "run doctor with a gh login that administers the repository, or check Settings > Actions > Workflow permissions: read"));
-  else if (!defaultRead) out.push(FAIL("default workflow token", `the default GITHUB_TOKEN can write (${perms?.default_workflow_permissions})`, "Settings > Actions > General > Workflow permissions: Read repository contents and packages permissions"));
+  else if (!defaultRead) out.push(FAIL("default workflow token", `the default GITHUB_TOKEN can write (${perms?.default_workflow_permissions})`, "node scripts/setup.mjs --apply default-token (its dry run names the workflows the change reaches), or Settings > Actions > General > Workflow permissions: Read repository contents and packages permissions"));
   else out.push(PASS("default workflow token", "read-only by default"));
   let list;
   try {
@@ -2339,9 +2359,20 @@ async function main() {
   if (args.json) process.stdout.write(`${JSON.stringify({ ready: fails === 0, failures: fails, checks: results }, null, 2)}\n`);
   else {
     for (const r of results) process.stdout.write(`${r.status.padEnd(4)} ${r.name}: ${r.detail}${r.fix && r.status !== "PASS" ? `\n     fix: ${r.fix}` : ""}\n`);
-    process.stdout.write(fails ? `\n${fails} failure(s); run node ${join(PLUGIN_ROOT, "scripts/setup.mjs")} --repo ${repo.full} --yes to apply the GitHub fixes\n` : "\nready\n");
+    process.stdout.write(doctorFooter(results, repo));
   }
   process.exit(fails ? 1 : 0);
+}
+
+/**
+ * doctor's last line: "ready", or the failures and setup's command for the GitHub fixes. setup's `all` leaves out the
+ * default token, a repository-wide setting the repository's other workflows run on, so a FAIL there names its own step.
+ */
+export function doctorFooter(results, repo) {
+  const fails = results.filter((r) => r.status === "FAIL").length;
+  if (!fails) return "\nready\n";
+  const tokenFix = results.some((r) => r.status === "FAIL" && r.name === "default workflow token") ? `; the default workflow token needs its own step, --apply default-token, whose dry run names the workflows it reaches` : "";
+  return `\n${fails} failure(s); run node ${join(PLUGIN_ROOT, "scripts/setup.mjs")} --repo ${repo.full} --yes to apply the GitHub fixes${tokenFix}\n`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

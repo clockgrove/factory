@@ -58,6 +58,10 @@ export const UNKNOWN_WHY = {
   relay: "calls through the relayed gateway key whose cost the gateway did not report",
   // A cloud sandbox's usage the vendor did not report (adapters/sandbox.mjs stageVendorCost).
   sandbox: "the sandbox vendor did not report the stage's usage",
+  // The scorer's: a usage record from before records named their progress comment, beside a comment of its stage with
+  // dollars that no record names; it may be that comment's stage, so its figure is not added to the comment's
+  // (bench objective.mjs withLines).
+  unmatched: "a usage record that names no progress comment, beside one of its stage that may be the same stage",
 };
 
 /** `rec` marked as having spend that was not reported, for `why` (an UNKNOWN_WHY code); in place. `usd` stays what was reported. */
@@ -1126,7 +1130,9 @@ export const priceCodex = (model, tokens, opts = {}) => priceTokens(CODEX_PRICES
 /**
  * Codex: `codex exec --json` prints JSONL ending in one `turn.completed` whose
  * `usage.{input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens}` is the
- * thread's running total, restored by `codex exec resume` (sinceSession takes a resumed pass's
+ * thread's running total (codex-rs exec builds it from the thread's total token usage, and shuts down after a completed
+ * turn), so a stream with more than one is read at its last, never summed. `codex exec resume` restores the running
+ * total (sinceSession takes a resumed pass's
  * share). `input_tokens` already includes the cached and the written parts and `output_tokens` the reasoning
  * part, so neither is added again. Sub-agent threads (`spawn_agent`) are threads of their own, in
  * neither: runHarness adds them from their rollouts (codex-threads.mjs). Dollars come from the price table. An `item.completed` of type `error` followed by a completed
@@ -1164,10 +1170,12 @@ export function parseCodex(stdout, model, { rollout = null, since = null, reques
       const u = e.usage || {};
       // Codex reports usage per turn, not per request; cache writes where the provider bills them (the AI Gateway does).
       if (!first) first = { unit: "turn", input: num(u.input_tokens), cached: num(u.cached_input_tokens), written: num(u.cache_write_input_tokens) };
-      input = add(input, num(u.input_tokens));
-      output = add(output, num(u.output_tokens));
-      cached = add(cached, num(u.cached_input_tokens));
-      written = add(written, num(u.cache_write_input_tokens));
+      // Each turn.completed carries the thread's running total, not the turn's share: the last one is the process's. A
+      // count it does not report keeps its value before it.
+      input = num(u.input_tokens) ?? input;
+      output = num(u.output_tokens) ?? output;
+      cached = num(u.cached_input_tokens) ?? cached;
+      written = num(u.cache_write_input_tokens) ?? written;
     }
     if (e.type === "turn.failed" || e.type === "error") {
       failed = e.error?.message || e.message || e.type;
@@ -1467,9 +1475,11 @@ export function sinceSession(rec, prior, { at } = {}) {
   // Copilot: only a total from the same session start is a running total of the one subtracted (Copilot keeps the
   // start time across --resume); anything else is counted as reported.
   if (rec.harness === "copilot" && (!rec.sessionStartTime || rec.sessionStartTime !== prior.sessionStartTime)) return rec;
-  // A total below the one already counted is no running total of it: unknown, neither it nor a share of it taken.
-  if (codex && runningTokens(rec.tokens) && TOKEN_KEYS.some((k) => (rec.tokens[k] ?? 0) < (prior.tokens[k] ?? 0))) return notRunning(`the resumed Codex thread reported ${rec.tokens.input} input tokens, below the ${prior.tokens.input} already counted for it`);
-  if (!codex && rec.usd !== null && rec.usd !== undefined && rec.usd < prior.usd) return notRunning(`the resumed session reported $${rec.usd}, below the $${prior.usd} already counted for it`);
+  // A total below the one already counted is no running total of it: unknown, neither it nor a share of it taken. Its
+  // harness reports running totals (a Claude Code from 2.1.277, checked above), so the session's later totals run on
+  // from this one: `newBase` says so, and the pass's runner keeps it as the session's total.
+  if (codex && runningTokens(rec.tokens) && TOKEN_KEYS.some((k) => (rec.tokens[k] ?? 0) < (prior.tokens[k] ?? 0))) return { ...notRunning(`the resumed Codex thread reported ${rec.tokens.input} input tokens, below the ${prior.tokens.input} already counted for it`), newBase: true };
+  if (!codex && rec.usd !== null && rec.usd !== undefined && rec.usd < prior.usd) return { ...notRunning(`the resumed session reported $${rec.usd}, below the $${prior.usd} already counted for it`), newBase: true };
   const models = rec.models
     ? Object.fromEntries(Object.entries(rec.models).map(([name, m]) => {
         const p = prior.models?.[name] ?? {};

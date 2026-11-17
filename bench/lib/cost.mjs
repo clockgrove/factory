@@ -276,7 +276,11 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     out.priceTableDate = null;
     out.note = null;
     out.basis = priced.length ? `pendulum:spend lines in ${parts.length} progress comment(s), the worker's own pricing (no usage artifact)` : unknown.usdUnknown ? "unknown: no stage's spend line holds a reported figure" : "unknown: no usage artifact and no pendulum:spend line";
-  } else if (out.parts.length > 1) out.basis += `; ${out.parts.length} artifacts summed (worker + review)`;
+  } else if (out.parts.length > 1) {
+    // A mixed-route Objective: its artifacts' stages and its local stages' spend lines, each stage once, each source's basis named.
+    const lines = parts.filter((r) => r.source === "spend").length;
+    out.basis = lines ? `artifacts: ${out.basis}; spend lines: the worker's own pricing, in ${lines} progress comment(s); ${out.parts.length - lines} artifact(s) and ${lines} spend line(s) summed` : `${out.basis}; ${out.parts.length} artifacts summed (worker + review)`;
+  }
   out.basis += unknownNote;
   out.basis += billingNote(byBilling);
   // The relayed worker key's dollars are inside the figure already: said, so no reader adds them again.

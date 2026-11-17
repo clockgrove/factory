@@ -149,7 +149,7 @@ export async function awaitUsage(api, repoFull, issues, { ended = issues, waitMs
 }
 
 /** The record of an artifact with no result.json to read: one run of unknown cost, never $0 and never priced from a stream. */
-const noResult = (artifact) => ({ artifact, harness: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], tokens: { input: null, output: null, cached: null, written: null }, basis: `unknown: no result.json in ${artifact} (its stage ended before it wrote one)` });
+const noResult = (artifact) => ({ artifact, standIn: true, harness: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], tokens: { input: null, output: null, cached: null, written: null }, basis: `unknown: no result.json in ${artifact} (its stage ended before it wrote one)` });
 
 /** The usage records of the artifacts, downloaded and read; each tagged with its artifact name. */
 async function usageFromArtifacts(artifacts, repoFull, download) {
@@ -164,7 +164,10 @@ async function usageFromArtifacts(artifacts, repoFull, download) {
       const rec = file ? parseUsageText(readFileSync(file, "utf8")) : null;
       const events = findFile(dir, "events.jsonl");
       if (rec && events) rec.sessions = sessionsOf(readFileSync(events, "utf8"));
-      records.push(rec ? { ...rec, artifact: a.name } : noResult(a.name));
+      // The workflow run that uploaded it: an artifact from before `progressRun` is matched to its stage's progress
+      // comment by that run (bench withLines).
+      const run = Number.isInteger(a.workflow_run) ? { workflowRun: a.workflow_run } : {};
+      records.push(rec ? { ...rec, artifact: a.name, ...run } : { ...noResult(a.name), ...run });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -379,7 +382,9 @@ export function usageFromDir(dir, { readdir, read, isDir = null }) {
   const walk = (at, depth) => {
     for (const name of readdir(at)) {
       const file = `${at}/${name}`;
-      if (name === "result.json" || name === "events.jsonl" || (depth === 0 && /\.(json|jsonl)$/.test(name))) {
+      // A stage's own record and stream only: its usage directory holds other JSON too (the session's running totals,
+      // harness.mjs SESSION_TOTALS_FILE), which is no record of a run.
+      if (name === "result.json" || name === "events.jsonl") {
         const text = read(file);
         const artifact = basename(at) === basename(dir) ? name : `${basename(at)}/${name}`;
         // A raw stream is never priced: it gives its sessions only, and stands for a run of unknown cost when no

@@ -6,4 +6,4 @@
 {"type":"turn.completed","usage":{"input_tokens":120000,"cached_input_tokens":90000,"output_tokens":8000}}
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"Opened the PR.\n```json\n{\"comments\":[{\"path\":\"src/a.ts\",\"line\":3,\"body\":\"acceptance 1: x\"}]}\n```"}}
-{"type":"turn.completed","usage":{"input_tokens":30000,"cached_input_tokens":25000,"output_tokens":2000,"reasoning_output_tokens":500}}
+{"type":"turn.completed","usage":{"input_tokens":150000,"cached_input_tokens":115000,"output_tokens":10000,"reasoning_output_tokens":500}}

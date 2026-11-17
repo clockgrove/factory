@@ -30,6 +30,6 @@ Local mode runs Factory's worker and reviewer on the user's machine, on its harn
    }
    ```
 
-   A name is lowercase letters, digits and hyphens, at most 34 characters, and not `claude`, `codex` or `copilot`. For automatic choice across them, the user starts `factory serve` with `FACTORY_LOCAL_AUTO_ACCOUNT=1` in its shell.
+   A name is lowercase letters, digits and hyphens, starting with a letter or digit, at most 34 characters, and not another harness's name (`claude`, `codex`, `copilot`). For automatic choice across them, the user starts `factory serve` with `FACTORY_LOCAL_AUTO_ACCOUNT=1` in its shell.
 
 Then go back to the skill's first run of `serve --once`, from the clone: it lists anything still missing. The factory-doctor skill, run for local mode, checks the token, the sandbox, the logins and each account by name.

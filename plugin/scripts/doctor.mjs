@@ -779,7 +779,7 @@ export async function workflowTokenChecks({ repo, token }) {
   const perms = await rest(`repos/${repo.full}/actions/permissions/workflow`, { token }).catch((e) => ({ error: e.status || e.message }));
   const defaultRead = perms?.error ? null : perms?.default_workflow_permissions === "read";
   if (perms?.error) out.push(WARN("default workflow token", `could not read the repository's default (${perms.error}; it needs admin), so every pull_request and merge_group workflow must set read-only permissions itself`, "run doctor with a gh login that administers the repository, or check Settings > Actions > Workflow permissions: read"));
-  else if (!defaultRead) out.push(FAIL("default workflow token", `the default GITHUB_TOKEN can write (${perms?.default_workflow_permissions})`, "Settings > Actions > General > Workflow permissions: Read repository contents and packages permissions"));
+  else if (!defaultRead) out.push(FAIL("default workflow token", `the default GITHUB_TOKEN can write (${perms?.default_workflow_permissions})`, "node scripts/setup.mjs --apply default-token (its dry run names the workflows the change reaches), or Settings > Actions > General > Workflow permissions: Read repository contents and packages permissions"));
   else out.push(PASS("default workflow token", "read-only by default"));
   let list;
   try {

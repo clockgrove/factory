@@ -1,5 +1,47 @@
 # Setup reference
 
+## Workflow settings
+
+A first setup asks only the harness and its credential, the caps and auto-merge (SKILL.md); the rest take these defaults. After the file is written, list the ones it took as "You can change these later". Each changes later by a re-render, `--apply workflow --<flag> <value>`, landed by pull request like the first file; one with a variable also changes, with no pull request, by `gh variable set <variable> --body <value>` (anyone with write access can set one, so the others stay in the reviewed file). A re-render keeps the file's settings: pass only changes (`--name=` clears one), and show the kept and changed lines. The workflow never triggers from a fork.
+
+| Flag | Default | Variable | What |
+| --- | --- | --- | --- |
+| `--harness` | `claude` | `PENDULUM_HARNESS` | The coding agent: `claude`, `codex` or `copilot`. |
+| `--credential` | `api` | no | `api`, or `plan` for Claude on a subscription (Claude on a subscription, below). |
+| `--model` | the harness's | `PENDULUM_MODEL` | The worker's model; an Objective's `pendulum:model:<id>` label overrides it. |
+| `--subagent-model` | the harness's | `PENDULUM_SUBAGENT_MODEL` | The implementer sub-agents' model. |
+| `--reviewer-model` | `--model`'s | `PENDULUM_REVIEWER_MODEL` | The reviewer's model. |
+| `--max-usd` | `25` | `PENDULUM_MAX_USD` | The per-job dollar cap. |
+| `--daily-usd` | `100` | `PENDULUM_DAILY_USD` | Nothing starts once today's spend passes it (UTC day). |
+| `--max-concurrent` | `3` | `PENDULUM_MAX_CONCURRENT` | Worker jobs at once. |
+| `--timeout-minutes` | `240` | `PENDULUM_TIMEOUT_MINUTES` | Each job's wall clock; under 360 on hosted runners; on Actions a variable can lower it, not raise it. |
+| `--auto-merge` | `true` | no | `true`: Pendulum merges the reviewed head once its required checks pass, gated by CI, the reviewer and the merge queue, unread. `false`: its PRs wait for a person's merge. |
+| `--notify` | none | no | The GitHub handle Blocked and Question reach; setup pins it as `login#id`. |
+| `--setup` | none | no | The toolchain command run before the worker. |
+| `--install` | `auto` | no | `auto` installs from the lockfiles, `none`, or a command. |
+| `--validation` | none | `PENDULUM_VALIDATION` | The validation commands, comma-separated. |
+| `--budget-command` | none | no | The repository's test-budget command. |
+| `--protected-paths` | none | no | Paths added to the protected list; workers' commits may not touch them. |
+| `--ci-checks` | none | no | The CI's required check names, also the protection step's. |
+| `--node-version` | `22` | no | The Node.js the runner sets up; match your CI's. |
+| `--runs-on` | the CI's Linux runner | no | The work and review jobs' runner. |
+| `--preset first-run` | none | no | `max_usd` 5, `max_concurrent` 1, `auto_merge` false; a flag beside it wins. |
+| `--sandbox vercel` | none | no | The cloud-sandbox jobs instead of runner jobs (Cloud sandbox, below). |
+
+Raising the first-run preset later: `gh variable set PENDULUM_MAX_USD --body 25` and `gh variable set PENDULUM_MAX_CONCURRENT --body 3`, or a re-render with `--max-usd 25 --max-concurrent 3`; auto-merge only by a re-render with `--auto-merge true`.
+
+## Model credentials
+
+The user saves one with `gh secret set <name>`, pasting at the prompt (never `--body`, which leaves it in shell history): Claude `ANTHROPIC_API_KEY` (`CLAUDE_CODE_OAUTH_TOKEN` with `--credential plan`; none with workload identity federation); Codex `PENDULUM_CODEX_GATEWAY_KEY` (a Vercel AI Gateway key) or `CODEX_API_KEY`; Copilot `COPILOT_GITHUB_TOKEN`, a fine-grained token with only the Copilot Requests permission (doctor fails without it).
+
+## The App
+
+`--apply app` posts a pre-filled App, `Pendulum (<repo>)`, webhook off, with exactly: contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); nothing else, never workflows. `--secret-scope org` saves its secrets as organization secrets shared with this repository only. If the browser cannot load the 127.0.0.1 address after Create, `curl` the address its page shows from setup's shell.
+
+## Labels and board
+
+These run as the App when the user exported `PENDULUM_APP_TOKEN`, or `PENDULUM_APP_ID` and `PENDULUM_APP_PRIVATE_KEY="$(cat <path>.pem)"`; never read the key.
+
 ## Landing the workflow file
 
 The workflow does nothing until `.github/workflows/pendulum.yml` is on the default branch: its cron and its triggers start there. Land it through a pull request, so the repository's own checks and rules apply:
@@ -16,7 +58,7 @@ A re-render on an upgrade lands the same way, on a branch `upgrade-pendulum`, wi
 
 When the user declines `--apply app` or it fails:
 
-1. Open `https://github.com/settings/apps/new` (an organization's: `/organizations/<org>/settings/apps/new`). Name it `Pendulum (<repo>)`, uncheck webhooks, and grant exactly the permissions SKILL.md names. Projects is under Organization permissions, and a repository a user owns needs none (no App reaches a personal board); the rest are Repository permissions.
+1. Open `https://github.com/settings/apps/new` (an organization's: `/organizations/<org>/settings/apps/new`). Name it `Pendulum (<repo>)`, uncheck webhooks, and grant exactly the permissions The App names. Projects is under Organization permissions, and a repository a user owns needs none (no App reaches a personal board); the rest are Repository permissions.
 2. Create it, generate a private key, note the App ID.
 3. Install it on this repository only.
 4. The user saves the two secrets: `gh secret set PENDULUM_APP_ID` and `gh secret set PENDULUM_APP_PRIVATE_KEY < path.pem`, the path given as text.

@@ -92,12 +92,12 @@ The plugin follows Pendulum's `main` branch. The workflow it writes for your rep
 
 Use the full name in requests like this one: it is what Pendulum's skills answer to, and a bare "Pendulum" can mean something else to your agent, such as the Python date-time library of that name.
 
-The session follows Pendulum's `pendulum-setup` skill. It asks a few questions first; the ones that matter on day one are the cost caps and auto-merge, and the defaults are fine for the rest. Then it shows each change and waits for your yes. It:
+The session follows Pendulum's `pendulum-setup` skill. It asks three questions first: which coding agent (Claude Code, Codex or Copilot CLI) and its credential, the spending caps, and whether Pendulum merges its own pull requests. For a first run it recommends a preset: about $5 per job, one Objective at a time, and auto-merge off, so you read each pull request before it lands. Everything else takes its default, and it lists those afterwards with how to change them later. Then it shows each change and waits for your yes. It:
 
 - writes Pendulum's workflow file, `.github/workflows/pendulum.yml`, which holds the jobs that run your Objectives, and opens a pull request that adds it;
 - creates a GitHub App for this one repository from a pre-filled definition, a few clicks in your browser, and saves its two secrets (or walks you through GitHub's settings by hand): on GitHub Actions, Pendulum writes to your repository as that App rather than as you;
 - has you save your model credential;
-- creates the labels and, on a repository an organization owns, a GitHub Project board that shows each Objective's state, requires your CI's checks on the default branch, adds a merge queue where GitHub offers one, and sets squash merges to use each PR's title and body.
+- creates the labels and, on a repository an organization owns, a GitHub Project board that shows each Objective's state, requires your CI's checks on the default branch, adds a merge queue where GitHub offers one, sets squash merges to use each PR's title and body, and makes your repository's default workflow token read-only (it first names your workflows that rely on that default).
 
 Merge that pull request when you are ready. Pendulum starts once the workflow file is on your default branch.
 
@@ -105,7 +105,7 @@ Merge that pull request when you are ready. Pendulum starts once the workflow fi
 
 > Is Clockgrove Pendulum set up correctly here?
 
-The session runs Pendulum's doctor, which changes nothing. Each line it prints is PASS, WARN or FAIL, with the fix. Expect a FAIL or two the first time, for example when your repository's default workflow token can write; fix what it names and ask again.
+The session runs Pendulum's doctor, which changes nothing. Each line it prints is PASS, WARN or FAIL, with the fix. Expect a FAIL or two the first time; fix what it names and ask again.
 
 **4. Tell it what to build.**
 

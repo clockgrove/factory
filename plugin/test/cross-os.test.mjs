@@ -13,6 +13,8 @@ import { openProgressCheck } from "../scripts/lib/fix-progress.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 import { workValidation } from "../scripts/lib/session.mjs";
 import { crossOsRow } from "../scripts/doctor.mjs";
+import { PASS_KINDS, passKind } from "../scripts/lib/usage.mjs";
+import { passLabel } from "../scripts/lib/report.mjs";
 
 // #518: opt-in cross-OS CI in the work stage. The repository names a CI workflow and the check names of its macOS and
 // Windows legs; the stage dispatches the workflow on the branch for each head it validates, waits for those legs in that
@@ -201,7 +203,7 @@ test("#518: on, with macOS and Windows green: the workflow is dispatched on the 
   assert.equal(r.result.passes, 2, "the command's pass and the cross-OS pass");
   assert.deepEqual(r.dispatches, [{ ref: "pendulum/4", return_run_details: true }]);
   assert.equal(r.prompts.length, 0, "no fix pass");
-  assert.deepEqual(r.log.map(anyHead), ["validation pass 1 (1 commands)", "cross-OS validation pass 1 (cross-OS legs)", "dispatch X", `waiting for cross-OS legs (${MAC}; ${WIN}) on X`, anyHead(legLine(r.head, "success", "success"))]);
+  assert.deepEqual(r.log.map(anyHead), ["validation pass 1 (1 commands)", "cross-os-validation pass 1 (cross-OS legs)", "dispatch X", `waiting for cross-OS legs (${MAC}; ${WIN}) on X`, anyHead(legLine(r.head, "success", "success"))]);
 });
 
 test("#518: a red Windows leg goes back to the worker; its fix commits, the commands run on the new head before it is dispatched, and it ends green", async () => {
@@ -228,7 +230,7 @@ test("#518 B1: a same-name pull_request check that was skipped, and a dispatched
   const named = await stage({ settings: ON, github: { pr: prSkipped, legs: () => ({ [MAC]: green, [WIN]: red }) }, checks: { boundMs: 50 } });
   assert.notEqual(named.result.green, true);
   assert.equal(named.prompts.length, 1, "a red, not the pull_request run's skip, and one fix pass for it");
-  assert.match(named.result.stalled || "", /it brought back the red of cross-OS validation pass 1 on [0-9a-f]{7}: test \(windows-2025, 1\/1\), failing the same way/, "the same red after its fix pass is no progress, with no progress check wired");
+  assert.match(named.result.stalled || "", /it brought back the red of cross-os-validation pass 1 on [0-9a-f]{7}: test \(windows-2025, 1\/1\), failing the same way/, "the same red after its fix pass is no progress, with no progress check wired");
 });
 
 test("#518 B1: a needs: failure that skips a leg is no green: the stage Blocks naming the skip and the job that caused it", async () => {
@@ -341,4 +343,16 @@ test("#518 S1: doctor's row: the cost while on; no dispatch trigger, write permi
   assert.equal(workflowProblem(parseYaml("on: workflow_dispatch\njobs:\n  t:\n    permissions:\n      contents: read\n"), "ci.yml"), null);
   assert.equal(crossOsRow(inputs, { doc: parseYaml(CI), route: "sandbox" }).status, "FAIL");
   assert.equal(crossOsRow(resolveInputs({ env: { PENDULUM_CROSS_OS_CHECKS: LEGS } }), {}).status, "FAIL");
+});
+
+test("#518 with #517: the cross-OS loop's fix and fresh passes are fix passes on the card and in the report; its scope holds have no kind", () => {
+  for (const l of ["cross-os-validation-fix-1", "cross-os-validation-fresh-2"]) {
+    assert.equal(passKind(l), "fix", l);
+    assert.ok(PASS_KINDS.includes(passKind(l)));
+    assert.match(passLabel(l), /^cross-os-validation-(?:fix|fresh)$/, "the report's pass label, read as a fix pass (report.mjs isFix)");
+  }
+  for (const l of ["cross-os-validation-scope-1", "cross-os-validation-fresh-scope-1"]) {
+    assert.equal(passKind(l), null, l);
+    assert.doesNotMatch(passLabel(l), /-(?:fix|fresh)$/, "no fix pass in the report either");
+  }
 });

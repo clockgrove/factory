@@ -1823,11 +1823,11 @@ export async function workValidation(args, cross = null) {
     // Green, or handed off: the red its fix passes were handed is fixed, and judges nothing after it.
     handed = null;
     if (cross.problem) {
-      log(`cross-OS validation: ${cross.problem}`);
-      if (args.onPhase) await args.onPhase(`cross-OS validation: ${cross.problem}`);
+      log(`cross-os-validation: ${cross.problem}`);
+      if (args.onPhase) await args.onPhase(`cross-os-validation: ${cross.problem}`);
       return { green: false, passes, lastOutput: "", usage: [...usage], stuck: { reason: cross.problem, cause: "setup" } };
     }
-    const c = add(await validationLoop({ ...args, spentUsd: spent(), commands: [], checks: cross.checks, label: "cross-OS validation", handOff: false, checksOnlyFirst: false, holdRed: null, handed, returnAfterFix: true, recurOnFirst: true }));
+    const c = add(await validationLoop({ ...args, spentUsd: spent(), commands: [], checks: cross.checks, label: "cross-os-validation", handOff: false, checksOnlyFirst: false, holdRed: null, handed, returnAfterFix: true, recurOnFirst: true }));
     if (c.fixed) continue;
     if (c.green) return { ...v, passes, usage: [...usage] };
     return c;

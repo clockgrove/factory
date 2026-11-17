@@ -35,11 +35,12 @@ const CI = "name: CI\non:\n  pull_request:\n  workflow_dispatch:\npermissions:\n
  *   check runs appear (GitHub creates a run after answering the dispatch).
  * - `pr(sha)`: check runs of a `pull_request` run on the head (another check suite), present from the start.
  * - `earlier(sha)`: workflow runs dispatched on the head before the stage ran (each with its legs, by `legs(sha, 0)`).
- * - `dispatch`: the dispatch's answer, a status code (204, or 200 with the run's id).
+ * - `dispatch`: the dispatch's answer, a status code: 200 with the run's id, 204 with none, or another refusal; `auto`
+ *   (the default) as GitHub answers, 200 when the body asks for `return_run_details`, else 204.
  * - `workflow`: the workflow file's text at any ref; `noRunner`: every job has no runner yet (GitHub has not started it).
  * The head a dispatch runs on is the checkout's HEAD then.
  */
-async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => [], dispatch = 204, workflow = CI, noRunner = false, log }, fn) {
+async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => [], dispatch = "auto", workflow = CI, noRunner = false, log }, fn) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -56,13 +57,15 @@ async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => 
     const u = new URL(url);
     const p = u.pathname;
     if (p === `/repos/${REPO.full}/actions/workflows/ci.yml/dispatches` && init.method === "POST") {
-      seen.dispatches.push(JSON.parse(String(init.body)));
-      if (![200, 204].includes(dispatch)) return json({ message: dispatch === 403 ? "Resource not accessible by integration" : "Workflow does not have 'workflow_dispatch' trigger" }, dispatch);
+      const body = JSON.parse(String(init.body));
+      seen.dispatches.push(body);
+      const status = dispatch === "auto" ? (body.return_run_details === true ? 200 : 204) : dispatch;
+      if (![200, 204].includes(status)) return json({ message: dispatch === 403 ? "Resource not accessible by integration" : "Workflow does not have 'workflow_dispatch' trigger" }, dispatch);
       const sha = execFileSync("git", ["-C", work, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
       log.push(`dispatch ${sha.slice(0, 7)}`);
       const h = { n: seen.dispatches.length, id: (ids += 10), at: Date.now() + 1000, cr: 0, lr: 0 };
       seen.heads.set(sha, [...(seen.heads.get(sha) || []), h]);
-      return dispatch === 200 ? json({ workflow_run_id: h.id, run_url: `https://github.test/runs/${h.id}`, html_url: "x" }) : json(null, 204);
+      return status === 200 ? json({ workflow_run_id: h.id, run_url: `https://github.test/runs/${h.id}`, html_url: "x" }) : json(null, 204);
     }
     let m = /^\/repos\/acme\/app\/contents\/\.github\/workflows\/ci\.yml$/.exec(p);
     if (m) return new Response(workflow, { status: 200 });
@@ -185,7 +188,7 @@ test("#518: on, with macOS and Windows green: the workflow is dispatched on the 
   const r = await stage({ settings: ON, commands: ["test -f README"], github: { legs: () => ({ [MAC]: green, [WIN]: green }) } });
   assert.equal(r.result.green, true, r.log.join("\n"));
   assert.equal(r.result.passes, 2, "the command's pass and the cross-OS pass");
-  assert.deepEqual(r.dispatches, [{ ref: "pendulum/4" }]);
+  assert.deepEqual(r.dispatches, [{ ref: "pendulum/4", return_run_details: true }]);
   assert.equal(r.prompts.length, 0, "no fix pass");
   assert.deepEqual(r.log.map(anyHead), ["validation pass 1 (1 commands)", "cross-OS validation pass 1 (cross-OS legs)", "dispatch X", `waiting for cross-OS legs (${MAC}; ${WIN}) on X`, anyHead(legLine(r.head, "success", "success"))]);
 });
@@ -197,7 +200,7 @@ test("#518: a red Windows leg goes back to the worker; its fix commits, the comm
   assert.match(r.prompts[0], /Pendulum's validation pass 1 failed on the branch you delivered/);
   assert.match(r.prompts[0], /test \(windows-2025, 1\/1\)/, "the fix pass is handed the red leg");
   assert.match(r.prompts[0], /paths join with a backslash on Windows/, "with its failure from the job's log");
-  assert.deepEqual(r.dispatches, [{ ref: "pendulum/4" }, { ref: "pendulum/4" }], "each new head is dispatched once");
+  assert.deepEqual(r.dispatches, [{ ref: "pendulum/4", return_run_details: true }, { ref: "pendulum/4", return_run_details: true }], "each new head is dispatched once");
   const order = r.log.map(anyHead).filter((l) => /^(validation pass|dispatch|cross-OS CI \(ci\.yml\))/.test(l));
   assert.deepEqual(order, ["validation pass 1 (1 commands)", "dispatch X", anyHead(legLine("0".repeat(7), "success", "failure")), "validation pass 1 (1 commands)", "dispatch X", anyHead(legLine("0".repeat(7), "success", "success"))], r.log.join("\n"));
   assert.equal(r.result.passes, 4, "two command passes, two cross-OS passes");
@@ -205,15 +208,16 @@ test("#518: a red Windows leg goes back to the worker; its fix commits, the comm
 
 test("#518 B1: a same-name pull_request check that was skipped, and a dispatched run GitHub lists late, never stand for the dispatched Windows leg that failed", async () => {
   const prSkipped = (sha) => [{ id: 9001, name: WIN, status: "completed", conclusion: "skipped", check_suite: { id: 1 }, app: { slug: "github-actions" }, started_at: new Date().toISOString() }, { id: 9002, name: MAC, status: "completed", conclusion: "success", check_suite: { id: 1 }, app: { slug: "github-actions" }, started_at: new Date().toISOString() }].map((c) => ({ ...c, head_sha: sha }));
-  const r = await stage({ settings: ON, github: { pr: prSkipped, lag: 3, legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
+  const r = await stage({ settings: ON, github: { pr: prSkipped, lag: 3, dispatch: 204, legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
   assert.equal(r.prompts.length, 1, "the dispatched leg's red went to the fix pass");
   assert.match(r.prompts[0], /test \(windows-2025, 1\/1\)/);
   assert.equal(anyHead(r.log.find((l) => /^cross-OS CI \(ci\.yml\)/.test(l))), anyHead(legLine("0".repeat(7), "success", "failure")), r.log.join("\n"));
   assert.equal(r.result.green, true, "green only on the fix's own dispatched run");
-  // GitHub naming the run in its answer: that run, on the head Pendulum pushed, is the one read.
-  const named = await stage({ settings: ON, github: { dispatch: 200, pr: prSkipped, legs: () => ({ [MAC]: green, [WIN]: red }) }, checks: { boundMs: 50 } });
+  // GitHub naming the run in its answer (return_run_details): that run, on the head Pendulum pushed, is the one read.
+  const named = await stage({ settings: ON, github: { pr: prSkipped, legs: () => ({ [MAC]: green, [WIN]: red }) }, checks: { boundMs: 50 } });
   assert.notEqual(named.result.green, true);
-  assert.equal(named.prompts.length >= 1, true, "a red, not the pull_request run's skip");
+  assert.equal(named.prompts.length, 1, "a red, not the pull_request run's skip, and one fix pass for it");
+  assert.match(named.result.stalled || "", /it brought back the red of cross-OS validation pass 1 on [0-9a-f]{7}: test \(windows-2025, 1\/1\), failing the same way/, "the same red after its fix pass is no progress, with no progress check wired");
 });
 
 test("#518 B1: a needs: failure that skips a leg is no green: the stage Blocks naming the skip and the job that caused it", async () => {
@@ -234,7 +238,7 @@ test("#518 S5: a dispatched run already on the head is waited for, not dispatche
   assert.deepEqual(r.dispatches, []);
   const c = await stage({ settings: ON, github: { earlier: () => [{ id: 7, at, cancelled: true }], legs: (sha, n) => (n === 0 ? { [MAC]: green, [WIN]: { status: "completed", conclusion: "cancelled" } } : { [MAC]: green, [WIN]: green }) } });
   assert.equal(c.result.green, true, c.log.join("\n"));
-  assert.deepEqual(c.dispatches, [{ ref: "pendulum/4" }]);
+  assert.deepEqual(c.dispatches, [{ ref: "pendulum/4", return_run_details: true }]);
 });
 
 test("#518 S2: a Windows fix that breaks Linux is judged by the progress check against the red it was given, not fixed again unjudged", async () => {
@@ -244,6 +248,25 @@ test("#518 S2: a Windows fix that breaks Linux is judged by the progress check a
   assert.equal(r.result.green, false);
   assert.equal(r.prompts.length, 1, "no fix pass for the Linux red: the decision route is off, and the exact checks cannot call it progress");
   assert.match(r.result.stalled || "", /^the fix pass before it made no progress: .*failing: test ! -f fix-1/);
+});
+
+test("#518 S2: Linux red fixed, then a Windows red: the Windows leg gets its own fix pass, unjudged, with the decision route off", async () => {
+  // The commands fail until fix-1 (the Linux fix) is there; the Windows leg is red on the first dispatch only.
+  const linux = "test -f fix-1 || { echo 'not ok 1 - linux path'; exit 1; }";
+  const r = await stage({ settings: ON, progress: true, commands: [linux], github: { legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
+  assert.equal(r.result.green, true, r.log.join("\n"));
+  assert.equal(r.prompts.length, 2, "the Linux fix pass, then the Windows one");
+  assert.match(r.prompts[1], /test \(windows-2025, 1\/1\)/);
+  assert.ok(!r.log.some((l) => /no progress/.test(l)), r.log.join("\n"));
+});
+
+test("#518 S2: Linux red X fixed, Windows red Y fixed, then X again: no progress, and the stage Blocks naming the red that came back", async () => {
+  // X fails until fix-1, and again once fix-2 (the Windows fix) is there; the Windows leg is red on the first dispatch.
+  const linux = "{ test -f fix-1 && test ! -f fix-2; } || { echo 'not ok 1 - linux path'; exit 1; }";
+  const r = await stage({ settings: ON, progress: true, commands: [linux], github: { legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
+  assert.equal(r.result.green, false);
+  assert.equal(r.prompts.length, 2, "X's fix pass and Y's, none for X again");
+  assert.match(r.result.stalled || "", /^the fix pass before it made no progress: it brought back the red of validation pass 1 on [0-9a-f]{7}: .*linux path.*, failing the same way/);
 });
 
 test("#518 S3: the bound is the head's, from its first wait: a leg still running then Blocks naming it, with no fix pass", async () => {

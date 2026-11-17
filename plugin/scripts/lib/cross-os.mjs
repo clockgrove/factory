@@ -89,8 +89,9 @@ const NOT_RUN = ["skipped", "neutral"];
  * The checks the cross-OS loop waits for (session.mjs validationLoop's `checks`): the legs, read with `token` (the
  * check runs) and `actionsToken` (the workflow file, its runs, the jobs, a rerun, the dispatch), and these hooks:
  * - `request(sha)`, before the wait on a head: the named workflow as `sha` has it must pass workflowProblem; a dispatched,
- *   not cancelled run of it on `sha` is reused; else the workflow is dispatched on `branch` (GitHub answers with the
- *   run's id, which must be on `sha`; without an id, the run is found on `sha` created at or after the dispatch). {ok},
+ *   not cancelled run of it on `sha` is reused; else the workflow is dispatched on `branch`, asking for the run's details
+ *   (`return_run_details`: GitHub then answers 200 with the run's id, which must be on `sha`; an answer without one, 204,
+ *   leaves the run to be found on `sha`, created at or after the dispatch). {ok},
  *   or {refused: {reason, cause}}.
  * - `select(sha, checkRuns)`: only the check runs of that workflow run's check suites count (a rerun's suite included),
  *   so a check of the same name from another workflow or event on the head never stands for a leg.
@@ -161,7 +162,7 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
       h.since = Math.floor(now() / 1000) * 1000;
       let made;
       try {
-        made = await rest(`repos/${repo.full}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, { ...actions, method: "POST", body: { ref: branch } });
+        made = await rest(`repos/${repo.full}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, { ...actions, method: "POST", body: { ref: branch, return_run_details: true } });
       } catch (e) {
         return { refused: dispatchRefusal(e, { workflow, branch, route }) };
       }

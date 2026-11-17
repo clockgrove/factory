@@ -89,7 +89,7 @@ import { stageAccountName } from "./choice.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
-import { exactJudge, redNames, signed } from "./fix-progress.mjs";
+import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
 import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead } from "./logic.mjs";
 
@@ -1185,7 +1185,7 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
  *   handed off ran them). `onRead(state)`: each reading of the checks as awaitChecks makes it. `signal` (an AbortSignal)
  *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
  */
-export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null, handed: handedIn = null, returnAfterFix = false }) {
+export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null, handed: handedIn = null, returnAfterFix = false, recurOnFirst = false }) {
   // The decision calls' spend during this loop (triage and the rest: decisionSpend) is taken off what is left too; the
   // drift advisory's is not, since its reserve is no part of `maxUsd` here (harness.mjs passMaxUsd).
   const passDecisions = () => decisionSpend() - reservedSpend();
@@ -1198,7 +1198,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // for all the stage's loops, this loop's added as it goes (one seen again after a committed pass is no progress). No
   // progressCheck (no decider wired): only the exact checks decide, and what they cannot is no progress.
   // `handedIn`: the red an earlier loop of the stage last handed a fix pass (workValidation), so this loop's first red is
-  // judged against it.
+  // judged against it. With none, and `recurOnFirst` (workValidation), a red with no fix pass of this loop before it gets
+  // the exact recurrence check alone: one the stage saw before, failing the same way (sameRed against `seen`), came back
+  // after the passes that committed since, which is no progress; any other goes to its fix pass, no decision model asked.
   let handed = handedIn;
   const seen = progressCheck?.seen ?? [];
   let stalled = "";
@@ -1731,7 +1733,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // A red after a fix pass goes on only when that pass made progress on the red it was handed (fix-progress.mjs); a
     // red on a merge Pendulum made itself is not the change's, so it gets its fix pass unjudged.
     const caught = !!validated && !!outbox?.caughtUp?.(validated);
-    const judged = handed && !caught ? await judgeProgress({ before: handed, after: shape, seen, diff: await diffStat(handed.head, shape.head) }) : null;
+    const back = !handed && !caught && recurOnFirst ? seen.find((r) => sameRed(r, shape, { seen: true })) : null;
+    const judged = handed && !caught ? await judgeProgress({ before: handed, after: shape, seen, diff: await diffStat(handed.head, shape.head) }) : back ? { progress: false, why: `it brought back the red of ${back.at ? `${back.at}: ` : ""}${redNames(back).join(", ")}, failing the same way, after the passes that committed since` } : null;
     seen.push(shape);
     // The stage harness's usage limit stopped the question: the stage ends on it as a pass meeting it does, never as no progress.
     if (judged?.limited) throw new UsageLimitReached(judged.limited, { since: Date.now(), label: "fix-progress check" });
@@ -1776,9 +1779,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
  * {checks} from crossOsChecks, or {problem} for a setting that cannot run), a second loop on the head it left: the
  * cross-OS legs, asked for and awaited on that head, no commands, never handed off. A red leg goes to that loop's fix
  * pass like any red; once a fix pass there commits, that loop ends (`fixed`) and the first loop validates the new head
- * (or hands it off) before the legs are asked for on it. Each loop starts from the red the loop before it last handed a
- * fix pass, so the stage's one progress check judges a fix that breaks the other side (Linux after Windows, or the
- * reverse) as it judges any red after a fix pass; every round spends from the same max_usd and wall clock. The legs
+ * (or hands it off) before the legs are asked for on it. The first loop after such a fix starts from the red that fix
+ * was handed, so the stage's one progress check judges a fix that breaks the other side as it judges any red after a fix
+ * pass. A loop that ends green or hands off has fixed its reds: the next loop starts from none, and its first red gets
+ * only the exact recurrence check (validationLoop `recurOnFirst`), so a red that comes back after it was fixed (Linux,
+ * Windows, Linux again) is no progress, and any other red goes to its fix pass. Every round spends from the same
+ * max_usd and wall clock. The legs
  * green on the head the first loop left end the stage's validation with that loop's end (a hand-off included); any
  * other end of either loop ends it there. Returns the deciding loop's result, with every loop's passes and usage summed.
  * A setting problem Blocks as a setup gap once the first loop is green.
@@ -1794,15 +1800,20 @@ export async function workValidation(args, cross = null) {
     return { ...r, passes, usage: [...usage] };
   };
   const spent = () => (args.spentUsd || 0) + sumSpend(usage).usd;
+  // One list of the stage's reds for every loop (the recurrence check reads it): the caller's progress check's, else,
+  // with cross-OS CI on, the exact checks' own.
+  if (cross && !args.progressCheck) args = { ...args, progressCheck: { judge: exactJudge, seen: [] } };
   for (;;) {
-    const v = add(await validationLoop({ ...args, spentUsd: spent(), handed }));
+    const v = add(await validationLoop({ ...args, spentUsd: spent(), handed, recurOnFirst: !!cross }));
     if (!cross || v.aborted || !(v.green || v.handedOff)) return v;
+    // Green, or handed off: the red its fix passes were handed is fixed, and judges nothing after it.
+    handed = null;
     if (cross.problem) {
       log(`cross-OS validation: ${cross.problem}`);
       if (args.onPhase) await args.onPhase(`cross-OS validation: ${cross.problem}`);
       return { green: false, passes, lastOutput: "", usage: [...usage], stuck: { reason: cross.problem, cause: "setup" } };
     }
-    const c = add(await validationLoop({ ...args, spentUsd: spent(), commands: [], checks: cross.checks, label: "cross-OS validation", handOff: false, checksOnlyFirst: false, holdRed: null, handed, returnAfterFix: true }));
+    const c = add(await validationLoop({ ...args, spentUsd: spent(), commands: [], checks: cross.checks, label: "cross-OS validation", handOff: false, checksOnlyFirst: false, holdRed: null, handed, returnAfterFix: true, recurOnFirst: true }));
     if (c.fixed) continue;
     if (c.green) return { ...v, passes, usage: [...usage] };
     return c;

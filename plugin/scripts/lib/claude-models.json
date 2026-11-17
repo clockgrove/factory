@@ -1,0 +1,9 @@
+{
+  "_note": "Other names of Claude models, each mapped to Anthropic's API model id, so the cost report (report.mjs modelName) names each model once. GitHub Copilot's model catalog writes a Claude model's version with a dot (`claude-sonnet-5.5`), Anthropic's API with a hyphen (`claude-sonnet-5-5`). Only the ids listed here are renamed: any other id stays as recorded, so an API id that has a dot in its own right (`claude-2.1`) is never touched. Add a row when a record names a Claude model under a catalog id not listed here.",
+  "date": "2026-11-17",
+  "sources": ["https://docs.github.com/en/copilot/reference/ai-models/supported-models", "https://docs.anthropic.com/en/docs/about-claude/models/overview"],
+  "aliases": {
+    "claude-opus-5.5": "claude-opus-5-5",
+    "claude-sonnet-5.5": "claude-sonnet-5-5"
+  }
+}

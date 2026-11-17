@@ -401,7 +401,8 @@ export const coversLine = (r) => {
  * to that record (when it has none) and it is dropped. A record that is no stand-in takes the sandbox cost of a comment
  * it stands for when it has none of its own. A record that names no comment counts beside the comments, but a
  * figure is never counted twice: a record with no `progressRun` field beside an unnamed comment of its stage with
- * dollars may be that stage, so its dollars are unknown there (UNKNOWN_WHY `unmatched`).
+ * dollars may be that stage, so its dollars are unknown there (UNKNOWN_WHY `unmatched`; the record is marked
+ * `unmatched`: a reader takes none of its dollars, tokens or per-pass ledger).
  */
 export const withLines = (records = [], lines = []) => {
   const covers = coversLine;
@@ -434,7 +435,7 @@ export const withLines = (records = [], lines = []) => {
   // A record that cannot say which comment is its own, beside an unnamed comment of its stage with dollars: unknown there.
   const unsure = (r) => !Object.hasOwn(r, "progressRun") && !lines.some(covers(r)) && rest.some((l) => stageOf(l) === stageOf(r) && typeof l.usd === "number" && l.usd > 0);
   const known = (r) => r.runs !== 0 && ((typeof r.usd === "number" && r.usd > 0) || (r.harness === "codex" && (r.tokens?.input ?? null) !== null));
-  const counted = out.map((r) => (unsure(r) && known(r) ? { ...r, usd: null, tokens: { input: null, output: null, cached: null, written: null }, subAgents: undefined, workerKeyUsd: undefined, usdByBilling: undefined, usdUnknown: Math.max(1, Number.isInteger(r.usdUnknown) ? r.usdUnknown : 0), usdUnknownWhy: [...new Set([...(Array.isArray(r.usdUnknownWhy) ? r.usdUnknownWhy : []), "unmatched"])] } : r));
+  const counted = out.map((r) => (unsure(r) && known(r) ? { ...r, usd: null, tokens: { input: null, output: null, cached: null, written: null }, subAgents: undefined, workerKeyUsd: undefined, usdByBilling: undefined, usdUnknown: Math.max(1, Number.isInteger(r.usdUnknown) ? r.usdUnknown : 0), usdUnknownWhy: [...new Set([...(Array.isArray(r.usdUnknownWhy) ? r.usdUnknownWhy : []), "unmatched"])], unmatched: true } : r));
   return [...counted, ...rest];
 };
 
@@ -482,9 +483,16 @@ export function stageSpendRecords(n, stages = [], vendors = [], { all = false } 
     // The model's runs of unknown cost: the progress line's; a vendor comment standing alone counts the sandbox's own in
     // its line too (vendorBody), which `vendor` above carries, so that one is not counted twice.
     const lineUnknown = unknownIn(spend);
-    const modelUnknown = own && lineUnknown.usdUnknown && sandboxUnknown ? (lineUnknown.usdUnknown > 1 ? { usdUnknown: lineUnknown.usdUnknown - 1, usdUnknownWhy: lineUnknown.usdUnknownWhy.filter((w) => w !== "sandbox") } : {}) : lineUnknown;
+    let modelUnknown = own && lineUnknown.usdUnknown && sandboxUnknown ? (lineUnknown.usdUnknown > 1 ? { usdUnknown: lineUnknown.usdUnknown - 1, usdUnknownWhy: lineUnknown.usdUnknownWhy.filter((w) => w !== "sandbox") } : {}) : lineUnknown;
     // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
-    const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
+    let modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
+    // A vendor comment standing alone carries its stage's model dollars as `modelUsd` (logic.mjs vendorBody); with none,
+    // and no model run of unknown cost beside it (its usage record could not be read), the model's spend is one run of
+    // unknown cost, as the finish card counts it (finish-card.mjs objectiveStages), never $0.
+    if (own && spend && num(spend.modelUsd) === null) {
+      modelUsd = null;
+      if (!modelUnknown.usdUnknown) modelUnknown = { usdUnknown: 1, usdUnknownWhy: ["unreported"] };
+    }
     out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), ...(spend?.limitPaused === true ? { limitPaused: true } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(Object.keys(billingRead(spend?.usdByBilling)).length ? { usdByBilling: billingRead(spend.usdByBilling), ...(billingCode(spend.billing) ? { billing: spend.billing } : {}) } : {}), ...modelUnknown, tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, progressRun: String(id), basis: spend ? "pendulum:spend line (the worker's own pricing)" : "unknown: no pendulum:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });
   }
   // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.

@@ -18,7 +18,7 @@ import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
 import { preparePendulumHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
-import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
+import { COLUMNS, collaboratorPermission, findProject, getRepo, ghLoginToken, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { APP_ID_VARIABLE, appIdVariable, PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
@@ -30,6 +30,7 @@ import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { ROUTE_CREDENTIAL_INPUTS, ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeAccountsText, routeAutoSetting, routeCredentialEnv, routeCredentialSecrets, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
 import { LOCAL_DOMAINS, PREVIOUS_NAME, TOKEN_LINK_FIX, pendulumKeyDir, previousKeyDirProblem, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { parseYaml, workflowEvents, writeGrants } from "./lib/yaml.mjs";
+import { appIdSetLine, appIdWhyText, learnAppId } from "./lib/app-id.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, promoCodex, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
@@ -681,6 +682,28 @@ export function appIdVariableCheck({ variable, appId, repo }) {
   if (variable === null || variable === undefined || String(variable).trim() === "") return WARN("app id variable", `the repository variable ${APP_ID_VARIABLE} is not set, so \`pendulum report\` cannot tell Pendulum's App's comments from another App's without --app`, fix);
   if (String(variable).trim() !== id) return WARN("app id variable", `the repository variable ${APP_ID_VARIABLE} names another App than the app_id input`, fix);
   return PASS("app id variable", `${APP_ID_VARIABLE} names the App the jobs run as`);
+}
+
+/**
+ * Local mode (#564): the repository variable PENDULUM_APP_ID, from the variables list doctor read (`listed`), else, the
+ * list refused, read alone with the gh login's token (`fallback`, unless it is `token`, the one refused), and its local
+ * copy for `pendulum report` saved or brought up to date (lib/app-id.mjs learnAppId). A WARN, with the `gh variable set` line, when it is not set; a WARN when
+ * neither token may read it and no local copy is there; a WARN for a copy whose place is not safe.
+ */
+export async function localAppIdCheck({ repo, listed, token = null, fallback = ghLoginToken, home = homedir() }) {
+  const name = "app id variable";
+  const fix = `${appIdSetLine(repo.full)} (setup's app step writes it for a new App)`;
+  let r;
+  try {
+    r = await learnAppId(repo, { listed, token, fallback, home });
+  } catch (e) {
+    return WARN(name, `${APP_ID_VARIABLE} was not read (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)})`, "run doctor again");
+  }
+  const copy = r.copy ? `; \`pendulum report\` takes the local copy, ${r.copy} (${r.file}), meanwhile` : "";
+  if (r.problem) return WARN(name, `the local copy of Pendulum's App id for \`pendulum report\` is not taken: ${r.problem}`, "fix it as said, then run doctor again: it saves the copy");
+  if (r.from === "unset") return WARN(name, `the repository variable ${APP_ID_VARIABLE} ${appIdWhyText(r)}, so \`pendulum report\` cannot tell Pendulum's App's comments from another App's without --app${copy}`, fix);
+  if (r.from === "forbidden") return r.copy ? PASS(name, `${APP_ID_VARIABLE} could not be read (neither the local token nor a gh login may read the repository's variables); \`pendulum report\` takes the local copy, ${r.copy} (${r.file})`) : WARN(name, `${APP_ID_VARIABLE} could not be read: neither the local token nor a gh login may read the repository's variables, so \`pendulum report\` has no App id (app-unreadable) and no local copy was saved`, "log in with gh (gh auth login) or give the local token Variables: read, then run doctor again");
+  return PASS(name, `${APP_ID_VARIABLE} is ${r.id}${r.from === "variable-gh" ? " (read with the gh login: the local token may not read it)" : ""}; its local copy for \`pendulum report\` is ${r.file}${r.saved ? " (saved now)" : ""}`);
 }
 
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.PENDULUM_ACCOUNTS }) {
@@ -2312,17 +2335,21 @@ export function localDomainChecks({ inputs, env = process.env, local }) {
  * `varsToken` (local mode's token in local mode, as serve lists them; a token that may not is a WARN with the fix, and
  * the workflow's values stand); this shell wins over both. GitHub's copy unreadable: the checkout's copy if there is
  * one, and one WARN naming the harness that leaves. `committed`: local mode's read of the clone (local.mjs
- * committedWorkflowEnv), or null. Returns {wf, committed, env, stage, inputs, layers, checks}: `stage`, the settings a local
+ * committedWorkflowEnv), or null. Returns {wf, committed, env, stage, inputs, layers, listed, checks}: `listed`, the
+ * variables list as read (github.mjs repositoryVariables), or null; `stage`, the settings a local
  * stage reads (local.mjs baseEnv: this shell's own settings only, inputs.mjs machineSettings, over the repository's).
  */
 export async function doctorSettings({ args, checkout, repo, token, varsToken = token, committed = null, env = process.env, local = false }) {
   const checks = [];
   let variables = {};
+  // The list as read ({vars} or {refused: status}), for the App id row (localAppIdCheck); null when it was not read.
+  let listed = null;
   if (!env.GITHUB_ACTIONS) {
     const who = local ? "the local token" : "doctor's token";
     const fix = local ? "give the local token Variables: read (docs/LOCAL.md, Set it up)" : "run doctor with a gh login that can read the repository's variables (an admin's), or with --local and local mode's token";
     try {
       const r = await repositoryVariables(repo, { token: varsToken });
+      listed = r;
       if (r.refused) checks.push(WARN("repository variables", `${who} cannot read the repository's variables (HTTP ${r.refused}), so the checks take the workflow's values${local ? " and so does local mode on this machine" : ""}`, fix));
       else {
         variables = r.vars;
@@ -2339,7 +2366,7 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
     // What a local stage reads, as serve's baseEnv builds it: the repository's settings, under this shell's own
     // (inputs.mjs machineSettings) only.
     const stage = env.GITHUB_ACTIONS ? env : { ...settingLayers({ workflow: workflowSettings(wf).kept, variables }).values, ...machineSettings(env) };
-    return { wf, committed: from, env: merged, stage, inputs: resolveInputs({ args, env: merged }), layers, checks: [...more, ...checks] };
+    return { wf, committed: from, env: merged, stage, inputs: resolveInputs({ args, env: merged }), layers, listed, checks: [...more, ...checks] };
   };
   if (env.GITHUB_ACTIONS || args.checkout || (committed && !committed.noClone)) return settle(committed ? committed.wf : readWorkflowEnv(checkout), committed);
   const path = ".github/workflows/pendulum.yml";
@@ -2436,7 +2463,7 @@ async function main() {
     }
   }
   const varsToken = ownToken || token;
-  const { wf, committed, env, stage, inputs, layers, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
+  const { wf, committed, env, stage, inputs, layers, listed, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
   const results = [defaultsCheck(inputs), ...(previous ? [FAIL("key folder", previous, `mv ${join(homedir(), ".config", PREVIOUS_NAME)} ${pendulumKeyDir(homedir())}`)] : []), ...(linked ? [linked] : []), ...source, ...settingsRows(layers, { verbose: !!args.verbose }), ...ownerLimitChecks({ inputs, local, stage })];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
@@ -2456,6 +2483,7 @@ async function main() {
   if (app?.error) results.push(FAIL("app token", app.error, "check PENDULUM_APP_ID, the private key, and that the App is installed on this repository"));
   const appVar = process.env.GITHUB_ACTIONS && !local ? appIdVariableCheck({ variable: appIdVariable(), appId: pre.appId, repo }) : null;
   if (appVar) results.push(appVar);
+  if (local && !process.env.GITHUB_ACTIONS && listed) results.push(await localAppIdCheck({ repo, listed, token: varsToken }));
   // The accounts for GitHub Actions and the cloud sandbox: the workflow's own env block (never a variable), as its jobs read it.
   const accounts = process.env.GITHUB_ACTIONS ? process.env.PENDULUM_ACCOUNTS : wf.PENDULUM_ACCOUNTS;
   const autoAccount = process.env.GITHUB_ACTIONS ? process.env.PENDULUM_AUTO_ACCOUNT : wf.PENDULUM_AUTO_ACCOUNT;

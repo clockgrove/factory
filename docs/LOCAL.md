@@ -39,6 +39,10 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
 
    Save it with `pendulum token set` in the clone: it asks for the token without echoing it (or reads it from stdin) and writes it, owner-only, to `~/.config/pendulum/tokens/OWNER/NAME`, where local mode reads it; or export `PENDULUM_LOCAL_TOKEN`.
 
+   Pendulum's App id, which `pendulum report` needs to tell the App's comments from another App's, is no secret, so it is kept apart from the token: setup's app step, and each `serve` start and `doctor` run here that reads the repository variable `PENDULUM_APP_ID`, save it (or bring it up to date) to `~/.config/pendulum/repos/OWNER/NAME.json` (`{"appId": N}`, readable, mode 644, in owner-only folders). At `serve`'s start, that read never holds the start: when it goes through the `gh` login, a rate limit ends it at once and it gives up after 15 seconds, and `pendulum report` then reads the id itself.
+   When the local token may not read variables, they read that one variable with your `gh` login's token instead (`gh auth token`, never printed; not when it is the local token itself); doctor warns when the variable is not set, naming its `gh variable set` line.
+   The report takes the copy only when the variable gives no id, says on stderr that it is unverified, and never takes one behind a symbolic link, of another user, or that others may write, or in a folder others may write.
+
    `~/.config/pendulum` is the one key folder the sandboxes hide. While the key folder of the product's previous name is still in `~/.config`, no sandbox hides it, so `pendulum serve`, `pendulum run` and doctor refuse to start and print the `mv` that fixes it: move that folder to `~/.config/pendulum`, never copy it.
 
    Local mode checks the token's reach before it uses it:
@@ -1096,7 +1100,7 @@ A pinned package manager it cannot resolve is a FAIL, and a repository tool Clau
 - Without the optional Projects permission, the token cannot move Project cards, so labels carry the state.
 - `PENDULUM_LOCAL_DB` is Linux and WSL2 only.
 - Renaming the repository needs two steps by hand:
-  - Move the token file to the new name, `~/.config/pendulum/tokens/OWNER/NEW-NAME`.
+  - Move the token file to the new name, `~/.config/pendulum/tokens/OWNER/NEW-NAME`; the App id's copy, `~/.config/pendulum/repos/OWNER/NEW-NAME.json`, is saved again by the next `serve` or `doctor`.
   - The board keeps its node id, which the workflow's `PENDULUM_PROJECT` names, so Pendulum still finds it.
     A workflow that records no id finds the board by its exact title `Pendulum: <repository>`: rename the board `Pendulum: NEW-NAME` there, then `setup --apply project,workflow` records its id; or set `PENDULUM_PROJECT` to the board's node id in the workflow's env block yourself.
     setup's project step alone writes nothing to the workflow (it prints the line to add), and run before the board has the new title it makes a second, empty board.

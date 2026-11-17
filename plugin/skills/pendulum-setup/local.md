@@ -1,6 +1,6 @@
 # Local mode: set it up
 
-Local mode runs Pendulum's worker and reviewer on the user's machine, on its harness login, every command in a sandbox. Walk these steps with the user, one at a time: each is theirs to do, on their machine. Never ask for, read or print a token, key or login, and never open a file under `~/.config/pendulum`. Every command here is the one Pendulum's local-mode guide gives; point a person who wants the whole guide to [Local mode](https://github.com/clockgrove/pendulum/blob/v0.9.37/docs/LOCAL.md#set-it-up).
+Local mode runs Pendulum's worker and reviewer on the user's machine, on its harness login, every command in a sandbox. Walk these steps with the user, one at a time: each is theirs to do, on their machine. Never ask for, read or print a token, key or login, and never open a file under `~/.config/pendulum`. Every command here is the one Pendulum's local-mode guide gives; point a person who wants the whole guide to [Local mode](https://github.com/clockgrove/pendulum/blob/v0.10.0/docs/LOCAL.md#set-it-up).
 
 ## The platform
 

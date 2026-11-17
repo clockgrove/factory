@@ -8,12 +8,13 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CONCURRENCY, FINDING_QUESTION, checkAnswers, findingInput, openFindingCheck, resolves } from "../scripts/lib/finding-check.mjs";
+import { CONCURRENCY, FINDING_QUESTION, INPUT_CAPS, checkAnswers, decisionsPart, findingInput, openFindingCheck, resolves } from "../scripts/lib/finding-check.mjs";
+import { dropHeldSecrets, holdSecrets } from "../scripts/lib/inputs.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { postReplies } from "../scripts/lib/handoff.mjs";
 import { decideExit, marker, reviewBody, setSelf } from "../scripts/lib/logic.mjs";
 import { openOutbox } from "../scripts/lib/outbox.mjs";
-import { ANSWER_ROUNDS, FINDING_CHECK_TRIES, answerDiff, checkState, openFindingsExit, readAnswerRounds, unaddressedReviewComments } from "../scripts/lib/session.mjs";
+import { ANSWER_ROUNDS, FINDING_CHECK_TRIES, answerDiff, checkState, objectiveDecisions, openFindingsExit, readAnswerRounds, unaddressedReviewComments } from "../scripts/lib/session.mjs";
 import { MIN_CONFIDENCE } from "../scripts/lib/triage.mjs";
 import { findingCheckRow } from "../scripts/doctor.mjs";
 import { CODE_SCANNING, answeredReviewers } from "../scripts/lib/third-party-review.mjs";
@@ -28,8 +29,8 @@ const app = { login: SELF, type: "Bot" };
  * GitHub for Objective 7's PR 12: Factory's review (id 1) and its line comments, code scanning's, the PR's and the issue's
  * comments, the review threads (one per root line comment, resolved as `resolved` says) and the writes made.
  */
-function github({ lineComments = [], reviews = [{ id: 1, user: app, author_association: "NONE", body: "<!-- factory:7:review -->\nFactory reviewer: one comment-only pass." }] } = {}) {
-  const state = { lineComments, reviews, prComments: [], issueComments: [], resolved: new Set(), labels: [], writes: [] };
+function github({ lineComments = [], reviews = [{ id: 1, user: app, author_association: "NONE", body: "<!-- factory:7:review -->\nFactory reviewer: one comment-only pass." }], writers = null, me = app } = {}) {
+  const state = { lineComments, reviews, prComments: [], issueComments: [], resolved: new Set(), labels: [], writes: [], writers, me };
   let id = 50_000;
   const node = (c) => ({ databaseId: c.id, body: c.body, authorAssociation: c.author_association || "NONE", author: { __typename: c.user.type === "Bot" ? "Bot" : "User", login: c.user.login.replace(/\[bot\]$/, "") }, pullRequestReview: c.pull_request_review_id ? { body: state.reviews.find((r) => r.id === c.pull_request_review_id)?.body || "", authorAssociation: "NONE", author: { __typename: "Bot", login: "factory-app" } } : null });
   const threads = () =>
@@ -55,14 +56,14 @@ function github({ lineComments = [], reviews = [{ id: 1, user: app, author_assoc
     if (method === "GET" && p === "/pulls/12/comments") return json(state.lineComments);
     if (method === "GET" && p === "/pulls/12/reviews") return json(state.reviews);
     if (method === "POST" && (m = /^\/pulls\/12\/comments\/(\d+)\/replies$/.exec(p))) {
-      const c = { id: id++, in_reply_to_id: Number(m[1]), user: app, author_association: "NONE", body: body.body };
+      const c = { id: id++, in_reply_to_id: Number(m[1]), user: state.me, author_association: "NONE", body: body.body };
       state.lineComments.push(c);
       return json(c, 201);
     }
     const list = (n) => (n === "12" ? state.prComments : state.issueComments);
     if (method === "GET" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) return json(list(m[1]));
     if (method === "POST" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) {
-      const c = { id: id++, user: app, author_association: "NONE", body: body.body, created_at: new Date().toISOString() };
+      const c = { id: id++, user: state.me, author_association: "NONE", body: body.body, created_at: new Date().toISOString() };
       list(m[1]).push(c);
       return json(c, 201);
     }
@@ -72,6 +73,9 @@ function github({ lineComments = [], reviews = [{ id: 1, user: app, author_assoc
       return json(c);
     }
     if (method === "GET" && /^\/issues\/7\/timeline$/.test(p)) return json(state.timeline || []);
+    // The repository's writers (`writers`, logins with push access); anyone else's permission reads as `read`.
+    if (method === "GET" && state.writers && p === "/collaborators") return json(state.writers.map((login) => ({ login })));
+    if (method === "GET" && state.writers && (m = /^\/collaborators\/([^/]+)\/permission$/.exec(p))) return json({ permission: state.writers.includes(decodeURIComponent(m[1])) ? "write" : "read" });
     if (method === "POST" && p === "/issues/12/labels") {
       state.labels.push(...body.labels);
       return json([]);
@@ -81,12 +85,12 @@ function github({ lineComments = [], reviews = [{ id: 1, user: app, author_assoc
   return { fetch, state };
 }
 
-async function withGitHub(gh, fn) {
+async function withGitHub(gh, fn, self = SELF) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
   globalThis.fetch = gh.fetch;
-  setSelf(SELF);
+  setSelf(self);
   try {
     return await fn();
   } finally {
@@ -242,6 +246,10 @@ test("#368: a rebuttal resolves only at triage's confidence floor; a fix needs n
   assert.equal(resolves({ verdict: "rebutted", confidence: MIN_CONFIDENCE - 0.01 }), false);
   assert.equal(resolves({ verdict: "rebutted", confidence: null }), false, "no confidence is no rebuttal");
   assert.equal(resolves({ verdict: "unresolved", confidence: 1 }), false);
+  // #474: a finding a maintainer's decision settles is a judgement too, so it needs the floor.
+  assert.equal(resolves({ verdict: "decided", confidence: MIN_CONFIDENCE }), true);
+  assert.equal(resolves({ verdict: "decided", confidence: MIN_CONFIDENCE - 0.01 }), false);
+  assert.equal(resolves({ verdict: "decided", confidence: null }), false);
 });
 
 test("#368: only a reply by someone who can push answers Factory's finding; a stranger's does not", async () => {
@@ -433,4 +441,219 @@ test("#368: the review stage judges answers the last stage got no verdict on fir
   assert.ok(judged > listed && judged < src.indexOf("await resolveFactoryThreads(repo, pr.number"), "judged before the threads are resolved");
   assert.match(src, /diffOf: \(from\) => answerDiff\(outbox\.git, \{ base: outbox\.base, from, head \}\), since: reviewedAt/);
   assert.match(src, /if \(decision\.findingsOpen && [^\n]*decideExit\(\{ \.\.\.exitArgs, reviewUnaddressed: 0 \}\)\.exit === "delivered"\) await openFindingsExit\(decision, \{[^\n]*unjudged, decider: findingCheck\.asked\?\.\(\) \?\? null, limit: findingCheck\.limited\?\.\(\) \?\? null \}, token\);\n[^\n]*\n[^\n]*\n  if \(decision\.usageLimit\) throw new UsageLimitReached\(decision\.usageLimit/);
+});
+
+/** The decisions part of a finding check question (findingInput), or null when it has none. */
+const partOf = (input) => /\nDecisions recorded on the issue[^\n]*\n<<<BEGIN (\w+)>>>\n([\s\S]*?)\n<<<END \1>>>/.exec(input)?.[2] ?? null;
+const replyPart = (input) => /\nThe author's reply:\n<<<BEGIN (\w+)>>>\n([\s\S]*?)\n<<<END \1>>>/.exec(input)?.[2] ?? null;
+const SETTLES = "Treat that acceptance entry as done by the owner after merge";
+const OWNER = { login: "owner-kim", type: "User", id: 41 };
+/**
+ * A decider that reads a decision only where the question puts the maintainers' decisions, as the question tells the
+ * model to: `decided` when that part holds `phrase` (a decision that speaks to this finding), else `unresolved`. The
+ * reply quoting a decision counts for nothing. Whether a real model reads a broad or stale decision so is the
+ * instrument run's to show, not this fake's.
+ */
+function decisionReader(phrase = SETTLES, unless = null) {
+  const asked = [];
+  return {
+    asked,
+    name: "fake",
+    model: "fake/decider",
+    async decide(input, question) {
+      asked.push({ input, question });
+      const part = partOf(input) ?? "";
+      return { verdict: part.includes(phrase) && !(unless && part.includes(unless)) ? "decided" : "unresolved", confidence: 0.9 };
+    },
+  };
+}
+
+/**
+ * #474, as on clockgrove#355: the reviewer's finding (`finding`, by default one on an acceptance entry no commit can meet,
+ * an edit to another issue) is still open after both answer rounds; `author` then posts `decision` on the issue, the
+ * worker's reply cites it, and the last stage judges the reply with the decisions the stage read (objectiveDecisions).
+ * `self` and `me`: the login Factory posts as (local mode: the developer's). Returns what the check was asked, what it
+ * resolved, the findings left open and the stage's exit.
+ */
+async function decisionAfterRounds(author, { decision = `Owner decision (2026-11-16): the owner session ticks #347's five items after the PR merges. ${SETTLES}, say so in the PR body, and go on without asking.`, finding = null, phrase = SETTLES, unless = null, self = SELF, me = app, writers = ["owner-kim"], reviews = undefined, issueComments = [], prComments = [] } = {}) {
+  const raised = finding ?? { ...root(100, "docs/review.md", 88, "acceptance 2: #347's five items are not ticked, and no change in this PR ticks them. FINDING-TICK"), created_at: "2026-11-16T21:57:33Z" };
+  const gh = github({ lineComments: [raised], writers, me, ...(reviews ? { reviews } : {}) });
+  gh.state.issueComments.push({ id: 900, user: OWNER, author_association: "MEMBER", body: "Owner: the merge queue's red is main's own, not this PR's.", created_at: "2026-11-16T18:57:12Z" }, ...issueComments);
+  gh.state.prComments.push(...prComments);
+  gh.state.issueComments.push({ id: 901, user: author, author_association: writers.includes(author.login) ? "MEMBER" : "NONE", body: decision, created_at: "2026-11-16T22:37:31Z" });
+  const ctx = { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "factory:objective" };
+  const where = { id: raised.id, path: raised.path, line: raised.line };
+  return withGitHub(
+    gh,
+    async () => {
+      // Each round is recorded by its time to the millisecond (rounds taken in the same one are one), so a moment apart.
+      for (let round = 1; round <= ANSWER_ROUNDS; round += 1) {
+        assert.equal((await openFindingsExit(exitFor(1), { ...ctx, open: [where] }, { token: "t" })).rerun, true);
+        await new Promise((r) => setTimeout(r, 3));
+      }
+      const toAnswer = await list();
+      assert.deepEqual(toAnswer.map((c) => c.id), [raised.id]);
+      const replies = JSON.stringify([{ id: raised.id, body: `Rebuttal, naming the owner's recorded decision on #7: "${SETTLES}". No commit can tick another issue's checklist.` }]);
+      await postReplies(REPO, 12, 7, replies, [raised.id], { token: "t" });
+      const decisions = await objectiveDecisions(REPO, { issue: 7, prNumber: 12 }, { token: "t" }, { strict: true });
+      const fake = decisionReader(phrase, unless);
+      const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: toAnswer, repliesText: replies, check: openFindingCheck({ decider: fake }), diffOf, since: RAISED, issueBody: "## Acceptance\n1. the review doc records the hashes\n2. #347 ticks these five items", decisions, opts: { token: "t" } });
+      const open = await list();
+      const decision = exitFor(open.length);
+      const exit = decision.findingsOpen ? await openFindingsExit(decision, { ...ctx, open }, { token: "t" }) : decision;
+      return { gh, decisions, input: fake.asked[0]?.input ?? "", out, open, exit };
+    },
+    self,
+  );
+}
+
+test("#474: a recorded owner decision settles a finding re-raised past the answer rounds: the finding check reads it as decided, resolves the thread, and the stage does not Block", async () => {
+  const { gh, decisions, input, out, open, exit } = await decisionAfterRounds(OWNER);
+  assert.deepEqual(decisions.map((d) => [d.author, d.key, d.on]), [["owner-kim", "comment:900", "issue"], ["owner-kim", "comment:901", "issue"]]);
+  // The check is given the decisions as data, each with its author, time and place, in their own fenced part, and the
+  // finding with the time it was raised, so the model can weigh one against the other.
+  assert.match(partOf(input) ?? "", /^owner-kim, 2026-11-16 18:57Z, on the issue:\nOwner: the merge queue's red is main's own[\s\S]*\n\nowner-kim, 2026-11-16 22:37Z, on the issue:\nOwner decision \(2026-11-16\)/);
+  assert.match(input, /Finding by Factory's reviewer, at docs\/review\.md:88, raised 2026-11-16 21:57Z:\n/);
+  assert.ok(FINDING_QUESTION.choices.some((c) => c.value === "decided"));
+  assert.deepEqual(out, { resolved: [100], open: [], unjudged: [] });
+  assert.deepEqual([...gh.state.resolved], ["T100"]);
+  assert.deepEqual(open, []);
+  assert.equal(exit.exit, "delivered");
+  assert.equal(exit.findingsOpen, undefined);
+  assert.equal(exit.rerun, undefined);
+});
+
+test("#474: the same decision text from a commenter without write access settles nothing: it never reaches the check's decisions, and the stage Blocks past the answer rounds", async () => {
+  const { gh, decisions, input, out, open, exit } = await decisionAfterRounds({ login: "drive-by", type: "User", id: 77 });
+  assert.deepEqual(decisions.map((d) => [d.author, d.key]), [["owner-kim", "comment:900"]], "only the writer's comment is a decision");
+  // The check gets the writers' decisions only; the drive-by's text reaches it only inside the reply, which settles nothing.
+  const part = partOf(input);
+  assert.match(part ?? "", /^owner-kim, 2026-11-16 18:57Z, on the issue:\nOwner: the merge queue's red is main's own/);
+  assert.doesNotMatch(part, /done by the owner after merge/);
+  assert.match(replyPart(input), /done by the owner after merge/);
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [] });
+  assert.deepEqual([...gh.state.resolved], []);
+  assert.deepEqual(open.map((c) => c.id), [100]);
+  assert.equal(exit.exit, "blocked");
+  assert.match(exit.reason, new RegExp(`^1 reviewer finding\\(s\\) still open on PR #12 after ${ANSWER_ROUNDS} answer round\\(s\\): docs/review\\.md:88\\.`));
+});
+
+test("#474: a broad approval posted before an unrelated finding settles nothing; the question says general approval is no decision, a later decision stands, and doubt is unresolved", async () => {
+  const finding = { ...root(100, "src/auth.ts", 14, "AGENTS.md rule 2: the session token is written to the log. FINDING-LOG"), created_at: "2026-11-16T23:30:00Z" };
+  const { input, out, open, exit } = await decisionAfterRounds(OWNER, { decision: "LGTM, ship it.", finding, phrase: "src/auth.ts" });
+  assert.match(partOf(input), /owner-kim, 2026-11-16 22:37Z, on the issue:\nLGTM, ship it\./);
+  assert.match(input, /at src\/auth\.ts:14, raised 2026-11-16 23:30Z:/, "the finding is later than the approval, and the question shows both times");
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [] });
+  assert.equal(exit.exit, "blocked");
+  const { instructions } = FINDING_QUESTION;
+  assert.match(instructions, /settles a finding only when it speaks to the very thing this finding asks: its acceptance entry, rule, file or behaviour/);
+  assert.match(instructions, /General approval or encouragement \("LGTM", "ship it", "go on"\) settles nothing/);
+  assert.match(instructions, /Where two decisions conflict, the later one stands/);
+  assert.match(instructions, /When in doubt, answer unresolved/);
+  assert.match(FINDING_QUESTION.choices.find((c) => c.value === "decided").description, /General approval is no such decision/);
+});
+
+test("#474: a maintainer's decision never settles code scanning's alert, whatever the model answers", async () => {
+  const progress = [];
+  const gh = github({ lineComments: [alert], writers: ["owner-kim"] });
+  gh.state.issueComments.push({ id: 901, user: OWNER, author_association: "MEMBER", body: "Owner decision: the prototype-polluting assignment in src/merge.ts is accepted; leave it.", created_at: "2026-11-16T22:37:31Z" });
+  await withGitHub(gh, async () => {
+    const toAnswer = await list();
+    assert.deepEqual(toAnswer.map((c) => [c.id, c.from]), [[300, CODE_SCANNING]]);
+    const replies = JSON.stringify([{ id: 300, body: "The owner accepted it on #7." }]);
+    await postReplies(REPO, 12, 7, replies, [300], { token: "t" });
+    const decisions = await objectiveDecisions(REPO, { issue: 7, prNumber: 12 }, { token: "t" }, { strict: true });
+    const fake = decisionReader("src/merge.ts is accepted");
+    const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: toAnswer, repliesText: replies, check: openFindingCheck({ inputs: { triageModel: "fake/decider" }, decider: fake }), diffOf, since: RAISED, decisions, opts: { token: "t" }, progress: async (l) => progress.push(l) });
+    assert.equal(fake.asked.length, 1, "the model answered decided");
+    assert.deepEqual(out, { resolved: [], open: [300], unjudged: [] });
+    assert.deepEqual([...gh.state.resolved], []);
+    assert.deepEqual((await list()).map((c) => c.id), [300]);
+    assert.deepEqual(progress, ["finding check (fake/decider): 0 of 1 answer(s) resolve their findings; still open: src/merge.ts:8"]);
+  });
+});
+
+test("#474: in local mode, where Factory posts as the developer, the developer's own decision settles the finding; Factory's review, replies and progress are not decisions", async () => {
+  const dev = { login: "kirk", type: "User", id: 9 };
+  const reviews = [{ id: 1, user: dev, author_association: "OWNER", body: "<!-- factory:7:review -->\nFactory reviewer: one comment-only pass.", submitted_at: "2026-11-16T21:57:00Z", state: "COMMENTED" }];
+  const finding = { ...root(100, "docs/review.md", 88, "acceptance 2: #347's five items are not ticked. FINDING-TICK"), user: dev, author_association: "OWNER", created_at: "2026-11-16T21:57:33Z" };
+  const progressComment = { id: 899, user: dev, author_association: "OWNER", body: "<!-- factory:7:progress:review:1 -->\nFactory review run 1: started.", created_at: "2026-11-16T21:50:00Z" };
+  const { gh, decisions, out, exit } = await decisionAfterRounds(dev, { finding, self: "kirk", me: dev, writers: ["kirk", "owner-kim"], reviews, issueComments: [progressComment] });
+  assert.ok(gh.state.lineComments.some((c) => c.in_reply_to_id === 100 && c.user.login === "kirk" && c.body.startsWith("<!-- factory:7:reply:100 -->")), "Factory's reply is posted as the developer");
+  assert.deepEqual(decisions.map((d) => d.key), ["comment:900", "comment:901"], "only the people's plain comments: no review, finding, reply or progress comment");
+  assert.deepEqual(out.resolved, [100]);
+  assert.equal(exit.exit, "delivered");
+});
+
+test("#474: the decisions part measures what it shows: each decision cut at its own cap, the newest kept, the issue's within its share, a count of those left out, dismissed reviews dropped, review states shown", () => {
+  const at = (m) => `2026-11-16T${String(10 + Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}:00Z`;
+  const d = (n, extra) => ({ author: "owner-kim", at: at(n), body: `decision ${n}`, key: `comment:${n}`, kind: "comment", state: null, ...extra });
+  // One long paste is cut at its own cap, not the part's.
+  const long = decisionsPart([d(1, { body: `start ${"x".repeat(5000)}`, on: "issue" })]).text;
+  assert.match(long, /^owner-kim, 2026-11-16 10:01Z, on the issue:\nstart x+\n\[cut at 2000 characters\]$/);
+  assert.equal(INPUT_CAPS.decision, 2000);
+  // The issue's decision, the oldest, outlived by PR chatter: kept ahead of it; the PR's newest whole ones fill the rest,
+  // none of them clipped, and the part says how many it left out.
+  const chatter = Array.from({ length: 8 }, (_, i) => d(10 + i, { body: `pr ${i} ${"y".repeat(1700)}`, on: "pr" }));
+  const { text: part, left } = decisionsPart([d(1, { body: SETTLES, on: "issue" }), ...chatter]);
+  assert.match(part, /^\(4 more decision\(s\), none of them the newest, are not shown for length\.\)\n\nowner-kim, 2026-11-16 10:01Z, on the issue:\nTreat that acceptance entry/);
+  assert.deepEqual(left.map((x) => x.key), ["comment:10", "comment:11", "comment:12", "comment:13"]);
+  assert.deepEqual([...part.matchAll(/\npr (\d) y+(?=\n\n|$)/g)].map((m) => m[1]), ["4", "5", "6", "7"], "the newest whole, oldest first");
+  assert.doesNotMatch(part, /\[cut at/);
+  assert.ok(part.length - part.indexOf("owner-kim") <= INPUT_CAPS.decisions, "what is measured is what is shown");
+  // A dismissed review's word is no decision; a review's state is shown with it.
+  const reviews = decisionsPart([d(1, { kind: "review", state: "DISMISSED", body: "Do it the other way." }), d(2, { kind: "line", state: "DISMISSED", body: "a.ts:3: no" }), d(3, { kind: "review", state: "CHANGES_REQUESTED", body: "Keep the old API.", on: "pr" })]).text;
+  assert.equal(reviews, "owner-kim, 2026-11-16 10:03Z, in a review of the pull request (review state CHANGES_REQUESTED):\nKeep the old API.");
+  assert.deepEqual(decisionsPart([d(1, { kind: "review", state: "DISMISSED" })]), { text: "(none recorded)", shown: [], left: [] });
+});
+
+const REVERSAL = "Reversal: tick #347 in this PR after all.";
+const longDecision = (id, at) => ({ id, user: OWNER, author_association: "MEMBER", body: `Notes ${id}: ${"x".repeat(1900)}`, created_at: at });
+
+test("#474: an issue waiver, then a newer reversal on the PR, then a window full of long issue decisions: the reversal still reaches the check, which then reads no waiver as standing", async () => {
+  const older = ["09:00", "09:10", "09:20", "09:30"].map((t, i) => longDecision(800 + i, `2026-11-16T${t}:00Z`));
+  const reversal = { id: 950, user: OWNER, author_association: "MEMBER", body: REVERSAL, created_at: "2026-11-16T22:45:00Z" };
+  const { input, out, exit } = await decisionAfterRounds(OWNER, { unless: REVERSAL, issueComments: older, prComments: [reversal] });
+  const part = partOf(input);
+  assert.match(part, /owner-kim, 2026-11-16 22:45Z, on the pull request:\nReversal: tick #347/, "the newest decision is always shown");
+  assert.match(part, new RegExp(SETTLES), "the issue's waiver, within its share");
+  assert.match(part, /^\(1 more decision\(s\), none of them the newest, are not shown for length\.\)/);
+  assert.doesNotMatch(part, /Notes 800:/, "the oldest issue decision is the one left out");
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [] });
+  assert.equal(exit.exit, "blocked");
+});
+
+test("#474: when a decision newer than the oldest one shown is left out for length, a decided verdict resolves nothing", async () => {
+  const reversal = { id: 950, user: OWNER, author_association: "MEMBER", body: REVERSAL, created_at: "2026-11-16T22:45:00Z" };
+  const chatter = ["23:00", "23:10", "23:20", "23:30", "23:40"].map((t, i) => longDecision(960 + i, `2026-11-16T${t}:00Z`));
+  const { decisions, input, out, exit } = await decisionAfterRounds(OWNER, { unless: REVERSAL, prComments: [reversal, ...chatter] });
+  const part = partOf(input);
+  // The issue's waiver is shown within its share; the reversal, older than the PR's newest, did not fit.
+  assert.match(part, new RegExp(SETTLES));
+  assert.doesNotMatch(part, /Reversal/);
+  // The fake model, seeing only the waiver, answers decided: the guard keeps the finding open.
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [] });
+  assert.equal(exit.exit, "blocked");
+  const { left } = decisionsPart(decisions);
+  assert.ok(left.some((d) => d.key === "comment:950"));
+});
+
+test("#474: a held secret in a decision never reaches the decision model, even where the decision's cap would cut through it", () => {
+  const secret = "sk-live-0123456789abcdef0123";
+  holdSecrets([secret]);
+  try {
+    const body = `${"z".repeat(1990)}${secret} and more`;
+    const input = findingInput({ repo: "acme/app", prNumber: 12, finding: { path: "a", line: 2, body: "b" }, reply: "r", diff: "", decisions: [{ author: "owner-kim", at: "2026-11-16T22:37:31Z", body, key: "comment:1", kind: "comment", on: "issue" }, { author: "owner-kim", at: "2026-11-16T22:40:00Z", body: `use ${secret} for the test`, key: "comment:2", kind: "comment", on: "issue" }] });
+    assert.doesNotMatch(input, /sk-live/);
+    assert.match(partOf(input), /use \*\*\* for the test/);
+  } finally {
+    dropHeldSecrets();
+  }
+});
+
+test("#474: the review stage gives the finding check the maintainers' decisions it read", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
+  assert.match(src, /\(\{ decisions, unread \} = await unreadNow\(repo, /);
+  assert.match(src, /await checkAnswers\(\{[^\n]*, rules: await findingRules\(head\), decisions, opts: token, progress \}\)/);
 });

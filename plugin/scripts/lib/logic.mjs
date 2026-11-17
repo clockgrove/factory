@@ -2445,7 +2445,7 @@ export function maintainerDecisions(comments) {
   return all
     .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim() && !factoryThread(c) && !(Date.parse(c.created_at) <= since))
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
-    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, kind: c.kind || "comment", state: stateOf(c), seen: latest(c.created_at, c.updated_at) }));
+    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, kind: c.kind || "comment", state: stateOf(c), seen: latest(c.created_at, c.updated_at), ...(c.on ? { on: c.on } : {}) }));
 }
 const REVIEW_BODY = /<!-- factory:\d+:review -->/;
 const latest = (...times) => times.filter((t) => Number.isFinite(Date.parse(t))).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;

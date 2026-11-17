@@ -1,6 +1,6 @@
 ---
 name: pendulum-restart
-description: "Restart one Clockgrove Pendulum Objective from its issue's current text, in any state, on the user's yes: applies the pendulum:restart label, which stops a running stage and discards the earlier plan, branch and pull request. Use when the user asks to restart, redo or start over a Clockgrove Pendulum Objective, or says one was built from the wrong text. Not for pausing one (pendulum-stop), or letting one go on after a fix or an answer (pendulum-status)."
+description: "Restart one Pendulum Objective from its issue's current text, in any state, on the user's yes: applies the pendulum:restart label, which stops a running stage and discards the earlier plan, branch and pull request. Use when the user asks to restart, redo or start over a Pendulum Objective, or says one was built from the wrong text. Not for pausing one (pendulum-stop), or letting one go on after a fix or an answer (pendulum-status)."
 ---
 
 # /pendulum:pendulum-restart <issue>

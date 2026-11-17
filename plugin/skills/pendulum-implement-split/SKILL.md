@@ -1,6 +1,6 @@
 ---
 name: pendulum-implement-split
-description: "Internal: the second stage of a Clockgrove Pendulum worker run, loaded only when a Pendulum task card names it. Implements the plan's checklist with implementer sub-agents on the pinned model, runs disjoint-file items concurrently, integrates once, and splits an Objective too large for one session into sequential PRs."
+description: "Internal: the second stage of a Pendulum worker run, loaded only when a Pendulum task card names it. Implements the plan's checklist with implementer sub-agents on the pinned model, runs disjoint-file items concurrently, integrates once, and splits an Objective too large for one session into sequential PRs."
 user-invocable: false
 ---
 

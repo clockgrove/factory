@@ -1,6 +1,6 @@
 ---
 name: pendulum-objective-plan
-description: "Internal: the first stage of a Clockgrove Pendulum worker run, loaded only when a Pendulum task card names it. Reads the Objective's issue, writes the plan before any code, records every assumption and applies the Question rule."
+description: "Internal: the first stage of a Pendulum worker run, loaded only when a Pendulum task card names it. Reads the Objective's issue, writes the plan before any code, records every assumption and applies the Question rule."
 user-invocable: false
 ---
 

@@ -24,7 +24,7 @@ import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } 
 import { APP_ID_VARIABLE, DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
 import { FINDING_OUTCOMES, STATE_LABELS, findingsOf, ledgerOfComment, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { labelTime, pendulumOwn, throughApp } from "./finish-card.mjs";
-import { BILLING, BILLING_WORDS, UNKNOWN_WHY, billingRead, codexRow } from "./usage.mjs";
+import { BILLING, BILLING_WORDS, UNKNOWN_WHY, billingRead, codexRow, longShare, sumLong } from "./usage.mjs";
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
 import { labelsVouched } from "./objective-trust.mjs";
 import { spread } from "./spread.mjs";
@@ -687,6 +687,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   const totals = zeroCost();
   const totalTokens = zeroTokens();
   const unknownItems = [];
+  const mixes = mixBook(prices?.longContextAbove);
   const views = { stage: breakdown(), pass: breakdown(), model: breakdown(), harness: breakdown(), version: breakdown(), account: breakdown() };
   const passMinutes = new Map();
   const cacheByKind = new Map();
@@ -842,6 +843,14 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       views.stage.add(stageKind, c, tokens, count);
       views.harness.add(harness, c, tokens, count);
       views.model.add(model, c, tokens, count);
+      // The token mix `--rates` weighs: a stage's whole tokens from its record when one is at hand (with its long-context
+      // share and its sub-agent threads), else as the model breakdown counts them.
+      if (rates && rec.source !== "decisions" && !rec.notStage && !rec.unattributed) {
+        const src = rec.source === "spend" ? recordOf ?? (localRec?.tokens ? localRec : null) : rec;
+        const whole = src?.tokens && typeof src.tokens === "object" ? src.tokens : tokens;
+        const sub = modelKey(line?.ran?.subagent) ?? modelKey(src?.ran?.subagent);
+        mixes.stage(model, whole, harness === "codex" && whole === src?.tokens ? { subs: src.subAgents ?? [] } : { unsplit: sub && sub !== model ? sub : null });
+      }
       views.version.add(rec.source === "decisions" ? "decisions" : version, c, tokens, count);
       if (by.includes("account")) views.account.add(rec.source === "decisions" ? "decisions" : account, c, tokens, count);
       if (rec.source !== "decisions" && !rec.notStage) {
@@ -956,7 +965,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       blockedOrUnmergedSpend: { rankBy: "stages", items: rank(objectives.filter((o) => o.outcome === "blocked" || o.outcome === "closed-unmerged").map((o) => ({ issue: o.issue, outcome: o.outcome, stages: o.stages.work + o.stages.rebase + o.stages.review, cost: o.cost })), "stages") },
     },
     comparison: scope.compare && read.arms ? comparisonOf(read.arms, objectives, armMeasures) : null,
-    rates: rates ? rateRatios(views.model.rows(), rates, tables, { at: now }) : null,
+    rates: rates ? rateRatios(mixes.rows(), rates, tables, { at: now }) : null,
     source: sourceOf(source, trust, missing, read),
   };
   return report;
@@ -1168,12 +1177,15 @@ function sourceOf(source, trust, missing, read) {
 
 /** What a rate ratio is, word for word as the harness labels it: no dollar unit, never a cost. */
 export const RATIO_WORDS = "ratio of published rates on the recorded token mix (no dollar unit)";
-/** Why a model or a pair of models has no rate ratio. */
+/** Why a model, a candidate or a pair of them has no rate ratio. */
 export const RATIO_WHY = Object.freeze({
-  "no-rate-table": "no published rate table of Pendulum's has this model (Anthropic's models have none: Claude Code reports its own dollars)",
+  "no-rate-table": "Pendulum holds no published rates for this model (it holds OpenAI's alone; Claude Code and Copilot report their own dollars)",
   "price-ended": "its rate in the table was a promotional one, which has ended",
   "other-vendor": "the two models are of different vendors, whose rates are never compared",
-  "no-tokens": "no input and output tokens recorded for this model",
+  "same-model": "the candidate is the recorded model itself",
+  "no-tokens": "a stage of this model has no input or output tokens recorded",
+  "sub-agents": "a stage's tokens include sub-agents on another model that no record splits out",
+  "long-context": "its tokens from requests over the long-context threshold are not known, or are not zero and one of the two models has no long-context rate",
 });
 
 /**
@@ -1182,67 +1194,111 @@ export const RATIO_WHY = Object.freeze({
  */
 export const rateTables = (prices) => [{ vendor: "openai", file: "codex-prices.json", table: prices }];
 
+const TOKEN_KEYS = ["input", "cached", "written", "output"];
+const noLong = () => ({ input: 0, cached: 0, written: 0, output: 0 });
+
+/**
+ * The recorded token mix of each model, for `--rates`: each stage's tokens under its model, as the model breakdown counts
+ * them, but a Codex stage's sub-agent threads (its record's `subAgents`) under each thread's own model, the rest under the
+ * stage's, as the cost join prices them (usage.mjs priceStage). A stage whose tokens no record splits (a progress comment's
+ * ledger line, or another harness's record) while its harness line names a sub-agent model other than its own marks both
+ * models `sub-agents`. `long` is the part of the mix from requests over `above` input tokens (usage.mjs longShare), summed
+ * over the stages, null once any stage's is not known. A stage with no input or output tokens marks its model `no-tokens`.
+ */
+function mixBook(above) {
+  const rows = new Map();
+  const row = (m) => {
+    if (!rows.has(m)) rows.set(m, { key: m, tokens: zeroTokens(), long: noLong(), why: new Set() });
+    return rows.get(m);
+  };
+  const add = (m, tokens, long) => {
+    const r = row(m);
+    if (num(tokens?.input) === null || num(tokens?.output) === null) r.why.add("no-tokens");
+    addTokens(r.tokens, tokens);
+    r.long = r.long && long ? sumLong([r.long, long]) : null;
+  };
+  return {
+    /** One stage: `subs` the sub-agent threads its record lists (an exact split), or `unsplit` a sub-agent model it may hold. */
+    stage(model, tokens, { subs = null, unsplit = null } = {}) {
+      if (!model) return;
+      if (unsplit) for (const m of [model, unsplit]) row(m).why.add("sub-agents");
+      const threads = (Array.isArray(subs) ? subs : []).filter((t) => t?.tokens && typeof t.tokens === "object");
+      if (!threads.length) return add(model, tokens, longShare(tokens, above));
+      const sum = (k) => threads.reduce((n, t) => n + (num(t.tokens[k]) ?? 0), 0);
+      const unthreaded = Object.fromEntries(TOKEN_KEYS.map((k) => [k, num(tokens?.[k]) === null ? null : Math.max(0, tokens[k] - sum(k))]));
+      add(model, unthreaded, sumLong([longShare(tokens, above), ...threads.map((t) => longShare(t.tokens, above))], -1));
+      for (const t of threads) add(modelKey(t.model) ?? model, t.tokens, longShare(t.tokens, above));
+    },
+    rows: () => [...rows.values()].map((r) => ({ key: r.key, tokens: r.tokens, long: r.long, why: [...r.why].sort() })),
+  };
+}
+
 /** A model's published rates: `{vendor, file, id, rate}` from the first table that lists it, else `{why}` (RATIO_WHY). */
 function publishedRate(tables, model, at) {
   let ended = null;
   for (const t of tables) {
     const row = codexRow(t.table, model, { at });
     if (row.rate) return { vendor: t.vendor, file: t.file, id: row.id, rate: row.rate };
-    if (row.why === "price-ended") ended ??= { vendor: t.vendor, why: "price-ended" };
+    if (row.why === "price-ended") ended ??= { vendor: t.vendor, id: row.id, why: "price-ended" };
   }
   return ended ?? { why: "no-rate-table" };
 }
 
+/** Tokens (Pendulum's shape: input includes the cache reads and writes) as the four parts a rate row prices. */
+const partsOf = (t) => ({ uncached: Math.max(0, (t.input ?? 0) - (t.cached ?? 0) - (t.written ?? 0)), cached: t.cached ?? 0, written: t.written ?? 0, output: t.output ?? 0 });
 /**
- * A token mix weighed at a row of published rates, per million tokens: the uncached input (input less its cache reads
- * and writes) at `input`, cache reads at `cached`, cache writes at `write` (`input` for a model with none) and output
- * at `output`. A weight, not dollars: only the ratio of two of them on one mix is ever reported.
+ * Parts weighed at a row of published rates, per million tokens: uncached input at `input`, cache reads at `cached`, cache
+ * writes at `write` (`input` for a model with none), output at `output`. A weight, not dollars: only the ratio of two of
+ * them on one mix is ever reported.
  */
-const weigh = (mix, r) => mix.uncached * r.input + mix.cached * r.cached + mix.written * (r.write ?? r.input) + mix.output * r.output;
+const weigh = (p, r) => p.uncached * r.input + p.cached * r.cached + p.written * (r.write ?? r.input) + p.output * r.output;
+/** Tokens weighed as usage.mjs codexPrice prices them: the long-context share at the `long` rates, the rest at the standard. */
+const weighTiers = (tokens, long, r) => weigh(partsOf(Object.fromEntries(TOKEN_KEYS.map((k) => [k, Math.max(0, (tokens[k] ?? 0) - long[k])]))), r) + (r.long ? weigh(partsOf(long), r.long) : 0);
 
 /**
- * `--rates`: for each model of the model breakdown with recorded tokens and a published rate table, the ratio of each
- * named candidate's published rates to its own, on its recorded token mix (the tokens the breakdown holds for it), at the
- * table's standard rates (the long-context tier is not applied). Only within one vendor's table: a candidate of another
- * vendor, or a model no table lists, gets no ratio and is listed in `skipped` with its code (RATIO_WHY). No dollar figure:
- * a ratio has no unit, and the mix is token counts. `at`: when the rates are read (a promotional rate prices only before
- * its end).
+ * `--rates`: for each model's recorded token mix (mixBook) with published rates, the ratio of each named candidate's rates
+ * to the model's own on that mix, weighed as the cost join prices tokens (codexPrice): with a long-context share, the
+ * share at each model's `long` rates. Only within one vendor's table. No ratio, and a `skipped` entry with its code
+ * (RATIO_WHY), for: a model or candidate no table lists or whose promotional rate ended, a pair of two vendors, a candidate
+ * that is the model itself, a model whose mix is not known whole (`no-tokens`, `sub-agents`), and a long-context share
+ * not known, or not zero where either model has no `long` rates (two models with none price every token at the standard
+ * rates, the share aside). Candidates are taken once each, an alias with the model it names. No dollar figure: a ratio
+ * has no unit, and the mix is token counts. `at`: when the rates are read (a promotional rate counts only before its end).
  */
-export function rateRatios(modelRows, candidates, tables, { at }) {
+export function rateRatios(mixes, candidates, tables, { at }) {
   const items = [];
   const skipped = [];
-  const asked = candidates.map((c) => ({ candidate: c, ...publishedRate(tables, c, at) }));
+  const asked = [];
+  for (const name of candidates) {
+    const c = { candidate: name, ...publishedRate(tables, name, at) };
+    if (!asked.some((a) => a.candidate === name || (c.id && a.id === c.id && a.vendor === c.vendor))) asked.push(c);
+  }
   for (const c of asked) if (c.why) skipped.push({ model: null, candidate: c.candidate, why: c.why });
-  for (const row of modelRows) {
+  for (const row of mixes) {
     if (row.key === null || row.key === "decisions") continue;
     const own = publishedRate(tables, row.key, at);
-    if (own.why) {
-      skipped.push({ model: row.key, candidate: null, why: own.why });
-      continue;
-    }
+    const whyNot = own.why ? [own.why] : row.why;
     const t = row.tokens;
-    const input = num(t?.input);
-    const output = num(t?.output);
-    const cached = num(t?.cached) ?? 0;
-    const written = num(t?.written) ?? 0;
-    const mix = input === null || output === null ? null : { uncached: Math.max(0, input - cached - written), cached, written, output };
-    const base = mix ? weigh(mix, own.rate) : 0;
-    if (!(base > 0)) {
-      skipped.push({ model: row.key, candidate: null, why: "no-tokens" });
+    if (!whyNot.length && !(weigh(partsOf(t), own.rate) > 0)) whyNot.push("no-tokens");
+    if (whyNot.length) {
+      for (const why of whyNot) skipped.push({ model: row.key, candidate: null, why });
       continue;
     }
+    const longSome = row.long !== null && TOKEN_KEYS.some((k) => row.long[k] > 0);
     for (const c of asked) {
-      if (c.why || c.id === own.id) continue;
-      if (c.vendor !== own.vendor) {
-        skipped.push({ model: row.key, candidate: c.candidate, why: "other-vendor" });
+      if (c.why) continue;
+      const why = c.vendor !== own.vendor ? "other-vendor" : c.id === own.id ? "same-model" : !own.rate.long && !c.rate.long ? null : row.long === null || (longSome && !(own.rate.long && c.rate.long)) ? "long-context" : null;
+      if (why) {
+        skipped.push({ model: row.key, candidate: c.candidate, why });
         continue;
       }
-      items.push({ model: row.key, rateOf: own.id, candidate: c.candidate, candidateRateOf: c.id, vendor: own.vendor, mix, ratio: round6(weigh(mix, c.rate) / base) });
+      const long = own.rate.long || c.rate.long ? row.long : noLong();
+      items.push({ model: row.key, rateOf: own.id, candidate: c.candidate, candidateRateOf: c.id, vendor: own.vendor, mix: partsOf(t), long: partsOf(long), ratio: round6(weighTiers(t, long, c.rate) / weighTiers(t, long, own.rate)) });
     }
   }
   const used = tables.filter((t) => items.some((i) => i.vendor === t.vendor));
-  const basis = used.map((t) => `${t.vendor}'s published standard rates (no long-context tier) from ${t.file} dated ${t.table.date}`).join("; ");
-  return { words: RATIO_WORDS, candidates, basis: basis || null, tables: tables.map((t) => ({ vendor: t.vendor, file: t.file, date: t.table.date ?? null })), items, skipped: skipped.map((s) => ({ ...s, text: RATIO_WHY[s.why] })) };
+  const basis = used.map((t) => `${t.vendor}'s published rates from ${t.file} dated ${t.table.date}, the long-context share at the long-context rates`).join("; ");
+  return { words: RATIO_WORDS, candidates: asked.map((c) => c.candidate), basis: basis || null, tables: tables.map((t) => ({ vendor: t.vendor, file: t.file, date: t.table.date ?? null })), items, skipped: skipped.map((x) => ({ ...x, text: RATIO_WHY[x.why] })) };
 }
 
 // ------------------------------------------------------------------ Markdown
@@ -1306,9 +1362,10 @@ export function renderReport(r) {
 /** `--rates`' lines: each ratio with its basis, never a dollar figure, then what has none and why. */
 function renderRates(rates) {
   if (!rates) return [];
-  const out = ["", "## Rate ratios", "", `Each ratio is the ${rates.words}: the candidate's published rates over the recorded model's, on that model's tokens in this report, within one vendor's rates. It is no cost, and no figure here is dollars.`];
+  const out = ["", "## Rate ratios", "", `Each ratio is the ${rates.words}: the candidate's published rates over the recorded model's, on that model's recorded tokens in this report (its long-context share at the long-context rates), within one vendor's rates. It is no cost, and no figure here is dollars.`];
   if (rates.basis) out.push("", `Rates: ${rates.basis}.`);
-  out.push("", rates.items.length ? table(["Recorded model", "Candidate", "Ratio", "Uncached in", "Cache reads", "Cache writes", "Out"], rates.items.map((x) => [x.model, x.candidate, `${x.ratio}×`, x.mix.uncached, x.mix.cached, x.mix.written, x.mix.output])) : "No ratio.");
+  const longIn = (x) => x.long.uncached + x.long.cached + x.long.written;
+  out.push("", rates.items.length ? table(["Recorded model", "Candidate", "Ratio", "Uncached in", "Cache reads", "Cache writes", "Out", "Long-context in, out"], rates.items.map((x) => [x.model, x.candidate, `${x.ratio}×`, x.mix.uncached, x.mix.cached, x.mix.written, x.mix.output, longIn(x) || x.long.output ? `${longIn(x)}, ${x.long.output}` : "—"])) : "No ratio.");
   for (const s of rates.skipped) out.push(`- No ratio for ${[s.model, s.candidate].filter(Boolean).map((m) => `\`${m}\``).join(" to ")}: ${s.text}.`);
   return out;
 }

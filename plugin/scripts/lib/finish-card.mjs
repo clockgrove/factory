@@ -28,7 +28,7 @@ import { BASIS, BASIS_NOTE, COLORS, basisText, billingBasis, billingWords, cause
 // The shared look's helpers this module has always exported (card-kit.mjs holds them now).
 export { COLORS, billingBasis, billingWords, centsOf, costText, durationText, modelName };
 import { PREVIOUS_NAME } from "./local.mjs";
-import { BILLING, BILLING_WORDS, PASS_KEYS, UNKNOWN_WHY, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
+import { BILLING, BILLING_WORDS, PASS_KEYS, UNKNOWN_WHY, addBilling, billingRead, modelName as reportName, passRead, rerunRead, unknownRuns } from "./usage.mjs";
 
 const OBJECTIVE = DEFAULTS.objective_label;
 const ms = (at) => (typeof at === "number" ? at : at ? Date.parse(at) : NaN);
@@ -223,7 +223,7 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     const ledger = onComment?.ledger ?? (Array.isArray(record?.ledger) ? record.ledger : null);
     const version = [rec?.ran?.pendulum, onComment?.version, record?.ran?.pendulum].find((v) => typeof v === "string" && VERSION.test(v)) ?? null;
     const tokens = onComment ? onComment.ledger.reduce((t, p) => addTokens(t, p.tokens), zeroTokens()) : tokensOf(record?.tokens);
-    const s = { stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? ledgerModel(c.body) ?? modelId(record?.model), harness, usd, unknown, why, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true, sandbox: null, ledger, version, tokens, key, ...(from.noPass === true ? { noPass: true } : {}) };
+    const s = { stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? ledgerModel(c.body) ?? (record?.byok === true ? null : modelId(record?.model)), harness, usd, unknown, why, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true, sandbox: null, ledger, version, tokens, key, ...(from.noPass === true ? { noPass: true } : {}) };
     stages.push(s);
     byKey.set(`${stage}:${key}`, s);
   }
@@ -885,7 +885,8 @@ function runLog(d) {
   for (const s of d.stages) {
     if (!s.start) continue;
     const name = stageName(s, d.planned).toLowerCase();
-    out.push([s.start, `${name} stage started${s.model ? ` (${s.model})` : ""}`]);
+    // The model's id as the report names it (usage.mjs modelName, with claude-models.json alone).
+    out.push([s.start, `${name} stage started${s.model ? ` (${reportName(s.model, null)})` : ""}`]);
     out.push([s.end, `${name} stage's last line: ${s.usd === null ? "unknown" : costText(s.usd, s.unknown)}${s.outcome ? `, ${OUTCOME[s.outcome].slice(2)}` : ""}`]);
   }
   for (const h of d.holds ?? []) out.push([h.start, `${h.kind === "blocked" ? "Blocked" : "Question"} notice: on hold until the next stage`]);

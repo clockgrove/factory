@@ -2,7 +2,7 @@
 // comment (progress-card.mjs) both use, so the two read as one system. Money in cents (the exact figures stay in the
 // hidden lines), durations, model names, what dollars are, the state vocabulary, badges, table cells, and the charts'
 // Mermaid themes. Pure: no reads, no writes.
-import { billingRead } from "./usage.mjs";
+import { billingRead, modelName as recordedName } from "./usage.mjs";
 import { zoneOffsetMs } from "./clock.mjs";
 
 /** A model id as a card may print it: model-id characters only, else null. */
@@ -33,9 +33,13 @@ export const dollars = (usd) => cents(Math.round(usd * 100));
 /** Known dollars and runs of unknown cost as a figure: "$0.52", "unknown", "$0.52 + unknown". */
 export const costText = (usd, unknown) => (unknown > 0 ? (usd > 0 ? `${dollars(usd)} + unknown` : "unknown") : dollars(usd ?? 0));
 
-/** A model id as people say it: claude-opus-5-5 is Opus 5.5; any other id as it is. */
+/**
+ * A model id as people say it: the report's one name for it first (usage.mjs modelName, with claude-models.json alone:
+ * Copilot's catalog id `claude-sonnet-5.5` is `claude-sonnet-5-5`), then claude-opus-5-5 is Opus 5.5; any other id as
+ * recorded.
+ */
 export function modelName(id) {
-  const m = /^claude-([a-z]+)-(\d+)-(\d+)(?:-\d{8})?$/.exec(String(id || ""));
+  const m = /^claude-([a-z]+)-(\d+)-(\d+)(?:-\d{8})?$/.exec(recordedName(id, null) ?? "");
   return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}` : modelId(id);
 }
 

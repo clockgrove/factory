@@ -2817,7 +2817,7 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
 /**
  * The models a stage's harness line publishes (harnessMarker: its own model and the Objective's worker, sub-agent and
  * reviewer models, as choice.mjs ranWith gives them and the usage record's `ran` keeps them); [] when it names none
- * (Copilot at its default), null when the record has no `ran` to say.
+ * (Copilot at its default, its event stream naming none: usage.mjs copilotRan), null when the record has no `ran` to say.
  */
 export const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
 /** The routes a stage records it ran on (backend.mjs stageRoute), on its usage record and spend line (#570). */
@@ -2839,13 +2839,13 @@ const exitCode = (v) => (typeof v === "string" && /^[a-z][a-z-]{0,30}$/.test(v) 
  * the scorecard counts per account (#266). `exit`: how the stage ended (its record's exit code), which the report's
  * Blocked stages read. `route`: the route it ran on (its record's: `actions`, `local`, `sandbox`), which the report's
  * route breakdown reads. `ledger`: the per-pass ledger line written beside it (ledgerMarker), from the record's `ledger`;
- * absent for a record with none.
+ * absent for a record with none. A record of a pass through a bring-your-own-key provider (`byok`) writes no model in it.
  */
 export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
   const byPass = passRead(usage?.usdByPass);
   const rerun = rerunRead(usage?.rerun);
-  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum, published: publishedModels(usage.ran) }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...(usage?.noPass === true ? { noPass: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}), ...(exitCode(usage?.exit) ? { exit: usage.exit } : {}), ...(routeCode(usage?.route) ? { route: usage.route } : {}) } };
+  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum, published: usage.byok === true ? null : publishedModels(usage.ran) }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...(usage?.noPass === true ? { noPass: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}), ...(exitCode(usage?.exit) ? { exit: usage.exit } : {}), ...(routeCode(usage?.route) ? { route: usage.route } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer

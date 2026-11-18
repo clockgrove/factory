@@ -28,7 +28,7 @@ import { appIdSetLine, appIdWhyText, readAppIdVariable } from "./app-id.mjs";
 import { PREVIOUS_NAME } from "./local.mjs";
 import { FINDING_OUTCOMES, STATE_LABELS, decisionSpendEntries, findingsOf, ledgerOfComment, loginKey, publishedModels, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { ASKED, CHURN, clockRenamed, finishMarker, labelTime, markChurn, modellessStages, pendulumOwn, readSummary, reportStageKind, spendBreakdown, throughApp } from "./finish-card.mjs";
-import { BILLING, BILLING_WORDS, UNKNOWN_WHY, bareModel, codexRow, longShare, passKind, sumLong } from "./usage.mjs";
+import { BILLING, BILLING_WORDS, CLAUDE_MODELS, UNKNOWN_WHY, codexRow, longShare, modelName, passKind, sumLong } from "./usage.mjs";
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
 import { labelsVouched } from "./objective-trust.mjs";
 import { spread } from "./spread.mjs";
@@ -65,27 +65,8 @@ const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?$/;
 const HARNESSES = new Set(["claude", "codex", "copilot"]);
 const modelKey = (v) => (typeof v === "string" && MODEL.test(v) ? v : null);
 
-/** Other names of Claude models (GitHub Copilot's model catalog ids) and the Anthropic API id each names. */
-export const CLAUDE_MODELS = JSON.parse(readFileSync(join(import.meta.dirname, "claude-models.json"), "utf8"));
-
-/**
- * A model id as the report names it, one name per model: a model the Codex price table lists (usage.mjs codexRow: its id
- * after any provider prefix, or an alias the table records as OpenAI documents it) by the table's own id, a dated
- * snapshot suffix kept (`openai/gpt-6.1-sol` is `gpt-6.1-sol`; `gpt-5.6` is `gpt-5.6-sol`); a Claude model's other name
- * that claude-models.json lists (Copilot's catalog id `claude-sonnet-5.5`) by the Anthropic API id it maps it to
- * (`claude-sonnet-5-5`). Any other id as recorded; null for none.
- */
-export function modelName(model, prices, claude = CLAUDE_MODELS) {
-  const m = modelKey(model);
-  if (!m) return null;
-  const named = claude?.aliases && typeof claude.aliases === "object" && Object.hasOwn(claude.aliases, m) ? modelKey(claude.aliases[m]) : null;
-  if (named) return named;
-  const row = codexRow(prices, m, { at: null });
-  if (!row.rate && row.why !== "price-ended") return m;
-  const bare = bareModel(m);
-  const aliases = prices?.aliases && typeof prices.aliases === "object" ? prices.aliases : {};
-  return Object.hasOwn(aliases, bare) && typeof aliases[bare] === "string" ? aliases[bare] : bare;
-}
+/** One name per model (usage.mjs modelName, through claude-models.json), kept here for the report's readers. */
+export { CLAUDE_MODELS, modelName };
 
 /** Adds a breakdown row's money (`{usd, unknownRuns}`, and `stages` where it has them) into `map` under `key`. */
 const addRow = (map, key, r) => {
@@ -297,7 +278,7 @@ export function reportCacheDir(repoFull, env = process.env, home = homedir(), os
 }
 
 /** The fields of a usage record the report reads (the cost join's and the ledger's): all it keeps and caches. */
-const RECORD_FIELDS = ["harness", "model", "usd", "usdUnknown", "usdUnknownWhy", "usdByBilling", "billing", "tokens", "runs", "exit", "progressRun", "standIn", "account", "vendor", "subAgents", "workerKeyUsd", "gatewayDecisionUsd", "started", "ended", "premiumRequests", "aiCredits", "aiu", "ledger", "noPass"];
+const RECORD_FIELDS = ["harness", "model", "byok", "usd", "usdUnknown", "usdUnknownWhy", "usdByBilling", "billing", "tokens", "runs", "exit", "progressRun", "standIn", "account", "vendor", "subAgents", "workerKeyUsd", "gatewayDecisionUsd", "started", "ended", "premiumRequests", "aiCredits", "aiu", "ledger", "noPass"];
 /** A downloaded result.json cut to RECORD_FIELDS (and of `ran`, the Pendulum release): nothing else is kept or cached. */
 export function recordFields(rec) {
   if (!rec || typeof rec !== "object" || Array.isArray(rec)) return null;
@@ -1694,8 +1675,10 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       const harness = rec.source === "decisions" ? "decisions" : HARNESSES.has(rec.harness) ? rec.harness : HARNESSES.has(line?.harness) ? line.harness : null;
       // A stage's model from its own records alone, as the finish card names it (finish-card.mjs objectiveStages): its
       // harness line's, else its ledger line's, else its usage record's (Copilot's default model is known only from the
-      // run's record) or local mode's own record of it; never another stage's. Null when none names one (`no-model`).
-      const recorded = rec.source === "decisions" ? "decisions" : (modelKey(line?.model) ?? modelKey(onComment?.model) ?? modelKey((rec.source === "spend" ? recordOf : rec)?.model) ?? modelKey(localRec?.model));
+      // run's record) or local mode's own record of it; never another stage's. Null when none names one (`no-model`). A
+      // record of a pass through a bring-your-own-key provider (`byok`) names none: its id is the provider's own.
+      const own = (r) => (r?.byok === true ? null : modelKey(r?.model));
+      const recorded = rec.source === "decisions" ? "decisions" : (modelKey(line?.model) ?? modelKey(onComment?.model) ?? own(rec.source === "spend" ? recordOf : rec) ?? own(localRec));
       // One name per model (modelName); the `--rates` mix keeps the recorded id, its rows named so in turn (mixBook).
       const model = rec.source === "decisions" ? "decisions" : modelName(recorded, prices);
       if (model === null && !rec.unattributed && !rec.notStage) missing[notReached && source.artifactsWanted?.has(n) ? "modelStopped" : "noModel"].add(n);

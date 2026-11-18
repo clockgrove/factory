@@ -176,7 +176,7 @@ test("finish card: a Copilot stage with a spend line takes its model from its us
   const d = withSelf(() => data({ comments: copilot, records }));
   assert.deepEqual(d.stages.map((s) => [s.kind, s.model, s.usd, s.unknown]), [["build", "claude-sonnet-5.5", 0.4, 0], ["review", "claude-sonnet-5.5", 0.2, 0]]);
   const md = renderFinishCard(d);
-  assert.match(md, /\| 2:24 AM \| Plan \+ build · claude-sonnet-5\.5 \| 1 min 21 s \| \$0\.40 \|\n\| 2:26 AM \| Review · claude-sonnet-5\.5 \| 35 s \| \$0\.20 \|/);
+  assert.match(md, /\| 2:24 AM \| Plan \+ build · Sonnet 5\.5 \| 1 min 21 s \| \$0\.40 \|\n\| 2:26 AM \| Review · Sonnet 5\.5 \| 35 s \| \$0\.20 \|/);
   // A Claude stage with a spend line: its harness line's model, as before, whatever its record says.
   const claude = withSelf(() => data({ comments: withSpend({ work: { usd: 0.4 }, review: { usd: 0.2 } }), records: real.records.map((r) => ({ ...r, model: "claude-sonnet-5.5" })) }));
   assert.deepEqual(claude.stages.map((s) => [s.kind, s.model, s.usd]), [["build", "claude-opus-5-5", 0.4], ["review", "claude-fable-5-2", 0.2]]);

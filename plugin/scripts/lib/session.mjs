@@ -2383,7 +2383,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // chose them (none: the repository's defaults), the hosts its host labels opened, the worker's and the reviewer's
     // reasoning effort (null: the model's own) and the Pendulum release that ran the stage. On Copilot a model its own
     // stream names (usage.mjs copilotRan) is the one recorded; null for one Pendulum left to the harness that it names none of.
-    ...(ran ? { ran: { ...ranModels(ran, harness === "copilot" ? copilotRan(records) : null), labels: ran.labels ?? [], hosts: ran.hosts ?? [], effort: ran.effort ?? null, reviewerEffort: ran.reviewerEffort ?? null, pendulum: pendulumBuild() } } : {}),
+    ...(ran ? { ran: { ...ranModels(ran, harness === "copilot" && !runs.some((r) => r.byok === true) ? copilotRan(records) : null), labels: ran.labels ?? [], hosts: ran.hosts ?? [], effort: ran.effort ?? null, reviewerEffort: ran.reviewerEffort ?? null, pendulum: pendulumBuild() } } : {}),
     // The account the stage ran on, by name only: a local account (accounts.mjs), or on GitHub Actions and the cloud
     // sandbox the account step's pick (PENDULUM_STAGE_ACCOUNT) when the workflow declares accounts; none otherwise.
     ...((stageAccountName(account) ?? stageAccountName(ran?.account ?? null)) ? { account: stageAccountName(account) ?? ran.account } : {}),

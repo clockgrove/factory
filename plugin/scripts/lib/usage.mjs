@@ -1397,8 +1397,9 @@ export const IMPLEMENTER_AGENT = "implementer";
  * `reviewer`, the main agent's on its review passes; `subagent`, the implementer sub-agents' (IMPLEMENTER_AGENT, the
  * definition the sub-agent model pins). A role the stream names one model for has it; one it names more than one for is
  * null, as no single id records what ran; one it names none for is left out (none of its passes ran, a run killed
- * before its first message, a sub-agent that never sent a request, a pass on a bring-your-own-key provider), so the
- * model Pendulum asked for stands (choice.mjs ranModels). A decision call is none of the three.
+ * before its first message, a sub-agent that never sent a request, a pass whose calls went through a bring-your-own-key
+ * provider or that never said they did not: parseCopilot keeps none of its models), so the model Pendulum asked for
+ * stands (choice.mjs ranModels); writeUsage asks none of a stage with a pass through one. A decision call is none of the three.
  */
 export function copilotRan(records) {
   const seen = { worker: new Set(), subagent: new Set(), reviewer: new Set() };
@@ -1524,16 +1525,22 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   // `firstDispatchedModel`, and the model it ended on), under the agent definition's name.
   const main = new Set();
   const agents = Object.create(null);
-  // A model call through a bring-your-own-key provider (`isByok`), whose model id is the provider's own (an ARN can
-  // name an account): no model of the run is published (BYOK_EVENTS).
+  // Whether its model calls went through a bring-your-own-key provider (BYOK_EVENTS `isByok`), whose model id is the
+  // provider's own (an ARN can name an account). Its models are kept only when a call says false and none says true; a
+  // run that says neither (killed before its first call's end) keeps none.
   let byok = false;
+  let notByok = false;
   const events = jsonLines(stdout);
   for (const e of events) {
     if (e.type === "assistant.turn_end") turns += 1;
-    if (e.type === "assistant.message" && e.data?.model && !rec.model) rec.model = cleanModel(e.data.model);
     if (BYOK_EVENTS.has(e.type) && e.data?.isByok === true) byok = true;
-    if (e.type === "assistant.message" && !e.agentId && !e.data?.parentToolCallId && cleanModel(e.data?.model)) main.add(cleanModel(e.data.model));
-    if ((e.type === "subagent.completed" || e.type === "subagent.failed") && AGENT_NAME.test(e.data?.agentName ?? "") && cleanModel(e.data?.firstDispatchedModel)) {
+    // A record replayed from a checkpoint (its envelope's `checkpoint`) is the session's history, not this run: no model
+    // line of it counts.
+    const live = e.checkpoint !== true;
+    if (live && e.type === "assistant.message" && e.data?.model && !rec.model) rec.model = cleanModel(e.data.model);
+    if (live && BYOK_EVENTS.has(e.type) && e.data?.isByok === false) notByok = true;
+    if (live && e.type === "assistant.message" && !e.agentId && !e.data?.parentToolCallId && cleanModel(e.data?.model)) main.add(cleanModel(e.data.model));
+    if (live && (e.type === "subagent.completed" || e.type === "subagent.failed") && AGENT_NAME.test(e.data?.agentName ?? "") && cleanModel(e.data?.firstDispatchedModel)) {
       const seen = (agents[e.data.agentName] ??= new Set());
       seen.add(cleanModel(e.data.firstDispatchedModel));
       if (e.type === "subagent.completed" && cleanModel(e.data.model)) seen.add(cleanModel(e.data.model));
@@ -1571,7 +1578,7 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   if (requests >= 0) rec.premiumRequests = requests;
   if (!rec.model) rec.model = a.model;
   if (byok) rec.byok = true;
-  else if (main.size || Object.keys(agents).length) rec.agentModels = { main: [...main], agents: Object.fromEntries(Object.entries(agents).map(([k, v]) => [k, [...v]])) };
+  else if (notByok && (main.size || Object.keys(agents).length)) rec.agentModels = { main: [...main], agents: Object.fromEntries(Object.entries(agents).map(([k, v]) => [k, [...v]])) };
   const p = priceCredits(a, creditUsd);
   const refusal = rec.ok ? null : providerRefusal("copilot", events);
   if (refusal) rec.refusal = refusal;

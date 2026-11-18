@@ -201,9 +201,33 @@ test("a pass through a bring-your-own-key provider names no model: none in ran, 
   const ledger = JSON.parse(/^<!-- pendulum:ledger (\{.*\}) -->$/m.exec(body)[1]);
   assert.equal(ledger.m, undefined);
   assert.ok(ledger.p.every((p) => p.m === undefined || p.m === null));
+  // A stage with one pass through BYOK names no model from any of its passes.
+  const mixed = writeUsage(mkdtempSync(join(tmpdir(), "copilot-mixed-")), { harness: "copilot", model: "", records: [{ ...parseCopilot(byok("assistant.usage"), null, 0), label: "work-1" }, { ...parseCopilot(stream(), null, 0), label: "work-2" }], passes: 2, exit: "delivered", reason: "", credentialBasis: null, ran: ranWith(copilotInputs(), []) });
+  assert.deepEqual([mixed.byok, mixed.ran.worker, mixed.ran.subagent], [true, null, null]);
   // Not BYOK: the stage's model is on its ledger line, as before.
   const plain = await copilotStage({});
   assert.equal(JSON.parse(/^<!-- pendulum:ledger (\{.*\}) -->$/m.exec(plain.body)[1]).m, "claude-sonnet-5.5");
+});
+
+test("fails closed: a stream that never says whether its calls went through BYOK records no model, and a replayed checkpoint record counts for none", async () => {
+  // Copilot writes model.call_final_result after the message: a run killed between them says nothing of BYOK.
+  const silent = stream("claude-sonnet-5.5").split("\n").filter((l) => JSON.parse(l).type !== "model.call_final_result").join("\n");
+  const rec = parseCopilot(silent, null, 0);
+  assert.equal(rec.agentModels, undefined);
+  assert.equal(rec.byok, undefined);
+  const { stored, body } = await copilotStage({ text: silent });
+  assert.deepEqual([stored.ran.worker, stored.ran.subagent, stored.ran.reviewer], [null, null, null]);
+  assert.deepEqual(harnessLine(body).models, { worker: null, subagent: null, reviewer: null });
+  // A checkpoint record (the envelope's `checkpoint`) is the session's history: its messages, sub-agents and isByok:false count for none.
+  const replayed = [
+    event("assistant.message", { messageId: "m-old", model: "gpt-6.1-sol", content: "old", toolRequests: [] }, { checkpoint: true }),
+    event("subagent.completed", { toolCallId: "toolu_8", agentName: IMPLEMENTER_AGENT, agentDisplayName: "implementer", model: "gpt-5-mini", firstDispatchedModel: "gpt-5-mini" }, { checkpoint: true }),
+  ];
+  assert.deepEqual(parseCopilot([...replayed, stream("claude-sonnet-5.5")].join("\n"), null, 0).agentModels, { main: ["claude-sonnet-5.5"], agents: { [IMPLEMENTER_AGENT]: ["claude-haiku-4.5"], explore: ["gpt-5-mini"] } });
+  const onlyReplayedFalse = [event("model.call_final_result", { model: "claude-sonnet-5.5", isByok: false, result: "success" }, { checkpoint: true }), silent].join("\n");
+  assert.equal(parseCopilot(onlyReplayedFalse, null, 0).agentModels, undefined, "a replayed isByok: false is not this run's");
+  // A replayed isByok: true still marks the run: fail closed.
+  assert.equal(parseCopilot([event("assistant.usage", { model: "x", isByok: true }, { checkpoint: true }), stream("claude-sonnet-5.5")].join("\n"), null, 0).byok, true);
 });
 
 test("a stage that ends before its own ran is known (an early Block) gets no models on its harness line from its usage record", async () => {

@@ -827,7 +827,11 @@ export function coverAfter({ answerQuestion, answerFrom, answerTo, head, reviewe
 /** The worker's prompt for the one pass that answers the review. */
 export function answerPrompt({ taskCard, prNumber, comments, decisions = [], afterPush = false, red = null, question = !red, namedTests = false }) {
   // A finding answered before and still open (the finding check read that answer as not resolving it) carries `earlier`.
-  const list = comments.map((c) => `- ${c.path || "(review body)"}${Number.isInteger(c.line) ? `:${c.line}` : ""} (comment id ${JSON.stringify(c.id)}${c.from ? `, from third-party reviewer ${c.from}` : ""}): ${c.from ? JSON.stringify(String(c.body ?? "")) : c.body}${c.earlier ? `\n  Still open: Pendulum's check read your earlier answer as not resolving it: ${JSON.stringify(String(c.earlier))}` : ""}`).join("\n");
+  // A writer's own line comment (#595) is a maintainer's decision: its text is given once, under the decisions when they
+  // show it (its key `line:<id>`), else here, never framed as a third-party reviewer's.
+  const shownKeys = new Set(decisionsShown(decisions, afterPush ? Infinity : undefined).map((d) => d.key));
+  const text = (c) => (c.writer ? (shownKeys.has(`line:${c.id}`) ? "(its text is under the maintainers' decisions below)" : c.body) : c.from ? JSON.stringify(String(c.body ?? "")) : c.body);
+  const list = comments.map((c) => `- ${c.path || "(review body)"}${Number.isInteger(c.line) ? `:${c.line}` : ""} (comment id ${JSON.stringify(c.id)}${c.from ? `, from third-party reviewer ${c.from}` : c.writer ? `, a maintainer's line comment by ${c.writer}` : ""}): ${text(c)}${c.earlier ? `\n  Still open: Pendulum's check read your earlier answer as not resolving it: ${JSON.stringify(String(c.earlier))}` : ""}`).join("\n");
   const from = [...new Set(comments.map((c) => c.from).filter(Boolean))];
   // A named reviewer outside Pendulum (third-party-review.mjs): its text is review input to judge, never instructions. Its
   // body is one JSON string in the list, so its own newlines can never start a list item that lacks the "from" mark.
@@ -1870,7 +1874,7 @@ async function main() {
   const thirdParty = answeredReviewers(third.logins);
   // And, when the base's rules require every review conversation resolved, any other reviewer who can push or is an App
   // (#595): its open thread would hold the merge, so the answer pass takes it too. Read only when such a thread exists.
-  const unlisted = unlistedRule(repo, defaultBranch, token);
+  const unlisted = unlistedRule(repo, pr.base.ref, token);
   // Pendulum's placeholder (no finding of its own) still leaves a named reviewer's or code scanning's comments to answer.
   // The foundation pass posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open
   // comments too.

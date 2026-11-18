@@ -867,12 +867,15 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
  * reviewer opened (the root belongs to the review carrying marker(issue, "review"), by a trusted author: trustedAuthor),
  * "named" for one a reviewer Pendulum answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
  * root comment's author), with `unlisted` "unlisted" for one any other reviewer the answer pass may take opened (logic.mjs
- * answerableReviewer: someone who can push, or an App but github-actions[bot]), which it takes only when the base's
- * rules require every conversation resolved (#595), else null. `answered` is a person's answer, as the answer pass's
- * list judges it: ours once a person's answer exists (logic.mjs personAnswer: by someone who can push, and none of
+ * answerableReviewer: someone who can push, `writer` true, or an App but github-actions[bot]), which it takes only when
+ * the base's rules require every conversation resolved (#595), else null. This is the one classification of a thread:
+ * the answer pass's list (session.mjs unaddressedReviewComments) and the merge pass both read it, since REST and GraphQL
+ * name some Apps differently (Copilot's reviewer is `Copilot` in REST). `answered` is a person's answer, as the answer
+ * pass's list judges it: ours once a person's answer exists (logic.mjs personAnswer: by someone who can push, and none of
  * Pendulum's marked comments, its answer or the finding check's evidence) or the root is Pendulum's placeholder; named
- * and unlisted once a person's reply answers it (logic.mjs answersComment). Pendulum's own answer is the finding check's
- * to judge (finding-check.mjs): only its yes resolves the thread.
+ * and an unlisted App's once a person's reply answers it (logic.mjs answersComment); a writer's never (only the finding
+ * check's yes, or a person resolving it, settles it). Pendulum's own answer is the finding check's to judge
+ * (finding-check.mjs): only its yes resolves the thread.
  */
 export async function reviewThreads(repo, number, issue, opts, { thirdParty = [], unlisted = false } = {}) {
   const nodes = [];
@@ -901,10 +904,13 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
     // A reviewer outside Pendulum is told by the root comment's own author, as the answer pass's list tells it.
     const author = root?.author ? asRest(root.author).user.login : null;
     const theirs = !!root && !ours && named.has(String(author || "").toLowerCase());
-    const other = unlisted && !!root && !ours && !theirs && answerableReviewer(asRest(root.author, root.authorAssociation));
+    const opener = !!root && asRest(root.author, root.authorAssociation);
+    const other = unlisted && !!root && !ours && !theirs && answerableReviewer(opener);
+    // A writer's own thread is answered only by the finding check's yes: a writer's reply (its opener's included) is no answer.
+    const writer = other && trustedAuthor(opener);
     const replies = comments.slice(1).map((c) => asRest(c.author, c.authorAssociation, c.body));
-    const answered = ours ? isPlaceholder(root.body) || replies.some(personAnswer) : theirs || other ? replies.some((r) => answersComment(author, r)) : false;
-    return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : other ? "unlisted" : null, answered };
+    const answered = ours ? isPlaceholder(root.body) || replies.some(personAnswer) : theirs || (other && !writer) ? replies.some((r) => answersComment(author, r)) : false;
+    return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : other ? "unlisted" : null, ...(other ? { writer } : {}), answered };
   });
 }
 /** The most pages of 100 review threads reviewThreads reads. */

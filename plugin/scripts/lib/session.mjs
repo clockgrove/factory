@@ -65,13 +65,13 @@ import { endCard } from "./finish-card.mjs";
 import { lineClock, logTime, timeZone, whenText } from "./clock.mjs";
 import { SHORT_DETAIL, progressBody, progressCard } from "./progress-card.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
-import { EXIT_PROMPT, activityLine, latestRuns, answerableReviewer, answersComment, loginKey, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, latestRuns, answersComment, loginKey, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { REAP_NOW_MS, agentUser, atStop, exec, git, reapAgentNow, runnerCommand, trapStops } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
-import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
+import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, waitOf, writerComment } from "./third-party-review.mjs";
 import { accountWaitOf } from "./account-wait.mjs";
 import { TrialCap, rebaseWaitOf, reviewWaitOf, siblingTrials } from "./overlap.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
@@ -757,10 +757,12 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 
 /**
  * Reviewer findings still open. Line comments: the reviewer's root comments, and with `thirdParty` (third-party-review.mjs
- * logins) a named reviewer's, shaped and sanitised for the answer pass with `from` set (thirdPartyComment). A root
- * comment by a reviewer nobody named that the answer pass may take (logic.mjs answerableReviewer: someone who can push,
- * or an App but github-actions[bot]) is listed the same way, `from` its author, once `unlisted` (async, read at most once
- * and only when there is such a comment) says the base's rules require every review conversation resolved (#595). One is
+ * logins, or the thread github.mjs reviewThreads classifies "named") a named reviewer's, shaped and sanitised for the
+ * answer pass with `from` set (thirdPartyComment). A root comment of a thread reviewThreads classifies "unlisted" (a
+ * reviewer nobody named who can push, or an App but github-actions[bot]) is listed once `unlisted` (async, read at most
+ * once and only when there is such a comment) says the base's rules require every review conversation resolved (#595):
+ * an App's as a named reviewer's, `from` its author; a writer's with `writer` its author and no `from` (writerComment),
+ * since it is a maintainer's decision too, and answered only when its thread is resolved, never by a reply. One is
  * answered when a person answered it (a reply by someone who can push but one of Pendulum's marked comments, its answer or
  * the finding check's evidence, on the reviewer's comment: logic.mjs personAnswer, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
  * reviewer's, never on code scanning's), or when its thread is resolved: the finding check's yes on Pendulum's own
@@ -780,24 +782,33 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   // A named reviewer's comment is never Pendulum's own, even where the author filter stands in for the review ids.
   const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
   const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
-  const named = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty)) : [];
-  // A reviewer nobody named, whose thread the base's rules require resolved: the answer pass takes it as a named one's.
-  const others = comments.filter((c) => !c.in_reply_to_id && !ours(c) && !namedReviewer(c, thirdParty) && answerableReviewer(c));
-  const theirs = others.length && (await unlisted()) ? [...named, ...others] : named;
-  const fromOf = (c) => namedReviewer(c, thirdParty) ?? loginKey(c.user?.login);
+  // Each thread as github.mjs reviewThreads classifies it, the one classification the merge pass reads too (REST and
+  // GraphQL name some Apps differently: Copilot's reviewer is `Copilot` in REST). Read when a root is not Pendulum's or
+  // a root of Pendulum's may be resolved.
+  const foreign = comments.filter((c) => !c.in_reply_to_id && !ours(c));
+  const threads = roots.length || foreign.length ? new Map((await reviewThreads(repo, prNumber, 0, { token }, { thirdParty, unlisted: true })).filter((t) => t.rootId != null).map((t) => [t.rootId, t])) : new Map();
+  const kind = (c) => (namedReviewer(c, thirdParty) ? "named" : threads.get(c.id)?.by);
+  // A reviewer nobody named, whose thread the base's rules require resolved: the answer pass takes it (#595).
+  const others = foreign.filter((c) => kind(c) === "unlisted");
+  const theirs = [...foreign.filter((c) => kind(c) === "named"), ...(others.length && (await unlisted()) ? others : [])];
+  const fromOf = (c) => namedReviewer(c, thirdParty) ?? loginKey(threads.get(c.id)?.author ?? c.user?.login);
+  // A writer's thread: settled only by the finding check's yes or a person resolving it, never by a reply.
+  const writerIds = new Set(theirs.filter((c) => threads.get(c.id)?.writer).map((c) => c.id));
   const ourIds = new Set(roots.map((c) => c.id));
   const replies = comments.filter((c) => c.in_reply_to_id);
   // A person's answer, as ever; Pendulum's own answer, its latest per comment (the finding check's to judge).
-  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? personAnswer(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
+  const byPerson = new Set(replies.filter((c) => !writerIds.has(c.in_reply_to_id) && (ourIds.has(c.in_reply_to_id) ? personAnswer(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
   const answer = new Map(replies.filter(pendulumReply).map((c) => [c.in_reply_to_id, c.body]));
   const candidates = [...roots, ...theirs].filter((c) => !byPerson.has(c.id));
   // A resolved thread is an answered finding: resolved on the finding check's yes, or by a person.
-  const resolved = candidates.length ? new Set((await reviewThreads(repo, prNumber, 0, { token })).filter((t) => t.resolved).map((t) => t.rootId)) : new Set();
+  const resolved = new Set([...threads.values()].filter((t) => t.resolved).map((t) => t.rootId));
   // `raisedOn`: the commit the finding was raised on, from which the finding check reads what changed since.
   // `raisedAt`: when it was raised, which the finding check sets beside the decisions' times.
   // `earlierPrBody`: that answer said its fix is in the PR body (its marker's `:pr_body`, handoff.mjs postReplies, #584).
   const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)), ...(PR_BODY_REPLY.test(answer.get(c.id)) ? { earlierPrBody: true } : {}) } : {}) });
-  const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, fromOf(c)), ...earlier(c) }));
+  // A writer's line comment is a maintainer's decision too: never framed as a third-party reviewer's (`writer`, no `from`).
+  const shaped = (c) => (writerIds.has(c.id) ? writerComment(c, fromOf(c)) : thirdPartyComment(c, fromOf(c)));
+  const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...shaped(c), ...earlier(c) }));
   // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
   const own = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r) && (reviewIds ? reviewIds.has(r.id) : !reviewerLogin || r.user?.login === reviewerLogin));
@@ -4030,8 +4041,9 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
  * every conversation resolved (branch protection, or an active ruleset's pull_request rule), is a named reviewer's or an
  * unlisted one's that no person answered. Then the review label goes back on and this returns "answer-threads", within
  * the answer rounds per re-entry (takeAnswerRound); past them it Blocks ("threads") naming each one. Any other unresolved
- * thread under that rule (a stranger's, github-actions[bot]'s, or one Pendulum could not resolve) returns "threads" with
- * `report.reason` naming each one: its author, file and line; it never reaches a model. Otherwise null: the merge goes
+ * thread under that rule (a stranger's, github-actions[bot]'s, or one Pendulum could not resolve) returns "threads" at
+ * once, before any answer round, with `report.reason` naming each open one: its author, file and line; it never reaches
+ * a model. Otherwise null: the merge goes
  * on. Unreadable threads or rules are null too, and GitHub's own rule decides the merge; an unreadable or unwritable
  * round count is "pending".
  */
@@ -4078,7 +4090,10 @@ async function conversationsGate(repo, ctx, report, opts) {
   // The answer pass's: code scanning's open comment on every repository; under the rule, a named or unlisted reviewer's
   // that no person answered (Pendulum's own answer the finding check did not resolve included).
   const back = open.filter((t) => !t.answered && (scanning(t) || (rule && (t.by === "named" || t.by === "unlisted"))));
-  if (back.length) {
+  // Under the rule, a thread no answer pass takes (a stranger's) holds the merge whatever the answer pass does: it Blocks
+  // now, naming every open thread, and no answer round is spent first.
+  const stays = rule ? open.filter((t) => !back.includes(t)) : [];
+  if (back.length && !stays.length) {
     let round;
     try {
       round = await takeAnswerRound(repo, { issue, prNumber, objectiveLabel }, opts);

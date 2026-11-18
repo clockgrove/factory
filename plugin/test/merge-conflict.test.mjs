@@ -866,11 +866,12 @@ test("#595: a writer's open thread goes to the answer pass, and one a writer ans
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     gh.state.rules = [RULESET];
     const kirk = { __typename: "User", login: "kirk" };
-    const writer = { id: "PRRT_writer", isResolved: false, path: "src/a.ts", line: 3, originalLine: 3, comments: { nodes: [reply("Rename this.", kirk, "MEMBER")] } };
+    // A writer's own thread with their own follow-up: no reply settles it, only the finding check's yes.
+    const writer = { id: "PRRT_writer", isResolved: false, path: "src/a.ts", line: 3, originalLine: 3, comments: { nodes: [reply("Rename this.", kirk, "MEMBER"), reply("Or move it.", kirk, "MEMBER")] } };
     const answered = codexThread("PRRT_answered", 9, [reply("Keep it: decided on the issue.", kirk, "OWNER")]);
     gh.state.threads = [writer, answered];
     assert.equal(await merge(2, 12), "answer-threads");
-    assert.deepEqual(gh.state.resolved, ["PRRT_answered"], "a writer's answer resolves the App's thread");
+    assert.deepEqual(gh.state.resolved, ["PRRT_answered"], "a writer's answer resolves the App's thread, never the writer's own");
     assert.deepEqual(gh.state.labelled, ["12:pendulum:review"]);
     // A stranger's thread, and the job token's (any workflow posts as it), never go to a model: Blocked, named.
     const actions = { id: "PRRT_actions", isResolved: false, path: "src/b.ts", line: 7, originalLine: 7, comments: { nodes: [reply("lint: unused import", { __typename: "Bot", login: "github-actions" })] } };
@@ -879,6 +880,12 @@ test("#595: a writer's open thread goes to the answer pass, and one a writer ans
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "threads");
     assert.equal(mergeBlockReason("threads", report), "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 2 are open: dana on src/store.ts:41; github-actions[bot] on src/b.ts:7. Answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
     assert.deepEqual(gh.state.labelled, ["12:pendulum:review"], "no review runs for them");
+    // An App's open thread beside a stranger's: the stranger's holds the merge anyway, so it Blocks at once, no round spent.
+    gh.state.threads = [codexThread("PRRT_codex2", 12), structuredClone(personThread)];
+    const both = {};
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report: both }, { token: "t" }), "threads");
+    assert.match(mergeBlockReason("threads", both), /and 2 are open: chatgpt-codex-connector\[bot\] on src\/store\.ts:12; dana on src\/store\.ts:41\./);
+    assert.deepEqual(gh.state.labelled, ["12:pendulum:review"], "no answer round for the App's thread");
     // No rule: nothing is answered, resolved or Blocked for any of them.
     gh.state.rules = [];
     gh.state.threads = [writer, codexThread("PRRT_answered2", 9, [reply("Keep it.", kirk, "OWNER")]), structuredClone(personThread)];

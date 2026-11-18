@@ -82,13 +82,20 @@ export const namedReviewer = (item, logins = []) => (logins.length ? (logins.fin
 export const thirdPartyComment = (c, from) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line ?? null, body: sanitize(c.body, { max: THIRD_PARTY_TEXT_MAX }), from });
 
 /**
- * The comments that hold the stage's exit (decideExit's unanswered count): every one of Pendulum's own, and a named
- * reviewer's only when the answer pass was given it (`given`, ids). One that came after the wait is left for the next
- * review: the stage went on without it.
+ * A writer's own line comment as the answer pass gets it (#595, under a rule that requires resolved conversations): as
+ * thirdPartyComment shapes it, but `writer` (its author) in place of `from`. It is a maintainer's decision, never framed
+ * as untrusted review input; the answer pass's prompt names it as such and gives its text once.
+ */
+export const writerComment = (c, writer) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line ?? null, body: sanitize(c.body, { max: THIRD_PARTY_TEXT_MAX }), writer });
+
+/**
+ * The comments that hold the stage's exit (decideExit's unanswered count): every one of Pendulum's own, and another
+ * reviewer's (a named or unlisted one's, `from`, or a writer's, `writer`) only when the answer pass was given it
+ * (`given`, ids). One that came after the wait is left for the next review: the stage went on without it.
  */
 export const exitUnaddressed = (open, given) => {
   const ids = new Set([...given].map(String));
-  return open.filter((c) => !c.from || ids.has(String(c.id)));
+  return open.filter((c) => !(c.from || c.writer) || ids.has(String(c.id)));
 };
 
 /** Which of `logins` submitted a review of `sha` (a review by that login whose `commit_id` is `sha`, not pending). */

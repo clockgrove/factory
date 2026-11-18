@@ -378,9 +378,11 @@ export const writerBy = (authors) => (c) => c?.author_association === "OWNER" ||
 export const UNVERIFIED = Object.freeze(["unchecked", "unverifiable"]);
 /**
  * Why a login `--self` names is not trusted (`source.trusted.refused`): `cannot-push`, its permission on the repository
- * is below write, or none; else why its permission was not read (UNVERIFIED).
+ * is below write, or none, or its comments are by neither the owner, a member nor a collaborator; why its permission
+ * was not read (UNVERIFIED: `unchecked` also when the report stopped before reading a comment of theirs); `no-record`,
+ * a complete report read no comment of theirs with a marker in scope, so nothing decided it.
  */
-export const SELF_REFUSED = Object.freeze(["cannot-push", ...UNVERIFIED]);
+export const SELF_REFUSED = Object.freeze(["cannot-push", ...UNVERIFIED, "no-record"]);
 /** Whether a comment is by a MEMBER or COLLABORATOR author whose permission was not read (UNVERIFIED). */
 export const unverifiedBy = (authors) => (c) => MEMBER_ASSOCIATIONS.has(c?.author_association) && UNVERIFIED.includes(authors?.get(loginKey(c?.user?.login)));
 /**
@@ -2309,13 +2311,24 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   if (source.artifacts.expired) out.push({ code: "artifact-expired", count: source.artifacts.expired, counts: none, issues: [], text: "usage artifacts past GitHub's retention, not cached here" });
   if (source.artifacts.failed) out.push({ code: "artifact-failed", count: source.artifacts.failed, counts: none, issues: [], text: "usage artifacts that could not be downloaded" });
   if (source.artifacts.unreadable) out.push({ code: "artifacts-unreadable", count: source.artifacts.unreadable, counts: none, issues: [], text: "artifact lists the token may not read (it needs actions: read), or artifacts that name no workflow run" });
-  // The logins --self names that the report did not trust, with why (SELF_REFUSED): each one a permission read found
-  // unable to push, or whose permission was not read (UNVERIFIED). The token's own login is Pendulum's whatever it names.
+  // The logins --self names, each trusted only on a positive answer (SELF_REFUSED says why not): a comment of theirs with
+  // a marker, in scope, that is the repository owner's by association, or a permission read that found a writer. A
+  // read's other answers refuse it by name; with no answer, a comment of theirs by any other association is by someone
+  // who cannot push, a stopped report had not decided it (`unchecked`), and a complete one read no record of theirs
+  // (`no-record`). The token's own login is Pendulum's whatever it names.
+  const inSet = !!read.scope && setScope(read.scope);
+  const marked = (read.comments ?? []).filter((c) => (markerIssue(c) !== null || legacyIssue(c) !== null) && (!inSet || read.issues?.has(markerIssue(c) ?? legacyIssue(c))));
   const refusedWhy = (login) => {
-    const a = read.authors?.get(loginKey(login));
-    return a === false ? "cannot-push" : UNVERIFIED.includes(a) ? a : null;
+    const key = loginKey(login);
+    const theirs = marked.filter((c) => loginKey(c?.user?.login) === key);
+    const a = read.authors?.get(key);
+    if (a === true || theirs.some((c) => c.author_association === "OWNER")) return null;
+    if (a === false) return "cannot-push";
+    if (UNVERIFIED.includes(a)) return a;
+    if (theirs.length) return "cannot-push";
+    return source.stopped ? "unchecked" : "no-record";
   };
-  const refused = [...new Set(read.self ?? [])].filter((l) => loginKey(l) !== loginKey(source.login) && refusedWhy(l)).map((login) => ({ login, why: refusedWhy(login) }));
+  const refused = [...new Set(read.self ?? [])].filter((l) => loginKey(l) !== loginKey(source.login)).map((login) => ({ login, why: refusedWhy(login) })).filter((r) => r.why);
   return {
     // Partial when the call budget stopped the reads, or stages from before the rename went unread.
     complete: !out.some((m) => PARTIAL_CODES.includes(m.code)),

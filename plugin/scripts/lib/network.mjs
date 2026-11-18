@@ -1,8 +1,8 @@
 // Whether this machine reaches the services a stage needs, and the one wait while it does not (#228).
-// A request that never left this machine (DNS, a refused or unreachable connect, a connect that timed out) is no
-// answer from GitHub or the model provider: it is this machine's network. A process that waits outages out
-// (waitOutages: the stages and `pendulum serve`) sends no such request again until a cheap probe of the same host gets
-// an answer. One probe loop per host, however many calls wait on it, and one log line when the host is lost and one
+// A request that never left this machine (DNS, a refused or unreachable connect, a connect that timed out, a proxy's 5xx
+// to its CONNECT) is no answer from GitHub or the model provider: it is this machine's network. A process that waits
+// outages out (waitOutages: the stages and `pendulum serve`) sends no such request again until a cheap probe of the same
+// host gets an answer. One probe loop per host, however many calls wait on it, and one log line when the host is lost and one
 // when it answers again. Any HTTP answer, a 5xx or a 429 included, is GitHub (or the provider) answering: the client's
 // own retries handle those (github.mjs RETRY), until a 5xx outlasts them: then GitHub is down for the caller, an outage
 // of its host (github.mjs outlasted) named by the status (#353). One exception: GitHub's primary rate limit spent (#250). That answer
@@ -20,13 +20,39 @@ import { logTime, whenText } from "./clock.mjs";
 import { BARE_BUSY_TYPES } from "./usage.mjs";
 
 /** Node fetch's connect-level failures: no byte of the request left this machine, or its connect timed out. */
-export const UNREACHABLE = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+const UNREACHABLE = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
 
-/** The first system or undici code on an error or its causes (fetch wraps them as TypeError("fetch failed")). */
+// Node's fetch behind a proxy (NODE_USE_ENV_PROXY, as local mode's stages run: undici's EnvHttpProxyAgent) fails a
+// request whose CONNECT the proxy answered with anything but 200 with undici's RequestAbortedError, code
+// UND_ERR_ABORTED, the code of any aborted request. The proxy's status is on no field of it: undici builds it into this
+// one message (lib/dispatcher/proxy-agent.js, `Proxy response (${statusCode}) !== 200 when HTTP Tunneling`), so that
+// exact text, whole, on an error with that code, is read for it, and nothing else of any message. A proxy that closes
+// the socket before it answers CONNECT gives no error at all: undici asks again until the caller's own signal ends the
+// request, and that TimeoutError or AbortError says nothing of where it waited (a host slow to answer gives the same),
+// so it is not read as this machine's network.
+const PROXY_TUNNEL = /^Proxy response \((\d{3})\) !== 200 when HTTP Tunneling$/;
+
+/**
+ * The first system or undici code on an error or its causes (fetch wraps them as TypeError("fetch failed")). A tunnel
+ * the proxy would not open (PROXY_TUNNEL) is `PROXY_TUNNEL_<status>`, its status the proxy's answer to CONNECT.
+ */
 export const causeCode = (e) => {
-  for (let c = e, i = 0; c && i < 4; c = c.cause, i += 1) if (typeof c.code === "string" && /^[A-Z0-9_]+$/.test(c.code)) return c.code;
+  for (let c = e, i = 0; c && i < 4; c = c.cause, i += 1) {
+    if (typeof c.code !== "string" || !/^[A-Z0-9_]+$/.test(c.code)) continue;
+    const tunnel = c.code === "UND_ERR_ABORTED" && typeof c.message === "string" ? PROXY_TUNNEL.exec(c.message) : null;
+    return tunnel ? `PROXY_TUNNEL_${tunnel[1]}` : c.code;
+  }
   return "";
 };
+
+/**
+ * Whether a code (causeCode) says the request never reached its host from this machine: a connect-level failure
+ * (UNREACHABLE), or the proxy's 5xx to its CONNECT: the proxy could not reach the host (or failed itself), and the
+ * host never saw the request. A host's own 5xx through a working proxy comes inside the tunnel, an HTTP answer, never
+ * this. A proxy's 4xx to CONNECT (407 for its credentials, 403 for its policy) is the proxy refusing this machine, which
+ * no wait mends: not this.
+ */
+export const unreachableCode = (code) => UNREACHABLE.has(code) || /^PROXY_TUNNEL_5\d\d$/.test(code);
 
 /**
  * The code on an error GitHub's primary rate limit refused (github.mjs: a 403 or 429, or a GraphQL RATE_LIMITED, with
@@ -91,10 +117,10 @@ export function spentResetOf(headers, count = null, now = OUTAGE.now()) {
 }
 
 /**
- * Whether an error is a host out of this machine's reach: a connect-level code on it or its causes, a NetworkDown, or
- * GitHub's 5xx past the client's retries (`offline`, its code the status: serverDown).
+ * Whether an error is a host out of this machine's reach: a code on it or its causes that says so (unreachableCode), a
+ * NetworkDown, or GitHub's 5xx past the client's retries (`offline`, its code the status: serverDown).
  */
-export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(causeCode(e)));
+export const unreachable = (e) => !!e && (e.offline === true || unreachableCode(causeCode(e)));
 
 /**
  * Whether an outage's code is a host that answered, and failed or was busy, past the retries ("HTTP 500"): GitHub's 5xx

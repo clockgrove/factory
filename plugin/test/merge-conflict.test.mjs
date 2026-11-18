@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyExit, mergeBlockCause, mergeBlockReason, mergeReadyOne, rebaseBlock, rebaseMarkers, rebaseNotice, recordMergeable } from "../scripts/lib/session.mjs";
-import { REBASE_LIMIT, marker, ontoRecord, setSelf, staleDecision } from "../scripts/lib/logic.mjs";
+import { REBASE_LIMIT, marker, ontoRecord, setSelf, setWriters, staleDecision } from "../scripts/lib/logic.mjs";
 import { Local } from "../scripts/local.mjs";
 import { RETRY, transientError } from "../scripts/lib/github.mjs";
 import { planTextMarker } from "../scripts/lib/handoff.mjs";
@@ -67,7 +67,7 @@ function fakeGitHub(g) {
   // `checkRuns`: the check runs on any head; `queueTimeout`: the merge queue ruleset's check timeout (minutes), with which
   // the repository and its rulesets are read (0: a ruleset with no merge queue), else they are unread. `entry`: a queued
   // PR's merge queue entry (GraphQL's shape), else none is read; `entryFails`: the entry read fails.
-  const state = { checkRuns: [{ id: 1, name: "ci", status: "completed", conclusion: "success" }], queueTimeout: null, entry: null, entryFails: false, race: null, removals: [], entries: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [], timeline: [], refuseOnce: false, permissions: { dana: "write" } };
+  const state = { checkRuns: [{ id: 1, name: "ci", status: "completed", conclusion: "success" }], queueTimeout: null, entry: null, entryFails: false, race: null, removals: [], entries: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [], timeline: [], refuseOnce: false, permissions: { dana: "write", kirk: "write" } };
   // GitHub's own rule: an unresolved conversation refuses the merge when protection or a ruleset requires them resolved.
   const conversationsHeld = () => state.threads.some((t) => !t.isResolved) && (state.protection || state.rules.some((r) => r.type === "pull_request" && r.parameters?.required_review_thread_resolution));
   let id = 1;
@@ -165,7 +165,7 @@ function fakeGitHub(g) {
     if (method === "GET" && /\/commits\/[0-9a-f]+\/status$/.test(u)) return json(200, { statuses: [] });
     if (method === "GET" && (m = /\/repos\/o\/r\/commits\/([0-9a-f]+)$/.exec(u))) return json(200, { sha: m[1], parents: [], commit: { committer: { date: "2026-01-01T00:00:00Z" } } });
     if (method === "GET" && /\/timeline/.test(u)) return json(200, state.timeline);
-    // Each login's permission (`permissions`): dana, the maintainer who answers in threads, can write.
+    // Each login's permission (`permissions`): dana and kirk, maintainers who write in threads, can write.
     if (method === "GET" && (m = /\/repos\/o\/r\/collaborators\/([^/]+)\/permission$/.exec(u)) && state.permissions[m[1]]) return json(200, { permission: state.permissions[m[1]] });
     return json(404, { message: `Not Found: ${method} ${u}` });
   };
@@ -189,6 +189,8 @@ async function withGitHub(fn) {
   } finally {
     globalThis.fetch = real;
     setSelf(null);
+    // No writer list or permission read carries over to the next test (#605).
+    setWriters(null, []);
   }
 }
 
@@ -640,7 +642,8 @@ test("#400: an edit since the plan by a writer merges once judged wording only; 
 const codeql = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "codeql-pr-339.json"), "utf8"));
 const RULESET = { type: "pull_request", ruleset_source_type: "Repository", ruleset_id: 1, parameters: { required_review_thread_resolution: true } };
 const reply = (body, author = { __typename: "Bot", login: "pendulum-app" }, authorAssociation = "NONE") => ({ body, authorAssociation, author, pullRequestReview: { body: "", authorAssociation, author } });
-const personThread = { id: "PRRT_person", isResolved: false, path: "src/store.ts", line: null, originalLine: 41, comments: { nodes: [reply("Why a second store?", { __typename: "User", login: "dana" }, "MEMBER")] } };
+// A stranger's thread: dana cannot push (#595: a writer's or an App's thread goes to the answer pass instead).
+const personThread = { id: "PRRT_person", isResolved: false, path: "src/store.ts", line: null, originalLine: 41, comments: { nodes: [reply("Why a second store?", { __typename: "User", login: "dana" }, "CONTRIBUTOR")] } };
 
 test("#331 #368: code scanning's open comment at the merge goes to the answer pass; Pendulum's answer alone leaves it open, and once the finding check resolved its thread the PR merges", async () => {
   await withGitHub(async (g, gh) => {
@@ -651,13 +654,13 @@ test("#331 #368: code scanning's open comment at the merge goes to the answer pa
     gh.state.threads = [thread];
     gh.state.rules = [RULESET];
     const report = {};
-    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "code-scanning");
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "answer-threads");
     assert.deepEqual(gh.attempts, [], "no merge GitHub would refuse");
     assert.deepEqual(gh.state.labelled, ["12:pendulum:review"], "the review runs again; its answer pass takes the comment");
-    assert.equal(mergeBlockReason("code-scanning", report), null, "not a Block");
+    assert.equal(mergeBlockReason("answer-threads", report), null, "not a Block");
     // The answer pass replied in its thread, and the finding check did not read it as resolving the alert: still open.
     thread.comments.nodes.push(reply("<!-- pendulum:2:reply:4580153891 -->\nFixed in abc1234: the key is checked against __proto__."));
-    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "code-scanning");
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "answer-threads");
     assert.deepEqual(gh.state.resolved, [], "Pendulum's own answer resolves nothing at the merge");
     // The finding check's yes resolved the thread (finding-check.mjs): the merge goes on.
     thread.isResolved = true;
@@ -679,7 +682,7 @@ test("#331: another unresolved thread a ruleset or branch protection requires re
     const why = mergeBlockReason("threads", report);
     assert.equal(why, "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: dana on src/store.ts:41. Answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
     assert.equal(mergeBlockCause("threads", report), "work");
-    assert.deepEqual(gh.state.labelled, [], "a person's thread is not Pendulum's to answer");
+    assert.deepEqual(gh.state.labelled, [], "a stranger's thread is never Pendulum's to answer");
 
     // Branch protection's own setting, read without admin (refUpdateRule).
     gh.state.rules = [];
@@ -759,9 +762,9 @@ test("#331: code scanning's review rounds at the merge are bounded per re-entry,
     const pass = (report = {}) => mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" });
     // Each round's fix brings a new alert: two rounds, then a Block, not a third review.
     gh.state.threads = [alert("A1", 239)];
-    assert.equal(await pass(), "code-scanning");
+    assert.equal(await pass(), "answer-threads");
     gh.state.threads = [alert("A2", 250)];
-    assert.equal(await pass(), "code-scanning");
+    assert.equal(await pass(), "answer-threads");
     gh.state.threads = [alert("A3", 260), alert("A4", 12)];
     const report = {};
     assert.equal(await pass(report), "threads");
@@ -772,7 +775,7 @@ test("#331: code scanning's review rounds at the merge are bounded per re-entry,
     assert.deepEqual(gh.attempts, []);
     // A re-entry (the Objective label applied again) starts the count over.
     gh.state.timeline = [{ event: "labeled", label: { name: "pendulum:objective" }, created_at: new Date(Date.now() + 1000).toISOString() }];
-    assert.equal(await pass(), "code-scanning");
+    assert.equal(await pass(), "answer-threads");
   });
 });
 
@@ -784,7 +787,7 @@ test("#331: a person's reply in code scanning's thread is no answer: the thread 
     const thread = structuredClone(codeql.thread);
     thread.comments.nodes.push(reply("Looking into it.", { __typename: "User", login: "dana" }, "MEMBER"));
     gh.state.threads = [thread];
-    assert.equal(await merge(2, 12), "code-scanning");
+    assert.equal(await merge(2, 12), "answer-threads");
     assert.deepEqual(gh.state.resolved, [], "never resolved on a person's word");
   });
 });
@@ -807,18 +810,97 @@ test("#331: threads resolved just now that GitHub's merge check does not count y
   });
 });
 
-test("#331: a named reviewer's comment posted after the answer pass Blocks under the rule, saying so; no review runs for it", async () => {
+test("#595: under the rule a named reviewer's comment posted after the answer pass goes back to it, as code scanning's does; with no rule it holds nothing", async () => {
   await withGitHub(async (g, gh) => {
     const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     const greptile = { __typename: "Bot", login: "greptile-apps" };
     gh.state.threads = [{ id: "PRRT_late", isResolved: false, path: "src/a.ts", line: 3, originalLine: 3, comments: { nodes: [reply("P2: missing check", greptile)] } }];
+    const pass = (report = {}) => mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report, thirdParty: ["greptile-apps[bot]"] }, { token: "t" });
     gh.state.rules = [RULESET];
     const report = {};
-    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report, thirdParty: ["greptile-apps[bot]"] }, { token: "t" }), "threads");
-    assert.equal(mergeBlockReason("threads", report), "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: greptile-apps[bot] on src/a.ts:3 (posted after the answer pass). Answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
-    assert.deepEqual(gh.state.labelled, []);
+    assert.equal(await pass(report), "answer-threads");
+    assert.equal(mergeBlockReason("answer-threads", report), null, "not a Block");
+    assert.deepEqual(gh.state.labelled, ["12:pendulum:review"], "the review runs again; its answer pass takes the comment");
+    assert.deepEqual(gh.attempts, []);
+    // No rule requires it resolved: the merge goes on, as it always did.
+    gh.state.rules = [];
+    assert.equal(await pass(), "queued");
+  });
+});
+
+// #595: an App nobody named (the Codex connector on an adopter's PR) reviewed on its own; the ruleset requires every
+// conversation resolved, and the Objective Blocked only at the merge, its real finding never answered.
+const codex = { __typename: "Bot", login: "chatgpt-codex-connector" };
+const codexThread = (id, line, replies = []) => ({ id, isResolved: false, path: "src/store.ts", line, originalLine: line, comments: { nodes: [{ ...reply("P1: the second store is never flushed", codex), databaseId: 7000 + line }, ...replies] } });
+
+test("#595: an unlisted App's open thread goes to the answer pass before the merge, within the answer rounds; resolved by the finding check, the PR merges", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    const thread = codexThread("PRRT_codex", 41);
+    gh.state.threads = [thread];
+    gh.state.rules = [RULESET];
+    const pass = (report = {}) => mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" });
+    assert.equal(await pass(), "answer-threads", "never a Block at the merge");
+    assert.deepEqual(gh.state.labelled, ["12:pendulum:review"]);
+    assert.deepEqual(gh.attempts, []);
+    // Pendulum's answer alone resolves nothing: the finding check's yes does (finding-check.mjs), so it goes back once more.
+    thread.comments.nodes.push(reply("<!-- pendulum:2:reply:7041 -->\nNot a defect: flush() runs on close."));
+    assert.equal(await pass(), "answer-threads");
+    assert.deepEqual(gh.state.resolved, []);
+    // Past the rounds it Blocks, naming the App, its file and line.
+    const report = {};
+    assert.equal(await pass(report), "threads");
+    assert.equal(mergeBlockReason("threads", report), "1 review thread(s) still open on PR #12 after 2 answer rounds: chatgpt-codex-connector[bot] on src/store.ts:41. Fix them on the branch, or answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
+    assert.equal(mergeBlockCause("threads", report), "work");
+    // The finding check resolved it: the merge goes on.
+    thread.isResolved = true;
+    assert.equal(await pass(), "queued");
+    assert.deepEqual(gh.enqueued, [{ pr: 12, sha: two }]);
+  });
+});
+
+test("#595: a writer's open thread goes to the answer pass, and one a writer answered is resolved; a stranger's and github-actions[bot]'s still Block with the notice, and none of them matters with no rule", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    gh.state.rules = [RULESET];
+    const kirk = { __typename: "User", login: "kirk" };
+    // A writer's own thread with their own follow-up: no reply settles it, only the finding check's yes.
+    const writer = { id: "PRRT_writer", isResolved: false, path: "src/a.ts", line: 3, originalLine: 3, comments: { nodes: [reply("Rename this.", kirk, "MEMBER"), reply("Or move it.", kirk, "MEMBER")] } };
+    const answered = codexThread("PRRT_answered", 9, [reply("Keep it: decided on the issue.", kirk, "OWNER")]);
+    gh.state.threads = [writer, answered];
+    assert.equal(await merge(2, 12), "answer-threads");
+    assert.deepEqual(gh.state.resolved, ["PRRT_answered"], "a writer's answer resolves the App's thread, never the writer's own");
+    assert.deepEqual(gh.state.labelled, ["12:pendulum:review"]);
+    // A stranger's thread, and the job token's (any workflow posts as it), never go to a model: Blocked, named.
+    const actions = { id: "PRRT_actions", isResolved: false, path: "src/b.ts", line: 7, originalLine: 7, comments: { nodes: [reply("lint: unused import", { __typename: "Bot", login: "github-actions" })] } };
+    gh.state.threads = [structuredClone(personThread), actions];
+    const report = {};
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "threads");
+    assert.equal(mergeBlockReason("threads", report), "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 2 are open: dana on src/store.ts:41; github-actions[bot] on src/b.ts:7. Answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
+    assert.deepEqual(gh.state.labelled, ["12:pendulum:review"], "no review runs for them");
+    // An App's open thread beside a stranger's: the stranger's holds the merge anyway, so it Blocks at once, no round spent.
+    gh.state.threads = [codexThread("PRRT_codex2", 12), structuredClone(personThread)];
+    const both = {};
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report: both }, { token: "t" }), "threads");
+    assert.match(mergeBlockReason("threads", both), /and 2 are open: chatgpt-codex-connector\[bot\] on src\/store\.ts:12; dana on src\/store\.ts:41\./);
+    assert.deepEqual(gh.state.labelled, ["12:pendulum:review"], "no answer round for the App's thread");
+    // Pendulum's own open thread is no stranger's: code scanning's comment beside it still gets its answer round.
+    const pendulum = { __typename: "Bot", login: "pendulum-app" };
+    const ours = { id: "PRRT_ours_open", isResolved: false, path: "src/store.ts", line: 41, originalLine: 41, comments: { nodes: [{ body: "acceptance 1: a second store", authorAssociation: "NONE", author: pendulum, pullRequestReview: { body: `${marker(2, "review")}\nPendulum's review`, authorAssociation: "NONE", author: pendulum } }] } };
+    gh.state.threads = [ours, structuredClone(codeql.thread)];
+    assert.equal(await merge(2, 12), "answer-threads");
+    assert.deepEqual(gh.state.labelled, ["12:pendulum:review", "12:pendulum:review"]);
+    // No rule: nothing is answered, resolved or Blocked for any of them.
+    gh.state.rules = [];
+    gh.state.threads = [writer, codexThread("PRRT_answered2", 9, [reply("Keep it.", kirk, "OWNER")]), structuredClone(personThread)];
+    assert.equal(await merge(2, 12), "queued");
+    assert.deepEqual(gh.state.resolved, ["PRRT_answered"], "nothing resolved with no rule");
   });
 });
 

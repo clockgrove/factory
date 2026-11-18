@@ -852,6 +852,15 @@ test("report (#539): a Copilot stage with a spend line is under its usage record
   assert.deepEqual(c.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]).sort(), [["claude-fable-5-2", 1, 0.163442], ["claude-opus-5-5", 1, 0.35637]]);
 });
 
+test("report (#600): a Copilot stage whose usage record ran through a bring-your-own-key provider names no model, as on its cards", async () => {
+  const w = copilotLinedWorld();
+  const arn = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/x";
+  for (const list of Object.values(w.artifacts)) for (const a of list) a.record = { ...a.record, model: arn, byok: true };
+  const { json: r } = await report(w, { issue: 3 });
+  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [[null, 2, 0.519812]]);
+  assert.ok(!JSON.stringify(r).includes("123456789012"), "the provider's id is nowhere in the report");
+});
+
 test("report (#533): the call budget stopped before the usage records: the stages whose ledger is unread are named, their dollars still the spend lines'", async () => {
   // The login, the issue, its comments and its PRs; then the budget ends before the artifact lists.
   const { code, json: r } = await report(linedWorld(), { issue: 3, "max-calls": 4 });

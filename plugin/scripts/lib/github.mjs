@@ -5,8 +5,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, latestRuns, personAnswer, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
-import { AUTHOR_READS_MAX, setVerified, takeAuthorRead, unverifiedAuthors, writersListed } from "./logic.mjs";
+import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answerableReviewer, answersComment, evaluateChecks, latestRuns, personAnswer, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { AUTHOR_READS_MAX, VERIFIED_TTL_MS, setReadFailed, setVerified, takeAuthorRead, unverifiedAuthors, writersListed } from "./logic.mjs";
 import { addBilling } from "./usage.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
@@ -879,19 +879,24 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
  * names a Bot without the suffix), `line` the current line, else the original one. `by` is "ours" for a thread Pendulum's
  * reviewer opened (the root belongs to the review carrying marker(issue, "review"), by a trusted author: trustedAuthor),
  * "named" for one a reviewer Pendulum answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
- * root comment's author), else null. `answered` is a person's answer, as the answer pass's list judges it: ours once a
- * person's answer exists (logic.mjs personAnswer: by someone who can push, and none of Pendulum's marked comments, its
- * answer or the finding check's evidence) or the root is Pendulum's placeholder; named once a
- * person's reply answers it (logic.mjs answersComment). Pendulum's own answer is the finding check's to judge
+ * root comment's author), with `unlisted` "unlisted" for one any other reviewer the answer pass may take opened (logic.mjs
+ * answerableReviewer: someone who can push, `writer` true, or an App but github-actions[bot]), which it takes only when
+ * the base's rules require every conversation resolved (#595), else null. This is the one classification of a thread:
+ * the answer pass's list (session.mjs unaddressedReviewComments) and the merge pass both read it, since REST and GraphQL
+ * name some Apps differently (Copilot's reviewer is `Copilot` in REST). `answered` is a person's answer, as the answer
+ * pass's list judges it: ours once a person's answer exists (logic.mjs personAnswer: by someone who can push, and none of
+ * Pendulum's marked comments, its answer or the finding check's evidence) or the root is Pendulum's placeholder; named
+ * and an unlisted App's once a person's reply answers it (logic.mjs answersComment); a writer's never (only the finding
+ * check's yes, or a person resolving it, settles it). Pendulum's own answer is the finding check's to judge
  * (finding-check.mjs): only its yes resolves the thread.
  */
-export async function reviewThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
+export async function reviewThreads(repo, number, issue, opts, { thirdParty = [], unlisted = false } = {}) {
   const nodes = [];
   let after = null;
   // Every thread, a page of 100 at a time (THREAD_PAGES at most).
   for (let page = 0; page < THREAD_PAGES; page += 1) {
     const data = await graphql(
-      `query($owner: String!, $name: String!, $n: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id isResolved path line originalLine comments(first: 50) { nodes { databaseId body authorAssociation author { __typename login } pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
+      `query($owner: String!, $name: String!, $n: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id isResolved path line originalLine comments(first: 50) { nodes { databaseId body authorAssociation author { __typename login ... on User { databaseId } } pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
       { owner: repo.owner, name: repo.name, n: Number(number), after },
       opts,
     );
@@ -902,7 +907,7 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
   }
   const mark = marker(issue, "review");
   // An author as REST shows it (GraphQL names a Bot without "[bot]"), for trustedAuthor.
-  const asRest = (author, association, body) => ({ user: { type: author?.__typename, login: author?.__typename === "Bot" ? `${author.login}[bot]` : author?.login }, author_association: association, body });
+  const asRest = (author, association, body) => ({ user: { type: author?.__typename, login: author?.__typename === "Bot" ? `${author.login}[bot]` : author?.login, ...(Number.isInteger(author?.databaseId) ? { id: author.databaseId } : {}) }, author_association: association, body });
   const named = new Set(thirdParty.map((l) => String(l).toLowerCase()));
   // Every author's push access the trust checks below read, verified first (verifyAuthors).
   await verifyAuthors(repo, nodes.flatMap((t) => (t.comments?.nodes || []).flatMap((c) => [asRest(c.author, c.authorAssociation), asRest(c.pullRequestReview?.author, c.pullRequestReview?.authorAssociation)])), opts);
@@ -914,9 +919,13 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
     // A reviewer outside Pendulum is told by the root comment's own author, as the answer pass's list tells it.
     const author = root?.author ? asRest(root.author).user.login : null;
     const theirs = !!root && !ours && named.has(String(author || "").toLowerCase());
+    const opener = !!root && asRest(root.author, root.authorAssociation);
+    const other = unlisted && !!root && !ours && !theirs && answerableReviewer(opener);
+    // A writer's own thread is answered only by the finding check's yes: a writer's reply (its opener's included) is no answer.
+    const writer = other && trustedAuthor(opener);
     const replies = comments.slice(1).map((c) => asRest(c.author, c.authorAssociation, c.body));
-    const answered = ours ? isPlaceholder(root.body) || replies.some(personAnswer) : theirs ? replies.some((r) => answersComment(author, r)) : false;
-    return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : null, answered };
+    const answered = ours ? isPlaceholder(root.body) || replies.some(personAnswer) : theirs || (other && !writer) ? replies.some((r) => answersComment(author, r)) : false;
+    return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : other ? "unlisted" : null, ...(other ? { writer } : {}), answered };
   });
 }
 /** The most pages of 100 review threads reviewThreads reads. */
@@ -959,15 +968,17 @@ export async function resolveThread(id, opts) {
 }
 
 /**
- * Resolve the review threads Pendulum handles (reviewThreads: its own reviewer's, and those of the reviewers in
- * `thirdParty`) that a person answered or that hold Pendulum's placeholder, so a rule that requires resolved
- * conversations can merge; they stay visible on the PR. A thread Pendulum's own answer is in is resolved by the finding
- * check's yes (finding-check.mjs), never here. Returns the number resolved.
+ * Resolve the review threads Pendulum handles (reviewThreads: its own reviewer's, those of the reviewers in
+ * `thirdParty`, and, when `unlisted` (async) says the base's rules require every conversation resolved, those of the
+ * reviewers nobody named that the answer pass takes) that a person answered or that hold Pendulum's placeholder, so a
+ * rule that requires resolved conversations can merge; they stay visible on the PR. A thread Pendulum's own answer is in
+ * is resolved by the finding check's yes (finding-check.mjs), never here. Returns the number resolved.
  */
-export async function resolvePendulumThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
+export async function resolvePendulumThreads(repo, number, issue, opts, { thirdParty = [], unlisted = async () => false } = {}) {
   let resolved = 0;
-  for (const t of await reviewThreads(repo, number, issue, opts, { thirdParty })) {
+  for (const t of await reviewThreads(repo, number, issue, opts, { thirdParty, unlisted: true })) {
     if (t.resolved || !t.by || !t.answered) continue;
+    if (t.by === "unlisted" && !(await unlisted())) continue;
     await resolveThread(t.id, opts);
     resolved += 1;
   }
@@ -1725,7 +1736,8 @@ const USAGE_DOWNLOADS = 8;
 export async function localSpendToday(repo, { dateIso = new Date().toISOString().slice(0, 10), token } = {}) {
   const since = new Date(Date.parse(`${dateIso}T00:00:00Z`) - 86_400_000).toISOString().replace(/\.\d{3}Z$/, "Z");
   // One paged read of the repository's comments updated since (issues and PRs alike), not one per Objective.
-  const comments = await verifyAuthors(repo, (await rest(`repos/${repo.full}/issues/comments?since=${since}&per_page=100`, { token, paginate: true })) || [], { token });
+  // Only Pendulum's marked comments count, so only their authors' push access is verified.
+  const comments = await verifyAuthors(repo, ((await rest(`repos/${repo.full}/issues/comments?since=${since}&per_page=100`, { token, paginate: true })) || []).filter((c) => /^<!-- pendulum:\d+:/.test(c.body || "")), { token });
   let usd = 0;
   let unknown = 0;
   const lines = [];
@@ -1950,9 +1962,10 @@ export async function ensureRuleset(repo, { branch, checks, queue = true }, opts
 
 /**
  * Learn the repository's writers (push or more; org members and owners included, whatever their membership's
- * visibility) so trustedAuthor can tell them apart from strangers. Once per process per repository; a failed read is
- * logged, and a MEMBER or COLLABORATOR author then counts only on its own permission read (verifyAuthors). True when a
- * list read for this repository is in memory.
+ * visibility) so trustedAuthor can tell them apart from strangers. Read again when older than WRITERS_TTL_MS, or for
+ * another repository; a failed read is logged, an earlier list of this repository's stays in use, and a MEMBER or
+ * COLLABORATOR author the list does not name counts only on its own permission read (verifyAuthors). True when a list
+ * read for this repository is in memory.
  */
 const WRITERS_TTL_MS = 10 * 60_000;
 const primed = new Map();
@@ -1963,6 +1976,7 @@ export async function primeWriters(repo, opts, { maintainers = null } = {}) {
   if (!selfLogin()) await primeSelf(opts);
   // A long-lived loop (local serve) re-reads them, so access revoked meanwhile stops counting within minutes.
   // Fresh and for this repository: the list is one per process, so another repository's read never counts here.
+  // Listed too: reads for another repository start the list over (logic.mjs setVerified), so this one's is read again.
   if (same && writersListed() && Date.now() - (primed.get(repo.full) ?? -Infinity) < WRITERS_TTL_MS) return true;
   try {
     const list = (await rest(`repos/${repo.full}/collaborators?affiliation=all&permission=push&per_page=100`, { ...opts, paginate: true })) || [];
@@ -2001,10 +2015,11 @@ export async function primeSelf(opts) {
 /**
  * Verify the push access of `items`' authors (comments, reviews, timeline events) that only a permission read can tell
  * (logic.mjs unverifiedAuthors: MEMBER and COLLABORATOR authors the writer list does not name), so trustedAuthor, which
- * reads no API, counts each as a writer only on GitHub's own answer of write, maintain or admin. Each login is read once
- * per read of the writer list (primeWriters), at most AUTHOR_READS_MAX in all; a read that fails, or one past that bound,
- * leaves the author untrusted (the next call reads a failed one again, within the bound). For a repository other than
- * the one the writer list is for, that list starts over (logic.mjs setVerified), as primeWriters' does. Returns `items`.
+ * reads no API, counts each as a writer only on GitHub's own answer of write, maintain or admin. Each login is read at
+ * most once per window of logic.mjs VERIFIED_TTL_MS (its answer counts no longer), at most AUTHOR_READS_MAX reads a
+ * window in all. A read that fails, or one past that bound, leaves the author untrusted; a failed one is read again only
+ * after FAILED_READ_MS, and a login past the bound is logged once a window. For a repository other than the one the
+ * writer list is for, that list starts over (logic.mjs setVerified), as primeWriters' does. Returns `items`.
  */
 const WRITE_PERMISSIONS = new Set(["admin", "maintain", "write"]);
 const authorReads = new Map();
@@ -2013,15 +2028,19 @@ export async function verifyAuthors(repo, items, opts) {
   for (const login of unverifiedAuthors(repo.full, items)) {
     const key = `${repo.full}\n${login}`;
     if (!authorReads.has(key)) {
-      if (!takeAuthorRead(repo.full)) {
-        log(`writers: ${login}'s permission on ${repo.full} is not read (over ${AUTHOR_READS_MAX} reads); their comments count as no writer's`);
+      const take = takeAuthorRead(repo.full, login);
+      if (take !== true) {
+        if (take === "over") log(`writers: ${login}'s permission on ${repo.full} is not read (over ${AUTHOR_READS_MAX} reads in ${VERIFIED_TTL_MS / 60_000} minutes); their comments count as no writer's until then`);
         continue;
       }
       authorReads.set(
         key,
         collaboratorPermission(repo, login, opts).then(
           (p) => setVerified(repo.full, login, WRITE_PERMISSIONS.has(p)),
-          (e) => log(`writers: ${login}'s permission on ${repo.full} could not be read (${e?.status || String(e?.message).slice(0, 60)}); their comments count as no writer's`),
+          (e) => {
+            setReadFailed(repo.full, login);
+            log(`writers: ${login}'s permission on ${repo.full} could not be read (${e?.status || String(e?.message).slice(0, 60)}); their comments count as no writer's for now`);
+          },
         ).finally(() => authorReads.delete(key)),
       );
     }

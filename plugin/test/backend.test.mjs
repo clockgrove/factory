@@ -67,7 +67,7 @@ test("trustedAuthor: Pendulum acts on a marker only from its own login or someon
   for (const a of ["MEMBER", "COLLABORATOR"]) assert.equal(trustedAuthor({ user: { type: "User", login: "member" }, author_association: a }), false);
   setVerified("acme/app", "member", true);
   for (const a of ["MEMBER", "COLLABORATOR"]) assert.equal(trustedAuthor({ user: { type: "User", login: "Member" }, author_association: a }), true);
-  setWriters("acme/app", []);
+  setWriters(null, []);
   for (const a of ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", undefined]) assert.equal(trustedAuthor({ user: { type: "User" }, author_association: a }), false);
 });
 

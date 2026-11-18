@@ -259,7 +259,9 @@ export async function readContext({ repo, n, ev, inputs, opts, readEventTime, ru
         return { project: null, card: null };
       },
     ),
-    listComments(repo, n, opts),
+    // Read as GitHub has them, with no author's permission read: only Pendulum's own comments (isSelf, pendulumOwn) are
+    // taken from them; the writer list is still loading beside them.
+    rest(`repos/${repo.full}/issues/${n}/comments?per_page=100`, { ...opts, paginate: true }).then((c) => c || []),
     due ? runningSince(repo, n, opts).catch(() => null) : null,
     due
       ? findPr(repo, `pendulum/${n}`, opts).then((pr) => reviewRequest(repo, pr, opts, { labelledOnly: true })).catch(() => null)

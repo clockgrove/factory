@@ -9,7 +9,7 @@
 // dispatcher's tick, on every route (the Action's, a cloud sandbox's, `serve`'s), puts the label back once that review
 // exists or the bound has passed (waitState), and the label starts the review stage again as it always does. That stage
 // finds Pendulum's own review already posted, so no reviewer pass runs again, and goes on to the answer pass.
-import { addLabels, listComments, listReviews, objectiveLabeledAt, removeLabel, rest, setStateLabel } from "./github.mjs";
+import { addLabels, listComments, listReviews, objectiveLabeledAt, removeLabel, resolutionRule, rest, setStateLabel } from "./github.mjs";
 import { sanitize } from "./handoff.mjs";
 import { THIRD_PARTY_WAIT_MAX_MINUTES, log } from "./inputs.mjs";
 import { clockText } from "./clock.mjs";
@@ -56,6 +56,22 @@ export { CODE_SCANNING };
  */
 export const answeredReviewers = (names = []) => [...new Set([...thirdPartyReviewers(names).logins, CODE_SCANNING])];
 
+/**
+ * Whether the answer pass takes the open threads of reviewers nobody named on a PR into `base` (#595), as an async
+ * function that reads at most once: when the base's rules require every review conversation resolved before a merge
+ * (github.mjs resolutionRule), a thread by someone who can push or by an App (logic.mjs answerableReviewer) would hold
+ * the merge, so the answer pass takes it as a named reviewer's. Rules that cannot be read are none here: the merge pass
+ * reads them again, and GitHub's own rule decides the merge.
+ */
+export function unlistedRule(repo, base, opts) {
+  let read = null;
+  return () =>
+    (read ??= resolutionRule(repo, base, opts).then(
+      (rule) => !!rule,
+      (e) => (log(`third-party review: the rules on ${base} could not be read (${e?.status ?? e?.code ?? "error"}); the answer pass takes no unlisted reviewer's thread`), false),
+    ));
+}
+
 /** The named reviewer who wrote a review or comment (its `user.login`, matched exactly), or null. */
 export const namedReviewer = (item, logins = []) => (logins.length ? (logins.find((l) => l === key(item?.user?.login)) ?? null) : null);
 
@@ -66,13 +82,20 @@ export const namedReviewer = (item, logins = []) => (logins.length ? (logins.fin
 export const thirdPartyComment = (c, from) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line ?? null, body: sanitize(c.body, { max: THIRD_PARTY_TEXT_MAX }), from });
 
 /**
- * The comments that hold the stage's exit (decideExit's unanswered count): every one of Pendulum's own, and a named
- * reviewer's only when the answer pass was given it (`given`, ids). One that came after the wait is left for the next
- * review: the stage went on without it.
+ * A writer's own line comment as the answer pass gets it (#595, under a rule that requires resolved conversations): as
+ * thirdPartyComment shapes it, but `writer` (its author) in place of `from`. It is a maintainer's decision, never framed
+ * as untrusted review input; the answer pass's prompt names it as such and gives its text once.
+ */
+export const writerComment = (c, writer) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line ?? null, body: sanitize(c.body, { max: THIRD_PARTY_TEXT_MAX }), writer });
+
+/**
+ * The comments that hold the stage's exit (decideExit's unanswered count): every one of Pendulum's own, and another
+ * reviewer's (a named or unlisted one's, `from`, or a writer's, `writer`) only when the answer pass was given it
+ * (`given`, ids). One that came after the wait is left for the next review: the stage went on without it.
  */
 export const exitUnaddressed = (open, given) => {
   const ids = new Set([...given].map(String));
-  return open.filter((c) => !c.from || ids.has(String(c.id)));
+  return open.filter((c) => !(c.from || c.writer) || ids.has(String(c.id)));
 };
 
 /** Which of `logins` submitted a review of `sha` (a review by that login whose `commit_id` is `sha`, not pending). */

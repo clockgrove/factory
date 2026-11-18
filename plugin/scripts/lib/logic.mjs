@@ -2398,18 +2398,21 @@ export const MEMBER_ASSOCIATIONS = new Set(["MEMBER", "COLLABORATOR"]);
  * The writers of the one repository this process works on, by login (primeWriters in github.mjs fills and refreshes
  * it). author_association alone is not enough: an App's token sees an organization member whose membership is private
  * as CONTRIBUTOR or NONE. Set for another repository, the list starts over, so one repository's writers never count in
- * another. `checked`: the write access of MEMBER and COLLABORATOR authors the writer list does not name, as their
- * permission reads found it (github.mjs verifyAuthors), and `reads`, how many such reads were made; both start over with
- * each read of the writer list, so access revoked meanwhile stops counting.
+ * another (a process serves one repository; one that read another's comments would read this list again). `checks`: the
+ * permission reads of MEMBER and COLLABORATOR authors the writer list does not name (github.mjs verifyAuthors), kept for
+ * one window of VERIFIED_TTL_MS from `since`, whatever becomes of the writer list's own reads: `verified`, each login's
+ * answer; `failed`, when a login's read last failed; `reads`, how many were made; `over`, the logins refused past
+ * AUTHOR_READS_MAX. The window then starts over, so a permission revoked meanwhile stops counting.
  */
-const freshWriters = (repo) => ({ repo, listed: false, logins: new Set(), maintainers: new Set(), unpinned: [], checked: new Map(), reads: 0 });
+const freshChecks = () => ({ since: Date.now(), verified: new Map(), failed: new Map(), reads: 0, over: new Set() });
+const freshWriters = (repo) => ({ repo, listed: false, logins: new Set(), maintainers: new Set(), unpinned: [], checks: freshChecks() });
 let WRITERS = freshWriters(null);
 // GitHub logins are unique ignoring case, so they are compared lowercased; a leading @ is dropped.
 export const loginKey = (l) => String(l ?? "").trim().replace(/^@/, "").toLowerCase();
 const loginSet = (logins) => new Set((logins || []).map(loginKey).filter(Boolean));
 export const setWriters = (repoFull, logins) => {
   const same = WRITERS.repo === repoFull;
-  WRITERS = { ...freshWriters(repoFull), listed: true, logins: loginSet(logins), maintainers: same ? WRITERS.maintainers : new Set(), unpinned: same ? WRITERS.unpinned : [] };
+  WRITERS = { ...freshWriters(repoFull), listed: true, logins: loginSet(logins), ...(same ? { maintainers: WRITERS.maintainers, unpinned: WRITERS.unpinned, checks: WRITERS.checks } : {}) };
 };
 /** A maintainers entry as `{login, id}`: `login#id` pins the account by its numeric id; a bare login has id null. */
 export function parseMaintainer(entry) {
@@ -2440,39 +2443,64 @@ export const knownWriter = (login) => (login && WRITERS.logins?.has(loginKey(log
 /** Whether this user is one of the workflow's maintainers, by numeric id. */
 export const pinnedMaintainer = (user) => Number.isInteger(user?.id) && !!WRITERS.maintainers?.has(user.id);
 
-/**
- * Whether a permission read found this login able to push to the writer list's repository (true), unable (false), or
- * no read answered for it (null): never read, or the read failed, which trusts nobody.
- */
-export const verifiedWriter = (login) => (login ? (WRITERS.checked?.get(loginKey(login)) ?? null) : null);
-/** Record a permission read's answer for `login` on `repoFull` (github.mjs verifyAuthors); another repository's list starts over. */
-export const setVerified = (repoFull, login, canPush) => {
-  if (WRITERS.repo !== repoFull) WRITERS = freshWriters(repoFull);
-  if (loginKey(login)) WRITERS.checked.set(loginKey(login), canPush === true);
-};
-/** The most permission reads verifyAuthors makes per read of the writer list: past it, an author it would read is not trusted. */
+/** How long a permission read's answer counts: the window of `checks` (freshWriters), which AUTHOR_READS_MAX also bounds. */
+export const VERIFIED_TTL_MS = 10 * 60_000;
+/** How long after a failed permission read the login is not read again: one flapping login costs a read a minute at most. */
+export const FAILED_READ_MS = 60_000;
+/** The most permission reads verifyAuthors makes per window: past it, an author it would read is not trusted. */
 export const AUTHOR_READS_MAX = 30;
-/** Take one of the permission reads AUTHOR_READS_MAX allows for `repoFull`: false when none is left. */
-export const takeAuthorRead = (repoFull) => {
-  if (WRITERS.repo !== repoFull) WRITERS = freshWriters(repoFull);
-  if (WRITERS.reads >= AUTHOR_READS_MAX) return false;
-  WRITERS.reads += 1;
-  return true;
+/** The permission reads of this window, for `repoFull` when given (another repository's list starts over). */
+const checksNow = (repoFull) => {
+  if (repoFull !== undefined && WRITERS.repo !== repoFull) WRITERS = freshWriters(repoFull);
+  if (Date.now() - WRITERS.checks.since >= VERIFIED_TTL_MS) WRITERS.checks = freshChecks();
+  return WRITERS.checks;
+};
+/**
+ * Whether a permission read in this window found this login able to push to the writer list's repository (true), unable
+ * (false), or no read answered for it (null): never read, read in an earlier window, or the read failed, which trusts
+ * nobody.
+ */
+export const verifiedWriter = (login) => (login ? (checksNow().verified.get(loginKey(login)) ?? null) : null);
+/** Record a permission read's answer for `login` on `repoFull` (github.mjs verifyAuthors, session.mjs objectiveDecisions). */
+export const setVerified = (repoFull, login, canPush) => {
+  const checks = checksNow(repoFull);
+  if (!loginKey(login)) return;
+  checks.verified.set(loginKey(login), canPush === true);
+  checks.failed.delete(loginKey(login));
+};
+/** Record that `login`'s permission read on `repoFull` failed now: it is not read again for FAILED_READ_MS. */
+export const setReadFailed = (repoFull, login) => {
+  if (loginKey(login)) checksNow(repoFull).failed.set(loginKey(login), Date.now());
+};
+/**
+ * Take one of the permission reads AUTHOR_READS_MAX allows this window on `repoFull`, for `login`: true; else "over" the
+ * first time this login is refused in the window (the caller says so once), false after.
+ */
+export const takeAuthorRead = (repoFull, login) => {
+  const checks = checksNow(repoFull);
+  if (checks.reads < AUTHOR_READS_MAX) {
+    checks.reads += 1;
+    return true;
+  }
+  if (checks.over.has(loginKey(login))) return false;
+  checks.over.add(loginKey(login));
+  return "over";
 };
 /**
  * The logins among `items` (comments, reviews, timeline events on `repoFull`: the author is `user`, else `actor`) whose
  * push access only a permission read can tell: a MEMBER or COLLABORATOR author that is not Pendulum itself, not on the
- * writer list, not a pinned maintainer, and not read yet. Each once, lowercased. For another repository than the writer
- * list's, the list starts over first (as setVerified).
+ * writer list, not a pinned maintainer, not read yet this window, and whose read did not fail in the last
+ * FAILED_READ_MS. Each once, lowercased.
  */
 export function unverifiedAuthors(repoFull, items) {
-  if (WRITERS.repo !== repoFull) WRITERS = freshWriters(repoFull);
+  const checks = checksNow(repoFull);
   const out = new Set();
   for (const item of items || []) {
     const user = item?.user ?? item?.actor;
     const key = loginKey(user?.login);
     if (!key || !MEMBER_ASSOCIATIONS.has(item?.author_association)) continue;
-    if (isSelf({ user }) || knownWriter(key) || pinnedMaintainer(user) || WRITERS.checked?.has(key)) continue;
+    if (isSelf({ user }) || knownWriter(key) || pinnedMaintainer(user) || checks.verified.has(key)) continue;
+    if (Date.now() - (checks.failed.get(key) ?? -Infinity) < FAILED_READ_MS) continue;
     out.add(key);
   }
   return [...out];
@@ -2514,6 +2542,23 @@ export const trustedAuthor = (item) => isSelf(item) || pushAuthor(item);
  * login is an App's, which no person can hold.
  */
 export const CODE_SCANNING = "github-advanced-security[bot]";
+
+/** The login of a workflow's own job token: any workflow run in the repository posts as it. */
+export const JOB_TOKEN_LOGIN = "github-actions[bot]";
+
+/**
+ * Whether the answer pass may take a review thread `item` (its root comment) opened, from a reviewer nobody named, when
+ * the base's rules require every review conversation resolved before a merge (#595): someone who can push
+ * (trustedAuthor), or a GitHub App (a `[bot]` login of type Bot), which can comment on a repository only through an
+ * installation on it. Never github-actions[bot] (JOB_TOKEN_LOGIN): every workflow run in the repository posts as it,
+ * one a stranger's comment or pull request starts included, so it stands for no installation anyone chose; its thread
+ * is a stranger's. Its text, as any reviewer's outside Pendulum, is data for the answer pass, never instructions.
+ */
+export const answerableReviewer = (item) => {
+  if (trustedAuthor(item)) return true;
+  const login = loginKey(item?.user?.login);
+  return item?.user?.type === "Bot" && login.endsWith("[bot]") && login !== JOB_TOKEN_LOGIN;
+};
 // Pendulum's answer to a line comment: its reply marker at the start (handoff.mjs postReplies).
 const REPLY_AT_START = /^<!-- pendulum:\d+:reply:\S+ -->/;
 
@@ -2860,7 +2905,7 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
 /**
  * The models a stage's harness line publishes (harnessMarker: its own model and the Objective's worker, sub-agent and
  * reviewer models, as choice.mjs ranWith gives them and the usage record's `ran` keeps them); [] when it names none
- * (Copilot at its default), null when the record has no `ran` to say.
+ * (Copilot at its default, its event stream naming none: usage.mjs copilotRan), null when the record has no `ran` to say.
  */
 export const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
 /** The routes a stage records it ran on (backend.mjs stageRoute), on its usage record and spend line (#570). */
@@ -2882,13 +2927,13 @@ const exitCode = (v) => (typeof v === "string" && /^[a-z][a-z-]{0,30}$/.test(v) 
  * the scorecard counts per account (#266). `exit`: how the stage ended (its record's exit code), which the report's
  * Blocked stages read. `route`: the route it ran on (its record's: `actions`, `local`, `sandbox`), which the report's
  * route breakdown reads. `ledger`: the per-pass ledger line written beside it (ledgerMarker), from the record's `ledger`;
- * absent for a record with none.
+ * absent for a record with none. A record of a pass through a bring-your-own-key provider (`byok`) writes no model in it.
  */
 export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
   const byPass = passRead(usage?.usdByPass);
   const rerun = rerunRead(usage?.rerun);
-  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum, published: publishedModels(usage.ran) }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...(usage?.noPass === true ? { noPass: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}), ...(exitCode(usage?.exit) ? { exit: usage.exit } : {}), ...(routeCode(usage?.route) ? { route: usage.route } : {}) } };
+  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum, published: usage.byok === true ? null : publishedModels(usage.ran) }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...(usage?.noPass === true ? { noPass: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}), ...(exitCode(usage?.exit) ? { exit: usage.exit } : {}), ...(routeCode(usage?.route) ? { route: usage.route } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer

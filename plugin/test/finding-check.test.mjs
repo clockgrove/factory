@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { BODY_FINDING_QUESTION, CONCURRENCY, FINDING_QUESTION, INPUT_CAPS, checkAnswers, decisionsPart, findingInput, listedFindings, namedTestRunner, openFindingCheck, resolves } from "../scripts/lib/finding-check.mjs";
 import { dropHeldSecrets, holdSecrets } from "../scripts/lib/inputs.mjs";
 import { RETRY, prBodyHistory, resolvePendulumThreads } from "../scripts/lib/github.mjs";
@@ -331,6 +331,22 @@ test("#368: findings still open after the answer pass get another answer round w
     gh.state.timeline = [{ event: "labeled", label: { name: "pendulum:objective" }, created_at: new Date(Date.now() + 1000).toISOString() }];
     assert.equal((await stage()).rerun, true);
   });
+});
+
+test("#595: answer rounds taken in one millisecond (a fast runner) still count apart; the bound holds", async () => {
+  const gh = github();
+  const open = [{ id: 200, path: "src/b.ts", line: 9 }];
+  mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-18T08:24:23.487Z") });
+  try {
+    await withGitHub(gh, async () => {
+      const stage = () => openFindingsExit(exitFor(open.length), { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "pendulum:objective", open }, { token: "t" });
+      for (let round = 1; round <= ANSWER_ROUNDS; round += 1) assert.equal((await stage()).rerun, true);
+      assert.equal((await readAnswerRounds(REPO, { issue: 7, prNumber: 12, objectiveLabel: "pendulum:objective" }, { token: "t" })).rounds.length, ANSWER_ROUNDS);
+      assert.equal((await stage()).exit, "blocked", "no third round");
+    });
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("#368: an answer the gateway gave no verdict on costs no answer round: the next stage judges it again with no worker pass, and the second stage in a row Blocks naming the gateway's failure", async () => {

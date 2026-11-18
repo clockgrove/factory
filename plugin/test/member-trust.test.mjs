@@ -5,8 +5,8 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { RETRY, listComments, reviewThreads, verifyAuthors } from "../scripts/lib/github.mjs";
-import { AUTHOR_READS_MAX, marker, reviewBody, setSelf, setWriters, trustedAuthor } from "../scripts/lib/logic.mjs";
+import { RETRY, listComments, localSpendToday, primeWriters, reviewThreads, verifyAuthors } from "../scripts/lib/github.mjs";
+import { AUTHOR_READS_MAX, FAILED_READ_MS, VERIFIED_TTL_MS, decisionSpendMarker, marker, reviewBody, setSelf, setWriters, trustedAuthor } from "../scripts/lib/logic.mjs";
 import { unaddressedReviewComments } from "../scripts/lib/session.mjs";
 import { findingInput } from "../scripts/lib/finding-check.mjs";
 
@@ -18,11 +18,14 @@ const user = (login) => ({ login, type: "User" });
 
 /**
  * GitHub for PR 12 of acme/app: its reviews, line comments, issue comments and review threads (GraphQL's shape), and
- * each login's permission (`permissions`: a login's answer, or a status to fail with). The writer list (`collaborators`)
- * names nobody: an App's token lists no one with organization-derived access. `reads` counts permission reads by login.
+ * each login's permission (`permissions`: a login's answer, or a status to fail with; changed in place as a test goes).
+ * The writer list (`collaborators`) names nobody unless given: an App's token lists no one with organization-derived
+ * access. `reads` counts permission reads by login, `listReads` the writer list's; `/issues/comments` is the repository's
+ * comments updated since a time (localSpendToday's read), here `comments` again.
  */
-function github({ reviews = [], lineComments = [], comments = [], threads = [], permissions = {} } = {}) {
+function github({ reviews = [], lineComments = [], comments = [], threads = [], permissions = {}, collaborators = [] } = {}) {
   const reads = {};
+  let listReads = 0;
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
     const p = u.pathname.replace("/repos/acme/app", "");
@@ -35,7 +38,8 @@ function github({ reviews = [], lineComments = [], comments = [], threads = [], 
     if (p === "/pulls/12/reviews") return json(reviews);
     if (p === "/pulls/12/comments") return json(lineComments);
     if (p === "/issues/12/comments") return json(comments);
-    if (p === "/collaborators") return json([]);
+    if (p === "/issues/comments") return json(comments);
+    if (p === "/collaborators") return (listReads += 1), json(collaborators);
     if ((m = /^\/collaborators\/([^/]+)\/permission$/.exec(p))) {
       const login = decodeURIComponent(m[1]);
       reads[login] = (reads[login] || 0) + 1;
@@ -45,7 +49,7 @@ function github({ reviews = [], lineComments = [], comments = [], threads = [], 
     }
     return json({ message: "Not Found" }, 404);
   };
-  return { fetch, reads };
+  return { fetch, reads, listReads: () => listReads };
 }
 
 async function withGitHub(gh, fn) {
@@ -100,27 +104,29 @@ test("#605: a read-only MEMBER's thread is not a writer's: their review is not P
   });
 });
 
-test("#605: a failed permission read fails closed: the author is not trusted, and is read again next time, within the bound", async () => {
+test("#605: a failed permission read fails closed and is not read again for a minute, so a flapping login costs the readers nothing meanwhile", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const restart = { id: 1, user: user("dev"), author_association: "COLLABORATOR", body: `${marker(7, "queue-red")}x` };
-  const gh = github({ comments: [restart], permissions: { dev: 502 } });
+  const permissions = { dev: 502 };
+  const gh = github({ comments: [restart], permissions });
   await withGitHub(gh, async () => {
     const [c] = await listComments(REPO, 12, { token: "t" });
     assert.equal(trustedAuthor(c), false, "unread: not trusted");
-    gh.reads.dev = 0;
+    assert.equal(gh.reads.dev, RETRY.tries);
     await listComments(REPO, 12, { token: "t" });
-    assert.equal(gh.reads.dev, RETRY.tries, "a failed read is tried again at the next read of the comments");
-  });
-  // The same login, once its permission reads as write, is trusted, with no read after the first.
-  const ok = github({ comments: [restart], permissions: { dev: "write" } });
-  await withGitHub(ok, async () => {
-    const [c] = await listComments(REPO, 12, { token: "t" });
-    assert.equal(trustedAuthor(c), true);
     await listComments(REPO, 12, { token: "t" });
-    assert.equal(ok.reads.dev, 1);
+    assert.equal(gh.reads.dev, RETRY.tries, "no read again within the minute");
+    t.mock.timers.tick(FAILED_READ_MS);
+    permissions.dev = "write";
+    const [again] = await listComments(REPO, 12, { token: "t" });
+    assert.equal(trustedAuthor(again), true, "read again after it, and its write answer counts");
+    await listComments(REPO, 12, { token: "t" });
+    assert.equal(gh.reads.dev, RETRY.tries + 1, "an answer is kept for the window");
   });
 });
 
-test("#605: permission reads are bounded per read of the writer list; past the bound an author is not trusted, and a fresh writer list starts the count again", async () => {
+test("#605: permission reads are bounded per ten-minute window of their own, and an answer counts in its window only, whatever the writer list's reads", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const many = Array.from({ length: AUTHOR_READS_MAX + 3 }, (_, i) => ({ id: i + 1, user: user(`member${i}`), author_association: "MEMBER", body: "x" }));
   const permissions = Object.fromEntries(many.map((c) => [c.user.login, "write"]));
   const gh = github({ comments: many, permissions });
@@ -128,14 +134,46 @@ test("#605: permission reads are bounded per read of the writer list; past the b
     const read = await listComments(REPO, 12, { token: "t" });
     assert.equal(Object.keys(gh.reads).length, AUTHOR_READS_MAX);
     assert.deepEqual(read.map(trustedAuthor), many.map((_, i) => i < AUTHOR_READS_MAX));
-    // Pendulum itself, the writer list's writers and the repository's owner need no read.
+    // Pendulum itself and the repository's owner need no read.
     await verifyAuthors(REPO, [{ user: app, author_association: "MEMBER" }, { user: user("boss"), author_association: "OWNER" }], { token: "t" });
-    assert.equal(Object.keys(gh.reads).length, AUTHOR_READS_MAX);
-    // The writer list read again (primeWriters, every few minutes in a long-lived loop): the reads start over.
+    // A writer list read again (primeWriters) starts no new window: the bound still holds.
     setWriters(REPO.full, []);
+    await listComments(REPO, 12, { token: "t" });
+    assert.equal(Object.keys(gh.reads).length, AUTHOR_READS_MAX);
+    // The window over: no answer read in it counts any more, so a permission revoked meanwhile stops counting, even
+    // with no writer list read since; the reads start over.
+    t.mock.timers.tick(VERIFIED_TTL_MS);
+    assert.equal(trustedAuthor(read[0]), false);
+    permissions.member0 = "read";
+    const again = await listComments(REPO, 12, { token: "t" });
+    assert.deepEqual([trustedAuthor(again[0]), trustedAuthor(again[1]), gh.reads.member0], [false, true, 2]);
     const rest = await verifyAuthors(REPO, many.slice(AUTHOR_READS_MAX), { token: "t" });
-    assert.equal(Object.keys(gh.reads).length, AUTHOR_READS_MAX + 3);
-    assert.deepEqual(rest.map(trustedAuthor), [true, true, true]);
+    assert.deepEqual(rest.map(trustedAuthor), [false, false, false], "past the bound in this window too");
+  });
+});
+
+test("#605: a writer list another repository's reads started over is read again, however fresh", async () => {
+  const gh = github({ collaborators: [{ login: "private-owner" }] });
+  await withGitHub(gh, async () => {
+    // An organization owner whose membership is private: an App's token sees CONTRIBUTOR, so only the list tells.
+    const c = { user: user("private-owner"), author_association: "CONTRIBUTOR" };
+    assert.equal(await primeWriters(REPO, { token: "t" }), true);
+    assert.equal(trustedAuthor(c), true);
+    await verifyAuthors({ owner: "acme", name: "other", full: "acme/other" }, [], { token: "t" });
+    await verifyAuthors(REPO, [], { token: "t" });
+    assert.equal(trustedAuthor(c), false, "the list started over");
+    assert.equal(await primeWriters(REPO, { token: "t" }), true);
+    assert.deepEqual([gh.listReads(), trustedAuthor(c)], [2, true]);
+  });
+});
+
+test("#605: today's spend counts a MEMBER's decision lines only when their permission reads as write", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const line = (id, login, usd) => ({ id, user: user(login), author_association: "MEMBER", body: `<!-- pendulum:7:decisions:dispatcher -->\n${decisionSpendMarker({ date: today, calls: 1, usd })}`, updated_at: new Date().toISOString() });
+  const gh = github({ comments: [line(1, "viewer", 5), line(2, "dev", 0.25), { id: 3, user: user("chatty"), author_association: "MEMBER", body: "no marker" }], permissions: { viewer: "read", dev: "write", chatty: "write" } });
+  await withGitHub(gh, async () => {
+    assert.equal((await localSpendToday(REPO, { dateIso: today, token: "t" })).usd, 0.25);
+    assert.deepEqual(gh.reads, { viewer: 1, dev: 1 }, "only the marked comments' authors are read");
   });
 });
 

@@ -101,6 +101,8 @@ test("every pass label the code runs a harness under is a pass kind, or named he
     exit: ["exit", null],
     "question-check": ["question-check", null],
     run: ["run", null],
+    // serve's probe of a held account (#613, local.mjs probeHold): no stage's pass, so no kind.
+    "limit probe": ["limit probe", null],
   };
   // Labels of no harness pass: a usage limit's place, a GitHub label, a status word, a red job's name.
   const other = (l) => /^(rebase|finding|fence|fix-progress|same-failure) check$/.test(l) || /^pendulum:/.test(l) || l === "working" || /^job \$\{/.test(l);

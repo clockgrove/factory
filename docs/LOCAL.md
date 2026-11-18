@@ -410,7 +410,7 @@ Objectives on other accounts go on: their harness label, else the loop's, picks 
 With one account per harness (one login, or one declared account), a hold on it holds the whole harness: every stage on that harness waits for the reset, and only Objectives on another harness go on.
 
 **Resuming.** The `serve` whose stage paused resumes the Objective after the reset, or sooner, with no lapse counted and no twelve-hour bound, since the reset is known:
-- at the first tick that reads nothing holding its account (a release, below; the folder cleared by hand);
+- at the first tick that reads nothing holding its account (a probe it answered or a release, both below; the folder cleared by hand);
 - or once it is moved to a free account (Accounts, below).
 
 While it waits, that `serve` writes the Objective's claim again once an hour, so a long wait (a weekly window) is never taken for a loop gone away and Blocked after the claim pause; if that `serve` stops, the usual claim pause applies.
@@ -432,12 +432,27 @@ While it waits, that `serve` writes the Objective's claim again once an hour, so
 The count starts again when a pass on that account completes (the provider served it) in a stage that started after the latest limit met there, or an hour after the hold ended.
 A hold lasts at most eight days.
 
+**Re-checking a hold.** A provider can lift a limit before the reset it named (a reset on the account, a plan change), so `serve` probes a held account now and then instead of trusting a reset days away.
+- **When:** only while the hold's reset is more than an hour ahead, only for a hold some work of that `serve` waits on at that tick (an Objective paused on it, a review or new work held by it), and at most once in 30 minutes per account for every `serve` on the machine together, however the last probe ended.
+  Nearer than an hour, the reset itself comes soon enough and nothing is probed.
+- **What:** one call through the held account's own harness and login, the same call a decision made through the harness is (PLAN.md): a fixed one-line prompt, no tool, no file write, no session kept, one turn, under that call's dollar and time cap, on the model the loop's stages run (the harness's default for an account of another harness).
+  It runs beside the tick, which never waits for it, and it is no stage: it starts none, takes no slot and writes nothing to GitHub.
+- **Answered:** the hold is released exactly as `pendulum hold release` does it (below), for every `serve` on the machine, and the log says so.
+  At the next tick the Objectives paused on the account resume and new stages start on it.
+- **Refused for the usage limit or quota:** the hold stands, and the account is probed again 30 minutes on at the soonest.
+- **Anything else** (no answer, another refusal, a harness that did not start, the time cap): the hold stands, the same.
+- **Its cost** is the probe's own, in no stage's or Objective's spend: the log line of each probe and the account's probe record in the holds folder give the dollars its harness reported, or say the call is of unknown cost with the reason's code (`unreported`, `no-price`, …), never an estimate.
+  `daily_usd` and `pendulum report` read GitHub's records, so they do not count it.
+- Only a limit with a reset is probed: an account passed over on a no-reset guess (Accounts, below) is tried again when the guess ends, and Copilot reports no reset.
+
 **Where holds live.** The holds are the machine's, not one `serve`'s: they live in `~/.cache/pendulum/holds`, one file per limit met, which every `serve` on the machine (any repository) reads, and a restarted one too, so none spends a call to find a limit another already met.
 - Several `serve`s writing at once lose none (each writes a file of its own, whole, never rewriting another's).
 - A declared account's hold is kept under its name.
   With none declared, a hold is kept under the login the stage ran on, as `<harness>@<hash>` of its folder's real path (`CLAUDE_CONFIG_DIR` else `~/.claude`, `CODEX_HOME` else `~/.codex`, `~/.config/pendulum/copilot-token`), so two `serve`s on two logins of one harness never hold each other, and two on one login do.
 - A Copilot token in `serve`'s environment (`COPILOT_GITHUB_TOKEN`) names no login: its hold stays in that `serve`'s memory, and another `serve` on the machine finds the limit with its own first pass.
 - A file holds the harness, that name or hash, the hold's end, the count, when it was met and the limit's window when the harness named it: no secret and no path.
+- Each account probed also has one `<name>.probe.json`, its last probe, replaced at each one: when it started, how it ended (`answered`, `limited` or `failed`), its cost as above, its billing and model, and when it released the hold if it did.
+  It holds and releases nothing by itself; a probe that starts writes it first, which is how every `serve` here takes turns.
 - No sandbox may write the folder (it is outside every writable one, and read-only in the outer sandbox), and a file there that is a link, another user's, or writable by others is not read.
 
 **`pendulum hold list`** shows each account the holds remember, by the name they are kept under (a declared name, or `<harness>@<hash>`): its harness, whether it is held until a reset (and the window) or passed over on a no-reset guess, until when, and its back-off count.

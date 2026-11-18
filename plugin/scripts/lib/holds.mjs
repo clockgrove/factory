@@ -14,6 +14,9 @@
 // file a sandbox or another user could have made (a link, another owner, group or world write bits) is not read. A
 // person lifts an account's hold with `pendulum hold release` (#376): one more file, a release record, that ends every
 // record made on the account before it, for every serve, and resets its back-off count; no file need be removed.
+// A serve re-checks a hold whose reset is far off (#613: probeDue), since a provider may lift a limit before the reset it
+// named: each account has one `<key>.probe.json`, its last probe (when, how it ended, what it cost), replaced whole as
+// the probe starts and again as it ends, so every serve here takes turns from the same record.
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +51,16 @@ export const SPENT_GUESS_MS = [1, 4, 24].map((h) => h * 60 * 60_000);
 /** A stage-start record (accountHolds.started) of an account no stage started on this long is removed. */
 export const START_FORGET_MS = HOLD_MAX_MS;
 
+/**
+ * A hold is probed (local.mjs probeHolds) only while its reset is more than this far ahead: nearer than that, the reset
+ * itself comes soon enough, and the call is saved.
+ */
+export const PROBE_NEAR_MS = 60 * 60_000;
+/** The least time between two probes of one account, by any serve on the machine, however the last one ended. */
+export const PROBE_EVERY_MS = 30 * 60_000;
+/** How a probe ended: the provider answered it, refused it for the usage limit, or anything else (no answer). */
+export const PROBE_OUTCOMES = Object.freeze(["answered", "limited", "failed"]);
+
 /** The machine's holds: under Pendulum's cache folder, never ~/.config/pendulum (no secret is in them). */
 export const holdsDir = (home = homedir()) => join(home, ".cache", "pendulum", "holds");
 
@@ -61,6 +74,7 @@ const FILE = new RegExp(`^(${KEY_SRC})\\.[0-9a-f]{16}\\.json$`);
 const TEMP = new RegExp(`^\\.${KEY_SRC}\\.[0-9a-f]{16}\\.tmp$`);
 const STARTED = new RegExp(`^(${KEY_SRC})\\.started\\.json$`);
 const QUOTA = new RegExp(`^(${KEY_SRC})\\.quota\\.json$`);
+const PROBE = new RegExp(`^(${KEY_SRC})\\.probe\\.json$`);
 const MAX_BYTES = 4096;
 
 /** A usage limit's window as the harness names it (usage.mjs providerRefusal `limitType`: `five_hour`, `codex/primary`), else null. */
@@ -207,6 +221,11 @@ function readDir(dir, now, uid) {
         if (now - st.mtimeMs > START_FORGET_MS && (STARTED.test(name) || QUOTA.exec(name)[1].includes("@"))) rmSync(file, { force: true });
         continue;
       }
+      // An account's last probe goes once no probe was made for as long as a hold can last.
+      if (PROBE.test(name)) {
+        if (now - st.mtimeMs > HOLD_MAX_MS) rmSync(file, { force: true });
+        continue;
+      }
       const m = FILE.exec(name);
       if (!m || st.size > MAX_BYTES || st.nlink !== 1) continue;
       const r = recordOf(JSON.parse(readFileSync(file, "utf8")), m[1]);
@@ -248,6 +267,23 @@ function fold(records, account, now) {
 const START = (key) => `${key}.started.json`;
 /** A quota reading's file (accountHolds.reading): one per account, replaced whole at each stage end that reports one. */
 const QUOTA_FILE = (key) => `${key}.quota.json`;
+
+/** An account's last probe's file (accountHolds.probed): one per account, replaced whole as a probe starts and as it ends. */
+const PROBE_FILE = (key) => `${key}.probe.json`;
+
+/**
+ * A probe's record, checked: {harness, account, at, outcome (PROBE_OUTCOMES; null while it runs), usd (the dollars its
+ * harness reported, null with none), usdUnknown and usdUnknownWhy (its runs of unknown cost and why, usage.mjs
+ * UNKNOWN_WHY's codes), billing (usage.mjs BILLING, or null), model, released (when its answer released the hold, ms)},
+ * or null.
+ */
+function probeOf(v, account) {
+  if (!v || typeof v !== "object" || v.account !== account || typeof v.harness !== "string" || !NAME.test(v.harness) || !Number.isSafeInteger(v.at)) return null;
+  const usd = typeof v.usd === "number" && Number.isFinite(v.usd) && v.usd >= 0 ? v.usd : null;
+  const unknown = Number.isSafeInteger(v.usdUnknown) && v.usdUnknown > 0 ? v.usdUnknown : 0;
+  const why = Array.isArray(v.usdUnknownWhy) ? v.usdUnknownWhy.filter((w) => typeof w === "string" && NAME.test(w)).slice(0, 8) : [];
+  return { harness: v.harness, account, at: v.at, outcome: PROBE_OUTCOMES.includes(v.outcome) ? v.outcome : null, usd, ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: why } : {}), billing: typeof v.billing === "string" && NAME.test(v.billing) ? v.billing : null, model: typeof v.model === "string" && v.model.length <= 100 ? v.model : null, ...(Number.isSafeInteger(v.released) ? { released: v.released } : {}) };
+}
 
 /** An account's file of one record (a start or a quota reading) parsed, when this user made it and no one else may write it; else null. */
 function ownFile(dir, name, uid) {
@@ -329,6 +365,13 @@ function replaceFile(dir, account, name, value, uid) {
  *   older Pendulum, which knows no release, at least ends the guess and the count. Returns what it ended (`list`'s entry),
  *   or null when the records remember nothing of the account, and writes nothing then.
  * - `releasedAt(account, now)`: when the account was last released (ms), while that record is kept; else null.
+ * - `probeDue(account, now)`: whether the account's hold is to be probed now (#613): its reset is more than PROBE_NEAR_MS
+ *   ahead, and no serve here started a probe of it within PROBE_EVERY_MS (one dated after now, another clock's, is long ago).
+ * - `probed({harness, account, now, outcome, usd, usdUnknown, usdUnknownWhy, billing, model, released})`: a probe of the
+ *   account started at `now` (no `outcome`: the turn is taken, for every serve here), or ended as `outcome`
+ *   (PROBE_OUTCOMES; `released`: when its answer released the hold) at that cost: the dollars its harness reported, or its runs of unknown cost and why, never an estimate. One small file
+ *   per account, replaced whole; kept in this process's memory with no `dir` or when the file cannot be written.
+ * - `probe(account, now)`: the account's last probe (probeOf's record), or null.
  * `account` is the hold's key: a declared account's name, or a login's (local.mjs holdOf).
  * With no `dir`, `seed` is the records already kept elsewhere (heldRecord's), `readings` the quota readings kept there
  * (readingOf's), and `onPut` hears each record this store makes, for its caller to keep there (route-holds.mjs).
@@ -345,6 +388,8 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
   let kept = dir ? [] : [...seed];
   // This process's start records ({at, since, n}), with no file, or beside one.
   const starts = new Map();
+  // This process's probe records, with no file, or beside one.
+  const probes = new Map();
   // Quota readings kept in this process: every one with no `dir`, else those a file could not take.
   const quotas = dir ? [] : readings.filter(Boolean);
   const readingsOf = (account) => {
@@ -439,6 +484,31 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
       const at = all(now).filter((r) => r.released && r.account === account).map((r) => r.at);
       return at.length ? Math.max(...at) : null;
     },
+    probe(account, now) {
+      const mine = probes.get(account) ?? null;
+      const file = dir && KEY.test(account) ? probeOf(ownFile(dir, PROBE_FILE(account), uid), account) : null;
+      const at = (r) => (r.at > now ? 0 : r.at);
+      return !file || (mine && at(mine) >= at(file)) ? mine : file;
+    },
+    probeDue(account, now) {
+      const until = this.until(account, now);
+      if (until === null || until - now <= PROBE_NEAR_MS) return false;
+      const last = this.probe(account, now);
+      return !last || last.at > now || now - last.at >= PROBE_EVERY_MS;
+    },
+    probed({ harness, account, now, outcome = null, usd = null, usdUnknown = 0, usdUnknownWhy = [], billing = null, model = null, released = null }) {
+      const r = probeOf({ harness, account, at: now, outcome, usd, usdUnknown, usdUnknownWhy, billing, model, released }, account);
+      if (!r) return null;
+      probes.set(account, r);
+      if (!dir || !KEY.test(account)) return r;
+      try {
+        replaceFile(dir, account, PROBE_FILE(account), r, uid);
+        probes.delete(account);
+      } catch (e) {
+        onError(e);
+      }
+      return r;
+    },
     started({ harness, account, now }) {
       const since = newestAt(readingsOf(account), now);
       const prev = this.startRecord(account);
@@ -469,7 +539,7 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
       try {
         if (!ours(lstatSync(dir, { throwIfNoEntry: false }), uid)) return;
         for (const name of readdirSync(dir)) {
-          const key = STARTED.exec(name)?.[1] ?? QUOTA.exec(name)?.[1];
+          const key = STARTED.exec(name)?.[1] ?? QUOTA.exec(name)?.[1] ?? PROBE.exec(name)?.[1];
           if (key && !key.includes("@") && !keep.includes(key)) rmSync(join(dir, name), { force: true });
         }
       } catch (e) {

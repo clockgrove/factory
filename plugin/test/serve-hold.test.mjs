@@ -1945,3 +1945,37 @@ test("withClaim: a stage that paused on GitHub's spent rate limit is resumed aft
     gh.restore();
   }
 });
+
+test("serve: a held account days from its reset is probed beside the tick; once the probe is answered the hold is released and the Objective it held starts at a later tick (#613)", async () => {
+  const { readFileSync, writeFileSync } = await import("node:fs");
+  // The harness on the loop's PATH: a fake `claude` that answers the probe, logging each call.
+  const bin = mkdtempSync(join(tmpdir(), "probe-bin-"));
+  const calls = join(bin, "calls.txt");
+  const out = [{ type: "system", subtype: "init", session_id: "11111111-1111-1111-1111-111111111111" }, { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "ok", session_id: "11111111-1111-1111-1111-111111111111", total_cost_usd: 0.004, usage: { input_tokens: 900, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }].map((l) => JSON.stringify(l)).join("\n");
+  writeFileSync(calls, "");
+  writeFileSync(join(bin, "claude"), `#!${process.execPath}\nconst fs = require("node:fs");\nfs.readFileSync(0);\nfs.appendFileSync(${JSON.stringify(calls)}, "call\\n");\nprocess.stdout.write(${JSON.stringify(`${out}\n`)});\n`, { mode: 0o755 });
+  const holds = accountHolds();
+  holds.limit({ harness: "claude", account: "claude", reset: Date.now() + 3 * 24 * 60 * 60_000, now: Date.now() });
+  const started = [];
+  const run = await serveAgainst({
+    view: (read, labels) => labels,
+    firstStage: () => Promise.resolve({ exit: "delivered" }),
+    stopAfter: 2000,
+    stubs: {
+      harness: "claude",
+      holds,
+      accountFor: (harness) => ({ name: harness, harness, declared: false }),
+      holdOf: (account) => ({ key: account.name, shared: true }),
+      baseEnv: () => ({ PATH: `${bin}:${process.env.PATH}`, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1", PENDULUM_INPUT_MAX_CONCURRENT: "2" }),
+      runObjective(n) {
+        started.push(n);
+        this.stopping = true;
+        return Promise.resolve({ exit: "delivered" });
+      },
+    },
+  });
+  assert.deepEqual(started, [7], "the Objective the hold kept Queued started once the probe released it");
+  assert.equal(readFileSync(calls, "utf8"), "call\n", "one probe, however many ticks passed while it ran");
+  assert.equal(run.lines.filter((l) => /claude: answered a probe before its usage limit's reset .*its hold is released, as `pendulum hold release claude` does; .*\(the probe: \$0\.0040\)/.test(l)).length, 1, run.lines.join(""));
+  assert.equal(holds.until("claude", Date.now()), null);
+});

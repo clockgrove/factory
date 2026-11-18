@@ -625,3 +625,42 @@ test("local loop where no Action runs (adopt): a pick without pendulum:local is 
   assert.deepEqual(raced.r.ready, []);
   assert.deepEqual(raced.writes.filter((w) => w.startsWith("POST /issues/9/")), []);
 });
+
+test("claimedLocally: a runner job steps aside only for a marked claim whose author cannot be checked; a comments read that keeps failing is not claimed (#167)", async () => {
+  const { BACKENDS } = await import("../scripts/lib/backend.mjs");
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  let failures = 0;
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const claim = (at, login = "maintainer") => [{ id: 1, user: { login, type: "User" }, body: `<!-- pendulum:7:local -->\n${claimBody("box:1:a:m:b", new Date())}`, updated_at: at }];
+  let comments = [];
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    if (u.pathname === "/user") return json({ login: "maintainer", type: "User" });
+    if (u.pathname === "/repos/acme/nowriters/collaborators") return json({ message: "Server Error" }, 502);
+    if (u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    if (u.pathname.endsWith("/issues/7/comments")) return failures-- > 0 ? json({ message: "Server Error" }, 502) : json(comments);
+    return json({ message: "Not Found" }, 404);
+  };
+  const claimed = (name = "app") => BACKENDS.actions.trigger.claimedLocally({ owner: "acme", name, full: `acme/${name}` }, 7, { token: "t" }, { pauseMs: 0 });
+  try {
+    failures = Infinity;
+    assert.equal(await claimed(), false, "a listing that keeps failing is no claim seen: an unlabelled Objective's runner job works it, never skips");
+    failures = 1;
+    assert.equal(await claimed(), false, "read again: no claim, the runner works it");
+    comments = claim(new Date().toISOString());
+    assert.equal(await claimed(), true);
+    comments = claim(ago(HOUR));
+    assert.equal(await claimed(), false, "a stale claim holds nothing");
+    // The writer list never loads: a marked comment whose author cannot be checked may be a live loop's.
+    failures = 0;
+    comments = claim(new Date().toISOString(), "dev");
+    assert.equal(await claimed("nowriters"), true);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+  }
+});

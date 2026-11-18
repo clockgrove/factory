@@ -1082,3 +1082,69 @@ test("serve: a held account days from its reset is probed beside the tick; once 
   assert.equal(run.lines.filter((l) => /claude: answered a probe before its usage limit's reset .*its hold is released, as `pendulum hold release claude` does; .*\(the probe: \$0\.0040\)/.test(l)).length, 1, run.lines.join(""));
   assert.equal(holds.until("claude", Date.now()), null);
 });
+
+test("serve: a dispatch that releases a stop never drops a newer stop recorded while it ran (#2667)", async () => {
+  let reviewEnd = null;
+  let ticks = 0;
+  const run = await serveAgainst({
+    // 4 is a stale listing with no state label, after the review's Block landed.
+    view: (read, labels) => (read === 4 ? stopLabels(labels) : labels),
+    onList: (read, { labels }) => {
+      // A person clears the Block by hand: the next tick's fresh read shows it Queued and releases the first stop.
+      if (read === 2) labels.delete("pendulum:blocked");
+    },
+    onIssue: (read, { labels }) => {
+      if (read !== 3 || !reviewEnd) return;
+      // The review running here Blocks after that fresh read, while the same dispatch is still under way.
+      labels.add("pendulum:blocked");
+      reviewEnd({ exit: "blocked" });
+      reviewEnd = null;
+    },
+    firstStage: (fake) => {
+      fake.labels.delete("pendulum:running");
+      fake.labels.add("pendulum:blocked");
+      return Promise.resolve({ exit: "blocked" });
+    },
+    stubs: {
+      pendingReviews: async () => (++ticks === 2 ? [{ issue: 7, pr: 9 }] : []),
+      withClaim: (n, fn) => fn(),
+      review: () => new Promise((ok) => (reviewEnd = ok)),
+    },
+    stopAfter: 6,
+  });
+  assert.deepEqual(run.claims, [1], "the review's Block holds it through the stale read");
+});
+
+test("resume: a failed read of the issue or its PR keeps the claim and runs nothing (#167)", async () => {
+  let down = true;
+  const gh = claimGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"], fail: (kind) => down && kind === "issue" });
+  try {
+    const { writeClaim } = await import("../scripts/lib/local.mjs");
+    const dead = await claimLoop(process.pid + 1);
+    await writeClaim(dead.repo, 7, dead.holder, dead.opts);
+    const loop = await claimLoop();
+    assert.equal((await loop.resume(7)).exit, "skipped");
+    assert.equal(gh.comments.length, 1, "a failed read is no 'nothing left to run'");
+    // Read fine with nothing left (no PR to review, not Running): the claim goes.
+    down = false;
+    assert.equal((await loop.resume(7)).exit, "skipped");
+    assert.equal(gh.comments.length, 0);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("runObjective: a start that fails on a claim it cannot read changes nothing (#167)", async () => {
+  const gh = claimGitHub({ fail: (kind) => kind === "comments" });
+  try {
+    const loop = await claimLoop();
+    loop.stage = async () => ({ code: 0, exit: "blocked", usd: 0, stage: "work" });
+    // The claim cannot be read: another machine may be running it, so nothing changes yet.
+    const r = await loop.runObjective(7);
+    assert.equal(r.startFailed, "claim-read");
+    assert.ok(gh.labels.has("pendulum:running"), "not un-marked");
+    assert.deepEqual(gh.writes, [], "nothing written");
+  } finally {
+    gh.restore();
+  }
+});

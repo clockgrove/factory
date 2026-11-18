@@ -179,3 +179,47 @@ test("run and review hold one slot of the machine's budget for each stage while 
     other.release();
   }
 });
+
+/**
+ * `n` processes that each load takeSlot, say so and spin until all have, then each take a slot of `budget` with the real
+ * takeSlot and hold what they got: {child, taken} for each.
+ */
+async function racers(dir, budget, n) {
+  const lib = pathToFileURL(join(here, "..", "scripts", "lib", "machine.mjs")).href;
+  // The start line: a file made once every racer is ready, so they take at once however long each took to start.
+  const go = join(mkdtempSync(join(tmpdir(), "racers-")), "go");
+  const racing = Array.from({ length: n }, () => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", `import { existsSync } from "node:fs"; import { takeSlot } from ${JSON.stringify(lib)}; process.stdout.write("ready\\n"); while (!existsSync(${JSON.stringify(go)})); const s = takeSlot({ dir: ${JSON.stringify(dir)}, budget: ${budget} }); process.stdout.write(s ? "taken\\n" : "full\\n"); setInterval(() => {}, 60000);`], { stdio: ["ignore", "pipe", "inherit"] });
+    let ready;
+    const started = new Promise((r) => (ready = r));
+    const answer = new Promise((ok, fail) => {
+      let out = "";
+      child.stdout.on("data", (c) => {
+        out += c;
+        if (out.startsWith("ready\n")) ready();
+        const m = /^ready\n(taken|full)\n/.exec(out);
+        if (m) ok({ child, taken: m[1] === "taken" });
+      });
+      child.on("exit", (code) => fail(new Error(`racer exited ${code}`)));
+    });
+    return { started, answer };
+  });
+  try {
+    await Promise.all(racing.map((r) => Promise.race([r.started, r.answer])));
+  } finally {
+    writeFileSync(go, "");
+  }
+  return Promise.all(racing.map((r) => r.answer));
+}
+
+test("slots: loops taking the last slot at once leave exactly one of them holding it (#309, #323)", async () => {
+  const dir = slotsDir(home());
+  const raced = await racers(dir, 1, 3);
+  try {
+    const taken = raced.filter((r) => r.taken);
+    assert.equal(taken.length, 1, "one racer keeps the slot");
+    assert.deepEqual(slotHolders(dir).map((h) => h.pid), [taken[0].child.pid]);
+  } finally {
+    for (const r of raced) await killed(r.child);
+  }
+});

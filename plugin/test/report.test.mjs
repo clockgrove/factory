@@ -1903,3 +1903,28 @@ test("report (#570 V5): per merged Objective, the median and p25..p75 over three
   assert.deepEqual(p.usd.subscription, { median: 0, p25: 0, p75: 2.5, n: 4, leftOut: 0 });
   assert.deepEqual(p.reviewRounds, { median: 0, p25: 0, p75: 0, n: 4, leftOut: 0 });
 });
+
+test("report (#570 V6): a reopened Objective merged again is clocked to its last merge, its newest card's, on both paths", async () => {
+  // #3 merged and carded, then reopened: a work stage after the merge, a second PR merged at 04:00 and its card.
+  const make = ({ secondCard }) => {
+    const w = churnedWorld();
+    return finishCard3(w).then((first) => {
+      w.comments.push(first, progress(3, "work", "local-again", { user: ME, at: "2026-11-17T03:30:00Z", spend: { usd: 0.5, parts: { usdByBilling: { api: 0.5 }, billing: "api", route: "local" } } }));
+      w.pulls.push({ ...ownPull(3, { number: 40, created: "2026-11-17T03:20:00Z", merged: "2026-11-17T04:00:00Z" }), head: { ref: "pendulum/3", repo: { id: scratchPr.head?.repo?.id ?? 1 } }, base: { repo: { id: scratchPr.base?.repo?.id ?? 1 } } });
+      if (secondCard) w.comments.push(comment(3, first.body.replace(/"merged":"[^"]*"/, '"merged":"2026-11-17T04:00:00Z"'), { at: "2026-11-17T04:01:00Z" }));
+      return w;
+    });
+  };
+  const wall = Math.round(((Date.parse("2026-11-17T04:00:00Z") - Date.parse("2026-11-17T02:23:42Z")) / 60_000) * 100) / 100;
+  for (const secondCard of [true, false]) {
+    const w = await make({ secondCard });
+    for (const flags of [{ issue: 3 }, { issue: 3, by: "account" }]) {
+      const three = byIssue((await report(w, flags)).json, 3);
+      assert.deepEqual([three.outcome, three.started, three.merged, three.wallMinutes, three.clockWhy], ["merged", "2026-11-17T02:23:42Z", "2026-11-17T04:00:00Z", wall, null], `${secondCard ? "its second card" : "its second PR"}, ${JSON.stringify(flags)}`);
+      assert.equal(three.stages.work, 2, "the work after the first merge counts");
+    }
+    // In a period that ends before the last merge it is not merged in it.
+    const { json: early } = await report(w, { since: "2026-11-17", until: "2026-11-17T03:00:00Z" });
+    assert.ok(!early.totals.perMerged.leftOut.some((x) => x.issue === 3) && early.totals.perMerged.usd.api.n === 0, "#3 merged last at 04:00");
+  }
+});

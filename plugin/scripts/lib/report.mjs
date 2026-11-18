@@ -369,9 +369,12 @@ export function ownPredicate(appId = null, self = []) {
   return (c) => app(c) || (named.has(loginKey(c?.user?.login)) && pushAuthor(c));
 }
 
-/** The summary of the first finish card of Objective `n` among `own`, Pendulum's own comments, that carries one it reads (readSummary); null for none. */
-export function firstCard(n, own) {
-  for (const c of (own || []).filter((x) => markerIssue(x) === n && (x.body || "").startsWith(finishMarker(n))).sort((a, b) => ms(a.created_at) - ms(b.created_at))) {
+/**
+ * The summary of the newest finish card of Objective `n` among `own`, Pendulum's own comments, that carries one it reads
+ * (readSummary): a reopened Objective merged again has a card per merge, and the newest is its last; null for none.
+ */
+export function lastCard(n, own) {
+  for (const c of (own || []).filter((x) => markerIssue(x) === n && (x.body || "").startsWith(finishMarker(n))).sort((a, b) => ms(b.created_at) - ms(a.created_at))) {
     const summary = readSummary(c.body, n);
     if (summary) return summary;
   }
@@ -963,10 +966,14 @@ export function outcomeOf(issue, pulls, { pullsRead = true } = {}) {
 }
 
 /**
- * When merged Objective `n` merged, as its row says it (#570 V6): its first finish card's (Pendulum's own, `mine`), else
- * the newest PR on its branch's.
+ * When merged Objective `n` last merged, as its row says it (#570 V6): its newest finish card's merge (Pendulum's own,
+ * `mine`: lastCard), else its last merged PR's (lastMerge), whichever is later.
  */
-const mergedAt = (n, comments, pulls, mine) => firstCard(n, (comments || []).filter((c) => markerIssue(c) === n && mine(c)))?.merged ?? newestPull(n, pulls)?.merged_at ?? null;
+const mergedAt = (n, comments, pulls, mine) => lastOf(lastCard(n, (comments || []).filter((c) => markerIssue(c) === n && mine(c)))?.merged, lastMerge(n, pulls));
+/** The later of two times (ISO, or null), or null for neither. */
+const lastOf = (a, b) => [a, b].filter((t) => Number.isFinite(ms(t))).sort((x, y) => ms(y) - ms(x))[0] ?? null;
+/** The last merge of a PR on Objective `n`'s branch from this repository itself (not a fork's), or null. */
+const lastMerge = (n, pulls) => (pulls || []).filter((p) => p?.head?.ref === `pendulum/${n}` && p.head?.repo?.id === p.base?.repo?.id && Number.isFinite(ms(p.merged_at))).map((p) => p.merged_at).sort((a, b) => ms(b) - ms(a))[0] ?? null;
 
 /** The newest PR on Objective `n`'s branch from this repository itself (not a fork's), or undefined. */
 const newestPull = (n, pulls) => (pulls || []).filter((p) => p?.head?.ref === `pendulum/${n}` && p.head?.repo?.id === p.base?.repo?.id).sort((a, b) => ms(b.created_at) - ms(a.created_at))[0];
@@ -1433,12 +1440,13 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     // Where its dollars went, by the finish card's rules (#570 V1).
     row.asked = asked;
     row.churn = churn;
-    // Its clock (#570 V6): the scorer's start (its first `pendulum:objective` label) from its finish card's summary, the
-    // same card on both paths, else from its timeline where the report read it (a labelled set's arms); its merge, the
-    // card's, else its newest PR's; and the wall clock between them. Null with why (`clockWhy`) where no record gives one.
-    const card = summary ?? firstCard(n, ownAll);
+    // Its clock (#570 V6): the scorer's start (its first `pendulum:objective` label) from its newest finish card's summary
+    // (lastCard: a reopened Objective's last, the same card on both paths, whichever its figures were read from), else from
+    // its timeline where the report read it (a labelled set's arms); its last merge, that card's, else its last merged
+    // PR's, whichever is later; and the wall clock between them. Null with why (`clockWhy`) where no record gives one.
+    const card = lastCard(n, ownAll);
     const started = card ? card.labelled : (read.started?.get(n) ?? null);
-    const mergedAt = row.outcome === "merged" ? (card?.merged ?? newestPull(n, pulls)?.merged_at ?? null) : null;
+    const mergedAt = row.outcome === "merged" ? lastOf(card?.merged, lastMerge(n, pulls)) : null;
     row.started = started;
     row.merged = mergedAt;
     row.wallMinutes = started && mergedAt && ms(mergedAt) >= ms(started) ? round2((ms(mergedAt) - ms(started)) / 60_000) : null;

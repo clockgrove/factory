@@ -247,7 +247,7 @@ const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
  */
 const WHERE = { repo: { value: "OWNER/NAME" }, checkout: { value: "CLONE" } };
 export const COMMANDS = {
-  run: { args: ["issue"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: `one Objective, from the stage its state calls for (with --wait, to merged, waiting out a network pause as serve does); exits 0 delivered, ${PAUSED_EXIT} paused and resumable (its last line names the command), 1 otherwise` },
+  run: { args: ["issue"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: `one Objective, from the stage its state calls for (with --wait, to merged, waiting out a network pause as serve does); exits 0 delivered (with --wait, merged), ${PAUSED_EXIT} paused and resumable (its last line names the command), 1 otherwise` },
   serve: { args: [], flags: { ...WHERE, once: "bool", all: "bool", interval: { value: "SECONDS", number: true }, verbose: "bool" }, about: "a loop: the dispatcher's rules every --interval seconds (30); --verbose also names every setting left at Pendulum's defaults" },
   review: { args: ["pr"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: `a review re-run (with --wait, to merged, waiting out a network pause as serve does); exits as run does` },
   doctor: { args: [], flags: { ...WHERE, json: "bool", probe: "bool", "run-setup": "bool", verbose: "bool" }, about: "whether this clone, its repository and this machine are ready for local mode, each check PASS, WARN or FAIL with its fix (doctor.mjs --local); exits 1 on a FAIL" },
@@ -2234,12 +2234,13 @@ export class Local {
 
   /**
    * A claim this loop holds on an Objective it keeps paused (a usage limit's reset, its account labels: pausedHere),
-   * written again once its comment is PAUSED_BEAT_MS old (`claim`, localClaim's read: its heartbeat is GitHub's update
+   * written again once its comment is PAUSED_BEAT_MS old (`everyMs`: `run --wait` beats as a stage does, waitPaused;
+   * `claim`, localClaim's read: its heartbeat is GitHub's update
    * time). No stage runs to heartbeat it, and a claim a day old is a loop gone away, which the dispatcher Blocks. A
    * write that fails is logged; the next tick tries again.
    */
-  async beatPaused(issue, claim) {
-    if (!claim?.heartbeat || (this.clock ?? Date.now)() - Date.parse(claim.heartbeat) < PAUSED_BEAT_MS) return;
+  async beatPaused(issue, claim, everyMs = PAUSED_BEAT_MS) {
+    if (!claim?.heartbeat || (this.clock ?? Date.now)() - Date.parse(claim.heartbeat) < everyMs) return;
     await writeClaim(this.repo, issue, this.holder, this.opts).catch((e) => log(`#${issue}: the paused claim's heartbeat could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`));
   }
 
@@ -2610,9 +2611,10 @@ export class Local {
    * request after one more try (serverVerdict), with the cause `pendulum`: GitHub has no incident, so the request fails
    * on its own. `wait` (`run --wait`): the stage resumed follows its PR to the merge, as the run would have.
    */
-  async resume(issue, { wait = false } = {}) {
+  async resume(issue, { wait = false, now: at = null } = {}) {
     const off = this.offline?.get(issue);
-    const now = (this.clock ?? Date.now)();
+    // `now`: the moment the caller judged the pause by (waitPaused), so the bound is read at the same time.
+    const now = at ?? (this.clock ?? Date.now)();
     const paused = !!off && !off.harness && !off.pinWait;
     // Only GitHub's own 5xx is GitHub's status page's to judge: a pause on another host waits on, within the bound.
     const verdict = paused && serverDown(off.code) && !!off.server && off.origin === githubOrigin() && now - off.since < OUTAGE.blockMs ? await this.serverVerdict(issue, off) : null;
@@ -2690,13 +2692,15 @@ export class Local {
       if ((pr?.labels || []).some((l) => l.name === REVIEW_LABEL)) {
         if (reruns < 2) return this.review(issue, prNumber, { wait, reruns: reruns + 1 });
         log(`#${issue}: PR #${prNumber} still has comments arriving after ${reruns} review re-runs; left labelled ${REVIEW_LABEL} for the next serve tick`);
-        return review;
+        // With --wait, delivered is merged: this one is not.
+        return { exit: null };
       }
-      const merged = await this.followMerge(issue, prNumber);
-      // A stage of its merge path (a review again, a send-back's rebase) that ended paused: that pause is this end, so
-      // the claim stays for its resume and the run never reads it as delivered.
-      if (merged?.exit) return merged;
-      if (merged === "next") return { ...review, next: true };
+      // Delivered only once merged (followToMerge): a stage of its merge path that ended paused (a review again, a
+      // send-back's rebase) is this end, so the claim stays for its resume; any other end of the follow (Blocked at the
+      // merge, stopped, held, closed, the follow's bound) is none.
+      const merged = await this.followToMerge(issue, prNumber);
+      if (merged.exit !== "delivered") return merged;
+      if (merged.next) return { ...review, next: true };
     }
     return review;
   }
@@ -2794,6 +2798,8 @@ export class Local {
       failures.set(issue, { count, retryAt, recheck });
       return new Date(retryAt).toISOString();
     };
+    // Only serve reads its failed starts again (recheckStarts); `run --wait` waiting a pause out polls again (waitPaused).
+    const readAgain = (at) => (this.serving ? `this loop reads its claim again after ${at}` : this.waitingOn === issue ? "this run reads it again at its next poll" : "a later `pendulum run` or serve on this machine reads it again");
     try {
       const data = await getIssue(this.repo, issue, this.opts);
       if (!(data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "pendulum:running")) {
@@ -2805,18 +2811,18 @@ export class Local {
         if (!unknown) await dropClaim(this.repo, issue, this.holder, this.opts);
         this.lapsed?.delete(issue);
         return { ...out, exit: "blocked" };
-      } else if (unknown) log(`#${issue}: who holds it is unknown here, so it stays as it is; this loop reads its claim again after ${backoff()}`);
+      } else if (unknown) log(`#${issue}: who holds it is unknown here, so it stays as it is; ${readAgain(backoff())}`);
       else {
         await this.requeue(issue);
         if (machine) {
           backoff();
           log(`#${issue}: back to Queued; it waits with every new start here for this machine's fault to clear`);
-        } else log(`#${issue}: back to Queued; this loop starts it again after ${backoff()}`);
+        } else log(`#${issue}: back to Queued; ${this.serving ? `this loop starts it again after ${backoff()}` : (backoff(), "the next pick starts it again (a serve's, or a `pendulum run`)")}`);
       }
     } catch (x) {
       // GitHub failed here too (the issue read, the requeue or the Block): the Objective may still be Running, so this
       // loop reads its claim again after the backoff and settles it then (recheckStarts).
-      log(`#${issue}: could not settle the failed start (${String(x?.message || x).slice(0, 120)}); this loop reads it again after ${backoff(true)}`);
+      log(`#${issue}: could not settle the failed start (${String(x?.message || x).slice(0, 120)}); ${readAgain(backoff(true))}`);
     }
     this.lapsed?.delete(issue);
     return out;
@@ -3062,7 +3068,8 @@ export class Local {
   }
 
   /**
-   * `pendulum review <pr>` to its end: its review (runReview), and with `wait` a stage that ends paused on an outage
+   * `pendulum review <pr>` to its end: a review re-run on its own (as a person re-applying pendulum:review), in the
+   * Objective's clone under its claim, and with `wait` a stage that ends paused on an outage
    * waited out in place and resumed (waitPaused), as runToEnd does; its split parts are left to the loop or a run.
    */
   async reviewToEnd(prNumber, { wait = false, resumeWith = "" } = {}) {
@@ -3081,62 +3088,98 @@ export class Local {
       if (!parts || !r?.next) break;
       r = await this.runObjective(issue, { wait: true });
     }
-    if (r?.exit === "paused" && !this.stopping) log(`#${issue}: paused, resumable (exit ${PAUSED_EXIT}): its claim stays on this machine; \`pendulum run ${issue} --wait${resumeWith}\` resumes it here, as does a \`pendulum serve\` of this repository on this machine`);
+    // With --wait, delivered is merged: work delivered with its PR conflicting, left to the send-back, is not.
+    if (wait && r?.exit === "delivered" && r.unreviewed) {
+      log((await this.pendingMergeLine(issue)) || `#${issue}: its PR is not merged`);
+      r = { ...r, exit: null };
+    }
+    if (r?.exit === "paused" && !this.stopping) {
+      const resume = `\`pendulum run ${issue} --wait${resumeWith}\``;
+      // A claim another local loop took over while the stage ran (withClaim's heartbeat): that loop resumes it.
+      if (this.ceded?.has(issue)) log(`#${issue}: paused, resumable (exit ${PAUSED_EXIT}): another local loop holds its claim now and resumes it; ${resume} takes it up once that loop is gone`);
+      else log(`#${issue}: paused, resumable (exit ${PAUSED_EXIT}): its claim stays on this machine; ${resume} resumes it here, as does a \`pendulum serve\` of this repository on this machine`);
+    }
     return r;
   }
 
   /**
-   * `run --wait`, a stage that ended paused on an outage (`r`; outagePaused keeps its record): what serve's tick does for
-   * it, in place. Every RESUME_POLL_MS (serve's tick) it asks outageDue, under the same bound as serve (OUTAGE.blockMs,
-   * PENDULUM_LOCAL_OUTAGE_HOURS, from the first loss), and once due reads the issue and its claim as serve's tick does:
-   * a stopped Objective, or a claim no longer this run's, is not resumed; one still this run's is resumed (resume), and
-   * a stage that pauses again is waited out the same way. Past the bound it stops waiting and returns the paused end:
-   * where serve Blocks it with the cause `outage`, a run leaves its claim for the command that resumes it (runToEnd).
-   * A pause on a usage limit or on account labels is returned as it is.
+   * `run --wait` or `review --wait`, a stage that ended paused on an outage (`r`; outagePaused keeps its record): what
+   * serve's tick does for it, in place. Every RESUME_POLL_MS (serve's tick) it asks outageDue, under the same bound as
+   * serve (OUTAGE.blockMs, PENDULUM_LOCAL_OUTAGE_HOURS, from the first loss), and once due, or once the claim's
+   * heartbeat is due (HEARTBEAT_MS, so no loop takes the claim for a loop gone away: CLAIM_FRESH_MS), reads the issue and
+   * its claim as serve's tick does. A stopped Objective is not resumed and its claim goes, as a stage stopped under
+   * withClaim drops it; a claim no longer this run's is left to its holder; one still this run's is written again when
+   * its heartbeat is due (beatPaused), and resumed when the pause is (resume, judged at the same moment). A resume that
+   * starts nothing (a read that fails, a claim it cannot read, a stage of it still running here) leaves the pause as it
+   * stands, for the next poll, as serve's next tick; a stage that pauses again is waited out the same way. Past the
+   * bound it stops waiting and returns the paused end: where serve Blocks it with the cause `outage`, a run leaves its
+   * claim for the command that resumes it (toEnd). A pause on a usage limit or on account labels is returned as it is.
    */
   async waitPaused(issue, r) {
     const clock = this.clock ?? Date.now;
+    const beatEvery = this.heartbeatMs ?? HEARTBEAT_MS;
     let said = false;
-    while (r?.exit === "paused" && !this.stopping) {
-      this.applyLocalLimits();
-      const off = this.offline?.get(issue);
-      if (!off || off.harness || off.pinWait) return r;
-      const now = clock();
-      if (now - off.since >= OUTAGE.blockMs) {
-        log(`#${issue}: still paused on ${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage; this run stops waiting`);
-        return r;
-      }
-      if (!said) log(`#${issue}: waiting here for ${off.host} to answer, as serve would, up to ${minutesText(OUTAGE.blockMs)} from ${new Date(off.since).toISOString()}`);
-      said = true;
-      if (await this.outageDue(off, now)) {
-        const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
-        const c = data ? await localClaim(this.repo, issue, this.opts).catch(() => undefined) : undefined;
-        if (data && stopCause(data, this.objectiveLabel())) {
-          this.offline.delete(issue);
-          log(`#${issue}: stopped while paused; not resuming it`);
-          return { exit: "stopped" };
+    let beatAt = clock();
+    this.waitingOn = issue;
+    try {
+      while (r?.exit === "paused" && !this.stopping) {
+        this.applyLocalLimits();
+        const off = this.offline?.get(issue);
+        if (!off || off.harness || off.pinWait) return r;
+        const now = clock();
+        if (now - off.since >= OUTAGE.blockMs) {
+          log(`#${issue}: still paused on ${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage; this run stops waiting`);
+          return r;
         }
-        if (c !== undefined && c?.holder !== this.holder) {
-          this.offline.delete(issue);
-          log(`#${issue}: its claim is no longer this run's (${c?.holder ?? "none"}); not resuming it`);
-          return { exit: "skipped" };
-        }
-        if (c !== undefined) {
-          log(`#${issue}: resuming (${off.host} answers again)`);
-          const was = r;
-          r = await this.resume(issue, { wait: true });
-          // Nothing started (a read that failed, a stage of it still running here): the pause stands, and the next poll
-          // tries again, as serve's next tick does.
-          if (r?.exit !== "skipped" || !this.offline?.has(issue)) {
-            said = false;
-            continue;
+        if (!said) log(`#${issue}: waiting here for ${off.host} to answer, as serve would, up to ${minutesText(OUTAGE.blockMs)} from ${new Date(off.since).toISOString()}`);
+        said = true;
+        const due = await this.outageDue(off, now);
+        if (due || now - beatAt >= beatEvery) {
+          const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
+          const c = data ? await localClaim(this.repo, issue, this.opts).catch(() => undefined) : undefined;
+          if (data && stopCause(data, this.objectiveLabel())) {
+            this.offline.delete(issue);
+            if (c?.holder === this.holder) await dropClaim(this.repo, issue, this.holder, this.opts).catch((e) => log(`#${issue}: its claim could not be dropped (${String(e?.message || e).slice(0, 120)})`));
+            log(`#${issue}: stopped while paused; not resuming it`);
+            return { exit: "stopped" };
           }
-          r = was;
+          if (c !== undefined && c?.holder !== this.holder) {
+            this.offline.delete(issue);
+            log(`#${issue}: its claim is no longer this run's (${c?.holder ?? "none"}); not resuming it`);
+            return { exit: "skipped" };
+          }
+          if (c !== undefined && !due) {
+            beatAt = now;
+            await this.beatPaused(issue, c, beatEvery);
+          }
+          if (c !== undefined && due) {
+            log(`#${issue}: resuming (${off.host} answers again)`);
+            const was = r;
+            try {
+              r = await this.resume(issue, { wait: true, now });
+            } catch (e) {
+              // A start that threw before its stage (a claim it could not read: startFailed) leaves the pause standing.
+              if (!e?.startFailed || !this.offline?.has(issue)) throw e;
+              log(`#${issue}: the resume could not start (${e.startFailed}: ${String(e?.message || e).slice(0, 160)}); the pause stands and this run tries again at its next poll`);
+              r = { exit: "skipped" };
+            }
+            // Nothing started (a read that failed, a claim it could not read, a stage of it still running here): the
+            // pause stands, and the next poll tries again, as serve's next tick does.
+            const none = r?.exit === "skipped" || (!!r?.startFailed && !r?.exit);
+            if (!none || !this.offline?.has(issue)) {
+              said = false;
+              beatAt = clock();
+              continue;
+            }
+            r = was;
+          }
         }
+        await this.pause(this.resumePollMs ?? RESUME_POLL_MS);
       }
-      await this.pause(this.resumePollMs ?? RESUME_POLL_MS);
+      return r;
+    } finally {
+      this.waitingOn = null;
     }
-    return r;
   }
 
   /**
@@ -3228,12 +3271,6 @@ export class Local {
     const reason = `the send-back of the conflicting PR for its rebase failed (${code}); the run log has GitHub's answer`;
     await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, cause: "pendulum", notify: inputs.notify, stage: "merge" }, this.opts).catch((x) => log(`#${issue} Block: ${String(x?.message || x).slice(0, 160)}`));
     return false;
-  }
-
-  /** A review re-run on its own (a human re-applied pendulum:review), in the Objective's clone. */
-  async runReview(prNumber, { wait = false } = {}) {
-    const issue = await this.reviewIssueOf(prNumber);
-    return this.withClaim(issue, () => this.review(issue, prNumber, { wait }));
   }
 
   /** The Objective of a PR on a pendulum/<issue> branch; throws for any other PR. */

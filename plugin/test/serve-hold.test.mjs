@@ -277,7 +277,7 @@ test("serve: a dispatch that releases a stop never drops a newer stop recorded w
  * labels and PR.
  * `fail(kind)` answers 502 to a read while it returns true: "comments", "issue" or "pulls" (404 for "repo").
  */
-function claimGitHub({ labels = ["pendulum:objective", "pendulum:local", "pendulum:running"], pr = null, fail = () => false } = {}) {
+function claimGitHub({ labels = ["pendulum:objective", "pendulum:local", "pendulum:running"], pr = null, fail = () => false, now = () => Date.now() } = {}) {
   const comments = [];
   const writes = [];
   const sets = new Map();
@@ -303,7 +303,7 @@ function claimGitHub({ labels = ["pendulum:objective", "pendulum:local", "pendul
     const on = /^\/issues\/(\d+)\/comments$/.exec(p);
     if (on && method === "GET") return fail("comments") ? json({ message: "Server Error" }, 502) : json(comments.filter((c) => (c.issue ?? 7) === Number(on[1])));
     if (on && method === "POST") {
-      const c = { id: (id += 1), issue: Number(on[1]), user: { login: "maintainer", type: "User" }, body: JSON.parse(init.body).body, updated_at: new Date().toISOString() };
+      const c = { id: (id += 1), issue: Number(on[1]), user: { login: "maintainer", type: "User" }, body: JSON.parse(init.body).body, updated_at: new Date(now()).toISOString() };
       comments.push(c);
       return json(c, 201);
     }
@@ -311,7 +311,7 @@ function claimGitHub({ labels = ["pendulum:objective", "pendulum:local", "pendul
     if (one && method === "PATCH") {
       if (fail("patch")) return json({ message: "Server Error" }, 502);
       const c = comments.find((x) => String(x.id) === one[1]);
-      Object.assign(c, { body: JSON.parse(init.body).body, updated_at: new Date().toISOString() });
+      Object.assign(c, { body: JSON.parse(init.body).body, updated_at: new Date(now()).toISOString() });
       return json(c);
     }
     if (one && method === "DELETE") {
@@ -1138,10 +1138,10 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
  * `pendulum run 7 --wait` (runToEnd; `go` for another command) against claimGitHub, its stages ending as `ends` says in
  * turn (stage() stubbed: the rest of the run is real; an end may be a function of the stage), on a clock `at()` that
  * reads it; the provider's host api.anthropic.test answers once `up(probe)` says so for that probe (1, 2, …). A PR's
- * merge, once followed, is merged (`merges` counts the follows). Returns the run's end, its exit status, its log, the
+ * merge, once followed, is `merged` (true by default; `merges` counts the follows); `prep(loop)` sets the loop up further. Returns the run's end, its exit status, its log, the
  * stages started and the probes made.
  */
-async function runPaused({ ends, up, at, go = (loop) => loop.runToEnd(7, { wait: true, resumeWith: " --repo acme/app" }) }) {
+async function runPaused({ ends, up, at, merged = true, prep = () => {}, go = (loop) => loop.runToEnd(7, { wait: true, resumeWith: " --repo acme/app" }) }) {
   const { runExit } = await import("../scripts/local.mjs");
   const inner = globalThis.fetch;
   let probes = 0;
@@ -1157,7 +1157,8 @@ async function runPaused({ ends, up, at, go = (loop) => loop.runToEnd(7, { wait:
       return typeof end === "function" ? end(name) : end;
     };
     const merges = [];
-    loop.followMerge = async (n, prNumber) => (merges.push(prNumber), true);
+    loop.followMerge = async (n, prNumber) => (merges.push(prNumber), merged);
+    prep(loop);
     let r;
     const lines = await logged(async () => {
       r = await go(loop);
@@ -1171,12 +1172,13 @@ async function runPaused({ ends, up, at, go = (loop) => loop.runToEnd(7, { wait:
 const lostSince = Date.parse("2026-11-17T08:47:00Z");
 const pausedOnDns = { exit: "paused", stage: "work", code: 0, outage: { host: "api.anthropic.test", origin: "https://api.anthropic.test", code: "EAI_AGAIN", since: new Date(lostSince).toISOString() } };
 
-test("#575: run --wait waits in place for a stage paused on this machine's network, resumes it once its host answers, and exits 0 on the resumed stage's delivery", async () => {
-  const gh = claimGitHub();
+test("#575: run --wait waits in place for a stage paused on this machine's network, resumes it once its host answers, and exits 0 once the resumed stage's PR merged", async () => {
+  const pr = reviewPr(true);
+  const gh = claimGitHub({ pr });
   try {
     const t = lostSince + 20 * 60_000;
-    const { r, code, log, started, probes } = await runPaused({ ends: [pausedOnDns, { exit: "delivered", stage: "work", code: 0 }], up: (n) => n >= 3, at: () => t });
-    assert.deepEqual(started, ["work", "work"], "the paused stage is resumed in place");
+    const { r, code, log, started, probes } = await runPaused({ ends: [pausedOnDns, delivers(pr), delivers(pr)], up: (n) => n >= 3, at: () => t });
+    assert.deepEqual(started, ["work", "work", "review"], "the paused stage is resumed in place, then reviewed");
     assert.equal(probes, 3, "one probe a poll until the host answers");
     assert.equal(r.exit, "delivered");
     assert.equal(code, 0);
@@ -1275,6 +1277,144 @@ test("#575: review --wait whose review stage pauses on this machine's network wa
     } finally {
       gh.restore();
     }
+  }
+});
+
+test("#575: run --wait exits 0 only once its PR merged: a reviewed PR whose merge follow ends without a merge (Blocked, stopped, held, closed, the bound) exits 1", async () => {
+  const pr = reviewPr(true);
+  const gh = claimGitHub({ pr });
+  try {
+    const { r, code, started, merges } = await runPaused({ ends: [delivers(pr), delivers(pr)], up: () => true, at: () => lostSince, merged: false });
+    assert.deepEqual(started, ["work", "review"]);
+    assert.deepEqual(merges, [5]);
+    assert.notEqual(r.exit, "delivered");
+    assert.equal(code, 1);
+    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped, as on any end with no pause");
+  } finally {
+    gh.restore();
+  }
+});
+
+for (const [path, setup] of [
+  ["work", () => {
+    const pr = reviewPr(true);
+    return { pr, ends: [pausedOnDns, delivers(pr), delivers(pr)], stages: ["work", "work", "review"], read: /#7: who holds it is unknown here, so it stays as it is; this run reads it again at its next poll/ };
+  }],
+  ["review", () => {
+    const pr = reviewPr();
+    return { pr, ends: [reviewPausedOnDns, delivers(pr)], stages: ["review", "review"], read: /#7: the resume could not start \(claim-read: .*\); the pause stands and this run tries again at its next poll/, go: (loop) => loop.reviewToEnd(5, { wait: true }) };
+  }],
+]) {
+  test(`#575: a resume of a paused ${path} stage whose claim cannot be read starts nothing and leaves the pause standing; run --wait polls again and resumes it`, async () => {
+    const s = setup();
+    let failing = false;
+    const gh = claimGitHub({ pr: s.pr, fail: (what) => failing && what === "comments" });
+    try {
+      let resumes = 0;
+      const prep = (loop) => {
+        const real = loop.resume.bind(loop);
+        // The first resume meets GitHub failing every read of the claim (502), past readClaim's tries.
+        loop.resume = async (...a) => {
+          failing = (resumes += 1) === 1;
+          try {
+            return await real(...a);
+          } finally {
+            failing = false;
+          }
+        };
+      };
+      const { code, log, started } = await runPaused({ ends: s.ends, up: () => true, at: () => lostSince + 20 * 60_000, prep, ...(s.go ? { go: s.go } : {}) });
+      assert.equal(resumes, 2, "resumed again at the next poll");
+      assert.deepEqual(started, s.stages);
+      assert.equal(code, 0);
+      assert.match(log, s.read);
+    } finally {
+      gh.restore();
+    }
+  });
+}
+
+test("#575: run --wait keeps its claim fresh while it waits with GitHub answering: written at least every heartbeat, so no serve here takes it for a loop gone away", async () => {
+  const { CLAIM_FRESH_MS, HEARTBEAT_MS } = await import("../scripts/lib/local.mjs");
+  const start = Date.now();
+  let t = start;
+  const gh = claimGitHub({ now: () => t });
+  try {
+    const since = start - 20 * 60_000;
+    const paused = { ...pausedOnDns, outage: { ...pausedOnDns.outage, since: new Date(since).toISOString() } };
+    // Each probe that finds the provider still down is five minutes later, up to the bound.
+    const { code, started } = await runPaused({ ends: [paused], up: () => ((t += 5 * 60_000), false), at: () => t });
+    assert.equal(code, 75);
+    assert.deepEqual(started, ["work"]);
+    const claim = gh.comments.find((c) => c.body.includes(":local -->"));
+    assert.ok(claim, "the claim stays");
+    const beats = gh.writes.filter((w) => w.startsWith("PATCH /issues/comments/")).length;
+    // Twelve hours, less the twenty minutes before the wait, at one write per five-minute poll once its heartbeat is due.
+    assert.ok(beats >= Math.floor((12 * 60 - 20) / 5) - 1, `${beats} claim writes`);
+    assert.ok(t - Date.parse(claim.updated_at) < CLAIM_FRESH_MS, "fresh when the run stops waiting");
+    assert.ok(HEARTBEAT_MS < CLAIM_FRESH_MS);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#575: run --wait resumes nothing for an Objective stopped while paused (its claim goes, as a stopped stage's does), nor for one whose claim another loop took", async () => {
+  const { holderId } = await import("../scripts/local.mjs");
+  const other = holderId({ host: "other-box", machine: "m2", boot: "b2" }, 4242);
+  for (const how of ["stopped", "taken"]) {
+    const gh = claimGitHub();
+    try {
+      const prep = (loop) => {
+        const real = loop.outageDue.bind(loop);
+        loop.outageDue = async (...a) => {
+          if (how === "stopped") gh.labels.delete("pendulum:objective");
+          else for (const c of gh.comments) c.body = c.body.replaceAll(loop.holder, other);
+          return real(...a);
+        };
+      };
+      const { r, code, log, started } = await runPaused({ ends: [pausedOnDns], up: () => true, at: () => lostSince + 20 * 60_000, prep });
+      assert.deepEqual(started, ["work"], "never resumed");
+      assert.equal(r.exit, how === "stopped" ? "stopped" : "skipped");
+      assert.equal(code, 1);
+      if (how === "stopped") {
+        assert.match(log, /#7: stopped while paused; not resuming it/);
+        assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "its claim goes");
+      } else {
+        assert.ok(log.includes(`#7: its claim is no longer this run's (${other}); not resuming it`));
+        assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the other loop's claim is left alone");
+      }
+    } finally {
+      gh.restore();
+    }
+  }
+});
+
+test("#575: a real send-back whose rebase stage ends paused ends run --wait's merge follow paused, its claim kept; resume with wait follows the merge again", async () => {
+  const pr = { ...reviewPr(), labels: [], mergeable_state: "dirty", head: { ref: "pendulum/7", sha: "a".repeat(40) } };
+  const gh = claimGitHub({ pr, labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"] });
+  const inner = globalThis.fetch;
+  let down = true;
+  globalThis.fetch = async (url, init) => (new URL(url).origin === "https://api.anthropic.test" && down ? Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } })) : inner(url, init));
+  try {
+    const loop = await claimLoop();
+    loop.clock = () => lostSince + 20 * 60_000;
+    const started = [];
+    loop.stage = async (n, name) => (started.push(name), pausedOnDns);
+    const merges = [];
+    loop.followMerge = async (n, prNumber) => (merges.push(prNumber), true);
+    const sendGh = { getPrSettled: async () => pr, rebaseMarkers: async () => ({ effective: 0, recent: 0, already: false, stuck: null, record: null }), prComment: async () => {}, applyExit: async () => {} };
+    const r = await loop.withClaim(7, () => loop.sendBack(7, 5, { objectiveLabel: "pendulum:objective", notify: "" }, { gh: sendGh }));
+    assert.deepEqual(started, ["work"], "the worker's rebase ran and paused");
+    assert.equal(r.exit, "paused", "the pause is the follow's end, not a failed send-back");
+    assert.equal(loop.offline.get(7)?.stage, "work");
+    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
+    down = false;
+    const resumed = await loop.resume(7, { wait: true });
+    assert.deepEqual(merges, [5], "following the merge goes on, which sends it back again");
+    assert.equal(resumed.exit, "delivered");
+  } finally {
+    globalThis.fetch = inner;
+    gh.restore();
   }
 });
 

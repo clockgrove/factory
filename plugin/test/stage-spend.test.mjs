@@ -66,7 +66,7 @@ test("a local work stage that ran no harness pass ends with a $0 spend line, not
   assert.ok(last, `the stage wrote no progress comment:\n${out}`);
   assert.match(last, /exit: blocked/, out);
   assert.doesNotMatch(last, /crashed/, "a Block by its own check, not a crash");
-  assert.deepEqual(lineOf(last), { usd: 0, noPass: true }, last);
+  assert.deepEqual(lineOf(last), { usd: 0, noPass: true, exit: "blocked" }, last);
 });
 
 const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;

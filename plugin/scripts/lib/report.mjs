@@ -1971,8 +1971,24 @@ export function renderReport(r) {
   view("model", r.breakdowns.model, "Model");
   view("harness", r.breakdowns.harness, "Harness");
   view("Pendulum version", r.breakdowns.version, "Version");
+  view("route", r.breakdowns.route, "Route");
+  view("UTC day a stage started", r.breakdowns.day, "Day");
   if (r.breakdowns.account) view("account", r.breakdowns.account, "Account");
-  if (r.objectives.length) out.push("", "## Objectives", "", table(["Issue", "Outcome", "Work", "Rebase", "Review", ...COST_HEAD], r.objectives.map((o) => [`#${o.issue}`, o.outcome ?? "unread", o.stages.work, o.stages.rebase, o.stages.review, ...costCells(o.cost)])));
+  // Where the dollars went, by the finish card's rules: the work asked for, then the churn apart.
+  const rowCells = (x) => [...COST_KINDS.map((k) => (x.usd[k] ? money(x.usd[k]) : "—")), String(x.unknownRuns)];
+  if (r.totals.asked.length || r.totals.churn.length) {
+    out.push("", "## Where the dollars went", "", "By the finish card's rules, over every Objective's stages (decision calls outside a stage are in neither table).", "", table(["What the issue asked for", ...COST_HEAD], r.totals.asked.map((x) => [x.what, ...rowCells(x)])));
+    if (r.totals.churn.length) out.push("", table(["Churn Pendulum caused", "Stages", ...COST_HEAD], r.totals.churn.map((x) => [x.row, x.stages, ...rowCells(x)])));
+  }
+  // Per merged Objective: each measure's median (p25..p75, n, left out).
+  const p = r.totals.perMerged;
+  if (p.n) {
+    const fmt = (m, unit = (x) => String(x)) => (m.median === null ? `none${m.leftOut ? ` (${m.leftOut} left out)` : ""}` : `${unit(m.median)} (${unit(m.p25)}..${unit(m.p75)}, n=${m.n}${m.leftOut ? `, ${m.leftOut} left out` : ""})`);
+    const kinds = COST_KINDS.filter((k) => p.usd[k].median);
+    out.push("", "## Per merged Objective", "", `${p.n} merged Objective(s); medians with p25..p75. Dollars, review rounds and fix passes count only those every stage of which is in the period; dollars only those with no run of unknown cost.`, "", table(["Measure", "Median (p25..p75, n)"], [...(kinds.length ? kinds : ["api"]).map((k) => [`$ ${COST_HEAD[COST_KINDS.indexOf(k)]}`, fmt(p.usd[k], money)]), ["Wall clock minutes", fmt(p.wallMinutes)], ["Review rounds", fmt(p.reviewRounds)], ["Fix passes", fmt(p.fixPasses)]]));
+    if (p.leftOut.length) out.push("", `- Left out: ${p.leftOut.map((x) => `#${x.issue} (${x.why.join(", ")})`).join("; ")}.`);
+  }
+  if (r.objectives.length) out.push("", "## Objectives", "", table(["Issue", "Outcome", "Route", "Blocks", "Wall min", "Work", "Rebase", "Review", ...COST_HEAD], r.objectives.map((o) => [`#${o.issue}`, `${o.outcome ?? "unread"}${o.running ? " (running)" : ""}`, o.route ?? "not recorded", o.blocks, o.wallMinutes ?? "—", o.stages.work, o.stages.rebase, o.stages.review, ...costCells(o.cost)])));
   const f = r.findings;
   if (f.totals.findings || f.totals.reviewStages) {
     const counts = (x) => [x.findings, ...f.outcomes.map((o) => x.outcomes[o])];
@@ -1992,6 +2008,8 @@ export function renderReport(r) {
   if (h.answerAndFixPasses.unrecorded.length) out[out.length - 1] += `; not recorded (a stage with no per-pass ledger): ${h.answerAndFixPasses.unrecorded.map((n) => `#${n}`).join(", ")}`;
   list("Cache-write share by pass label", h.cacheWriteShare.items, (x) => `${x.passLabel} ${(x.share * 100).toFixed(1)}% (${x.written} of ${x.input} input tokens)`);
   list("Cost per model minute", h.costPerModelMinute.items, (x) => `#${x.issue} ${money(x.usdPerModelMinute)}/min ${x.billing} (${money(x.usd)} over ${x.modelMinutes} min)`);
+  list("Stages that ended Blocked", h.blockedStages.items, (x) => `#${x.issue} ${x.stages} stage(s): ${COST_KINDS.filter((k) => x.cost.usd[k]).map((k) => `${money(x.cost.usd[k])} ${k}`).join(", ") || "$0.00"}${x.cost.unknownRuns ? ` plus ${x.cost.unknownRuns} run(s) of unknown cost` : ""}`);
+  if (h.blockedStages.unrecorded.length) out[out.length - 1] += `; not recorded (a stage whose records do not say how it ended): ${h.blockedStages.unrecorded.map((n) => `#${n}`).join(", ")}`;
   list("Spend in Objectives that ended Blocked or closed unmerged", h.blockedOrUnmergedSpend.items, (x) => `#${x.issue} ${x.outcome}, ${x.stages} stage(s): ${COST_KINDS.filter((k) => x.cost.usd[k]).map((k) => `${money(x.cost.usd[k])} ${k}`).join(", ") || "$0.00"}${x.cost.unknownRuns ? ` plus ${x.cost.unknownRuns} run(s) of unknown cost` : ""}`);
   return `${[...out, ...renderRates(r.rates), ...renderSource(r.source)].join("\n")}\n`;
 }

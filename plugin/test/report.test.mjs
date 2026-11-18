@@ -10,7 +10,7 @@ import { pendulumBuild } from "../scripts/lib/release.mjs";
 import { progressTail, writeUsage } from "../scripts/lib/session.mjs";
 import { costOf, loadPrices } from "../scripts/lib/cost-join.mjs";
 import { BILLING_WORDS } from "../scripts/lib/usage.mjs";
-import { REPORT_SCHEMA, STOPPED_EXIT, buildReport, outcomeOf, readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
+import { COST_KINDS, REPORT_SCHEMA, STOPPED_EXIT, buildReport, outcomeOf, readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
 import { passLedger } from "../scripts/lib/usage.mjs";
 import { keepDecision } from "../scripts/lib/harness.mjs";
 import { objectiveRecords } from "../scripts/lib/finish-card.mjs";
@@ -398,17 +398,22 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.findings.totals), ["cost", "findings", "outcomes", "reviewStages", "unnamed"]);
   assert.deepEqual(keys(r.scope), ["by", "compare", "defaultPeriod", "issues", "label", "parent", "since", "until"]);
   assert.deepEqual(keys(r.words), ["api", "credits", "sandbox", "subscription", "unknown"]);
-  assert.deepEqual(keys(r.totals), ["cost", "objectives", "passes", "stages", "tokens"]);
+  assert.deepEqual(keys(r.totals), ["asked", "churn", "cost", "objectives", "passes", "perMerged", "stages", "tokens"]);
+  assert.deepEqual(keys(r.totals.perMerged), ["fixPasses", "leftOut", "n", "reviewRounds", "usd", "wallMinutes"]);
+  assert.deepEqual(keys(r.totals.perMerged.usd), ["api", "credits", "sandbox", "subscription", "unknown"]);
+  assert.deepEqual(keys(r.totals.perMerged.wallMinutes), ["leftOut", "median", "n", "p25", "p75"]);
+  assert.deepEqual(keys(r.totals.asked[0]), ["unknownRuns", "usd", "what"]);
   const cost = [".unknownRuns:number", ".unknownWhy[]", ".usd.api:number", ".usd.credits:number", ".usd.sandbox:number", ".usd.subscription:number", ".usd.unknown:number"];
   assert.deepEqual(shape(r.objectives.find((o) => o.issue === 5).cost).map((s) => s.replace(/\[\]:string$/, "[]")), cost);
   assert.deepEqual(keys(r.unknown), ["items", "reasons", "runs", "stages"]);
   assert.deepEqual(keys(r.unknown.reasons[0]), ["code", "runs", "stages", "text"]);
   assert.deepEqual(keys(r.unknown.items[0]), ["issue", "runs", "stage", "why"]);
-  assert.deepEqual(keys(r.breakdowns), ["account", "harness", "model", "pass", "stage", "version"]);
+  assert.deepEqual(keys(r.breakdowns), ["account", "day", "harness", "model", "pass", "route", "stage", "version"]);
   assert.deepEqual(keys(r.breakdowns.stage[0]), ["cost", "key", "stages", "tokens"]);
-  assert.deepEqual(keys(r.breakdowns.pass[0]), ["cost", "key", "modelMinutes", "passes", "tokens"]);
-  assert.deepEqual(keys(r.objectives.find((o) => o.issue === 3)), ["cost", "findings", "issue", "modelMinutes", "outcome", "passes", "stages", "title", "tokens", "unpricedPasses", "url", "usdPerModelMinute"]);
-  assert.deepEqual(keys(r.hotSpots), ["answerAndFixPasses", "blockedOrUnmergedSpend", "cacheWriteShare", "costPerModelMinute", "reviewLoops"]);
+  assert.deepEqual(keys(r.breakdowns.pass[0]), ["cost", "key", "modelMinutes", "passes", "spendLineStages", "tokens"]);
+  assert.deepEqual(keys(r.objectives.find((o) => o.issue === 3)), ["asked", "blocks", "churn", "clockWhy", "cost", "findings", "issue", "merged", "modelMinutes", "outcome", "passes", "route", "running", "stages", "started", "title", "tokens", "unpricedPasses", "url", "usdPerModelMinute", "wallMinutes"]);
+  assert.deepEqual(keys(r.hotSpots), ["answerAndFixPasses", "blockedOrUnmergedSpend", "blockedStages", "cacheWriteShare", "costPerModelMinute", "reviewLoops"]);
+  assert.ok(Array.isArray(r.hotSpots.blockedStages.unrecorded));
   for (const h of Object.values(r.hotSpots)) assert.ok(typeof h.rankBy === "string" && Array.isArray(h.items));
   assert.deepEqual(keys(r.source), ["calls", "complete", "maxCalls", "missing", "read", "stoppedAt", "trusted"]);
   assert.deepEqual(keys(r.source.trusted), ["app", "appFrom", "appWhy", "logins"]);
@@ -419,7 +424,7 @@ test("report: --json keeps its schema: every field the documented shape names, o
   // The documented schema names every top-level field and the version (docs/REPORT.md).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "docs", "REPORT.md"), "utf8");
   assert.ok(doc.includes(REPORT_SCHEMA));
-  for (const k of [...keys(r), ...keys(r.hotSpots), ...keys(r.source), ...keys(r.findings), ...keys(r.findings.totals), ...r.findings.outcomes]) assert.ok(doc.includes(`\`${k}\``), `docs/REPORT.md names ${k}`);
+  for (const k of [...keys(r), ...keys(r.totals), ...keys(r.totals.perMerged), ...keys(r.breakdowns), ...keys(r.objectives[0]), ...keys(r.hotSpots), ...keys(r.source), ...keys(r.findings), ...keys(r.findings.totals), ...r.findings.outcomes]) assert.ok(doc.includes(`\`${k}\``), `docs/REPORT.md names ${k}`);
 });
 
 test("report: privacy: no reason, Block text, task card, transcript or credential string reaches it", async () => {
@@ -943,7 +948,8 @@ test("report (#543): a ledger line counts only on Pendulum's own comment: a past
   const { json: r, calls } = await report(withPastes(), { issue: 3 });
   const { json: fromArtifacts } = await report(linedWorld(), { issue: 3 });
   assert.equal(calls.filter((c) => c.startsWith("DOWNLOAD")).length, 2, "a pasted ledger spares no artifact read");
-  assert.deepEqual(r.breakdowns.pass, fromArtifacts.breakdowns.pass);
+  const passes = (x) => x.breakdowns.pass.filter((k) => k.key !== null);
+  assert.deepEqual(passes(r), passes(fromArtifacts));
   assert.deepEqual(byIssue(r, 3).passes, { total: 4, answer: 1, fix: 1 });
   assert.equal(usd(byIssue(r, 3)).api, 0.519812, "no pasted dollar");
   assert.deepEqual([byIssue(r, 3).cost.unknownRuns, byIssue(r, 3).cost.unknownWhy], [1, ["unattributed"]], "the member's stage comment is a run of unknown cost");
@@ -951,7 +957,7 @@ test("report (#543): a ledger line counts only on Pendulum's own comment: a past
   const bare = withPastes();
   bare.artifacts = {};
   const { json: none } = await report(bare, { issue: 3 });
-  assert.deepEqual(none.breakdowns.pass, []);
+  assert.deepEqual(none.breakdowns.pass.map((x) => [x.key, x.passes, x.cost.usd.api]), [[null, null, 0.519812]], "no pass: every dollar under no pass");
   assert.equal(byIssue(none, 3).passes, null);
   assert.deepEqual(none.source.missing.find((m) => m.code === "no-ledger")?.issues, [3]);
 });
@@ -1073,6 +1079,17 @@ async function finishCard3(w, { user = BOT, association, app, edit = (b) => b } 
 const artifactCalls = (calls) => calls.filter((c) => c.includes("/actions/artifacts") || c.startsWith("DOWNLOAD"));
 /** Everything a report says but where it read it from. */
 const figures = (r) => ({ totals: r.totals, unknown: r.unknown, breakdowns: r.breakdowns, objectives: r.objectives, hotSpots: r.hotSpots, findings: r.findings, missing: r.source.missing });
+/**
+ * figures() less what only a finish card records (#570): an Objective's clock (the scorer's start, from its card's summary,
+ * and the wall clock to its merge), for comparing a world with a card to the same world without one.
+ */
+const clockless = (r) => {
+  const f = structuredClone(figures(r));
+  for (const o of f.objectives) for (const k of ["started", "wallMinutes", "clockWhy"]) delete o[k];
+  delete f.totals.perMerged.wallMinutes;
+  f.totals.perMerged.leftOut = f.totals.perMerged.leftOut.map((x) => ({ ...x, why: x.why.filter((w) => w !== "no-clock") })).filter((x) => x.why.length);
+  return f;
+};
 
 test("report (#547): with --rates no Objective is read from its finish card's summary, which carries no sub-agent threads or long-context share: its stages are read", async () => {
   const w = world();
@@ -1083,7 +1100,7 @@ test("report (#547): with --rates no Objective is read from its finish card's su
   assert.ok(artifactCalls(rated.calls).some((c) => c.startsWith("DOWNLOAD")), "its usage records are read");
   // Its figures are its stages' own, as without a card.
   const stages = await report(world(), { issue: 3, rates: "gpt-6-luna" });
-  assert.deepEqual(figures(rated.json), figures(stages.json));
+  assert.deepEqual(clockless(rated.json), clockless(stages.json));
   assert.deepEqual(rated.json.rates, stages.json.rates);
 });
 
@@ -1100,7 +1117,7 @@ test("report (#544): a merged Objective is read from its finish card's summary, 
     assert.equal(card.json.source.calls.made, card.json.source.calls.planned);
     assert.equal(card.json.source.read.summaries, 1);
     // Every figure, the pass breakdown, tokens, model minutes and hot spots included, is the stages' own.
-    assert.deepEqual(figures(card.json), figures(stages.json), name);
+    assert.deepEqual(clockless(card.json), clockless(stages.json), name);
     assert.deepEqual(byIssue(card.json, 3).passes, { total: 4, answer: 1, fix: 1 });
     assert.deepEqual(card.json.breakdowns.pass.map((x) => [x.key, x.passes, x.cost.usd.api]), [["work", 1, 0.2], ["validation-fix", 1, 0.1], ["answer", 1, 0.05637], ["review", 1, 0.163442]]);
   }
@@ -1124,17 +1141,25 @@ test("report (#544): a merged Objective is read from its finish card's summary, 
   assert.deepEqual(s.tokens, byIssue(plain.json, 3).tokens);
   assert.deepEqual([s.labelled, s.labelledWallMs], [real.timeline.find((e) => e.event === "labeled" && e.label.name === "pendulum:objective").created_at, Date.parse(real.pr.merged_at) - Date.parse("2026-11-17T02:23:42Z")]);
 
-  // One comment: with every other comment of #3 gone, the card alone gives the same figures.
+  // One comment: with every other comment of #3 gone, the card alone gives the same figures, but for what only its
+  // stages' own comments say (#570): the day each started and the route each ran on, under none here.
   const alone = world();
   alone.comments = [...alone.comments.filter((c) => c.issue_url !== issueUrl(3)), posted];
   const one = await report(alone, { issue: 3 });
   assert.equal(one.json.source.read.pendulumComments, 1);
-  assert.deepEqual(figures(one.json), figures(plain.json));
+  const fromCommentsLess = (r) => {
+    const f = clockless(r);
+    for (const k of ["day", "route"]) f.breakdowns[k] = f.breakdowns[k].map((x) => ({ ...x, key: null }));
+    for (const o of f.objectives) o.route = null;
+    return f;
+  };
+  assert.deepEqual(fromCommentsLess(one.json), fromCommentsLess(plain.json));
+  assert.deepEqual(one.json.breakdowns.route.map((x) => x.key), [null]);
 
   // Over a period: the same figures as with no card at all, and no artifact of #3's read.
   const period = await report(w, { since: "2026-11-17" });
   const without = await report(world(), { since: "2026-11-17" });
-  assert.deepEqual(figures(period.json), figures(without.json));
+  assert.deepEqual(clockless(period.json), clockless(without.json));
   assert.ok(!period.calls.some((c) => c.includes("pendulum-usage-3")), "#3 is read from its card");
   assert.ok(period.calls.some((c) => c.includes("pendulum-usage-7")), "an Objective with no card is read by its stages");
   // A period that starts inside the card's run cannot use it, and --by account needs each stage's own record.
@@ -1147,7 +1172,11 @@ test("report (#544): a merged Objective is read from its finish card's summary, 
   const fallback = await report(lined, { issue: 3 });
   assert.equal(fallback.json.source.read.summaries, 0);
   assert.equal(fallback.calls.filter((c) => c.startsWith("DOWNLOAD")).length, 2);
-  assert.deepEqual(figures(fallback.json), figures((await report(linedWorld(), { issue: 3 })).json));
+  assert.deepEqual(clockless(fallback.json), clockless((await report(linedWorld(), { issue: 3 })).json));
+  // Its clock is still its card's (#570 V6): the scorer's start, the merge and the wall clock between them.
+  const three = byIssue(fallback.json, 3);
+  assert.deepEqual([three.started, three.merged, three.wallMinutes, three.clockWhy], ["2026-11-17T02:23:42Z", real.pr.merged_at, Math.round(((Date.parse(real.pr.merged_at) - Date.parse("2026-11-17T02:23:42Z")) / 60_000) * 100) / 100, null]);
+  assert.equal(byIssue((await report(linedWorld(), { issue: 3 })).json, 3).clockWhy, "no-card");
 });
 
 test("report (#544): a forged summary counts nothing: only Pendulum's own card is read, anyone else's leaves the stages to be read", async () => {
@@ -1205,7 +1234,7 @@ test("report (#544): a run with a sandbox, decision lines, comments Pendulum can
   const card = await report(w, { issue: 3 });
   assert.equal(card.json.source.read.summaries, 1);
   assert.deepEqual(artifactCalls(card.calls), []);
-  assert.deepEqual(figures(card.json), figures(stages.json));
+  assert.deepEqual(clockless(card.json), clockless(stages.json));
   // Each is in it: the sandbox's run of unknown cost, the teammate's stage and vendor comment, the decision calls.
   const s = readSummary(posted.body, 3);
   assert.deepEqual([s.sandbox.usd, s.sandbox.unknown, s.sandbox.foreign], [0.07, 2, ["work"]]);
@@ -1269,7 +1298,7 @@ test("report (#559): a stage whose lines name no model is under its own usage re
   w.comments.push(await finishCard3(w));
   const card = await report(w, { issue: 3 });
   assert.equal(card.json.source.read.summaries, 1);
-  assert.deepEqual(figures(card.json), figures(stages.json));
+  assert.deepEqual(clockless(card.json), clockless(stages.json));
 });
 
 test("report (#559): the usage record read for a stage's model is planned: the calls planned are the calls made", async () => {
@@ -1297,7 +1326,7 @@ test("report (#559): a stage no record of its own names a model for is under no 
   w.comments.push(await finishCard3(w));
   const card = await report(w, { issue: 3 });
   assert.equal(card.json.source.read.summaries, 1);
-  assert.deepEqual(figures(card.json), figures(stages.json));
+  assert.deepEqual(clockless(card.json), clockless(stages.json));
   // The call budget stopped before the record: the reason is the stop.
   const { json: stopped } = await report(modellessWorld("claude-sonnet-5.5"), { issue: 3, "max-calls": 4 });
   assert.deepEqual(stopped.breakdowns.model.map((x) => [x.key, x.stages]), [[null, 1], ["claude-fable-5-2", 1]]);
@@ -1378,7 +1407,7 @@ test("report (#566 S5): a usage record whose dollars the cost join withholds as 
   assert.deepEqual(forty.stages, { work: 2, rebase: 0, review: 1 }, "the record still counts as a stage");
   assert.ok(forty.cost.unknownWhy.includes("unmatched"));
   assert.equal(forty.cost.usd.api, 0, "its dollars withheld");
-  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.cost.usd.api, x.cost.usd.subscription]), [["work", 1, 0, 0.5]]);
+  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.cost.usd.api, x.cost.usd.subscription]), [["work", 1, 0, 0.5], [null, null, 0, 0.2]], "the review stage with no ledger, under no pass");
   assert.equal(r.totals.passes, 1);
 });
 
@@ -1428,7 +1457,7 @@ test("report (#566 S9): a stage with a ledger line takes its passes from it on t
   w.comments.push(await finishCard3(w));
   const card = await report(w, { issue: 3 });
   assert.equal(card.json.source.read.summaries, 1);
-  assert.deepEqual(figures(card.json), figures(stages.json));
+  assert.deepEqual(clockless(card.json), clockless(stages.json));
 });
 
 test("report (#566 R8, R9): each missing entry gives its Objectives and the stages among them; the Markdown names the unrecorded Objectives and the stages of unknown cost", async () => {
@@ -1600,4 +1629,144 @@ test("report (#563): a full first page with no Link header ends the read, and so
   // With GitHub's Link headers, no note.
   const { json: linked } = await report({ ...w, noLink: false }, { since: "2026-11-17" });
   assert.ok(!linked.source.missing.some((m) => m.code === "no-link"));
+});
+
+// ------------------------------------------------------------------ #570: the owner's first questions
+
+/**
+ * ledgeredWorld with #3's spend lines as the writer makes them now: its work stage's dollars by pass kind, the fix pass it
+ * ran again after a Block, and its exit (`work`: blocked, `review`: delivered, or none, a line from before the exit was
+ * recorded); its review only judging answers already made.
+ */
+function churnedWorld({ workExit = "blocked", reviewExit = "delivered" } = {}) {
+  const w = ledgeredWorld();
+  const work = { usdByPass: { work: { usd: 0.2, usdByBilling: { api: 0.2 } }, fix: { usd: 0.1, usdByBilling: { api: 0.1 } }, answer: { usd: 0.05637, usdByBilling: { api: 0.05637 } } }, rerun: { afterBlock: "2026-11-17T02:20:00Z", repeated: ["fix"] } };
+  const review = { usdByPass: { review: { usd: 0.163442, usdByBilling: { api: 0.163442 } } }, judgeOnly: true };
+  w.comments = w.comments.map((c) => {
+    if (c.user !== BOT) return c;
+    const [usdOf, parts, exit] = c.body.startsWith("<!-- pendulum:3:progress:work:44002648279 -->") ? [0.35637, work, workExit] : c.body.startsWith("<!-- pendulum:3:progress:review:44002920873 -->") ? [0.163442, review, reviewExit] : [null];
+    if (usdOf === null) return c;
+    const line = spendMarker(usdOf, { usdByBilling: { api: usdOf }, billing: "api", ...parts, ...(exit ? { exit } : {}) });
+    return { ...c, body: c.body.replace(/^<!-- pendulum:spend [^\n]*$/m, line) };
+  });
+  return w;
+}
+
+test("report (#570 V1): each Objective's asked and churn rows, and their totals, are its finish card's by the card's own rules, the same from its card and from its stages", async () => {
+  const { readSummary } = await import("../scripts/lib/finish-card.mjs");
+  const stages = await report(churnedWorld(), { issue: 3 });
+  const w = churnedWorld();
+  const posted = await finishCard3(w);
+  w.comments.push(posted);
+  const card = await report(w, { issue: 3 });
+  assert.equal(card.json.source.read.summaries, 1);
+  assert.deepEqual(clockless(card.json), clockless(stages.json));
+  const api = (n) => ({ api: n, subscription: 0, credits: 0, unknown: 0, sandbox: 0 });
+  // The build's work and answer passes are what the issue asked for; its fix pass run again after a Block, and the
+  // review that only judged answers, are churn.
+  const three = byIssue(card.json, 3);
+  assert.deepEqual(three.asked, [{ what: "work", usd: api(0.2), unknownRuns: 0 }, { what: "answer", usd: api(0.05637), unknownRuns: 0 }]);
+  assert.deepEqual(three.churn, [{ row: "judge", stages: 1, usd: api(0.163442), unknownRuns: 0 }, { row: "block", stages: 1, usd: api(0.1), unknownRuns: 0 }]);
+  // The card's own rows, word for word.
+  const s = readSummary(posted.body, 3);
+  assert.deepEqual(s.asked.map((r) => [r.what, r.usd, r.unknown]), three.asked.map((r) => [r.what, r.usd.api, r.unknownRuns]));
+  assert.deepEqual(s.churn.map((r) => [r.row, r.stages, r.usd, r.unknown]), three.churn.map((r) => [r.row, r.stages, r.usd.api, r.unknownRuns]));
+  assert.deepEqual(card.json.totals.asked, three.asked);
+  assert.deepEqual(card.json.totals.churn, three.churn);
+  // Over several Objectives: a conflict rebase is churn, a sandbox its own row, and the rows add up to the stages' dollars.
+  const { json: r } = await report(world(), { since: "2026-11-17" });
+  const seven = byIssue(r, 7);
+  assert.deepEqual(seven.churn.map((x) => [x.row, x.stages, x.usd.api]), [["rebase-conflict", 1, 0.4]]);
+  for (const k of COST_KINDS) {
+    const rows = r.totals.asked.concat(r.totals.churn).reduce((t, x) => t + x.usd[k], 0);
+    const decisions = r.breakdowns.stage.find((x) => x.key === "decisions")?.cost.usd[k] ?? 0;
+    assert.ok(Math.abs(rows + decisions - r.totals.cost.usd[k]) < 1e-9, k);
+  }
+});
+
+test("report (#570 V2): a stage with no ledger puts its spend line's dollars by pass in the pass breakdown, and a row of the dollars no pass names makes it cover the totals", async () => {
+  const w = churnedWorld();
+  // No ledger anywhere: no ledger line, and no usage record to read one from.
+  w.comments = w.comments.map((c) => ({ ...c, body: c.body.replace(/^<!-- pendulum:ledger [^\n]*$/m, "") }));
+  w.artifacts = {};
+  const { json: r } = await report(w, { issue: 3 });
+  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.spendLineStages, x.cost.usd.api]), [["work", 0, 1, 0.2], ["answer", 0, 1, 0.05637], ["fix", 0, 1, 0.1], ["review", 0, 1, 0.163442]]);
+  assert.equal(r.totals.passes, 0, "no pass counted");
+  // With ledgers and decision calls outside a stage, a teammate's stage and an unknown run, the rows cover the totals.
+  for (const scope of [{ since: "2026-11-17" }, { issue: 3 }]) {
+    const { json: all } = await report(scope.issue ? churnedWorld() : world(), scope);
+    for (const view of Object.keys(all.breakdowns)) {
+      for (const k of COST_KINDS) assert.ok(Math.abs(all.breakdowns[view].reduce((t, x) => t + x.cost.usd[k], 0) - all.totals.cost.usd[k]) < 1e-9, `${view} ${k}`);
+      assert.equal(all.breakdowns[view].reduce((t, x) => t + x.cost.unknownRuns, 0), all.totals.cost.unknownRuns, view);
+    }
+  }
+  const { json: period } = await report(world(), { since: "2026-11-17" });
+  const rest = period.breakdowns.pass.at(-1);
+  assert.deepEqual([rest.key, rest.passes], [null, null]);
+  assert.ok(rest.cost.usd.api >= 0.02, "the decision calls outside a stage name no pass");
+});
+
+test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Blocks, clock and Running, and the dollars by UTC day", async () => {
+  const w = world();
+  // #5's Blocked notice, Pendulum's own; #9 Running now.
+  w.comments.push(comment(5, `<!-- pendulum:5:blocked:work:local-a1 -->\nBlocked (work): x.\n<!-- pendulum:block {"cause":"pendulum"} -->`, { user: ME, at: "2026-11-17T03:30:00Z" }));
+  w.issues.find((i) => i.number === 9).labels.push({ name: "pendulum:running" });
+  // A stage the next day, on Actions.
+  w.comments.push(progress(7, "review", "52001", { at: "2026-11-18T01:00:00Z", spend: { usd: 0.05, parts: { usdByBilling: { api: 0.05 }, billing: "api" } } }));
+  const { json: r } = await report(w, { since: "2026-11-17" });
+  // The route each stage ran on: the App's comments are GitHub Actions', the login's local mode's.
+  assert.deepEqual([3, 5, 7, 8].map((n) => byIssue(r, n).route), ["actions", "local", "mixed", "mixed"]);
+  assert.deepEqual(Object.fromEntries(r.breakdowns.route.map((x) => [x.key, x.stages])), { actions: 5, local: 5, decisions: 1, null: 1 });
+  assert.deepEqual([byIssue(r, 5).blocks, byIssue(r, 3).blocks], [1, 0]);
+  assert.deepEqual([byIssue(r, 5).running, byIssue(r, 3).running], [false, false]);
+  const { json: nine } = await report(w, { issue: 9 });
+  assert.equal(byIssue(nine, 9).running, true);
+  // No finish card: a merged Objective's start is not recorded, its merge is its PR's.
+  assert.deepEqual([byIssue(r, 7).started, byIssue(r, 7).merged, byIssue(r, 7).wallMinutes, byIssue(r, 7).clockWhy], [null, "2026-11-17T05:00:00Z", null, "no-card"]);
+  assert.deepEqual([byIssue(r, 5).clockWhy, byIssue(r, 8).clockWhy], ["not-merged", "not-merged"]);
+  // By day: each stage on the UTC date it started, oldest first, covering the totals.
+  assert.deepEqual(r.breakdowns.day.map((x) => [x.key, x.stages]), [["2026-11-17", r.totals.stages - 1], ["2026-11-18", 1]]);
+  assert.equal(r.breakdowns.day[1].cost.usd.api, 0.05);
+  // Per merged Objective: #3 and #7; #7 has a teammate's stage, a run of unknown cost and no fix passes it can count.
+  const p = r.totals.perMerged;
+  assert.equal(p.n, 2);
+  assert.deepEqual([p.usd.api.median, p.usd.api.n, p.usd.api.leftOut], [usd(byIssue(r, 3)).api, 1, 1]);
+  assert.deepEqual([p.reviewRounds.n, p.fixPasses.n, p.fixPasses.median, p.wallMinutes.n, p.wallMinutes.leftOut], [2, 1, 1, 0, 2]);
+  assert.deepEqual(p.leftOut, [{ issue: 3, why: ["no-clock"] }, { issue: 7, why: ["unknown-runs", "no-passes", "no-clock"] }]);
+  // A period that starts after #7's issue was opened cuts its figures: it is left out of them.
+  const { json: late } = await report(w, { since: "2026-11-17T02:00:00Z" });
+  assert.deepEqual(late.totals.perMerged.leftOut.find((x) => x.issue === 7).why, ["outside-period", "no-clock"]);
+  assert.equal(late.totals.perMerged.reviewRounds.n, 1);
+  // With its finish card, a merged Objective's clock is the card's: its first label to its merge.
+  const carded = churnedWorld();
+  carded.comments.push(await finishCard3(carded));
+  const three = byIssue((await report(carded, { issue: 3, by: "account" })).json, 3);
+  assert.deepEqual([three.started, three.merged, three.clockWhy], ["2026-11-17T02:23:42Z", real.pr.merged_at, null]);
+  assert.equal(three.wallMinutes, Math.round(((Date.parse(real.pr.merged_at) - Date.parse("2026-11-17T02:23:42Z")) / 60_000) * 100) / 100);
+  // The Markdown carries the same figures.
+  const md = renderReport(r);
+  assert.match(md, /^## By route$/m);
+  assert.match(md, /^\| 2026-11-18 \| 1 \| \$0\.05 \|/m);
+  assert.match(md, /^## Per merged Objective$/m);
+  assert.match(md, /^- Left out: #3 \(no-clock\); #7 \(unknown-runs, no-passes, no-clock\)\.$/m);
+  assert.match(md, /^\| #7 \| merged \| mixed \| 0 \| — \|/m);
+});
+
+test("report (#570 V8): the stages whose spend line records they ended Blocked, with their cost; a stage whose records do not say is named", async () => {
+  const blocked = await report(churnedWorld(), { issue: 3 });
+  assert.deepEqual(blocked.json.hotSpots.blockedStages, { rankBy: "stages", items: [{ issue: 3, stages: 1, keys: [{ stage: "work", key: "44002648279" }], cost: { usd: { api: 0.35637, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownWhy: [] } }], unrecorded: [] });
+  // The same from its finish card.
+  const w = churnedWorld();
+  w.comments.push(await finishCard3(w));
+  assert.deepEqual((await report(w, { issue: 3 })).json.hotSpots.blockedStages, blocked.json.hotSpots.blockedStages);
+  // A spend line from before the exit was recorded: not known, and said.
+  const { json: older } = await report(churnedWorld({ workExit: null, reviewExit: null }), { issue: 3 });
+  assert.deepEqual([older.hotSpots.blockedStages.items, older.hotSpots.blockedStages.unrecorded], [[], [3]]);
+  // The writer: the stage's exit code goes on its spend line, and is read back; anything else is not.
+  const line = stageSpendLine({ usd: 0.1, exit: "blocked" });
+  assert.equal(line.parts.exit, "blocked");
+  const { spendParts } = await import("../scripts/lib/logic.mjs");
+  assert.equal(spendParts(spendMarker(line.usd, line.parts)).exit, "blocked");
+  assert.ok(!Object.hasOwn(spendParts(spendMarker(0.1, { exit: "Blocked: the tests failed" })), "exit"));
+  assert.ok(!Object.hasOwn(stageSpendLine({ usd: 0.1 }).parts, "exit"));
 });

@@ -16,6 +16,7 @@ import { addTokens, isAnswer, isFix, stagePassFigures, zeroTokens } from "./pass
 import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
 import { RUNNING_LABEL, STATE_LABELS, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
+import { PREVIOUS_NAME } from "./local.mjs";
 import { BILLING, BILLING_WORDS, PASS_KEYS, UNKNOWN_WHY, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
 
 const OBJECTIVE = DEFAULTS.objective_label;
@@ -47,6 +48,17 @@ export function labelTime(issue, timeline, label = OBJECTIVE, clockAfter = null)
   const starts = (timeline || []).filter((e) => ((e.event === "labeled" && e.label?.name === label) || (e.event === "unlabeled" && e.label?.name === DRAFT_LABEL)) && ms(e.created_at) >= ms(first) && (!running || ms(e.created_at) <= ms(running)));
   return starts.map((e) => e.created_at).sort((a, b) => ms(a) - ms(b)).at(-1) ?? first;
 }
+
+/**
+ * Whether the issue's clock started before the rename to Pendulum (#567): a label event named exactly
+ * `<previous name>:objective` or `<previous name>:running` (local.mjs PREVIOUS_NAME), the name GitHub keeps on the events
+ * from before a label was renamed. Its wall clock is then not known: labelTime matches only the current names, so it would
+ * start at a later label and come out short. Nothing else is read from those events.
+ */
+export const clockRenamed = (timeline) => (timeline || []).some((e) => (e?.event === "labeled" || e?.event === "unlabeled") && [`${PREVIOUS_NAME}:objective`, `${PREVIOUS_NAME}:running`].includes(e.label?.name));
+
+/** Why a card's wall clock is not known (clockRenamed), as the card says it. */
+export const RENAMED_CLOCK_WHY = "its wall clock is not known: it was labelled before the rename to Pendulum";
 
 /**
  * Whether a comment, review or PR is Pendulum's own, whose markers the card trusts: by the login this process writes as
@@ -411,6 +423,8 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     planned: own.some((c) => (c.body || "").startsWith(marker(n, "plan")) && inRun(c.created_at)),
     // The scorer's start of the clock: the first label with no restart window (labelTime), null with no label event.
     labelled: labelTime(issue, timeline, label),
+    // Labelled before the rename to Pendulum: no wall clock (clockRenamed).
+    clockRenamed: clockRenamed(timeline),
     commits: sum("commits"),
     additions: sum("additions"),
     deletions: sum("deletions"),
@@ -474,7 +488,7 @@ export function finishTotals(d) {
   // No stage found at all: the run's cost was not read, so it is unknown, never $0.
   const unknown = d.stages.reduce((s, x) => s + (x.unknown || 0), 0) + (d.sandbox?.unknown ?? 0) + (d.stages.length ? 0 : 1);
   const why = [...new Set([...d.stages.flatMap((x) => (x.unknown ? x.why ?? [] : [])), ...sandboxWhy(d), ...(d.stages.length ? [] : ["no-record"])])].sort();
-  return { wall: ms(d.merged) - ms(d.started), usd: Math.round(usd * 1e6) / 1e6, unknown, why, byBilling: addBilling(...d.stages.map((s) => s.byBilling)) };
+  return { wall: d.clockRenamed ? null : ms(d.merged) - ms(d.started), usd: Math.round(usd * 1e6) / 1e6, unknown, why, byBilling: addBilling(...d.stages.map((s) => s.byBilling)) };
 }
 
 /**
@@ -532,7 +546,7 @@ function headlineCost({ usd, unknown, byBilling }) {
 /** The headline: time to merge and the cost. */
 export function headline(d) {
   const t = finishTotals(d);
-  return `Merged in ${durationText(t.wall)}${headlineCost(t)}.`;
+  return `Merged${t.wall === null ? "" : ` in ${durationText(t.wall)}`}${headlineCost(t)}.${t.wall === null ? ` ${RENAMED_CLOCK_WHY[0].toUpperCase()}${RENAMED_CLOCK_WHY.slice(1)}.` : ""}`;
 }
 
 /** A shields.io static badge, for-the-badge style: its label and message escaped as shields.io reads them. */
@@ -554,7 +568,7 @@ function costLabel(t) {
 /** The badges: status, wall clock and cost. */
 export function badges(d) {
   const t = finishTotals(d);
-  return [badge("status", "merged", COLORS.green), badge("wall clock", durationShort(t.wall), COLORS.brown), badge(costLabel(t), costText(t.usd, t.unknown), COLORS.amber)];
+  return [badge("status", "merged", COLORS.green), badge("wall clock", t.wall === null ? "not known" : durationShort(t.wall), COLORS.brown), badge(costLabel(t), costText(t.usd, t.unknown), COLORS.amber)];
 }
 
 const many = (n, one, more = `${one}s`) => `${n} ${n === 1 ? one : more}`;
@@ -688,7 +702,7 @@ function costTable(d, t, rows) {
   const lines = rows.map((r) => `| ${r.name}${r.model ? ` · ${modelName(r.model)}` : ""} | ${r.time} | ${cell(r)} |`);
   const queued = d.queue.reduce((s, q) => s + (ms(q.end) - ms(q.start)), 0);
   if (d.queue.length) lines.push(`| Merge queue · your CI | ${durationText(queued)} | — |`);
-  return [`| Stage | Time | ${one ? `Cost (${one})` : "Cost"} |`, "| --- | ---: | ---: |", ...lines, `| **Total** | **${durationText(t.wall)}** | **${costText(t.usd, t.unknown)}${t.usd > 0 && !one ? billingWords(t.usd, t.byBilling) : ""}** |`].join("\n");
+  return [`| Stage | Time | ${one ? `Cost (${one})` : "Cost"} |`, "| --- | ---: | ---: |", ...lines, `| **Total** | **${t.wall === null ? "not known" : durationText(t.wall)}** | **${costText(t.usd, t.unknown)}${t.usd > 0 && !one ? billingWords(t.usd, t.byBilling) : ""}** |`].join("\n");
 }
 
 /** The pass kinds' and stages' words in the breakdown (usage.mjs PASS_KEYS less `conflict`, which is churn), in its order. */
@@ -855,7 +869,7 @@ export const reportStageKind = (kind) => (kind === "review" || kind === "rebase"
  * a ledger and none is one Pendulum cannot attribute), `modelMinutes` (the minutes of every harness pass, null unless
  * `passes` is known and each harness pass has its times), `tokens` (every stage's, summed), and `labelled` and
  * `labelledWallMs` (the scorer's start of the clock, the first `pendulum:objective` label with no restart window, and the
- * wall clock from it to the merge; null with no label event).
+ * wall clock from it to the merge; null with no label event, or one labelled before the rename to Pendulum: clockRenamed).
  */
 function objectivePasses(d) {
   const figures = d.stages.map((s) => (Array.isArray(s.ledger) ? stagePassFigures(s.ledger) : null));
@@ -864,7 +878,7 @@ function objectivePasses(d) {
   const count = (keep) => kinds.filter((k) => keep(k.kind)).reduce((t, k) => t + k.passes, 0);
   const passes = whole ? { total: count(() => true), answer: count(isAnswer), fix: count(isFix) } : null;
   const modelMinutes = whole && !kinds.some((k) => k.untimed) ? kinds.reduce((t, k) => t + (k.harnessMinutes ?? 0), 0) : null;
-  const wall = d.labelled && ms(d.merged) >= ms(d.labelled) ? ms(d.merged) - ms(d.labelled) : null;
+  const wall = !d.clockRenamed && d.labelled && ms(d.merged) >= ms(d.labelled) ? ms(d.merged) - ms(d.labelled) : null;
   return { passes, modelMinutes, tokens: d.stages.reduce((t, s) => addTokens(t, s.tokens), zeroTokens()), labelled: d.labelled ?? null, labelledWallMs: wall };
 }
 

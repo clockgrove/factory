@@ -21,6 +21,7 @@ import { collectObjective } from "../../bench/lib/collect.mjs";
 import { scoreObjective } from "../../bench/lib/objective.mjs";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
+import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
 
 /** The Pendulum build a stage of this checkout records (#565 W6): its release at its tag, else with its commit. */
 const PENDULUM_VERSION = pendulumBuild();
@@ -407,7 +408,7 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.breakdowns), ["account", "harness", "model", "pass", "stage", "version"]);
   assert.deepEqual(keys(r.breakdowns.stage[0]), ["cost", "key", "stages", "tokens"]);
   assert.deepEqual(keys(r.breakdowns.pass[0]), ["cost", "key", "modelMinutes", "passes", "tokens"]);
-  assert.deepEqual(keys(r.objectives.find((o) => o.issue === 3)), ["cost", "findings", "issue", "modelMinutes", "outcome", "passes", "stages", "title", "tokens", "unpricedPasses", "url", "usdPerModelMinute"]);
+  assert.deepEqual(keys(r.objectives.find((o) => o.issue === 3)), ["cost", "findings", "issue", "legacyStages", "modelMinutes", "outcome", "passes", "stages", "title", "tokens", "unpricedPasses", "url", "usdPerModelMinute"]);
   assert.deepEqual(keys(r.hotSpots), ["answerAndFixPasses", "blockedOrUnmergedSpend", "cacheWriteShare", "costPerModelMinute", "reviewLoops"]);
   for (const h of Object.values(r.hotSpots)) assert.ok(typeof h.rankBy === "string" && Array.isArray(h.items));
   assert.deepEqual(keys(r.source), ["calls", "complete", "maxCalls", "missing", "read", "stoppedAt", "trusted"]);
@@ -1600,4 +1601,69 @@ test("report (#563): a full first page with no Link header ends the read, and so
   // With GitHub's Link headers, no note.
   const { json: linked } = await report({ ...w, noLink: false }, { since: "2026-11-17" });
   assert.ok(!linked.source.missing.some((m) => m.code === "no-link"));
+});
+
+/**
+ * A stage's progress comment as written before the rename to Pendulum (#567): the same head with the previous name, its
+ * own spend line under that name too. `head` overrides the marker line.
+ */
+const before = (n, stage, key, { usd = 999, head = null, ...rest } = {}) =>
+  comment(n, [head ?? `<!-- ${PREVIOUS_NAME}:${n}:progress:${stage}:${key} -->`, `${stage}: started.`, `<!-- ${PREVIOUS_NAME}:spend ${JSON.stringify({ usd })} -->`].join("\n"), rest);
+
+test("report (#567): stages recorded before the rename to Pendulum are named, never read: legacy-records lists them, the report is partial, and an Objective with both is marked", async () => {
+  const { json: plain } = await report(world(), { since: "2026-11-17" });
+  assert.equal(plain.source.complete, true);
+  assert.ok(!plain.source.missing.some((m) => m.code === "legacy-records"));
+  assert.ok(plain.objectives.every((o) => o.legacyStages === 0));
+  const w = world();
+  w.comments.push(
+    // #7 straddles the rename: a build under the previous marker by the App, in the period, beside its Pendulum stages.
+    before(7, "work", "40001", { at: "2026-11-17T03:30:00Z" }),
+    // #20: only stages from before the rename, by the local login (a work and a review stage) and by a member.
+    before(20, "work", "local-a1", { user: ME, at: "2026-11-17T02:00:00Z" }),
+    before(20, "review", "local-a2", { user: ME, at: "2026-11-17T02:30:00Z" }),
+    before(20, "work", "local-a3", { user: { login: "teammate", type: "User" }, association: "MEMBER", at: "2026-11-17T02:40:00Z" }),
+    // #26: through another GitHub App (the stage of unknown cost a Pendulum marker there would be): counts.
+    before(26, "work", "1", { user: { login: "otherapp[bot]", type: "Bot" }, association: "NONE", app: { id: 99, slug: "otherapp" }, at: "2026-11-17T02:00:00Z" }),
+    // None of these: a stranger's paste, one before the period, one on another issue than its marker names, and heads
+    // that are not the progress marker's exact grammar.
+    before(21, "work", "1", { user: { login: "stranger", type: "User" }, association: "NONE", at: "2026-11-17T02:00:00Z" }),
+    before(27, "work", "1", { user: { login: "github-actions[bot]", type: "Bot" }, association: "NONE", app: { id: 15368, slug: "github-actions" }, at: "2026-11-17T02:00:00Z" }),
+    before(22, "work", "1", { at: "2026-11-16T23:00:00Z", updated: "2026-11-17T01:00:00Z" }),
+    before(23, "work", "1", { head: `<!-- ${PREVIOUS_NAME}:24:progress:work:1 -->` }),
+    before(25, "work", "1", { head: `<!-- ${PREVIOUS_NAME}:25:progress:build:1 -->` }),
+    before(25, "work", "1", { head: `<!-- ${PREVIOUS_NAME}:25:progress:work -->` }),
+    before(25, "work", "1", { head: `x <!-- ${PREVIOUS_NAME}:25:progress:work:1 -->` }),
+    before(25, "work", "1", { head: `<!-- ${PREVIOUS_NAME}:25:progress:work:1 --> x` }),
+  );
+  const { code, json: r, err } = await report(w, { since: "2026-11-17" });
+  // Not a budget stop: exit 0, but not complete.
+  assert.equal(code, 0);
+  assert.equal(r.source.complete, false);
+  assert.equal(r.source.stoppedAt, null);
+  const entry = r.source.missing.find((m) => m.code === "legacy-records");
+  assert.deepEqual([entry?.issues, entry?.count, entry?.counts], [[7, 20, 26], 3, { objectives: 3, stages: 5 }], JSON.stringify(r.source.missing));
+  assert.match(err, /stages recorded before the rename to Pendulum/);
+  // No figure of theirs is read: every figure is the same as without them, and #20 has no row.
+  const figures = (x) => ({ totals: x.totals, unknown: x.unknown, breakdowns: x.breakdowns, findings: x.findings, hotSpots: x.hotSpots, rows: x.objectives.map(({ legacyStages, ...o }) => o) });
+  assert.deepEqual(figures(r), figures(plain));
+  assert.equal(byIssue(r, 7).legacyStages, 1);
+  assert.equal(byIssue(r, 20), undefined);
+  assert.ok(r.objectives.filter((o) => o.issue !== 7).every((o) => o.legacyStages === 0));
+  const md = renderReport(r);
+  assert.match(md, /^\*\*Partial:\*\* stages recorded before the rename to Pendulum[^\n]* \(#7, #20, #26\)\.$/m);
+  assert.match(md, /^- Partial, stages recorded before the rename to Pendulum not read: #7 \(1 stage\(s\)\)\.$/m);
+  // A set reads only its own: --issue 7 names #7 alone; a period that ends before them names none.
+  const { code: one, json: seven } = await report(w, { issue: 7 });
+  assert.equal(one, 0);
+  assert.deepEqual([seven.source.complete, seven.source.missing.find((m) => m.code === "legacy-records")?.issues, byIssue(seven, 7).legacyStages], [false, [7], 1]);
+  const { json: early } = await report(w, { since: "2026-11-17", until: "2026-11-17T01:30:00Z" });
+  assert.equal(early.source.complete, true);
+  // A budget stop still exits STOPPED_EXIT, with both codes and both lines on stderr.
+  const { code: stopped, json: cut, err: why } = await report(w, { since: "2026-11-17", "max-calls": 2 });
+  assert.equal(stopped, STOPPED_EXIT);
+  assert.equal(cut.source.complete, false);
+  assert.deepEqual(cut.source.missing.filter((m) => ["stopped", "legacy-records"].includes(m.code)).map((m) => m.code), ["stopped", "legacy-records"]);
+  assert.match(why, /^pendulum report: the reads stopped at --max-calls 2 /m);
+  assert.match(why, /^pendulum report: stages recorded before the rename to Pendulum/m);
 });

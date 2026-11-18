@@ -20,7 +20,7 @@ import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
-import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
+import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, markReady, postReview, prBodyHistory, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor } from "./lib/logic.mjs";
@@ -82,6 +82,7 @@ import {
   remainingMs,
   unaddressedReviewComments,
   answerDiff,
+  bodyChanges,
   checkState,
   openFindingsExit,
   readAnswerRounds,
@@ -1842,13 +1843,15 @@ async function main() {
   };
   // A reply that says fixed and names a test has it run without the fix and with it by the validation command it names,
   // through the stage's own validation path (runValidation, its sandbox and env), before any answer round is spent (#516).
+  // What the PR body changed since each finding was raised comes from GitHub's record of the body's edits, read once per
+  // check and only when a reply goes to the decision model (#584).
   const judgeAnswers = async (findings, repliesText) => {
     const head = outbox.expected() || pr.head.sha;
     // The commit a finding was raised on counts as the code without the fix only when it was green: Pendulum's validated
     // marker is on it and it is no red the stage held (heldRed), which the answer pass may have fixed beside the finding.
     const beforeGreen = async (sha) => sha !== heldRed?.sha && (await isValidated(repo, pr.number, issue, sha, token));
     const runTest = namedTestRunner({ checkout, commands: inputs.validation, env: passEnv, head, beforeGreen, timeoutMs: () => remainingMs(deadlineAt) });
-    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, runTest, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [], found: [] }));
+    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, runTest, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), bodyDiffOf: bodyChanges(outbox.git, () => prBodyHistory(repo, pr.number, token)), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [], found: [] }));
     unjudged.push(...r.unjudged);
     checkFound.push(...(r.found || []));
   };

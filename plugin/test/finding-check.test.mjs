@@ -10,12 +10,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { CONCURRENCY, FINDING_QUESTION, INPUT_CAPS, checkAnswers, decisionsPart, findingInput, listedFindings, namedTestRunner, openFindingCheck, resolves } from "../scripts/lib/finding-check.mjs";
 import { dropHeldSecrets, holdSecrets } from "../scripts/lib/inputs.mjs";
-import { RETRY, resolvePendulumThreads } from "../scripts/lib/github.mjs";
+import { RETRY, prBodyHistory, resolvePendulumThreads } from "../scripts/lib/github.mjs";
 import { parseReplies, postReplies } from "../scripts/lib/handoff.mjs";
 import { simpleCommand } from "../scripts/lib/shell.mjs";
 import { decideExit, findingsOf, marker, reviewBody, setSelf } from "../scripts/lib/logic.mjs";
 import { openOutbox } from "../scripts/lib/outbox.mjs";
-import { ANSWER_ROUNDS, FINDING_CHECK_TRIES, answerDiff, checkState, objectiveDecisions, openFindingsExit, progressReporter, readAnswerRounds, unaddressedReviewComments } from "../scripts/lib/session.mjs";
+import { exec } from "../scripts/lib/proc.mjs";
+import { ANSWER_ROUNDS, FINDING_CHECK_TRIES, answerDiff, bodyAt, bodyChanges, bodyDiff, checkState, objectiveDecisions, openFindingsExit, progressReporter, readAnswerRounds, unaddressedReviewComments } from "../scripts/lib/session.mjs";
 import { buildReport } from "../scripts/lib/report.mjs";
 import { MIN_CONFIDENCE } from "../scripts/lib/triage.mjs";
 import { findingCheckRow } from "../scripts/doctor.mjs";
@@ -55,6 +56,12 @@ function github({ lineComments = [], reviews = [{ id: 1, user: app, author_assoc
         return json({ data: { resolveReviewThread: { thread: { isResolved: true } } } });
       }
       if (body.query.includes("reviewThreads")) return json({ data: { repository: { pullRequest: { reviewThreads: { nodes: threads() } } } } });
+      // The PR body's history (#584): `prBody` as it stands, `bodyEdits` newest first; `failBody`, GitHub refuses the read.
+      if (body.query.includes("userContentEdits")) {
+        state.bodyReads = (state.bodyReads || 0) + 1;
+        if (state.failBody) return json({ errors: [{ type: "FORBIDDEN", message: "Resource not accessible" }] });
+        return json({ data: { repository: { pullRequest: { body: state.prBody ?? "", userContentEdits: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: state.bodyEdits || [] } } } } });
+      }
       return json({ data: {} });
     }
     if (method === "GET" && p === "/pulls/12/comments") return json(state.lineComments);
@@ -444,7 +451,7 @@ test("#368: the review stage judges answers the last stage got no verdict on fir
   assert.match(src, /\.filter\(\(c\) => !held\.has\(String\(c\.id\)\)\);/);
   const judged = src.indexOf("if (repliesPosted && !outbox.failed) await judgeAnswers(toAnswer, repliesPosted);");
   assert.ok(judged > listed && judged < src.indexOf("await resolvePendulumThreads(repo, pr.number"), "judged before the threads are resolved");
-  assert.match(src, /diffOf: \(from\) => answerDiff\(outbox\.git, \{ base: outbox\.base, from, head \}\), since: reviewedAt/);
+  assert.match(src, /diffOf: \(from\) => answerDiff\(outbox\.git, \{ base: outbox\.base, from, head \}\), bodyDiffOf: [^\n]*, since: reviewedAt/);
   assert.match(src, /if \(decision\.findingsOpen && [^\n]*decideExit\(\{ \.\.\.exitArgs, reviewUnaddressed: 0 \}\)\.exit === "delivered"\) await openFindingsExit\(decision, \{[^\n]*unjudged, found: checkFound, decider: findingCheck\.asked\?\.\(\) \?\? null, limit: findingCheck\.limited\?\.\(\) \?\? null \}, token\);\n[^\n]*\n[^\n]*\n  if \(decision\.usageLimit\) throw new UsageLimitReached\(decision\.usageLimit/);
 });
 
@@ -1086,4 +1093,130 @@ const reportRead = (comments) => ({
   artifacts: new Map(),
   local: new Map(),
   source: { stopped: null, comments: comments.length, pullsRead: true, artifactsRead: new Set(), artifacts: { listed: 0, downloaded: 0, cached: 0, expired: 0, noResult: 0, failed: 0, unreadable: 0, foreign: 0 }, foreignIssues: new Set(), localRecords: 0, selfKnown: true, login: SELF, calls: { max: 300, planned: 0, made: 0, byKind: {}, open: false } },
+});
+
+/** #584: the PR body as the worker wrote it, before and after an answer pass; `row2` is Acceptance row 2's place. */
+const prBody = ({ row2 = "src/old.ts", validation = "npm test: green" } = {}) => `Closes #7\n\n## Acceptance\n| Entry | Where |\n| --- | --- |\n| 1 | src/a.ts |\n| 2 | met in ${row2} |\n\n## Validation\n${validation}\n`;
+const OPENED = "2026-11-17T10:00:00Z";
+const BODY_RAISED = "2026-11-17T10:30:00Z";
+const EDITED = "2026-11-17T11:00:00Z";
+/** The part of a finding check question that holds the PR body's change, or null when it has none. */
+const bodyPart = (input) => /\nWhat it changed in its body[^\n]*\n<<<BEGIN (\w+)>>>\n([\s\S]*?)\n<<<END \1>>>/.exec(input)?.[2] ?? null;
+/**
+ * A decider that reads each part only where the question puts it, as the question tells the model to: FINDING-BODY (row 2
+ * names a file the diff does not change) is fixed only when the body's part shows that row's stale text gone and none
+ * put back; FINDING-CODE (src/b.ts) only when the code's part shows src/b.ts changed. Whether a real model reads a body
+ * diff so is the instrument run's to show, not this fake's.
+ */
+function bodyReader() {
+  const asked = [];
+  return {
+    asked,
+    name: "fake",
+    model: "fake/decider",
+    async decide(input) {
+      asked.push(input);
+      const body = bodyPart(input) ?? "";
+      if (input.includes("FINDING-BODY")) return { verdict: /^-\| 2 \| met in src\/old\.ts \|$/m.test(body) && !/^\+.*src\/old\.ts/m.test(body) ? "fixed" : "unresolved", confidence: 0.9 };
+      return { verdict: /^diff --git a\/src\/b\.ts /m.test(input) ? "fixed" : "unresolved", confidence: 0.9 };
+    },
+  };
+}
+
+/**
+ * #584, as on the adopter: Pendulum's reviewer finds the PR body's Acceptance row 2 misstates the diff (FINDING-BODY),
+ * and a code finding beside it (FINDING-CODE, src/b.ts) and one raised after the body's edit (FINDING-LATE); the answer
+ * pass rewrites pr.md (`now`) and commits nothing. The real check, the real body history read through GitHub's GraphQL
+ * (fake GitHub) and the real body diff by git. Returns the check's result, what the decider was asked and the fake.
+ */
+async function bodyAnswer(now, { failBody = false } = {}) {
+  const repo = testRepo();
+  const mgit = (args, opts = {}) => exec("git", ["-C", repo.dir, ...args], { env: { PATH: process.env.PATH, HOME: process.env.HOME, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }, ...opts });
+  const at = (c, created_at) => ({ ...c, original_commit_id: repo.head, created_at });
+  const gh = github({
+    lineComments: [
+      at(root(100, "src/a.ts", 5, "acceptance 2: the PR body's Acceptance row 2 says src/old.ts meets it, but this PR never changes src/old.ts. FINDING-BODY"), BODY_RAISED),
+      at(root(200, "src/b.ts", 9, "acceptance 1: null input crashes here. FINDING-CODE"), BODY_RAISED),
+      at(root(300, "src/b.ts", 12, "rule 3: no test for this branch. FINDING-LATE"), "2026-11-17T11:30:00Z"),
+    ],
+  });
+  // GitHub's record of the body: the version the PR opened with (a person's edit in the web editor: CRLF line ends),
+  // then the answer pass's, newest first; none when it was never edited.
+  gh.state.prBody = now;
+  gh.state.bodyEdits = now === null ? [] : [{ editedAt: EDITED, deletedAt: null, diff: now }, { editedAt: OPENED, deletedAt: null, diff: prBody().replace(/\n/g, "\r\n") }];
+  if (now === null) gh.state.prBody = prBody();
+  gh.state.failBody = failBody;
+  const fake = bodyReader();
+  const out = await withGitHub(gh, async () => {
+    const findings = await list();
+    const replies = JSON.stringify([
+      { id: 100, body: "Fixed in the PR body: Acceptance row 2 now names src/a.ts, which this PR changes." },
+      { id: 200, body: "Fixed.", fixed: true },
+      { id: 300, body: "Rule 3 does not apply here." },
+    ]);
+    await postReplies(REPO, 12, 7, replies, [100, 200, 300], { token: "t" });
+    return checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings, repliesText: replies, check: fakeCheck(fake), diffOf: async (from) => (from === repo.head ? "" : null), bodyDiffOf: bodyChanges(mgit, () => prBodyHistory(REPO, 12, { token: "t" })), since: repo.head, opts: { token: "t" } });
+  });
+  const input = (id) => fake.asked.find((i) => i.includes(id)) ?? "";
+  return { out, gh, input, fake, mgit };
+}
+
+test("#584: a body-only fix for a body finding resolves it: the question shows the body as it was when the finding was raised and as it is now", async () => {
+  const { out, gh, input } = await bodyAnswer(prBody({ row2: "src/a.ts" }));
+  assert.deepEqual(out.resolved, [100]);
+  assert.ok(evidenceOf(gh).get(100)?.includes("judged this answer fixed"), "the verdict goes up in the thread first");
+  const part = bodyPart(input("FINDING-BODY"));
+  assert.match(part, /^-\| 2 \| met in src\/old\.ts \|\n\+\| 2 \| met in src\/a\.ts \|$/m);
+  assert.doesNotMatch(part, /\r|^[-+]\| 1 /m, "line ends are not a change; only the row that changed is");
+  assert.equal(gh.state.bodyReads, 1, "the body's history is read once per check");
+});
+
+test("#584: a body edit that does not address a body finding leaves it open, judged on that edit", async () => {
+  const { out, input } = await bodyAnswer(prBody({ validation: "npm test: green (412 tests)" }));
+  assert.deepEqual(out.open, [100, 200, 300]);
+  assert.deepEqual(out.found.find((f) => f.id === 100)?.kind, "not-fixed");
+  const part = bodyPart(input("FINDING-BODY"));
+  assert.match(part, /^\+npm test: green \(412 tests\)$/m, "the model saw the body's change");
+  assert.match(part, /^ \| 2 \| met in src\/old\.ts \|$/m, "row 2 did not change: it shows as context, still standing");
+  // A history GitHub cannot give reads as a change that could not be read: still open.
+  const failed = await bodyAnswer(prBody({ row2: "src/a.ts" }), { failBody: true });
+  assert.deepEqual(failed.out.resolved, []);
+  assert.equal(bodyPart(failed.input("FINDING-BODY")), "(the change could not be read)");
+});
+
+test("#584: a code finding is judged as before: on the code's change, and with no body part when the body did not change since it was raised", async () => {
+  const { out, input } = await bodyAnswer(prBody({ row2: "src/a.ts" }));
+  // Raised before the body's edit: the question shows it, and the code's part still decides (src/b.ts unchanged).
+  assert.ok(out.open.includes(200));
+  assert.ok(bodyPart(input("FINDING-CODE")));
+  // Raised after it: the very question the check asked before the body was read.
+  const late = input("FINDING-LATE");
+  assert.equal(bodyPart(late), null);
+  const tag = /<<<BEGIN (\w+)>>>/.exec(late)[1];
+  const [c] = await withGitHub(github({ lineComments: [{ ...root(300, "src/b.ts", 12, "rule 3: no test for this branch. FINDING-LATE"), created_at: "2026-11-17T11:30:00Z" }] }), () => list());
+  assert.equal(late, findingInput({ repo: REPO.full, prNumber: 12, finding: { id: 300, path: "src/b.ts", line: 12, body: c.body, raisedAt: c.raisedAt }, reply: "Rule 3 does not apply here.", diff: "" }, tag));
+  // A body never edited: no part in any question.
+  const never = await bodyAnswer(null);
+  assert.ok(never.fake.asked.every((i) => bodyPart(i) === null));
+  assert.deepEqual(never.out.resolved, []);
+});
+
+test("#584: the body as it stood when a finding was raised: the version edited at or before then; unknown for a deleted version or a history that stops short", async () => {
+  const history = { now: "c", complete: true, revisions: [{ at: "2026-11-17T12:00:00Z", body: "c" }, { at: "2026-11-17T11:00:00Z", body: null }, { at: "2026-11-17T10:00:00Z", body: "a\r\n" }] };
+  assert.equal(bodyAt(history, "2026-11-17T10:30:00Z"), "a\n");
+  assert.equal(bodyAt(history, "2026-11-17T12:00:00Z"), "c");
+  assert.equal(bodyAt(history, "2026-11-17T11:30:00Z"), null, "a version a person deleted from the history");
+  assert.equal(bodyAt({ ...history, complete: false }, "2026-11-17T09:00:00Z"), null);
+  assert.equal(bodyAt({ now: "x\r\n", complete: true, revisions: [] }, "2026-11-17T09:00:00Z"), "x\n", "never edited");
+  assert.equal(bodyAt({ now: "x", complete: false, revisions: [] }, "2026-11-17T09:00:00Z"), null);
+  assert.equal(bodyAt(history, null), null);
+  const { mgit } = await bodyAnswer(null);
+  assert.equal(await bodyDiff(mgit, "a\r\nb\r\n", "a\nb\n"), "");
+  assert.match(await bodyDiff(mgit, "a\nb\n", "a\nc\n"), /^@@ [^\n]+\n a\n-b\n\+c\n$/);
+});
+
+test("#584: the review stage gives the finding check the PR body's history, read through GitHub's record of its edits", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
+  assert.match(src, /checkAnswers\(\{[^\n]*bodyDiffOf: bodyChanges\(outbox\.git, \(\) => prBodyHistory\(repo, pr\.number, token\)\)/);
 });

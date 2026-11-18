@@ -2133,6 +2133,57 @@ export async function answerDiff(mgit, { base, from, head, maxBytes = 1024 * 102
 }
 
 /**
+ * The PR body as it stood at `at` (#584), from github.mjs prBodyHistory's `history`: the newest version edited at or
+ * before `at`, the body as it stands when it was never edited; null when that cannot be told (no `at`, a version a person
+ * deleted from the history, a history that does not reach back to `at`). Line ends as `\n`.
+ */
+export function bodyAt(history, at) {
+  const t = Date.parse(at);
+  if (!history || !Number.isFinite(t)) return null;
+  const lf = (s) => String(s).replace(/\r\n?/g, "\n");
+  if (!history.revisions.length) return history.complete ? lf(history.now) : null;
+  const v = history.revisions.find((r) => Date.parse(r.at) <= t);
+  return v && typeof v.body === "string" ? lf(v.body) : null;
+}
+
+/**
+ * git's diff of the PR body from `before` to `now` (#584), its hunks only: "" when they are the same, null when git
+ * could not make it. Both texts are written to the mirror as blobs (`mgit`, the outbox's git): data, never run.
+ */
+export async function bodyDiff(mgit, before, now, { maxBytes = 256 * 1024 } = {}) {
+  const lf = (s) => String(s ?? "").replace(/\r\n?/g, "\n");
+  if (lf(before) === lf(now)) return "";
+  const blob = async (text) => {
+    const r = await mgit(["hash-object", "-t", "blob", "-w", "--stdin"], { input: lf(text) });
+    return r.code === 0 ? r.stdout.trim() : null;
+  };
+  const [a, b] = [await blob(before), await blob(now)];
+  if (!a || !b) return null;
+  const d = await mgit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", a, b], { maxBytes });
+  if (d.code !== 0 && !d.truncated) return null;
+  const text = String(d.stdout);
+  const hunk = text.search(/^@@ /m);
+  return hunk < 0 ? null : text.slice(hunk);
+}
+
+/**
+ * The finding check's `bodyDiffOf` (#584): `at` (when a finding was raised) to what the PR body changed since then
+ * (bodyDiff), "" when nothing, null when that cannot be told. The history is read once (`read`, prBodyHistory), on the
+ * first ask; a failed read is null for every finding.
+ */
+export function bodyChanges(mgit, read) {
+  let history = null;
+  return async (at) => {
+    history ??= Promise.resolve()
+      .then(read)
+      .catch((e) => (log(`finding check: the PR body's history could not be read (${e?.status ?? e?.code ?? "error"})`), null));
+    const h = await history;
+    const before = bodyAt(h, at);
+    return before === null ? null : bodyDiff(mgit, before, h.now);
+  };
+}
+
+/**
  * Whether the PR's head still needs a review pass (#350), on every route: `first` (no Pendulum review yet), `covered`
  * (the head is the head Pendulum's review covers, or only a rebase of it: no second pass), or neither, when commits were
  * written after it (the work stage answering a Question, a maintainer's push, an answer pass that applied maintainers'

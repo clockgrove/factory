@@ -90,8 +90,8 @@ import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
-import { stageAccountName } from "./choice.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, passLedger, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, rerunRead, BILLING, addBilling, stageBilling, passKind } from "./usage.mjs";
+import { ranModels, stageAccountName } from "./choice.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, passLedger, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, rerunRead, BILLING, addBilling, stageBilling, passKind, copilotRan } from "./usage.mjs";
 import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, redCancels, unplacedCancelReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
@@ -1186,6 +1186,13 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     ran = r;
     harness = r.harness;
     model = (stage === "review" ? r.reviewer : r.worker) || "";
+  };
+  /**
+   * The models the stage's usage record names (writeUsage's `ran`: on Copilot, those its own stream named), on the
+   * harness line from then on; nothing before the stage's own `ran` (progress.ran) is known.
+   */
+  progress.models = (recorded) => {
+    if (ran && recorded) progress.ran({ ...ran, ...ranModels(recorded) });
   };
   /** The live status line (what the harness is doing now); written at most every `everyMs`, never twice at once. */
   progress.live = (text, { everyMs = 120_000, force = false, snap = null, model: liveModel = null } = {}) => {
@@ -2370,10 +2377,11 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     harness,
     harnessVersion,
     model: merged.model ?? model ?? null,
-    // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default), the harness,
-    // model and host labels that chose them (none: the repository's defaults), the hosts its host labels opened, the
-    // worker's and the reviewer's reasoning effort (null: the model's own) and the Pendulum release that ran the stage.
-    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [], effort: ran.effort ?? null, reviewerEffort: ran.reviewerEffort ?? null, pendulum: pendulumBuild() } } : {}),
+    // The Objective's three models as this stage ran them (choice.mjs ranWith), the harness, model and host labels that
+    // chose them (none: the repository's defaults), the hosts its host labels opened, the worker's and the reviewer's
+    // reasoning effort (null: the model's own) and the Pendulum release that ran the stage. On Copilot a model its own
+    // stream names (usage.mjs copilotRan) is the one recorded; null for one Pendulum left to the harness that it names none of.
+    ...(ran ? { ran: { ...ranModels(ran, harness === "copilot" ? copilotRan(records) : null), labels: ran.labels ?? [], hosts: ran.hosts ?? [], effort: ran.effort ?? null, reviewerEffort: ran.reviewerEffort ?? null, pendulum: pendulumBuild() } } : {}),
     // The account the stage ran on, by name only: a local account (accounts.mjs), or on GitHub Actions and the cloud
     // sandbox the account step's pick (PENDULUM_STAGE_ACCOUNT) when the workflow declares accounts; none otherwise.
     ...((stageAccountName(account) ?? stageAccountName(ran?.account ?? null)) ? { account: stageAccountName(account) ?? ran.account } : {}),

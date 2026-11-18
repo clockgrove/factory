@@ -253,7 +253,7 @@ test("finish card, posted for real (#539): a Copilot stage with a spend line tak
   const copilot = await actionsCard("copilot", null);
   assert.deepEqual(copilot.downloads.map((a) => [a[2], a[4]]), [["4401", "pendulum-usage-9"], ["4402", "pendulum-usage-9-review"]], "each stage's own run's artifact, once");
   assert.equal(copilot.artifactReads.length, 2);
-  assert.match(copilot.card, /\| 10:05 AM \| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/, "the model from the record, the dollars from the spend lines");
+  assert.match(copilot.card, /\| 10:05 AM \| Build · Sonnet 5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · Sonnet 5\.5 \| 5 min \| \$0\.20 \|/, "the model from the record, the dollars from the spend lines");
   assert.doesNotMatch(copilot.card, /\$7/, "the record's dollars are never counted beside the line's");
   const claude = await actionsCard("claude", "claude-opus-5-5");
   assert.deepEqual([claude.artifactReads, claude.downloads], [[], []], "a harness line that names its model: nothing more is read");
@@ -269,11 +269,11 @@ test("finish card, posted for real (#543): a Copilot stage whose ledger line nam
   };
   const ledgered = await actionsCard("copilot", null, { ledger: { work: lineOf("4401", 0.4), review: lineOf("4402", 0.2) } });
   assert.deepEqual([ledgered.artifactReads, ledgered.downloads], [[], []], "the ledger lines name the model: nothing more is read");
-  assert.match(ledgered.card, /\| 10:05 AM \| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
+  assert.match(ledgered.card, /\| 10:05 AM \| Build · Sonnet 5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · Sonnet 5\.5 \| 5 min \| \$0\.20 \|/);
   // A ledger line that did not fit names no model: that stage's own run's artifact is read for it, as before.
   const cut = await actionsCard("copilot", null, { ledger: { work: lineOf("4401", 0.4), review: 'Per-pass ledger: 80 passes, over the 6000-character bound of its line; the stage\'s usage record holds it.\n<!-- pendulum:ledger {"cut":80} -->' } });
   assert.deepEqual(cut.downloads.map((a) => [a[2], a[4]]), [["4402", "pendulum-usage-9-review"]]);
-  assert.match(cut.card, /\| 10:05 AM \| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
+  assert.match(cut.card, /\| 10:05 AM \| Build · Sonnet 5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · Sonnet 5\.5 \| 5 min \| \$0\.20 \|/);
 });
 
 test("finish card: a stage whose kinds do not fit inside its own figure stays whole in its stage; a Blocked notice or an answer-rounds record names no churn, only a stage's own record does; a plain run shows no breakdown", () => {

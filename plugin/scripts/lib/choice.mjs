@@ -189,6 +189,11 @@ export const ranWith = (inputs, labels = [], account = null) => {
   const h = hostsOf(labels);
   return { harness: inputs.harness, worker: inputs.model || null, subagent: inputs.subagentModel || null, reviewer: inputs.reviewerModel || null, labels: choiceLabels(labels), hosts: h.ok ? h.hosts : [], effort: inputs.effort || null, reviewerEffort: inputs.reviewerEffort || null, ...(stageAccountName(account) ? { account } : {}) };
 };
+/**
+ * The three models of a stage's `ran` (ranWith), each as `seen` names it where it names one (usage.mjs copilotRan: the
+ * models Copilot's own stream names), else as `ran` has it, null for none.
+ */
+export const ranModels = (ran, seen = null) => Object.fromEntries(["worker", "subagent", "reviewer"].map((k) => [k, seen?.[k] ?? ran?.[k] ?? null]));
 /** An account name as accounts.mjs allows one (a harness's own name included), else null: nothing else is recorded. */
 export const stageAccountName = (name) => (typeof name === "string" && name.length <= LABEL_MAX - "pendulum:account:".length && /^[a-z0-9][a-z0-9-]*$/.test(name) ? name : null);
 

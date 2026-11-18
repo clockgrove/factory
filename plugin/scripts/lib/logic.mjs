@@ -2800,7 +2800,7 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
 /**
  * The models a stage's harness line publishes (harnessMarker: its own model and the Objective's worker, sub-agent and
  * reviewer models, as choice.mjs ranWith gives them and the usage record's `ran` keeps them); [] when it names none
- * (Copilot at its default), null when the record has no `ran` to say.
+ * (Copilot at its default, its event stream naming none: usage.mjs copilotRan), null when the record has no `ran` to say.
  */
 export const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
 /** The routes a stage records it ran on (backend.mjs stageRoute), on its usage record and spend line (#570). */

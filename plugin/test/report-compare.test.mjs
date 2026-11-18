@@ -140,6 +140,7 @@ function fakeGitHub(w) {
     m = /^\/issues\/(\d+)\/comments$/.exec(p);
     if (m) return page(w.comments.filter((c) => c.issue_url === issueUrl(Number(m[1]))), u);
     m = /^\/collaborators\/([^/]+)\/permission$/.exec(p);
+    if (m && w.permissions[decodeURIComponent(m[1])] === "rate-limited") return json({ message: "API rate limit exceeded" }, 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 1) });
     if (m) return w.permissions[decodeURIComponent(m[1])] === 403 ? json({ message: "Must have push access to view repository collaborators." }, 403) : json({ permission: w.permissions[decodeURIComponent(m[1])] ?? "read" });
     if (p === "/pulls") return page(w.pulls, u);
     if (p === "/actions/artifacts") return page((w.artifacts[u.searchParams.get("name")] || []).map(({ record, ...a }) => a), u, (artifacts, total) => ({ total_count: total, artifacts }));
@@ -346,6 +347,9 @@ test("report --compare: a labeller whose permission the token may not read (403)
   assert.deepEqual([slow.unverifiable, slow.untrusted], [[22], [24]]);
   assert.deepEqual(r.source.missing.find((m) => m.code === "label-unverifiable").issues, [22]);
   assert.match(renderReport(r), /Not counted for slow, its labeller's permission unreadable with this token: #22\./);
+  // A rate limit's 403 says nothing of what the token may read: the report fails, and no labeller is called unverifiable.
+  w.permissions.locked = "rate-limited";
+  await assert.rejects(report(w, ["--compare", "fast,slow", "--json"]), /rate limit|403/i);
 });
 
 test("report --compare: the latest application of the label counts: removed and re-applied by someone else", async () => {

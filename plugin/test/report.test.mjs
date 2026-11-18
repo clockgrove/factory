@@ -177,6 +177,7 @@ function fakeGitHub(w) {
       return page(w.pulls.filter((x) => !head || `${REPO.owner}:${x.head?.ref}` === head), u);
     }
     m = /^\/collaborators\/([^/]+)\/permission$/.exec(p);
+    if (m && w.rateLimitPermission) return json({ message: "API rate limit exceeded" }, 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 1) });
     if (m) {
       const answer = (w.permissions ?? { teammate: "write" })[decodeURIComponent(m[1])];
       if (typeof answer === "number") return json({ message: "Must have push access to view repository collaborators." }, answer);
@@ -429,7 +430,7 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.ok(Array.isArray(r.hotSpots.blockedStages.unrecorded));
   for (const h of Object.values(r.hotSpots)) assert.ok(typeof h.rankBy === "string" && Array.isArray(h.items));
   assert.deepEqual(keys(r.source), ["calls", "complete", "maxCalls", "missing", "read", "stoppedAt", "trusted"]);
-  assert.deepEqual(keys(r.source.trusted), ["app", "appFrom", "appWhy", "logins"]);
+  assert.deepEqual(keys(r.source.trusted), ["app", "appFrom", "appWhy", "logins", "refused"]);
   assert.deepEqual(keys(r.source.calls), ["byKind", "made", "planned", "plannedAtLeast"]);
   assert.deepEqual(keys(r.source.read), ["artifacts", "comments", "ignoredComments", "issues", "localRecords", "pendulumComments", "pulls", "summaries", "unattributedComments"]);
   assert.deepEqual(keys(r.source.missing[0]), ["code", "count", "counts", "issues", "text"]);
@@ -540,7 +541,7 @@ test("report (S1): Pendulum's App id comes from the repository variable PENDULUM
   const read = await over(fake, () => readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
   const r = buildReport(read, { now: new Date(NOW).toISOString() });
   assert.equal(usd(byIssue(r, 3)).api, 0.519812);
-  assert.deepEqual(r.source.trusted, { logins: ["kirkmarple-clockgrove"], app: APP.id, appFrom: "variable", appWhy: null });
+  assert.deepEqual(r.source.trusted, { logins: ["kirkmarple-clockgrove"], refused: [], app: APP.id, appFrom: "variable", appWhy: null });
   assert.ok(fake.calls.includes("GET /actions/variables/PENDULUM_APP_ID"));
   const flagged = await report(w, { issue: 3 });
   assert.ok(!flagged.calls.some((c) => c.includes("/actions/variables/")), "--app: no variable read");
@@ -579,7 +580,7 @@ test("report (#564): the local token gets 403 or 404 on PENDULUM_APP_ID: that on
   const w = world();
   w.appVariable = (t) => (t === "gho_login" ? APP.id : { status: 403 });
   const r = await withGh("gho_login", () => report(w, { issue: 3 }, { app: null }));
-  assert.deepEqual(r.json.source.trusted, { ...who, app: APP.id, appFrom: "variable-gh", appWhy: null });
+  assert.deepEqual(r.json.source.trusted, { ...who, refused: [], app: APP.id, appFrom: "variable-gh", appWhy: null });
   assert.equal(usd(byIssue(r.json, 3)).api, 0.519812, "the App's stages are Pendulum's");
   assert.deepEqual(r.calls.filter((c) => c.includes("/actions/variables/")), ["GET /actions/variables/PENDULUM_APP_ID", "GET /actions/variables/PENDULUM_APP_ID"]);
   assert.equal(r.json.source.calls.byKind["app id"], 2);
@@ -605,7 +606,7 @@ test("report (#564): no App id says why: a variable no token may read (403) is a
   const w = world();
   w.appVariable = () => ({ status: 403 });
   const forbidden = await withGh(null, () => report(w, { issue: 3 }, { app: null }));
-  assert.deepEqual(forbidden.json.source.trusted, { ...who, app: null, appFrom: "forbidden", appWhy: "forbidden" });
+  assert.deepEqual(forbidden.json.source.trusted, { ...who, refused: [], app: null, appFrom: "forbidden", appWhy: "forbidden" });
   assert.deepEqual(appMissing(forbidden.json), [["app-unreadable", 3]], "#3's three comments through the App, not attributed");
   assert.equal(forbidden.calls.filter((c) => c.includes("/actions/variables/")).length, 1, "no gh login: no second read");
   // #9 has no comment at all: the App id is still said to be missing, and why.
@@ -637,7 +638,7 @@ test("report (#564): the gh login's read never ends the report: refused (401) or
     w.appVariable = (t) => (t === "gho_login" ? { status: 401, message: "Bad credentials" } : { status: 403 });
     const refused = await withGh("gho_login", () => report(w, { issue: 3 }, { app: null }));
     assert.equal(refused.code, 0);
-    assert.deepEqual(refused.json.source.trusted, { ...who, app: APP.id, appFrom: "local-copy", appWhy: "forbidden" });
+    assert.deepEqual(refused.json.source.trusted, { ...who, refused: [], app: APP.id, appFrom: "local-copy", appWhy: "forbidden" });
     assert.match(refused.err, /the gh login's read of the repository variable PENDULUM_APP_ID failed \(HTTP 401\); the first read's answer stands/);
     assert.match(refused.err, /the App id is the local copy's, 2271 \(\S+app\.json\), unverified: the repository variable PENDULUM_APP_ID could not be read/);
     assert.ok(!refused.err.includes("gho_login"));
@@ -650,7 +651,7 @@ test("report (#564): the gh login's read never ends the report: refused (401) or
     const stopped = await withGh("gho_login", () => report(w, { issue: 3, "max-calls": 2 }, { app: null }));
     assert.equal(stopped.code, STOPPED_EXIT);
     assert.equal(stopped.json.source.stoppedAt, "app id");
-    assert.deepEqual(stopped.json.source.trusted, { ...who, app: APP.id, appFrom: "local-copy", appWhy: "forbidden" });
+    assert.deepEqual(stopped.json.source.trusted, { ...who, refused: [], app: APP.id, appFrom: "local-copy", appWhy: "forbidden" });
     rmSync(file);
     const bare = await withGh("gho_login", () => report(w, { issue: 3, "max-calls": 2 }, { app: null }));
     assert.deepEqual([bare.json.source.trusted.appFrom, bare.json.source.trusted.appWhy], ["forbidden", "forbidden"]);
@@ -668,17 +669,17 @@ test("report (#564): the local copy beside the local token gives the App id when
     const w = world();
     w.appVariable = () => ({ status: 403 });
     const r = await withGh(null, () => report(w, { issue: 3 }, { app: null }));
-    assert.deepEqual(r.json.source.trusted, { ...who, app: APP.id, appFrom: "local-copy", appWhy: "forbidden" });
+    assert.deepEqual(r.json.source.trusted, { ...who, refused: [], app: APP.id, appFrom: "local-copy", appWhy: "forbidden" });
     assert.equal(usd(byIssue(r.json, 3)).api, 0.519812);
     assert.deepEqual(appMissing(r.json), []);
     // Not set (404 to every token): the copy, and why it stands in.
     w.appVariable = null;
     const unset = await withGh("gho_login", () => report(w, { issue: 3 }, { app: null }));
-    assert.deepEqual(unset.json.source.trusted, { ...who, app: APP.id, appFrom: "local-copy", appWhy: "unset" });
+    assert.deepEqual(unset.json.source.trusted, { ...who, refused: [], app: APP.id, appFrom: "local-copy", appWhy: "unset" });
     assert.match(unset.err, /unverified: the repository variable PENDULUM_APP_ID is not set/);
     // The variable, when it can be read, is the App id: a stale copy is not.
     w.appVariable = 17;
-    assert.deepEqual((await withGh(null, () => report(w, { issue: 3 }, { app: null }))).json.source.trusted, { ...who, app: 17, appFrom: "variable", appWhy: null });
+    assert.deepEqual((await withGh(null, () => report(w, { issue: 3 }, { app: null }))).json.source.trusted, { ...who, refused: [], app: 17, appFrom: "variable", appWhy: null });
     // A copy any user may write decides nothing: it is named on stderr and the id stays unreadable.
     chmodSync(file, 0o666);
     w.appVariable = () => ({ status: 403 });
@@ -731,6 +732,7 @@ test("report (#607): a read-only member's forged spend comment changes no figure
   // --self names neither into Pendulum's own: the reader cannot push.
   const named = await report(forge(world()), { issue: 7, self: READER.login });
   assert.equal(usd(byIssue(named.json, 7)).api, 1.55);
+  assert.deepEqual([named.json.source.trusted.logins, named.json.source.trusted.refused], [["kirkmarple-clockgrove"], [{ login: READER.login, why: "cannot-push" }]], "a --self login that cannot push is not listed as trusted");
   // The writer's stage comment still counts: a run of unknown cost, and with --self its dollars.
   assert.ok(byIssue(forged.json, 7).cost.unknownWhy.includes("unattributed"));
   assert.equal(usd(byIssue((await report(forge(world()), { issue: 7, self: "teammate" })).json, 7)).unknown, 50);
@@ -774,7 +776,7 @@ test("report (#607): the call budget stops during the permission reads: those au
   assert.equal(usd(byIssue(r, 7)).unknown, 0, "never the unchecked author's dollars");
   assert.ok(byIssue(r, 7).cost.unknownWhy.includes("unattributed"));
   assert.deepEqual(r.source.missing.find((m) => m.code === "author-unchecked")?.issues, [7]);
-  assert.deepEqual(r.source.trusted.logins, ["kirkmarple-clockgrove", "teammate", "second-607"]);
+  assert.deepEqual([r.source.trusted.logins, r.source.trusted.refused], [["kirkmarple-clockgrove", "second-607"], [{ login: "teammate", why: "unchecked" }]]);
   // A stop before any permission read: every such author unchecked.
   const early = await report(w(), { issue: 7, "max-calls": 3 });
   assert.equal(early.calls.filter((c) => c.includes("/permission")).length, 0);
@@ -787,6 +789,59 @@ test("report (#607): the call budget stops during the permission reads: those au
   assert.equal(usd(byIssue(f, 7)).unknown, 0);
   assert.deepEqual(f.source.missing.find((m) => m.code === "author-unverifiable")?.issues, [7]);
   assert.equal(f.source.calls.planned, f.source.calls.made);
+});
+
+test("report (#607): perMerged reads a merged Objective from its card only when every writer's stage comment is one the card counted", async () => {
+  const w = world();
+  w.comments.push(await finishCard3(w));
+  // A verified writer's stage comment on #3, after its card: the row reads #3's stages, and so does perMerged.
+  w.comments.push(progress(3, "review", "local-late1", { user: { login: "teammate", type: "User" }, association: "MEMBER", at: "2026-11-17T02:40:00Z" }));
+  const { json: r } = await report(w, { since: "2026-11-17" });
+  assert.equal(r.source.read.summaries, 0);
+  assert.ok(byIssue(r, 3).cost.unknownRuns > 0);
+  assert.ok(r.totals.perMerged.leftOut.some((x) => x.issue === 3 && x.why.includes("unknown-runs")), "never known dollars for an Objective with a run of unknown cost");
+});
+
+test("report (#607): an author first met in an Objective's own thread, from before the period or merged in it, has their permission read, planned", async () => {
+  const early = { login: "early-607", type: "User" };
+  // #3 opened before the period with records in it: its thread from before the floor is read, and with it early-607's stage.
+  const w = world();
+  w.permissions = { teammate: "write", [early.login]: "write" };
+  w.comments.push(progress(3, "work", "local-e1", { user: early, association: "MEMBER", at: "2026-11-17T02:25:00Z" }));
+  const pre = await report(w, { since: "2026-11-17T02:26:00Z" });
+  const read = (r, login) => r.calls.indexOf(`GET /collaborators/${login}/permission`);
+  assert.ok(read(pre, early.login) > pre.calls.findIndex((c) => c.startsWith("GET /issues/3/comments")), "read after the thread that holds it");
+  assert.equal(pre.json.source.calls.planned, pre.json.source.calls.made);
+  // #7, merged in a period that holds none of its records: its thread is read for its figures, and the teammate's stage in it.
+  const merged = await report(world(), { since: "2026-11-17T04:56:00Z" });
+  assert.ok(read(merged, "teammate") > merged.calls.findIndex((c) => c.startsWith("GET /issues/7/comments")));
+  assert.equal(merged.json.source.calls.planned, merged.json.source.calls.made);
+});
+
+test("report (#607): a period whose token may not read an author's permission (403) counts their stage as unknown cost and says so; a rate limit is no 403", async () => {
+  const w = world();
+  w.permissions = { teammate: 403 };
+  const { code, json: r } = await report(w, { since: "2026-11-17" });
+  assert.equal(code, 0);
+  assert.deepEqual(r.source.missing.find((m) => m.code === "author-unverifiable")?.issues, [7]);
+  assert.ok(byIssue(r, 7).cost.unknownWhy.includes("unattributed"));
+  assert.equal(usd(byIssue(r, 7)).unknown, 0);
+  assert.equal(r.source.calls.planned, r.source.calls.made);
+  // A rate limit's 403 is GitHub's own answer that it is busy, not that the token may not read: the report fails.
+  const limited = world();
+  limited.rateLimitPermission = true;
+  await assert.rejects(report(limited, { since: "2026-11-17" }), /rate limit|403/i);
+});
+
+test("report (#607): a set reads the permissions of its own issues' authors alone", async () => {
+  const w = world();
+  w.comments.push(progress(42, "work", "local-o1", { user: { login: "outside-607", type: "User" }, association: "MEMBER", at: "2026-11-17T04:00:00Z" }));
+  w.permissions = { teammate: "write", "outside-607": "write" };
+  const set = await report(w, { label: "pendulum:objective" });
+  assert.ok(set.calls.includes("GET /collaborators/teammate/permission"));
+  assert.ok(!set.calls.includes("GET /collaborators/outside-607/permission"), "#42 is in no Objective of the set");
+  assert.equal(set.json.source.calls.planned, set.json.source.calls.made);
+  assert.ok((await report(w, { since: "2026-11-17" })).calls.includes("GET /collaborators/outside-607/permission"), "a period covers every issue");
 });
 
 test("report (S3): only a PR from the repository itself counts, and an open issue is open whatever its PRs", () => {

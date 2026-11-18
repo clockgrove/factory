@@ -2489,8 +2489,9 @@ export const takeAuthorRead = (repoFull, login) => {
 /**
  * The logins among `items` (comments, reviews, timeline events on `repoFull`: the author is `user`, else `actor`) whose
  * push access only a permission read can tell: a MEMBER or COLLABORATOR author that is not Pendulum itself, not on the
- * writer list, not a pinned maintainer, not read yet this window, and whose read did not fail in the last
- * FAILED_READ_MS. Each once, lowercased.
+ * writer list, not read yet this window, and whose read did not fail in the last FAILED_READ_MS (a pinned maintainer
+ * too: pushAuthor trusts one by id, but githubWriter, the finish card's rule, only on GitHub's answer). Each once,
+ * lowercased.
  */
 export function unverifiedAuthors(repoFull, items) {
   const checks = checksNow(repoFull);
@@ -2499,7 +2500,7 @@ export function unverifiedAuthors(repoFull, items) {
     const user = item?.user ?? item?.actor;
     const key = loginKey(user?.login);
     if (!key || !MEMBER_ASSOCIATIONS.has(item?.author_association)) continue;
-    if (isSelf({ user }) || knownWriter(key) || pinnedMaintainer(user) || checks.verified.has(key)) continue;
+    if (isSelf({ user }) || knownWriter(key) || checks.verified.has(key)) continue;
     if (Date.now() - (checks.failed.get(key) ?? -Infinity) < FAILED_READ_MS) continue;
     out.add(key);
   }
@@ -2511,7 +2512,14 @@ export function unverifiedAuthors(repoFull, items) {
  * maintainers, or one a permission read verified (a MEMBER or COLLABORATOR association alone is not enough:
  * MEMBER_ASSOCIATIONS).
  */
-export const pushAuthor = (item) => item?.author_association === "OWNER" || knownWriter(item?.user?.login) === true || pinnedMaintainer(item?.user) || verifiedWriter(item?.user?.login) === true;
+export const pushAuthor = (item) => githubWriter(item) || pinnedMaintainer(item?.user);
+/**
+ * A person GitHub itself says can push: the repository's owner by association, on the writer list, or one a permission
+ * read verified; a pinned maintainer only so. The finish card counts stage, spend and decision records by this
+ * (finish-card.mjs), as `pendulum report` does by its own permission reads (report.mjs writerBy), which cannot see the
+ * workflow's maintainers.
+ */
+export const githubWriter = (item) => item?.author_association === "OWNER" || knownWriter(item?.user?.login) === true || verifiedWriter(item?.user?.login) === true;
 
 /**
  * The login Pendulum itself writes as in this process: the App's `<slug>[bot]` on Actions, the token's owner in local

@@ -376,6 +376,11 @@ export const writerBy = (authors) => (c) => c?.author_association === "OWNER" ||
  * stopped the report first; `unverifiable`, the token may not read it (403).
  */
 export const UNVERIFIED = Object.freeze(["unchecked", "unverifiable"]);
+/**
+ * Why a login `--self` names is not trusted (`source.trusted.refused`): `cannot-push`, its permission on the repository
+ * is below write, or none; else why its permission was not read (UNVERIFIED).
+ */
+export const SELF_REFUSED = Object.freeze(["cannot-push", ...UNVERIFIED]);
 /** Whether a comment is by a MEMBER or COLLABORATOR author whose permission was not read (UNVERIFIED). */
 export const unverifiedBy = (authors) => (c) => MEMBER_ASSOCIATIONS.has(c?.author_association) && UNVERIFIED.includes(authors?.get(loginKey(c?.user?.login)));
 /**
@@ -426,7 +431,8 @@ export function lastCard(n, own) {
  * a merge (#589: Blocked, a Question, closed unmerged) carries no merged summary (readSummary): its stages are read. A card with no stage is none.
  * Anyone else's card, or a summary that does not read, is none: the stages are read. Returns {comment, summary}.
  */
-export function summaryFor(n, comments, scope, { mine, pushed = pushedBy(null), by = [], stages = false } = {}) {
+export function summaryFor(n, comments, scope, { mine, pushed, by = [], stages = false } = {}) {
+  if (typeof mine !== "function" || typeof pushed !== "function") throw new TypeError("summaryFor needs whose comments are Pendulum's (mine) and whose count as unknown cost (pushed)");
   if (stages || (by || []).some((b) => STAGE_DETAIL.includes(b))) return null;
   const on = (comments || []).filter((c) => markerIssue(c) === n);
   let found = null;
@@ -528,27 +534,25 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
   // Each MEMBER or COLLABORATOR author's push access, by login (writerBy, UNVERIFIED): read for the authors of the
   // comments with a marker (markerIssue, legacyIssue) that are not Pendulum's own login or App and not through another
   // App, since the association alone says only that they belong to the organization or were added to the repository
-  // (#607). Each login once, all of a read's new ones planned before their reads; a 403 leaves one `unverifiable`, and a
-  // BudgetStop leaves each not read `unchecked` (below, after the reads).
+  // (#607). In a set (setScope), only the authors of comments on its issues. Each login's permission is read once per
+  // report (`permissions`, shared with the label check, vetArms), all of a read's new ones planned before their reads;
+  // a 403 leaves one `unverifiable`, and a BudgetStop leaves each not read `unchecked` (below, after the reads).
   const authors = new Map();
+  const permissions = new Map();
+  const forbidden = new Set();
   const unread = () => {
     const own = pendulumOwn(app);
-    const voices = comments.filter((c) => (markerIssue(c) !== null || legacyIssue(c) !== null) && MEMBER_ASSOCIATIONS.has(c?.author_association) && !own(c) && !throughApp(c));
+    const inScope = (c) => !setMode || issues.has(markerIssue(c) ?? legacyIssue(c));
+    const voices = comments.filter((c) => (markerIssue(c) !== null || legacyIssue(c) !== null) && MEMBER_ASSOCIATIONS.has(c?.author_association) && !own(c) && !throughApp(c) && inScope(c));
     return [...new Set(voices.map((c) => loginKey(c.user?.login)).filter((l) => l && !authors.has(l)))].sort();
   };
   const vouch = async () => {
     const want = unread();
-    if (!want.length) return;
-    budget.plan(want.length, `the permission of ${want.length} comment author(s) with a marker whose association says only that they belong to the organization or were added to the repository`);
+    const toRead = want.filter((l) => !permissions.has(l));
+    if (toRead.length) budget.plan(toRead.length, `the permission of ${toRead.length} comment author(s) with a marker whose association says only that they belong to the organization or were added to the repository`);
     for (const login of want) {
-      budget.take("permissions");
-      try {
-        authors.set(login, WRITE_PERMISSIONS.has(await collaboratorPermission(repo, login, opts)));
-      } catch (e) {
-        // A token that may not read collaborators' permissions: this author cannot be verified, and that is said.
-        if (e?.status !== 403) throw e;
-        authors.set(login, "unverifiable");
-      }
+      if (!permissions.has(login)) await readPermission(repo, login, { budget, opts, permissions, forbidden });
+      authors.set(login, forbidden.has(login) ? "unverifiable" : WRITE_PERMISSIONS.has(permissions.get(login)));
     }
   };
   try {
@@ -630,7 +634,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       }
       if (arms.length) {
         if (scope.label) arms[0].listed = [...issues.keys()];
-        await vetArms(repo, arms, { budget, opts, started, renamed, timelines, objectiveLabel });
+        await vetArms(repo, arms, { budget, opts, started, renamed, timelines, objectiveLabel, permissions, forbidden });
         // Only the Objectives a vetted label counts for are read on, and one both arms count for is in neither.
         for (const n of [...issues.keys()]) if (!armCounted(arms, n)) issues.delete(n);
       }
@@ -881,25 +885,15 @@ const latestLabeled = (events, label) => {
  * `started` with when each issue's Objective started (finish-card.mjs labelTime, the scorer's start of its wall clock).
  * A BudgetStop leaves the rest unchecked.
  */
-async function vetArms(repo, arms, { budget, opts, started, renamed = new Set(), timelines = new Set(), objectiveLabel }) {
+async function vetArms(repo, arms, { budget, opts, started, renamed = new Set(), timelines = new Set(), objectiveLabel, permissions = new Map(), forbidden: unreadable = new Set() }) {
   const all = [...new Set(arms.flatMap((a) => a.listed))].sort((a, b) => a - b);
   if (!all.length) return;
   budget.plan(all.length, `the timelines of the ${all.length} Objective(s) labelled ${arms.map((a) => a.label).join(" or ")}: who applied the label (a paged read's first page each)`);
-  const permissions = new Map();
-  const unreadable = new Set();
   const permission = async (r, login, o) => {
     const key = loginKey(login);
     if (!permissions.has(key)) {
       budget.plan(1, "a labeller's permission on the repository");
-      budget.take("permissions");
-      try {
-        permissions.set(key, await collaboratorPermission(r, login, o));
-      } catch (e) {
-        // A token that may not read collaborators' permissions: this labeller cannot be vouched for, and that is said.
-        if (e?.status !== 403) throw e;
-        permissions.set(key, null);
-        unreadable.add(key);
-      }
+      await readPermission(r, key, { budget, opts: o, permissions, forbidden: unreadable });
     }
     return permissions.get(key);
   };
@@ -915,6 +909,23 @@ async function vetArms(repo, arms, { budget, opts, started, renamed = new Set(),
       const refused = await labelsVouched(repo, n, [arm.label], opts, { labelers: async () => ({ [arm.label]: last }), permission });
       arm[!refused ? "trusted" : last?.actor?.login && unreadable.has(loginKey(last.actor.login)) ? "unverifiable" : "untrusted"].push(n);
     }
+  }
+}
+
+/**
+ * One login's permission on the repository (github.mjs collaboratorPermission), one call taken from the budget (planned
+ * by the caller), kept in `permissions` by login (null for none, a 404). A 403 that is no rate limit (a token that may
+ * not read collaborators' permissions) keeps null and puts the login in `forbidden`: never vouched for, and that is
+ * said. A rate limit, or any other failure, throws.
+ */
+async function readPermission(repo, login, { budget, opts, permissions, forbidden }) {
+  budget.take("permissions");
+  try {
+    permissions.set(login, await collaboratorPermission(repo, login, opts));
+  } catch (e) {
+    if (e?.status !== 403 || e?.rateLimited) throw e;
+    permissions.set(login, null);
+    forbidden.add(login);
   }
 }
 
@@ -2106,7 +2117,7 @@ function perMergedOf(read, objectives, opts) {
   const wholeScope = { ...scope, since: null, until: null, defaultPeriod: false, issues: whole, label: null, parent: null, compare: null };
   const summaries = new Map();
   for (const n of whole) {
-    const found = summaryFor(n, comments, wholeScope, { mine, by: opts.by, stages: !!opts.rates });
+    const found = summaryFor(n, comments, wholeScope, { mine, pushed: theirs, by: opts.by, stages: !!opts.rates });
     if (found) summaries.set(n, found);
   }
   const inner = whole.length ? buildReport({ ...read, issues: new Map([...(issues ?? new Map())].filter(([n]) => whole.includes(n))), scope: wholeScope, summaries, arms: undefined }, { ...opts, wholePass: true }) : { objectives: [], measures: new Map() };
@@ -2298,6 +2309,13 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   if (source.artifacts.expired) out.push({ code: "artifact-expired", count: source.artifacts.expired, counts: none, issues: [], text: "usage artifacts past GitHub's retention, not cached here" });
   if (source.artifacts.failed) out.push({ code: "artifact-failed", count: source.artifacts.failed, counts: none, issues: [], text: "usage artifacts that could not be downloaded" });
   if (source.artifacts.unreadable) out.push({ code: "artifacts-unreadable", count: source.artifacts.unreadable, counts: none, issues: [], text: "artifact lists the token may not read (it needs actions: read), or artifacts that name no workflow run" });
+  // The logins --self names that the report did not trust, with why (SELF_REFUSED): each one a permission read found
+  // unable to push, or whose permission was not read (UNVERIFIED). The token's own login is Pendulum's whatever it names.
+  const refusedWhy = (login) => {
+    const a = read.authors?.get(loginKey(login));
+    return a === false ? "cannot-push" : UNVERIFIED.includes(a) ? a : null;
+  };
+  const refused = [...new Set(read.self ?? [])].filter((l) => loginKey(l) !== loginKey(source.login) && refusedWhy(l)).map((login) => ({ login, why: refusedWhy(login) }));
   return {
     // Partial when the call budget stopped the reads, or stages from before the rename went unread.
     complete: !out.some((m) => PARTIAL_CODES.includes(m.code)),
@@ -2308,7 +2326,7 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
     // someone who can push) and the App, with where its id came from (`flag`, `variable`, `variable-gh`, `local-copy`,
     // `env`) or why there is none (`unset`, `forbidden`; null when the call budget stopped before the read); `appWhy`,
     // why the variable gave no id (`unset`, `forbidden`), kept when the local copy or the env stands in for it.
-    trusted: { logins: [...new Set([source.login, ...(read.self ?? [])].filter(Boolean))], app: read.appId ?? null, appFrom: source.appFrom ?? null, appWhy: source.appWhy ?? null },
+    trusted: { logins: [...new Set([source.login, ...(read.self ?? []).filter((l) => !refused.some((r) => r.login === l))].filter(Boolean))], refused, app: read.appId ?? null, appFrom: source.appFrom ?? null, appWhy: source.appWhy ?? null },
     read: { comments: source.comments, pendulumComments: trust.own, unattributedComments: trust.vouched, ignoredComments: trust.ignored, issues: read.issues?.size ?? 0, pulls: read.pulls?.length ?? 0, artifacts: { ...source.artifacts }, localRecords: source.localRecords, summaries },
     missing: out,
   };

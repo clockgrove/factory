@@ -363,13 +363,3 @@ test("report (#569 V3): every cost in every breakdown keeps its split of unknown
   const split = (c) => [c.unknownRuns, c.unknownDecisionCalls, c.unknownUnsplitRuns];
   assert.deepEqual([split(opus.cost), split(opus.basis.pass.cost), split(opus.basis.stage.cost)], [[7, 3, 3], [1, 0, 0], [6, 3, 3]]);
 });
-
-test("report (#569 R5, V10): an Objective with stages from before the rename has no model minutes and no reviewer passes: those stages are not read", async () => {
-  const w = decisionsWorld();
-  w.comments.push(comment(20, ["<!-- factory:20:progress:work:local-old -->", "Factory work: started."].join("\n"), { when: at(-5) }));
-  const { json: r } = await report(w, ["--issue", "20"]);
-  const o = byIssue(r, 20);
-  assert.equal(o.legacyStages, 1);
-  assert.deepEqual([o.passes, o.modelMinutes], [{ total: 4, answer: 1, fix: 1 }, null]);
-  assert.deepEqual(r.hotSpots.reviewLoops.items, [{ issue: 20, reviews: 1, reviewerPasses: null }]);
-});

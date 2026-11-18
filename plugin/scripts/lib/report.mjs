@@ -1524,8 +1524,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       foldPasses(figures);
     });
     // Known only when each stage has a ledger (a stage Pendulum cannot attribute to itself has none it reads).
-    // Not with stages from before the rename to Pendulum (`legacyStages`), which are not read.
-    const whole = ledgered && !unledgered && !unattributedStages && !(legacy.get(n) > 0);
+    // Stages from before the rename to Pendulum (`legacyStages`) are not read: the row's figures leave them out (#567).
+    const whole = ledgered && !unledgered && !unattributedStages;
     if (ledgered && !unledgered) {
       // The minutes of every harness pass, known only when each has its start and end too: the finish card's summary's
       // and the arms' rule (#569 R5).

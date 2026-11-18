@@ -469,3 +469,22 @@ test("report --compare (#567): a merged Objective with stages from before the re
   assert.equal(cards.json.source.read.summaries, 6);
   assert.deepEqual(cards.json.comparison, r.comparison);
 });
+
+test("report --compare (#567): an Objective labelled before the rename, with no older stage, has no wall clock on either path, even read from a card written before cards knew it", async () => {
+  const card = await import("../scripts/lib/finish-card.mjs");
+  // #12's first label under the old name: on the timeline the report reads, but not on the one its card was built from.
+  const renamed = (w) => {
+    w.timelines[12] = [{ event: "labeled", label: { name: `${PREVIOUS_NAME}:objective` }, actor: ME, created_at: at(-20) }, ...w.timelines[12]];
+    return w;
+  };
+  const stages = await report(renamed(experiment()), ["--compare", "fast,slow", "--json"]);
+  const cards = await report(renamed(carded(experiment(), card)), ["--compare", "fast,slow", "--json"]);
+  assert.equal(cards.json.source.read.summaries, 6);
+  assert.deepEqual(cards.json.comparison, stages.json.comparison);
+  const [fast] = stages.json.comparison.arms;
+  assert.equal(fast.objectives.find((o) => o.issue === 12).wallMinutes, null);
+  assert.deepEqual(fast.legacy, []);
+  assert.deepEqual(fast.wallMinutes, { median: 120, p25: 90, p75: 150, n: 2, leftOut: 1 });
+  // Its other measures stand: it has no stage from before the rename.
+  assert.equal(fast.modelMinutes.n, 3);
+});

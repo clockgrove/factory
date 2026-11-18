@@ -457,6 +457,8 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
   // Per vetted label: the issues listed under it, and those whose latest `labeled` event is by someone who can push or not.
   const arms = vetted.map((label) => ({ label, listed: [], trusted: [], untrusted: [], unverifiable: [] }));
   const started = new Map();
+  // The vetted issues labelled before the rename to Pendulum (finish-card.mjs clockRenamed): no wall clock on either path.
+  const renamed = new Set();
   // Which comment read a BudgetStop cuts short ({n}: a named issue's own, null: the repository's), and the Objectives
   // whose comments from before the floor are still to be read (null until known): source.cut, below.
   let floor = null;
@@ -540,7 +542,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       }
       if (arms.length) {
         if (scope.label) arms[0].listed = [...issues.keys()];
-        await vetArms(repo, arms, { budget, opts, started, objectiveLabel });
+        await vetArms(repo, arms, { budget, opts, started, renamed, objectiveLabel });
         // Only the Objectives a vetted label counts for are read on, and one both arms count for is in neither.
         for (const n of [...issues.keys()]) if (!armCounted(arms, n)) issues.delete(n);
       }
@@ -697,7 +699,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
   readSummaries();
   for (const n of issues.keys()) localOf(n);
   source.localRecords = [...local.values()].reduce((s, m) => s + m.size, 0);
-  return { repo, scope, appId: app, self: [...new Set((self || []).map(loginKey))], issues, pulls, comments, artifacts, summaries, local, ...(arms.length ? { arms, started } : {}), source: { ...source, calls: budget } };
+  return { repo, scope, appId: app, self: [...new Set((self || []).map(loginKey))], issues, pulls, comments, artifacts, summaries, local, ...(arms.length ? { arms, started, renamed } : {}), source: { ...source, calls: budget } };
 }
 
 /**
@@ -754,7 +756,7 @@ const latestLabeled = (events, label) => {
  * `started` with when each issue's Objective started (finish-card.mjs labelTime, the scorer's start of its wall clock).
  * A BudgetStop leaves the rest unchecked.
  */
-async function vetArms(repo, arms, { budget, opts, started, objectiveLabel }) {
+async function vetArms(repo, arms, { budget, opts, started, renamed = new Set(), objectiveLabel }) {
   const all = [...new Set(arms.flatMap((a) => a.listed))].sort((a, b) => a - b);
   if (!all.length) return;
   budget.plan(all.length, `the timelines of the ${all.length} Objective(s) labelled ${arms.map((a) => a.label).join(" or ")}: who applied the label (a paged read's first page each)`);
@@ -779,7 +781,8 @@ async function vetArms(repo, arms, { budget, opts, started, objectiveLabel }) {
   for (const n of all) {
     const events = await paged(`repos/${repo.full}/issues/${n}/timeline`, budget, "timelines", opts);
     // Labelled before the rename to Pendulum (finish-card.mjs clockRenamed): no start, so no wall clock, as on its card.
-    const start = clockRenamed(events) ? null : labelTime(null, events, objectiveLabel);
+    if (clockRenamed(events)) renamed.add(n);
+    const start = renamed.has(n) ? null : labelTime(null, events, objectiveLabel);
     if (start) started.set(n, start);
     for (const arm of arms.filter((a) => a.listed.includes(n))) {
       const last = latestLabeled(events, arm.label);
@@ -1215,8 +1218,9 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     row.findings = findingsFor({ n, own: summary ? sorted(ownAll.filter((c) => progress.test(c.body || ""))) : allStages, scope, runOf, reviewStages, rows: findingRows, stageRows: findingStages, totals: findingTotals });
     objectives.push(row);
     if (counted && summary) {
-      // Read from its finish card: the measures its summary carries, from the same ledgers and the scorer's start.
-      armMeasures.set(n, { modelMinutes: summary.modelMinutes === null ? null : round2(summary.modelMinutes), fixPasses: summary.passes?.fix ?? null, wallMinutes: summary.labelledWallMs === null ? null : round2(summary.labelledWallMs / 60_000) });
+      // Read from its finish card: the measures its summary carries, from the same ledgers and the scorer's start; no wall
+      // clock for an issue labelled before the rename, whose card may be from before cards knew it (readReport `renamed`).
+      armMeasures.set(n, { modelMinutes: summary.modelMinutes === null ? null : round2(summary.modelMinutes), fixPasses: summary.passes?.fix ?? null, wallMinutes: summary.labelledWallMs === null || read.renamed?.has(n) ? null : round2(summary.labelledWallMs / 60_000) });
     } else if (counted) {
       const start = read.started?.get(n);
       const mergedAt = row.outcome === "merged" ? newestPull(n, pulls)?.merged_at : null;

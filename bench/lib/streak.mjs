@@ -11,7 +11,8 @@
 // One still running, in review or waiting on a Question has not finished: it is listed as in flight, neither.
 // An External one (walkAway.bucket: its only stops were external Blocks, lib/objective.mjs walkAwayBucket) is listed
 // in the sequence as skipped: it neither extends nor breaks, and does not count as finished. A P1 escape found in its
-// merge makes it a break.
+// merge makes it a break. One labelled before the rename to Pendulum (bucket `unknown`: its walk-away is not known) is
+// skipped the same way, P1 escape or not.
 // A workflow hand-over scored as an owner step (lib/objective.mjs HANDOVER_SCORING, the default) leaves the merge a
 // walk-away: it extends the streak, and its entry says it carries an owner step (`ownerStep`). Scored as input, it breaks.
 // A finished row whose harness is unknown (none recorded, or two on one Objective) is listed under "unknown", which is
@@ -33,6 +34,7 @@ export function endedAt(row) {
 
 /** One finished row's verdict for the streak: `{ok, why}`; an External row's is `{ok: null, external: true, why}`, skipped. */
 export function verdict(row) {
+  if (row.walkAway?.bucket === "unknown") return { ok: null, unknown: true, why: `walk-away unknown: ${row.walkAway.reason}` };
   const escapes = (row.quality?.escapes || []).filter(isP1);
   if (row.walkAway?.bucket === "external" && !escapes.length) return { ok: null, external: true, why: `external: Blocked: ${[...new Set((row.walkAway.blocks || []).map((b) => b.cause))].join(", ")}` };
   if (!row.mergedAt) return { ok: false, why: `not merged (${row.exit})` };
@@ -95,6 +97,10 @@ export function streaks(rows, { from }) {
       h.sequence.push({ issue: r.issue, endedAt: end, ok: null, external: true, why: v.why });
       continue;
     }
+    if (v.unknown) {
+      h.sequence.push({ issue: r.issue, endedAt: end, ok: null, unknown: true, why: v.why });
+      continue;
+    }
     h.finished += 1;
     if (v.ok) {
       h.walkAway += 1;
@@ -114,7 +120,7 @@ export function streaks(rows, { from }) {
 }
 
 /** A sequence entry's verdict: yes, skipped (External) or no, with why. */
-const entryText = (x) => (x.external ? `skipped: ${cell(x.why)}` : x.ok ? (x.ownerStep ? `yes, owner step: ${cell(x.ownerStep)}` : "yes") : `no: ${cell(x.why)}`);
+const entryText = (x) => (x.external || x.unknown ? `skipped: ${cell(x.why)}` : x.ok ? (x.ownerStep ? `yes, owner step: ${cell(x.ownerStep)}` : "yes") : `no: ${cell(x.why)}`);
 
 const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
@@ -173,6 +179,10 @@ export function pooledStreak(rows, { from }) {
     if (v.external) {
       out.external += 1;
       out.sequence.push({ repository: r.repository, issue: r.issue, harness: r.harness ?? UNKNOWN, endedAt: end, ok: null, external: true, why: v.why });
+      continue;
+    }
+    if (v.unknown) {
+      out.sequence.push({ repository: r.repository, issue: r.issue, harness: r.harness ?? UNKNOWN, endedAt: end, ok: null, unknown: true, why: v.why });
       continue;
     }
     out.finished += 1;

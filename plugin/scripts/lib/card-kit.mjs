@@ -8,9 +8,6 @@ import { zoneOffsetMs } from "./clock.mjs";
 /** A model id as a card may print it: model-id characters only, else null. */
 export const modelId = (v) => (typeof v === "string" && /^[A-Za-z0-9._:/-]{1,80}$/.test(v) ? v : null);
 
-/** The Pendulum mark the card shows, from the repository's own brand assets. */
-export const MARK_URL = "https://raw.githubusercontent.com/clockgrove/pendulum/main/assets/brand/pendulum/web/mark-240.png";
-
 /** The brand colours of the badges and charts. */
 export const COLORS = Object.freeze({ amber: "c9822e", brown: "7a4a24", green: "4a7a3a", slate: "2b4a5f", ink: "b06f22" });
 
@@ -101,12 +98,6 @@ export function billingBasis(usd, byBilling) {
 }
 
 
-/** A shields.io static badge, for-the-badge style: its label and message escaped as shields.io reads them. */
-export function badge(label, message, color) {
-  const part = (s) => encodeURIComponent(String(s).replace(/-/g, "--").replace(/_/g, "__").replace(/ /g, "_"));
-  return `<img alt="${label}: ${message}" src="https://img.shields.io/badge/${part(label)}-${part(message)}-${color}?style=for-the-badge">`;
-}
-
 export const many = (n, one, more = `${one}s`) => `${n} ${n === 1 ? one : more}`;
 
 /**
@@ -132,7 +123,6 @@ export const GANTT_THEME = {
   themeCSS: `text.taskTextOutsideRight, text.taskTextOutsideLeft { fill: ${INK} !important; } .grid .tick line { stroke: #8b949e; }`,
   gantt: { useWidth: 440, barHeight: 24, barGap: 6, fontSize: 15, sectionFontSize: 15, leftPadding: 80 },
 };
-export const PIE_THEME = { theme: "base", themeVariables: { pie1: `#${COLORS.amber}`, pie2: `#${COLORS.green}`, pie3: `#${COLORS.slate}`, pie4: `#${COLORS.brown}`, pie5: "#8b949e", pieStrokeColor: `#${COLORS.brown}`, pieOuterStrokeColor: `#${COLORS.brown}`, pieTitleTextColor: INK, pieSectionTextColor: "#ffffff", pieLegendTextColor: INK, pieSectionTextSize: "16px", pieOpacity: "1" } };
 export const mermaidInit = (theme) => `%%{init: ${JSON.stringify(theme)}}%%`;
 
 /**
@@ -161,8 +151,18 @@ export const CELL_MAX = 300;
 /** Text for a GitHub table cell: one line, its pipes escaped, no HTML, at most `max` characters. */
 export function tableCell(text, max = CELL_MAX) {
   const one = String(text ?? "").replace(/\r?\n/g, " ").replace(/</g, "&lt;").replace(/>/g, "&gt;").trim();
-  const cut = one.length > max ? `${one.slice(0, max - 1)}…` : one;
+  let cut = one.length > max ? `${one.slice(0, max - 1)}…` : one;
+  // A backtick left open (a cut in a code span, or one in the text itself) is shown as itself, not as a span's start.
+  if ((cut.match(/`/g) ?? []).length % 2) cut = cut.replace(/`(?=[^`]*$)/, "\\`");
   return cut.replace(/\\?\|/g, "\\|");
+}
+/** `s` as a code span on one line, whatever backticks it holds: a fence longer than any run of them inside. */
+export function codeSpan(s) {
+  const one = String(s ?? "").replace(/\s+/g, " ").trim();
+  const run = Math.max(0, ...(one.match(/`+/g) ?? []).map((m) => m.length));
+  if (!run) return `\`${one}\``;
+  const fence = "`".repeat(run + 1);
+  return `${fence} ${one} ${fence}`;
 }
 /** Text for a paragraph a card writes: no HTML. */
 export const plainText = (s) => String(s ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;");

@@ -365,3 +365,31 @@ test("finish card (#589): time on hold names what it waited on from the notice's
   assert.match(zero, /^\| 2:10 PM \| Build · Opus 5\.5 · ❓ Question \| 9 min \| — \|$/m);
   assert.match(zero, /- — in Took means no time was recorded for that row; in Cost, that no AI dollars were/);
 });
+
+test("a Block or Question applied anywhere writes the Objective's card (session.mjs applyExit); never on an outage, and a stage writes its own after its exit line", async () => {
+  const { applyExit } = await import("../scripts/lib/session.mjs");
+  const o = F.blockedEnd();
+  const prs = () => [{ number: 157, user: { login: F.SELF, type: "Bot" }, created_at: "2026-11-17T20:19:00Z", html_url: "https://github.com/acme/app/pull/157", head: { sha: "d".repeat(40) }, commits: 2, additions: 40, deletions: 3, changed_files: 2, merged_at: null, draft: true, state: "open" }];
+  const world = () => {
+    const fake = fakeObjective(o, prs);
+    const inner = fake.fetch;
+    // The labels the exit sets: GitHub's answer, as any label write's.
+    fake.fetch = async (url, init = {}) => (/\/issues\/\d+\/labels/.test(new URL(url).pathname) ? new Response("[]", { status: 200, headers: { "content-type": "application/json" } }) : inner(url, init));
+    return fake;
+  };
+  const repo = repoOf("acme/app");
+  const cards = (fake) => fake.comments.filter((c) => c.body.startsWith(finishMarker(152)));
+  // The dispatcher's or a launcher's Block, outside any stage: the card with it.
+  const outside = world();
+  await over(outside, () => applyExit(repo, { issue: 152, pr: null, exit: "blocked", reason: "the setup command failed.", cause: "setup", notify: null, stage: "launch" }, { token: "t" }));
+  assert.equal(cards(outside).length, 1);
+  assert.match(cards(outside)[0].body, /\n### ⛔ Blocked after /);
+  // An outage's Block writes no card: GitHub may not answer, and the end's own outputs come first.
+  const outage = world();
+  await over(outage, () => applyExit(repo, { issue: 152, pr: null, exit: "blocked", reason: "GitHub is down.", cause: "outage", notify: null, stage: "outage" }, { token: "t" }));
+  assert.equal(cards(outage).length, 0);
+  // A stage's own exit (`card: false`): the stage writes the card after its exit line, not here.
+  const stage = world();
+  await over(stage, () => applyExit(repo, { issue: 152, pr: null, exit: "blocked", reason: "x.", cause: "work", notify: null, stage: "work", card: false }, { token: "t" }));
+  assert.equal(cards(stage).length, 0);
+});

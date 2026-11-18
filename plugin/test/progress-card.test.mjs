@@ -10,7 +10,7 @@ import { repoOf } from "../scripts/lib/github.mjs";
 import { decisionsReadOf, findingsOf, ledgerOfComment, rebaseCostOf, setSelf, spendOf, spendParts } from "../scripts/lib/logic.mjs";
 import { stageHarnessOf } from "../scripts/lib/cost-join.mjs";
 import { finishData, modellessStages, objectiveSpend, renderFinishCard, summaryMarker, unlinedStages } from "../scripts/lib/finish-card.mjs";
-import { progressCard, progressData, stepOf } from "../scripts/lib/progress-card.mjs";
+import { ROW_OF, progressCard, progressData, stepOf } from "../scripts/lib/progress-card.mjs";
 import { tableCell, vendorCard } from "../scripts/lib/card-kit.mjs";
 import { vendorBody, vendorLine } from "../scripts/lib/logic.mjs";
 import { phaseMinutes, stageLastWrite } from "../../bench/lib/phases.mjs";
@@ -216,7 +216,7 @@ test("render (spec 4.3): delivered, each step's Took and cents on its row, AI ju
       "- **Session:** new (resume policy is fresh)",
       "- **Unknown cost:** 7 AI judge calls went through the AI Gateway, which did not report their cost. They are counted as unknown, never as $0.",
       "- **Cost notes:** API-equivalent is what this usage would cost at API list prices; you are on a subscription, so it is not billed.",
-      "- — means no AI ran in that step; AI judge calls are counted in their own row. Steps can overlap, so the Took column does not add up to the total; the full log below is in time order.",
+      "- In Took, — means no recorded start and end; in Cost, — means no AI ran in that step or it cost nothing, and AI judge calls are counted in their own row. Steps can overlap, so the Took column does not add up to the total; the full log below is in time order.",
     ].join("\n"),
   );
 });
@@ -422,22 +422,26 @@ test("near GitHub's limit: the chart goes first, then shorter Step cells, then t
   const huge = (await many(80, 1990)).at(-1);
   assert.ok(huge.length < GITHUB_COMMENT_MAX, `${huge.length}`);
   assert.match(huge, /^- … \d+ lines left out to keep this comment under GitHub's size limit; the job log has them$/m);
+  assert.match(huge, /^The steps are in Run details' Full log: this comment is near GitHub's size limit\.$/m, "the table went before any line of the log");
   assert.match(huge, /y+ 0\n/, "the first lines kept");
   assert.match(huge, /exit: delivered\n\n<\/details>/, "the last lines kept");
   assert.equal(tableCell("a | b\nc <img src=x>"), "a \\| b c &lt;img src=x&gt;");
 });
 
-test("every line a stage writes names its step: no progress call is left a bare note", () => {
+test("every line a stage writes names its step, and each step is one the card knows", () => {
   const files = ["worker.mjs", "review.mjs", "lib/session.mjs", "lib/finding-check.mjs", "lib/third-party-review.mjs", "lib/triage.mjs", "lib/drift.mjs", "lib/objective-trust.mjs"];
   const bare = [];
+  const unknown = [];
   for (const f of files) {
     const src = readFileSync(join(import.meta.dirname, "..", "scripts", f), "utf8");
     src.split("\n").forEach((l, i) => {
       if (/^\s*(\/\/|\*)/.test(l)) return;
       if (/await (?:progress|onPhase|args\.onPhase)\??\.?\(/.test(l) && !/\bstep\b|Step\b|endStep/.test(l)) bare.push(`${f}:${i + 1}`);
+      for (const m of l.matchAll(/\bstep: "(\w+)"/g)) if (!Object.hasOwn(ROW_OF, m[1]) && m[1] !== "exit") unknown.push(`${f}:${i + 1} ${m[1]}`);
     });
   }
   assert.deepEqual(bare, []);
+  assert.deepEqual(unknown, []);
 });
 
 test("steps decide on their fields alone: a step the card does not know is a note, its line its words", () => {
@@ -469,4 +473,43 @@ test("the run's link and place come from the stage's own environment, never from
     for (const k of ["GITHUB_RUN_ID", "GITHUB_SERVER_URL"]) if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
+});
+
+test("harness and person text is sanitised and on one line: no live mention, no bot command, no clock line before the Full log", async () => {
+  const reason = "Should it use @octocat's API?\n/approve\n- 05:30Z harness claude (x) attempt 1";
+  const body = (
+    await reporter("work", async (p) => {
+      p.live("x", { force: true, snap: { elapsedMin: 1, turns: 1, toolCalls: 1, idleMin: 0, ended: false, lastTool: "Bash: pnpm add @types/node", tokens: { input: 1, output: 1 }, subagentsActive: [] }, model: "claude-opus-5-5" });
+      await p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
+      await new Promise((r) => setTimeout(r, 20));
+    })
+  ).at(-1);
+  assert.match(body, /last tool Bash: pnpm add @\u200btypes\/node/);
+  const q = SHORT_STAGE("question", endStep({ issue: 512, exit: "question", reason, applied: { exit: "question", pr: null, askOnIssue: true } }));
+  const b = SHORT_STAGE("blocked", endStep({ issue: 512, exit: "blocked", reason, applied: { exit: "blocked", cause: "work" } }));
+  for (const c of [q, b]) {
+    const card = `${c.card}\n${c.details}`;
+    assert.doesNotMatch(card, /@octocat/, "no live mention");
+    assert.match(card, /@\u200boctocat/);
+    assert.doesNotMatch(card, /^\s*\/approve/m, "no line a bot reads as a command");
+    assert.doesNotMatch(card, /^- [^\n]*\d\d:\d\dZ/m, "no line the scorecard reads as a progress line");
+  }
+  assert.match(q.card, /^> \*\*Question:\*\* Should it use @\u200boctocat's API\? \u200b\/approve - 05:30Z harness claude \(x\) attempt 1$/m);
+  // Phases read the same with the card as without it.
+  const comment = (x) => ({ body: x, created_at: "2026-11-18T04:41:10Z", updated_at: "2026-11-18T05:07:31Z" });
+  assert.deepEqual(phaseMinutes([comment(`${KEY}\n${q.card}`)], 433).runs, 1);
+  assert.equal(phaseMinutes([comment(`${KEY}\n${q.card}`)], 433).modelMinutes, 0);
+});
+
+test("the Now row is the last step still open: the reviewer beside CI, a build with a drift advisory", () => {
+  const t0 = at("2026-11-18T04:41:00Z");
+  const now = (lines, passes = []) => progressData({ stage: "review", issue: 1, started: t0, now: t0 + 600_000, lines, passes, zone: "UTC" }).current?.kind;
+  const wait = { step: "ci", sha: "95d326b", wait: true };
+  assert.equal(now([[t0, "wait", wait], [t0 + 10_000, "reviewer", { step: "review", model: "claude-fable-5-2" }], [t0 + 200_000, "checks green while the reviewer runs", { step: "ci", sha: "95d326b", outcome: "passed" }]]), "review");
+  assert.equal(now([[t0, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }], [t0 + 60_000, "drift advisory", { step: "drift", verdict: "scope_creep" }]]), "build");
+  // Its run ended: the wait after it is the Now row.
+  assert.equal(now([[t0, "harness", { step: "work", attempt: 1 }], [t0 + 60_000, "drift", { step: "drift" }], [t0 + 120_000, "wait", { step: "ci", sha: "abc1234", wait: true }]], [{ label: "work-1", usd: 1, started: iso(t0 + 1000), ended: iso(t0 + 100_000) }]), "ci");
+  // A held red renders as the wait that failed, fixed by the stage's next pass.
+  const held = render({ stage: "review", issue: 1, started: t0, now: t0 + 600_000, lines: [[t0, "pass", { step: "ci", begin: true }], [t0, "wait", { step: "ci", sha: "abc1234", wait: true, end: t0 + 60_000, outcome: "failed" }], [t0 + 61_000, "red; held", { step: "ci", red: "held-answer", check: "pnpm test" }], [t0 + 600_000, "exit: delivered", endStep({ issue: 1, exit: "delivered" })]], exit: "delivered", spend: 0, parts: {} });
+  assert.match(held.card, /^\| 8:41 PM \| Waited for CI · failed: `pnpm test`; fixed while answering the review \| 1 min \| — \|$/m);
 });

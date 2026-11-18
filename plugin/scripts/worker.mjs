@@ -20,11 +20,10 @@ import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { endCard } from "./lib/finish-card.mjs";
 import { useObjectiveZone } from "./lib/clock.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, appliedExit, endStep, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, workValidation, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, appliedExit, endStep, stateCard, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, workValidation, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
 import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -129,7 +128,8 @@ const settleExit = async () => {
 let lastApplied = null;
 const applyExit = async (...args) => {
   await settleExit();
-  const r = await applyExitNow(...args);
+  // The stage writes the Objective's card after its exit line (finish), so the card reads its final spend line.
+  const r = await applyExitNow(args[0], { ...args[1], card: false }, ...args.slice(2));
   lastApplied = appliedExit(args[1], r);
   return r;
 };
@@ -261,8 +261,6 @@ async function main() {
   // limit holds this stage's account in Pendulum's records on GitHub, and the Objective goes on on a free one.
   let limits = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
-  // The issue as the stage read it, for a Blocked or Question end's finish card (finish-card.mjs endCard); null before.
-  let cardIssue = null;
   const finish = async (exit, reason, outage = null, usageLimit = null) => {
     watch?.stop();
     if (!claimExit()) return parked();
@@ -314,8 +312,8 @@ async function main() {
     }
     const lastStep = endStep({ issue, exit, reason, applied: lastApplied, resetAt: usageLimit?.reset ?? null, rebase: rebaseText.replace(/^; /, "") || null });
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`, lastStep);
-    // A Blocked or Question end gets the Objective's finish card too, upserted in place (finish-card.mjs endCard; never throws).
-    if ((exit === "blocked" || exit === "question") && cardIssue) await endCard(repo, { ...cardIssue, number: issue }, token, { exit, reason, form: lastStep.form ?? null, appId: inputs.appId || process.env.PENDULUM_NOTICE_APP_ID || null, log });
+    // A Blocked or Question end's finish card, upserted in place (session.mjs stateCard: bounded, never on an outage).
+    if ((exit === "blocked" || exit === "question") && lastApplied?.exit === exit && !outage) await stateCard(repo, issue, { exit, reason, form: lastStep.form ?? null, next: lastStep.next ?? null, cause: lastApplied.cause ?? null }, token);
     // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.
     stopWaiting();
     setOutput("exit", exit);
@@ -374,7 +372,6 @@ async function main() {
   }
   // 1. The issue.
   let issueData = await getIssue(repo, issue, token);
-  cardIssue = issueData;
   // Its visible times from here on in the zone its body names, if any (lib/clock.mjs); the progress comment's too.
   useObjectiveZone(issueData?.body);
   const labels = (issueData.labels || []).map((l) => l.name);
@@ -731,7 +728,7 @@ async function main() {
   if (inputs.harness === "claude" && access.agent) noteSetupStart();
   if (inputs.setup) {
     log(`setup: ${inputs.setup}`);
-    const setupStep = { step: "setup" };
+    const setupStep = { step: "setup", span: true };
     await progress("setup", setupStep);
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
     // One that fails while this machine's network is down runs once more after it is back (checkout.mjs runSetup).
@@ -755,7 +752,7 @@ async function main() {
   let installNote = "";
   if (install) {
     log(`install: ${install}`);
-    const installStep = { step: "setup", first };
+    const installStep = { step: "setup", first, span: true };
     await progress(first ? "install (first time on this machine)" : "install", installStep);
     const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt), tools: installTools(installTree, inputs.install) });
     installStep.end = Date.now();

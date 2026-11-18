@@ -22,7 +22,6 @@ import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, i
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, markReady, postReview, prBodyHistory, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { endCard } from "./lib/finish-card.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
@@ -54,6 +53,7 @@ import {
   applyExit as applyExitNow,
   appliedExit,
   endStep,
+  stateCard,
   openAccess,
   commitAuthor,
   gitIdentity,
@@ -871,7 +871,8 @@ const applyExit = async (...args) => {
   await holdIfStopped();
   await beforeExit?.();
   if (!commitExit()) await parked();
-  const r = await applyExitNow(...args);
+  // The stage writes the Objective's card after its exit line (finish), so the card reads its final spend line.
+  const r = await applyExitNow(args[0], { ...args[1], card: false }, ...args.slice(2));
   lastApplied = appliedExit(args[1], r);
   return r;
 };
@@ -1034,8 +1035,6 @@ async function main() {
     }),
   );
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
-  // The issue as the stage read it, for a Blocked or Question end's finish card (finish-card.mjs endCard); null before.
-  let cardIssue = null;
   const finish = async (exit, reason, outage = null, usageLimit = null) => {
     watch?.stop();
     stopOverlap?.();
@@ -1076,8 +1075,8 @@ async function main() {
     }
     const lastStep = endStep({ issue, exit, reason, applied: lastApplied, resetAt: usageLimit?.reset ?? null });
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`, lastStep);
-    // A Blocked or Question end gets the Objective's finish card too, upserted in place (finish-card.mjs endCard; never throws).
-    if ((exit === "blocked" || exit === "question") && cardIssue) await endCard(repo, { ...cardIssue, number: issue }, token, { exit, reason, form: lastStep.form ?? null, appId: inputs.appId || process.env.PENDULUM_NOTICE_APP_ID || null, log });
+    // A Blocked or Question end's finish card, upserted in place (session.mjs stateCard: bounded, never on an outage).
+    if ((exit === "blocked" || exit === "question") && lastApplied?.exit === exit && !outage) await stateCard(repo, issue, { exit, reason, form: lastStep.form ?? null, next: lastStep.next ?? null, cause: lastApplied.cause ?? null }, token);
     // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.
     stopWaiting();
     setOutput("exit", exit);
@@ -1218,7 +1217,6 @@ async function main() {
     return;
   }
   const { issueData } = trusted;
-  cardIssue = issueData;
   // The harness and models this Objective runs on (objective-trust.mjs choiceGate): the reviewer, and the fix and answer
   // passes, on what its labels choose over the repository's defaults, or a Block before anything is set up for it.
   const chosen = await choiceGate({ repo, issue, labels: trusted.labels, args, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review" });
@@ -1352,7 +1350,7 @@ async function main() {
   // What already listens on loopback is no service of the setup's: Claude Code's commands reach only what it starts.
   if (inputs.harness === "claude" && access.agent) noteSetupStart();
   if (inputs.setup) {
-    const setupStep = { step: "setup" };
+    const setupStep = { step: "setup", span: true };
     await progress("setup", setupStep);
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
     // One that fails while this machine's network is down runs once more after it is back (checkout.mjs runSetup).
@@ -1373,7 +1371,7 @@ async function main() {
   const installTree = access.agent ? pendulumTree : checkout;
   const install = installCommand(installTree, inputs.install);
   if (install) {
-    const installStep = { step: "setup" };
+    const installStep = { step: "setup", span: true };
     await progress("install", installStep);
     // An install that failed or left a dependency missing is not a red for the branch: what validation would say after
     // it is no verdict on the PR. installDeps repairs it once; still broken, the stage Blocks naming the install.

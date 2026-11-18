@@ -347,7 +347,9 @@ test("#265: a stage start reads the labeler afresh, so a label removed and appli
       gh.state.writers.delete("kirk");
       assert.equal((await loop.stage(8, "work", "worker.mjs", [])).exit, "blocked");
       assert.deepEqual(loop.ran(), ["beta", "beta"]);
-      assert.equal(reads(gh), 4, "one read per stage start");
+      // One read per stage start, and one for each Block's finish card (session.mjs applyExit, #589).
+      assert.equal(gh.blocked().length, 2);
+      assert.equal(reads(gh), 4 + 2, "one read per stage start");
     });
   } finally {
     gh.restore();

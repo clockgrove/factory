@@ -593,6 +593,7 @@ test("validation loop: a required job GitHub never started gets no triage and no
   assert.deepEqual(real.steps.find((x) => x?.step === "fix"), { step: "fix", check: `required checks quality on ${sha.slice(0, 7)}` });
   assert.ok(stuck.steps.some((x) => x?.step === "ci" && x.red === "not-started"));
   assert.ok(real.steps.every((x) => x && typeof x.step === "string"), "no line without its step");
+  assert.ok(real.steps.some((x) => x?.step === "ci" && x.begin === true), "a pass's first line begins its CI round");
 });
 
 test("#402: validation loop: a triage rerun may wait for its workflow run as long as the checks' own wait, within the stage's wall clock less the guard", async () => {

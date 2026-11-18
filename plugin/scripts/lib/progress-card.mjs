@@ -12,8 +12,9 @@
 // byte for byte: its header, its `- <time> <text>` lines with their hidden UTC stamps). The card itself never writes a
 // line that starts `- ` and a clock, nor "min at the last line".
 import { clockText, timeZone, zoneDay } from "./clock.mjs";
-import { AGENTS, BASIS_NOTE, basisText, causeSentences, causesShort, cellCost, centsOf, durationText, ganttChart, kindsOf, many, minutesText, modelId, modelName, moneyText, plainText, stateBadge, stateWords, tableCell } from "./card-kit.mjs";
+import { AGENTS, BASIS_NOTE, codeSpan, basisText, causeSentences, causesShort, cellCost, centsOf, durationText, ganttChart, kindsOf, many, minutesText, modelId, modelName, moneyText, plainText, stateBadge, stateWords, tableCell } from "./card-kit.mjs";
 import { passKind } from "./usage.mjs";
+import { sanitize } from "./handoff.mjs";
 
 /** The rows' words: [name, what the Now row says, the timeline's section]. */
 export const ROWS = Object.freeze({
@@ -41,7 +42,7 @@ export const ROWS = Object.freeze({
   note: ["Note", "working", "Note"],
 });
 /** A line's step (the stage's `step` code) to its row's kind. */
-const ROW_OF = Object.freeze({ setup: "setup", edit: "edit", work: "build", conflict: "conflict", rebase: "rebased", drift: "drift", ci: "ci", commands: "commands", triage: "flake", fix: "fix", handoff: "handoff", scope: "scope", review: "review", queue: "queue", thirdParty: "outside", answer: "answer", check: "check", comments: "comments", note: "note" });
+export const ROW_OF = Object.freeze({ setup: "setup", edit: "edit", work: "build", conflict: "conflict", rebase: "rebased", drift: "drift", ci: "ci", commands: "commands", triage: "flake", fix: "fix", handoff: "handoff", scope: "scope", review: "review", queue: "queue", thirdParty: "outside", answer: "answer", check: "check", comments: "comments", note: "note" });
 /** Rows whose count shows (×N) when more than one of their steps happened. */
 const COUNTED = new Set(["build", "rebased", "conflict", "ci", "commands", "crossOs", "flake", "fix", "review", "answer"]);
 /** A step cell's detail clause, in characters (Step-cell details are cut to SHORT_DETAIL when the comment is near the limit). */
@@ -53,7 +54,12 @@ const STAGE_NAMES = Object.freeze({ work: "Work", review: "Review", merge: "Merg
 
 const count = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : 0);
 const sha7 = (v) => (typeof v === "string" && /^[0-9a-f]{7,64}$/.test(v) ? v.slice(0, 7) : null);
-const text = (v, max = 2000) => (typeof v === "string" && v.trim() ? v.trim().replace(/\s+/g, " ").slice(0, max) : null);
+/**
+ * Text a stage or its harness gave, as the card may print it: sanitised as all harness text is (handoff.mjs sanitize: no
+ * live mention, no marker, no bot command, no closing keyword), on one line, cut at `max`; null for none.
+ */
+export const clean = (v, max = 2000) => (typeof v === "string" && v.trim() ? sanitize(v, { max: max + 100 }).replace(/\s+/g, " ").trim().slice(0, max) : null);
+const text = clean;
 const logins = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?$/.test(x)) : []);
 const time = (v) => (Number.isFinite(v) ? v : null);
 const code = (v) => (typeof v === "string" && /^[a-z][a-z-]{0,30}$/.test(v) ? v : null);
@@ -97,7 +103,7 @@ export function stepOf(step, t, line = "") {
       Object.assign(e, { commands: count(s.commands), counts: true });
       break;
     case "triage":
-      Object.assign(e, { outcome: code(s.outcome), jobs: Array.isArray(s.jobs) ? s.jobs.filter((j) => typeof j === "string").slice(0, 10) : [], counts: true });
+      Object.assign(e, { outcome: code(s.outcome), jobs: Array.isArray(s.jobs) ? s.jobs.map((j) => clean(j, 100)).filter(Boolean).slice(0, 10) : [], counts: true });
       break;
     case "fix":
       Object.assign(e, { check: text(s.check, 200), why: code(s.why), denied: text(s.denied, 300), capped: text(s.capped, 40), counts: s.pass !== false });
@@ -120,7 +126,7 @@ export function stepOf(step, t, line = "") {
       Object.assign(e, { comments: count(s.comments), thirdParty: count(s.thirdParty), decisions: count(s.decisions), question: s.question === true, queue: s.queue === true, freshAfterFail: s.freshAfterFail === true, counts: s.pass !== false });
       break;
     case "check":
-      Object.assign(e, { tests: tally(s.tests), judged: tally(s.judged), open: Array.isArray(s.open) ? s.open.filter((x) => typeof x === "string").slice(0, 5) : [], again: count(s.again), off: s.off === true, decider: modelId(s.model), floor: text(s.floor, 120), verdicts: Array.isArray(s.verdicts) ? s.verdicts.slice(0, 20) : [] });
+      Object.assign(e, { tests: tally(s.tests), judged: tally(s.judged), open: Array.isArray(s.open) ? s.open.map((x) => clean(x, 200)).filter(Boolean).slice(0, 5) : [], again: count(s.again), off: s.off === true, decider: modelId(s.model), floor: text(s.floor, 120), verdicts: Array.isArray(s.verdicts) ? s.verdicts.slice(0, 20).map((v) => ({ place: clean(v?.place, 200) ?? "?", verdict: code(String(v?.verdict ?? "").replace(/_/g, "-")), confidence: Number.isFinite(v?.confidence) ? v.confidence : null })) : [] });
       break;
     case "comments":
       e.count = count(s.count);
@@ -168,7 +174,17 @@ export function progressData({ stage, subject = null, issue, started, now, lines
   const end = events.find((e) => e.step?.step === "exit");
   const steps = events.filter((e) => e.step?.step !== "exit");
   // Running: the last step is the Now row's, not its row's, until a later step (or the exit) follows it.
-  const current = live && !exit && steps.length ? steps.at(-1) : null;
+  // Running: the Now row is the last step still open (a span with no end yet; an AI step no ended run of its kind has
+  // closed), else the last step written. A line written beside it (a CI result while the reviewer runs, a drift
+  // advisory mid-build) is no Now row.
+  const ended = (passes || []).filter((p) => p && !p.noRun && Number.isFinite(Date.parse(p.ended)));
+  const AI = new Set(["build", "rebased", "conflict", "review", "answer", "fix", "scope"]);
+  const open = (e) => {
+    if (AI.has(e.kind)) return e.pass !== false && !ended.some((p) => passRow(p, { rebase }) === e.kind && Date.parse(p.started) >= e.t - 1000);
+    // A wait, or a step the stage marks as a span (setup, install), until the stage records its end.
+    return (e.step?.wait === true || e.step?.span === true) && !Number.isFinite(e.end);
+  };
+  const current = live && !exit && steps.length ? (steps.findLast(open) ?? steps.at(-1)) : null;
   const rows = [];
   const rowFor = (kind, t) => {
     let r = rows.find((x) => x.kind === kind);
@@ -257,7 +273,7 @@ function rowDetail(r, { at, max, data }) {
       const result = last((e) => e.result)?.result;
       if (red > wait || (red >= 0 && wait < 0)) {
         const e = ev[red];
-        const words = { "late-start": `CI had not started; waited up to ${e.minutes} min`, "held-answer": `failed: \`${e.check}\`; fixed while answering the review`, "held-next": `failed: \`${e.check}\`; fixed in the next step`, stuck: `CI did not finish: ${firstClause(e.clause)}`, "not-started": "CI did not start (GitHub's side)", base: "fails the same way on the default branch; not this change", unjudged: "could not tell whether the default branch fails the same way", setting: `setting problem: ${e.clause}` }[e.red];
+        const words = { "late-start": `CI had not started; waited up to ${e.minutes} min`, "held-answer": `failed: ${codeSpan(e.check)}; fixed while answering the review`, "held-next": `failed: ${codeSpan(e.check)}; fixed in the next step`, stuck: `CI did not finish: ${firstClause(e.clause)}`, "not-started": "CI did not start (GitHub's side)", base: "fails the same way on the default branch; not this change", unjudged: "could not tell whether the default branch fails the same way", setting: `setting problem: ${e.clause}` }[e.red];
         if (words) w.push(words);
       } else if (result && r.kind === "crossOs") w.push(result);
       else {
@@ -266,7 +282,7 @@ function rowDetail(r, { at, max, data }) {
         const failedCheck = outcome === "failed" ? [...(data.rows.find((x) => x.kind === "fix")?.events ?? []), ...(data.current?.kind === "fix" ? [data.current] : [])].findLast((e) => e.check)?.check : null;
         const where = sha ? `${r.count > 1 ? "last " : ""}on \`${sha}\`` : "";
         if (outcome === "passed") w.push(`passed${where ? `${r.count > 1 ? ", " : " "}${where}` : ""}`);
-        else if (outcome === "failed") w.push(failedCheck ? `failed: \`${failedCheck}\`` : `failed${where ? ` ${where}` : ""}`);
+        else if (outcome === "failed") w.push(failedCheck ? `failed: ${codeSpan(failedCheck)}` : `failed${where ? ` ${where}` : ""}`);
         else if (outcome === "finished") w.push(`finished${where ? ` ${where}` : ""}`);
         else if (where) w.push(where);
       }
@@ -295,7 +311,7 @@ function rowDetail(r, { at, max, data }) {
       const check = last((e) => e.check)?.check;
       const said = why && { rerun: "a fix changed nothing; failed jobs rerun", fresh: "a fix changed nothing; one more attempt in a new session", "no-fresh": `no further attempt: ${why.denied ?? ""}`, capped: `reached the ${why.capped ?? ""} limit; not checked`, unchanged: "the failure is unchanged", "no-progress": "the last fix made no progress", scope: "a fix touched build or CI files outside the plan; put back" }[why.why];
       if (said && ev.indexOf(why) > ev.findLastIndex((e) => e.check)) w.push(said);
-      else if (check) w.push(`last failure: \`${check}\``);
+      else if (check) w.push(`last failure: ${codeSpan(check)}`);
       break;
     }
     case "handoff": {
@@ -339,7 +355,7 @@ function rowDetail(r, { at, max, data }) {
       if (again) parts.push(`${again} judged again`);
       const open = [...new Set(ev.flatMap((e) => e.open))];
       const not = judged.off;
-      w.push(`${parts.join(", ")}${open.length ? `; still open: ${open.map((p) => `\`${p}\``).join(", ")}` : ""}${not ? `; ${not} not judged` : ""}`);
+      w.push(`${parts.join(", ")}${open.length ? `; still open: ${open.map((p) => codeSpan(p)).join(", ")}` : ""}${not ? `; ${not} not judged` : ""}`);
       break;
     }
     case "comments":
@@ -361,7 +377,7 @@ function rowName(r) {
   let base = name;
   if (r.kind === "conflict") {
     const b = ev.findLast((e) => e.base)?.base;
-    if (b) base = `Resolved a conflict with \`${b}\``;
+    if (b) base = `Resolved a conflict with ${codeSpan(b)}`;
   }
   if (r.kind === "answer") {
     const comments = ev.reduce((n, e) => n + e.comments, 0);
@@ -384,7 +400,7 @@ function rowName(r) {
 }
 
 /** A row's cost cell: its AI runs' known cents and runs of unknown cost; "—" when no AI ran in it. */
-const costCell = (r) => (r.usd === null && !r.unknown ? "—" : cellCost(r.cents ? r.cents / 100 : (r.usd ?? 0), r.unknown));
+const costCell = (r) => ((r.usd === null || r.usd === 0) && !r.unknown ? "—" : cellCost(r.cents ? r.cents / 100 : (r.usd ?? 0), r.unknown));
 
 /** The words of the Now row's step, its model and what its agent last reported. */
 function nowCell(d, at) {
@@ -402,12 +418,13 @@ function nowCell(d, at) {
  * The card's markdown (pure), from progressData's arguments and: `status` (the live line: the Now row's words when no
  * activity snapshot came with it), `ran` (choice.mjs ranWith), `harness`, `runId`, `runUrl`, `where` (`actions`,
  * `sandbox`, `local`), `detailMax` (the Step cells' clause: DETAIL_MAX, SHORT_DETAIL near the limit), `chart` (false: no
- * timeline chart), `explain` (false: Run details without its explanatory sentences), `notes` (Run details' lines the
+ * timeline chart), `explain` (false: Run details without its explanatory sentences), `table` (false: no table, near
+ * GitHub's limit), `notes` (Run details' lines the
  * reporter adds: the ledger cut). Returns `{card, details, chart}`: the headline, action line and table; Run details'
  * own lines (the Full log goes after them, progressBody); the timeline chart's block ("" for none).
  */
-export function progressCard({ status = "", ran = null, harness = null, runId = null, runUrl = null, where = "local", detailMax = DETAIL_MAX, chart = true, explain = true, notes = [], ...args }) {
-  const d = { ...progressData(args), status };
+export function progressCard({ status = "", ran = null, harness = null, runId = null, runUrl = null, where = "local", detailMax = DETAIL_MAX, chart = true, explain = true, table: showTable = true, notes = [], ...args }) {
+  const d = { ...progressData(args), status: clean(status, 400) };
   const at = (t) => clockText(t, { zone: d.zone, abbr: false, date: d.crosses });
   const atZ = (t) => clockText(t, { zone: d.zone, date: d.crosses });
   const running = d.live && !d.exit;
@@ -427,9 +444,10 @@ export function progressCard({ status = "", ran = null, harness = null, runId = 
   const times = running ? `Started ${atZ(d.started)} · updated ${atZ(d.now)}` : d.live ? `${at(d.started)} – ${atZ(d.now)}` : atZ(d.now);
   const line2 = [times, basis, ...unknownWords].filter(Boolean).join(" · ");
   const head = [line1, line2];
-  if (d.exit === "stopped" && d.endStep?.reason) head.push(plainText(d.endStep.reason));
+  if (d.exit === "stopped" && clean(d.endStep?.reason, 300)) head.push(plainText(clean(d.endStep.reason, 300)));
   // A send-back's rebase: which rebase of the Objective it was, and all its rebases' cost (session.mjs rebaseExitLine).
-  if (typeof d.endStep?.rebase === "string" && d.endStep.rebase) head.push(plainText(`${d.endStep.rebase[0].toUpperCase()}${d.endStep.rebase.slice(1)}`));
+  const rebaseLine = clean(d.endStep?.rebase, 300);
+  if (rebaseLine) head.push(plainText(`${rebaseLine[0].toUpperCase()}${rebaseLine.slice(1)}`));
   // The action line, for the states that need a person, and why.
   const act = actionLines(d, atZ);
   if (act.length) head.push("", ...act);
@@ -439,9 +457,9 @@ export function progressCard({ status = "", ran = null, harness = null, runId = 
     return `| ${at(r.t)} | ${tableCell(`${rowName(r)}${detail ? ` · ${detail}` : ""}`, 400)} | ${r.took === null ? "—" : durationText(r.took)} | ${costCell(r)} |`;
   });
   if (running && d.current) rows.push(`| ${at(d.current.t)} | ${nowCell(d, at)} | running | ${d.snap?.snap && !d.snap.snap.ended ? "when it ends" : "—"} |`);
-  else if (running) rows.push(`| ${at(d.started)} | **Now:** ${tableCell(status ? status : "starting")} | running | — |`);
+  else if (running) rows.push(`| ${at(d.started)} | **Now:** ${tableCell(clean(status, 400) ?? "starting")} | running | — |`);
   if (!running && d.live) rows.push(`| | **Total** | **${minutesText(wall)}** | **${usd === null ? "—" : cellCost(usd, u.runs)}** |`);
-  const table = rows.length ? ["", "| Time | Step | Took | Cost |", "| :-- | :-- | --: | --: |", ...rows] : [];
+  const table = !showTable ? ["", "The steps are in Run details' Full log: this comment is near GitHub's size limit."] : rows.length ? ["", "| Time | Step | Took | Cost |", "| :-- | :-- | --: | --: |", ...rows] : [];
   // The timeline chart: at the end only, with three or more rows that took a recorded time.
   const timed = d.rows.filter((r) => r.took !== null && r.spans.length);
   const gantt = chart && !running && timed.length >= 3 ? ganttChart(timed.map((r) => ({ section: ROWS[r.kind][2], bars: r.spans.map(([a, b]) => ({ start: a, end: b, tag: "active" })) })), { zone: d.zone, days: d.crosses, leftPadding: 110 }) : null;
@@ -453,7 +471,7 @@ export function progressCard({ status = "", ran = null, harness = null, runId = 
 function actionLines(d, atZ) {
   const s = d.endStep;
   const why = (r) => {
-    const first = String(r ?? "").split(/(?<=[.!?])\s/)[0];
+    const first = (clean(r, 2000) ?? "").split(/(?<=[.!?])\s/)[0];
     return plainText(clip(first, 300));
   };
   if (d.exit === "blocked") {
@@ -462,7 +480,7 @@ function actionLines(d, atZ) {
   }
   if (d.exit === "question") {
     const todo = s?.form === "pr" && s.pr ? `answer in a comment on this issue or PR #${s.pr}, then mark PR #${s.pr} ready. Pendulum goes on from where it stopped.` : "answer the question in a comment on this issue. Pendulum goes on from where it stopped.";
-    return [`> **What to do:** ${todo}`, ">", `> **Question:** ${plainText(clip(String(s?.reason ?? "").replace(/^question:\s*/i, ""), 300))}`];
+    return [`> **What to do:** ${todo}`, ">", `> **Question:** ${plainText(clip((clean(s?.reason, 2000) ?? "").replace(/^question:\s*/i, ""), 300))}`];
   }
   if (d.exit === "paused") return [`> **What to do:** nothing; Pendulum goes on when the usage limit resets${s?.resetAt ? ` at ${atZ(s.resetAt)}` : ""}.`];
   if (d.exit === "waiting") {
@@ -476,9 +494,9 @@ function actionLines(d, atZ) {
 function runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at }) {
   const out = [];
   const setups = d.rows.find((r) => r.kind === "setup")?.events ?? [];
-  const account = ran?.account ? ` · account \`${ran.account}\`` : "";
+  const account = ran?.account ? ` · account ${codeSpan(ran.account)}` : "";
   const place = { actions: "on GitHub Actions", sandbox: "in the cloud sandbox", local: "on this machine" }[where] ?? "on this machine";
-  const labels = ran?.labels?.length ? ` · chosen by ${ran.labels.map((l) => `\`${l}\``).join(", ")}` : "";
+  const labels = ran?.labels?.length ? ` · chosen by ${ran.labels.map((l) => codeSpan(l)).join(", ")}` : "";
   if (runId) out.push(`- **Run:** ${runUrl ? `[${runId}](${runUrl})` : runId} ${place}${harness ? ` · agent ${AGENTS[harness] ?? harness}` : ""}${account}${labels}`);
   const judge = d.rows.flatMap((r) => r.events).findLast((e) => e.decider)?.decider;
   const models = ran ? [["worker", ran.worker], ["sub-agents", ran.subagent], ["reviewer", ran.reviewer]].filter(([, id]) => id).map(([k, id]) => `${k} ${modelName(id)}`) : [];
@@ -490,15 +508,15 @@ function runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at 
   const s = d.snap?.snap;
   if (d.live && !d.exit && s && !s.ended) {
     const bits = [];
-    if (s.subagentsActive?.length) bits.push(`${many(s.subagentsActive.length, "sub-agent")} running (${s.subagentsActive.map((a) => `${a.type}: ${a.description || "?"}, ${a.minutes} min`).join("; ")})`);
+    if (s.subagentsActive?.length) bits.push(`${many(s.subagentsActive.length, "sub-agent")} running (${s.subagentsActive.map((a) => `${clean(a.type, 60) ?? "?"}: ${clean(a.description, 200) ?? "?"}, ${a.minutes} min`).join("; ")})`);
     if (s.backgroundCommands) bits.push(`${many(s.backgroundCommands, "background command")} running`);
-    if (s.lastTool) bits.push(`last tool ${s.lastTool}`);
+    if (clean(s.lastTool, 300)) bits.push(`last tool ${clean(s.lastTool, 300)}`);
     const k = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
     if (s.tokens) bits.push(`${k(s.tokens.input)} tokens in, ${k(s.tokens.output)} out`);
     if (bits.length) out.push(`- **Right now:** ${plainText(bits.join("; "))}`);
   }
   const verdicts = explain ? (d.rows.find((r) => r.kind === "check")?.events.flatMap((e) => e.verdicts.map((v) => ({ ...v, floor: e.floor }))) ?? []) : [];
-  if (verdicts.length) out.push(`- **AI judge verdicts:** ${plainText(verdicts.map((v) => `\`${v.place}\` ${String(v.verdict ?? "no verdict").replace(/_/g, " ")}${typeof v.confidence === "number" ? ` (${v.confidence.toFixed(2)})` : ""}`).join("; "))}${verdicts[0].floor ? ` · floor: ${plainText(verdicts[0].floor)}` : ""}`);
+  if (verdicts.length) out.push(`- **AI judge verdicts:** ${plainText(verdicts.map((v) => `${codeSpan(v.place)} ${String(v.verdict ?? "no verdict").replace(/-/g, " ")}${typeof v.confidence === "number" ? ` (${v.confidence.toFixed(2)})` : ""}`).join("; "))}${verdicts[0].floor ? ` · floor: ${plainText(verdicts[0].floor)}` : ""}`);
   // The unknown cost, one sentence per cause with its count (from the AI runs' own records), else the spend line's causes.
   const counts = [];
   for (const r of d.rows) for (const p of r.passes) if (count(p.usdUnknown) || typeof p.usd !== "number") counts.push([(p.usdUnknownWhy ?? [])[0] ?? (p.decision ? "decision" : "unreported"), count(p.usdUnknown) || 1]);
@@ -516,7 +534,7 @@ function runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at 
   if (premium) out.push(`- **Copilot:** ${premium} premium requests`);
   for (const e of d.rows.find((r) => r.kind === "rebased")?.events.filter((x) => x.note) ?? []) out.push(`- **Rebase:** ${plainText(e.note)}`);
   for (const n of notes) out.push(`- ${plainText(n)}`);
-  if (explain) out.push(d.live && !d.exit ? "- — means no AI ran in that step. Steps are grouped by kind; the full log below is in time order." : "- — means no AI ran in that step; AI judge calls are counted in their own row. Steps can overlap, so the Took column does not add up to the total; the full log below is in time order.");
+  if (explain) out.push(d.live && !d.exit ? "- In Took, — means no recorded start and end; in Cost, — means no AI ran in that step or it cost nothing. Steps are grouped by kind; the full log below is in time order." : "- In Took, — means no recorded start and end; in Cost, — means no AI ran in that step or it cost nothing, and AI judge calls are counted in their own row. Steps can overlap, so the Took column does not add up to the total; the full log below is in time order.");
   void at;
   return out.join("\n");
 }

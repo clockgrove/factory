@@ -60,7 +60,8 @@ import {
   transientError,
   RETRY,
 } from "./github.mjs";
-import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { input, log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { endCard } from "./finish-card.mjs";
 import { lineClock, logTime, timeZone, whenText } from "./clock.mjs";
 import { SHORT_DETAIL, progressBody, progressCard } from "./progress-card.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
@@ -989,11 +990,6 @@ export const STOP_WRITE_MS = 5_000;
  * 65,536): past it the stage writes the ledger line's cut form (logic.mjs ledgerCut), so its spend line still lands.
  */
 export const PROGRESS_LEDGER_ROOM = 60_000;
-/**
- * The size, in characters, the whole progress comment stays under with its card (progress-card.mjs): past it the card
- * is written without its table, which a log within PROGRESS_LEDGER_ROOM then always leaves room for.
- */
-export const PROGRESS_CARD_ROOM = 64_000;
 /** GitHub's limit on a comment's body, in characters. */
 export const GITHUB_COMMENT_MAX = 65_536;
 
@@ -1090,7 +1086,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const size = (b) => key.length + 1 + b.length;
     // Near GitHub's limit (past PROGRESS_LEDGER_ROOM), in order: no timeline chart, shorter Step cells, no explanatory
     // sentences, then the ledger line's cut form (logic.mjs ledgerCut: the final spend line is never lost to it), and
-    // only where GitHub would refuse the write otherwise, the Full log's middle lines.
+    // only where GitHub would refuse the write otherwise, the table, then the Full log's middle lines.
     const tries = [{}, { chart: false }, { chart: false, detailMax: SHORT_DETAIL }, { chart: false, detailMax: SHORT_DETAIL, explain: false }];
     for (const opts of tries) {
       const body = progressBody(cardOf(opts), logOf(), tailOf(own));
@@ -1099,8 +1095,12 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const last = { chart: false, detailMax: SHORT_DETAIL, explain: false };
     const l = own ? ledgerCut(own, `left out to keep this comment under ${PROGRESS_LEDGER_ROOM} characters`) : null;
     let body = progressBody(cardOf(last), logOf(), tailOf(l));
+    if (size(body) < GITHUB_COMMENT_MAX) return body;
+    // Past GitHub's limit even so: the table goes before any Full log line does.
+    const bare = { ...last, table: false };
+    body = progressBody(cardOf(bare), logOf(), tailOf(l));
     // The first 20 and the last 40 lines; fewer when even those would not fit (lines can be 2,000 characters long).
-    for (let [head, tail] = [20, 40]; size(body) >= GITHUB_COMMENT_MAX && head + tail > 0; tail > head ? (tail -= 5) : (head -= 5)) body = progressBody(cardOf(last), logOf([Math.max(0, head), Math.max(0, tail)]), tailOf(l));
+    for (let [head, tail] = [20, 40]; size(body) >= GITHUB_COMMENT_MAX && head + tail > 0; tail > head ? (tail -= 5) : (head -= 5)) body = progressBody(cardOf(bare), logOf([Math.max(0, head), Math.max(0, tail)]), tailOf(l));
     return body;
   };
   /**
@@ -1396,7 +1396,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   const begin = async (sha = null) => {
     if (sha && sha === redHead) return;
     log(`${label} pass ${passes}: ${byChecks ? `${checks.what || "required checks"} ${checks.names.join(checks.request ? "; " : ", ")}` : `${commands.length} command(s)`}`);
-    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? checks.what || "required checks" : `${commands.length} commands`})`, byChecks ? { step: "ci" } : byChecks ? { step: "ci", begin: true } : { step: "commands", commands: commands.length });
+    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? checks.what || "required checks" : `${commands.length} commands`})`, byChecks ? { step: "ci", begin: true } : { step: "commands", commands: commands.length });
   };
   const validate = async () => {
     // The CI wait's step (progress-card.mjs): its end and its outcome are set on it as the wait returns.
@@ -1915,7 +1915,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     }
     // The caller takes this red to its own pass (holdRed): no fix pass here.
     const held = holdRed?.();
-    if (onPhase) await onPhase(`${label} pass ${passes} red: ${failed.command}; ${held ? (typeof held === "string" ? held : "held for the stage's next pass") : "fix run"}${judged ? ` (progress: ${judged.why})` : ""}`, held ? { step: "red", detail: `${failed.command}: ${typeof held === "string" ? held : "held for the stage's next pass"}` } : held ? { step: "ci", red: typeof held === "string" ? "held-answer" : "held-next", check: failed.command } : { step: "fix", check: failed.command });
+    if (onPhase) await onPhase(`${label} pass ${passes} red: ${failed.command}; ${held ? (typeof held === "string" ? held : "held for the stage's next pass") : "fix run"}${judged ? ` (progress: ${judged.why})` : ""}`, held ? { step: "ci", red: typeof held === "string" ? "held-answer" : "held-next", check: failed.command } : { step: "fix", check: failed.command });
     if (held) return { green: false, passes, lastOutput: tail, command: failed.command, usage, held: { passes, sha: v.sha ?? null, failures, detail, tail, lead, command: failed.command } };
     handed = shape;
     redHead = v.fromChecks ? v.sha : null;
@@ -2599,7 +2599,20 @@ export function doctorBlock(rows) {
  * decides whether the notice says to resume or restart (nextStep), unless `next` says it. Returns the exit applied and
  * its reason: a Question whose PR GitHub would not draft is applied as a Block (cause `pendulum`).
  */
-export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "pendulum", next = null }, { token, notice = null }) {
+/** How long a Blocked or Question end waits on its finish card (stateCard) before it goes on without it. */
+export const STATE_CARD_MS = 20_000;
+/**
+ * The Objective's finish card for a Blocked or Question end (finish-card.mjs endCard), wherever the exit is applied (a
+ * stage, the dispatcher, a launcher, the local loop), so the card always says the latest state; never on an outage,
+ * which may not reach GitHub, and bounded (STATE_CARD_MS) so it never holds the end's own outputs. Never throws. A stage
+ * writes it after its exit line (`card: false` to applyExit), so the card reads the stage's final spend line.
+ */
+export async function stateCard(repo, issue, { exit, reason, form = null, next = null, cause = null }, { token }) {
+  if (cause === "outage") return;
+  await endCard(repo, issue, { token }, { exit, reason, form, next, appId: input("app_id") || process.env.PENDULUM_LOCAL_APP_ID || null, log, timeoutMs: STATE_CARD_MS }).catch((e) => log(`#${issue}: the ${exit} card was not written (${String(e?.message || e).slice(0, 120)})`));
+}
+
+export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "pendulum", next = null, card = true }, { token, notice = null }) {
   const project = await findProject(repo, { token }).catch(() => null);
   // The reason and the output can carry the harness's words (its exit record, a command's output): published as
   // Pendulum, they are sanitised like every other harness text (handoff.mjs sanitize).
@@ -2618,6 +2631,7 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
     // `key` names a Block whose repeats are one condition (local mode's git-identity): each repeat updates that comment.
     const body = `${at}${blockedLine({ issue, pr, stage, reason, fix, delivered, cause, next })}${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-DETAIL_CHARS).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}\n${blockMarker(cause)}`;
     await postNotice("Blocked notice", (o) => upsertComment(repo, issue, marker(issue, "blocked", key || `${stage}:${runId}`), body, o));
+    if (card) await stateCard(repo, issue, { exit, reason, next: next || nextOf(cause), cause }, { token });
     return { exit, reason };
   }
   if (exit === "question") {
@@ -2646,6 +2660,7 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
       const body = questionNotice({ at, stage, reason, pr, askOnIssue });
       await postNotice("Question notice", (o) => upsertComment(repo, issue, questionMarker(issue, { stage, runId, form }), body, o)).catch((e) => log(`Question notice: ${e.message.slice(0, 120)}`));
     }
+    if (card) await stateCard(repo, issue, { exit, reason, form, cause: null }, { token });
     return { exit, reason };
   }
   if (exit === "delivered") {

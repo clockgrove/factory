@@ -70,7 +70,7 @@ const RESOLVING = new Set(["fixed", "rebutted", "decided"]);
 export const resolves = (v, min = MIN_CONFIDENCE) => RESOLVING.has(v?.verdict) && typeof v.confidence === "number" && v.confidence >= min;
 
 /** The most characters of each part of one question's input. */
-export const INPUT_CAPS = Object.freeze({ finding: 4000, reply: 4000, diff: 12_000, other: 8000, body: 16_000, entries: 4000, rules: 8000, decisions: 8000, decision: 2000 });
+export const INPUT_CAPS = Object.freeze({ finding: 4000, reply: 4000, diff: 12_000, other: 8000, left: 2000, body: 16_000, entries: 4000, rules: 8000, decisions: 8000, decision: 2000 });
 /** The most questions in flight at once. */
 export const CONCURRENCY = 4;
 
@@ -157,14 +157,44 @@ const sections = (diff) =>
     .map((text) => ({ header: text.split("\n", 1)[0], text }));
 const onPath = (header, path) => !!path && (header.endsWith(` b/${path}`) || header.includes(` a/${path} `));
 
+/** The path a section's header names: the file's, or for a rename its new one. */
+const pathOf = (header) => {
+  const both = header.slice("diff --git a/".length);
+  const half = (both.length - 3) / 2;
+  return both.slice(half, half + 3) === " b/" && both.slice(0, half) === both.slice(half + 3) ? both.slice(0, half) : both.slice(both.lastIndexOf(" b/") + 3);
+};
+/** Whether a text names a path exactly: the path whole, not as a part of a longer one. */
+const names = (text, path) => !!path && new RegExp(`(?<![\\w./-])${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w/-]|\\.\\w)`).test(String(text ?? ""));
+
+/**
+ * The other files' sections as one question shows them (#631): cut at INPUT_CAPS.other, and a cut one ends with the
+ * paths of the files it shows nothing of (within INPUT_CAPS.left, then their count), so the model knows the change
+ * went past what it was shown.
+ */
+function otherPart(others) {
+  const text = others.map((s) => s.text).join("");
+  if (text.length <= INPUT_CAPS.other) return text;
+  const left = [];
+  for (let i = 0, at = 0; i < others.length; at += others[i].text.length, i += 1) if (at >= INPUT_CAPS.other) left.push(pathOf(others[i].header));
+  let shown = 0;
+  for (let used = 0; shown < left.length && used + left[shown].length + 1 <= INPUT_CAPS.left; shown += 1) used += left[shown].length + 1;
+  if (!left.length) return cut(text, INPUT_CAPS.other);
+  const tail = [...left.slice(0, shown), ...(left.length > shown ? [`${left.length - shown} more file(s)`] : [])].join(", ");
+  return `${cut(text, INPUT_CAPS.other)}\n[files changed too, and not shown for length: ${tail}]`;
+}
+
 /**
  * The answer's change as one question shows it, from the whole diff since the finding was raised (`diff`, null when it
- * could not be made): the finding's own file, then the other files it changed, each cut at its cap.
+ * could not be made): the finding's own file, then the other files it changed, each cut at its cap. Of the other files,
+ * those the reply names by path come first, then those the finding's body names, then the others, each group in git's
+ * order (#631): a fix the reply points at is never the part cut away behind files that sort before it.
  */
-export function changeOf(diff, path) {
+export function changeOf(diff, path, { reply = "", body = "" } = {}) {
   if (diff === null || diff === undefined) return { own: null, other: "" };
   const all = sections(diff);
-  return { own: all.filter((s) => onPath(s.header, path)).map((s) => s.text).join(""), other: all.filter((s) => !onPath(s.header, path)).map((s) => s.text).join("") };
+  const rank = (s) => (names(reply, pathOf(s.header)) ? 0 : names(body, pathOf(s.header)) ? 1 : 2);
+  const others = all.filter((s) => !onPath(s.header, path)).map((s) => ({ ...s, rank: rank(s) }));
+  return { own: all.filter((s) => onPath(s.header, path)).map((s) => s.text).join(""), other: otherPart([0, 1, 2].flatMap((r) => others.filter((s) => s.rank === r))) };
 }
 
 /**
@@ -183,7 +213,7 @@ export function findingInput({ repo, prNumber, finding, reply, diff, bodyDiff, i
   const data = (title, text) => [title, `<<<BEGIN ${tag}>>>`, String(text).trimEnd(), `<<<END ${tag}>>>`, ""];
   // A writer's own line comment (third-party-review.mjs writerComment: `writer`, its author) is a maintainer's, not Pendulum's reviewer's.
   const by = finding.writer ? `${finding.writer}, a maintainer (someone with write access to the repository)` : finding.from ? `${finding.from}, a reviewer outside Pendulum` : "Pendulum's reviewer";
-  const { own, other } = changeOf(diff, finding.path);
+  const { own, other } = changeOf(diff, finding.path, { reply, body: finding.body });
   const entries = acceptanceEntries(issue);
   return redactSecrets(
     [
@@ -193,7 +223,7 @@ export function findingInput({ repo, prNumber, finding, reply, diff, bodyDiff, i
       ...data(`Finding by ${by}, at ${findingPlace(finding)}${finding.raisedAt ? `, raised ${when(finding.raisedAt)}` : ""}:`, cut(finding.body, INPUT_CAPS.finding)),
       ...data("The author's reply:", cut(reply, INPUT_CAPS.reply)),
       ...data(`What the pull request changed in ${finding.path || "its files"} since the finding was raised (the default branch's own changes left out):`, own === null ? "(the change could not be read)" : own.trim() ? cut(own, INPUT_CAPS.diff) : "(no change)"),
-      ...data("What it changed in its other files since then:", own === null ? "(the change could not be read)" : other.trim() ? cut(other, INPUT_CAPS.other) : "(no change)"),
+      ...data("What it changed in its other files since then:", own === null ? "(the change could not be read)" : other.trim() ? other : "(no change)"),
       ...(bodyDiff === undefined ? [] : data("What it changed in its body (the pull request's description) since then:", bodyDiff === null ? "(whether the body changed could not be read)" : bodyDiff.trim() ? cut(bodyDiff, INPUT_CAPS.body) : "(no change)")),
       ...data("The issue's acceptance entries:", entries.length ? cut(entries.map((e) => `${e.id}. ${e.text}`).join("\n"), INPUT_CAPS.entries) : String(issue || "").trim() ? cut(issue, INPUT_CAPS.entries) : "(none stated)"),
       ...data("The repository's rules:", String(rules || "").trim() ? cut(rules, INPUT_CAPS.rules) : "(none given)"),

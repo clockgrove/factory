@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { RETRY, repoOf } from "../scripts/lib/github.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
 import { COMMENT_MAX, endCard, finishCardBody, finishData, finishEndOf, finishMarker, finishSummary, postFinishCard, readSummary, renderFinishCard } from "../scripts/lib/finish-card.mjs";
-import { summaryFor } from "../scripts/lib/report.mjs";
+import { pushedBy, summaryFor } from "../scripts/lib/report.mjs";
 import * as F from "./fixtures/finish-ends.mjs";
 
 RETRY.sleep = async () => {};
@@ -133,15 +133,15 @@ test("finish card (#589): the report reads a non-merged card's Objective from it
   const blocked = withEnv(ZONE, () => finishCardBody(finishData(o)));
   const issueUrl = `https://api.github.com/repos/acme/app/issues/${o.issue.number}`;
   const comments = [...o.comments, { id: 9, user: { login: F.SELF, type: "Bot" }, created_at: "2026-11-17T20:53:00Z", updated_at: "2026-11-17T20:53:00Z", body: blocked }].map((c) => ({ ...c, issue_url: issueUrl }));
-  assert.equal(summaryFor(152, comments, scope, { mine }), null, "a Blocked card is no merge: the stages are read");
+  assert.equal(summaryFor(152, comments, scope, { mine, pushed: pushedBy(null) }), null, "a Blocked card is no merge: the stages are read");
   // The same Objective later merged: its card was written over in place (created at the Block, updated at the merge).
   const m = F.mergedClean();
   const url = `https://api.github.com/repos/acme/app/issues/402`;
   const ledgered = m.comments.map((c) => ({ ...c, issue_url: url, body: /:progress:/.test(c.body) ? `${c.body}\n<!-- pendulum:ledger {"p":[]} -->` : c.body }));
   const mergedBody = withEnv(ZONE, () => finishCardBody(finishData({ ...m, comments: ledgered })));
   const upserted = { id: 10, user: { login: F.SELF, type: "Bot" }, created_at: "2026-11-17T18:06:00Z", updated_at: "2026-11-17T18:32:00Z", body: mergedBody, issue_url: url };
-  assert.ok(summaryFor(402, [...ledgered, upserted], scope, { mine }), "its figures are those of its last write, after every stage");
-  assert.equal(summaryFor(402, [...ledgered, { ...upserted, updated_at: upserted.created_at }], scope, { mine }), null, "a card older than a stage's last write is not read");
+  assert.ok(summaryFor(402, [...ledgered, upserted], scope, { mine, pushed: pushedBy(null) }), "its figures are those of its last write, after every stage");
+  assert.equal(summaryFor(402, [...ledgered, { ...upserted, updated_at: upserted.created_at }], scope, { mine, pushed: pushedBy(null) }), null, "a card older than a stage's last write is not read");
 });
 
 test("finish card (#589): over GitHub's limit the card leaves out its run log first; its summary and end line stay", () => {

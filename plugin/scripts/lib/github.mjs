@@ -2021,7 +2021,7 @@ export async function primeSelf(opts) {
  * after FAILED_READ_MS, and a login past the bound is logged once a window. For a repository other than the one the
  * writer list is for, that list starts over (logic.mjs setVerified), as primeWriters' does. Returns `items`.
  */
-const WRITE_PERMISSIONS = new Set(["admin", "maintain", "write"]);
+export const WRITE_PERMISSIONS = new Set(["admin", "maintain", "write"]);
 const authorReads = new Map();
 export async function verifyAuthors(repo, items, opts) {
   if (!Array.isArray(items)) return items;

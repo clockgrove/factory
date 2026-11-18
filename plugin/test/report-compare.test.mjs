@@ -73,7 +73,7 @@ function objective(w, n, { arms = [], labeller = ME, kind = "api", work = [["wor
  * #24 labelled through another App). Every figure below is chosen so each median and quartile is exact.
  */
 function experiment() {
-  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", [OUTSIDER.login]: "triage" } };
+  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", [OUTSIDER.login]: "triage", teammate: "write" } };
   objective(w, 11, { arms: [FAST], work: [["work-1", 1, 10]], wall: 60 });
   objective(w, 12, { arms: [FAST], work: [["work-1", 1.5, 15], ["validation-fix-1", 0.5, 5]], reviews: [[["review", 0.5, 5]]], wall: 90 });
   objective(w, 13, { arms: [FAST], work: [["work-1", 4, 30]], reviews: [[["review", 0, 1]], [["review", 0, 1]]], wall: 180 });
@@ -140,6 +140,7 @@ function fakeGitHub(w) {
     m = /^\/issues\/(\d+)\/comments$/.exec(p);
     if (m) return page(w.comments.filter((c) => c.issue_url === issueUrl(Number(m[1]))), u);
     m = /^\/collaborators\/([^/]+)\/permission$/.exec(p);
+    if (m && w.permissions[decodeURIComponent(m[1])] === "rate-limited") return json({ message: "API rate limit exceeded" }, 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 1) });
     if (m) return w.permissions[decodeURIComponent(m[1])] === 403 ? json({ message: "Must have push access to view repository collaborators." }, 403) : json({ permission: w.permissions[decodeURIComponent(m[1])] ?? "read" });
     if (p === "/pulls") return page(w.pulls, u);
     if (p === "/actions/artifacts") return page((w.artifacts[u.searchParams.get("name")] || []).map(({ record, ...a }) => a), u, (artifacts, total) => ({ total_count: total, artifacts }));
@@ -346,6 +347,9 @@ test("report --compare: a labeller whose permission the token may not read (403)
   assert.deepEqual([slow.unverifiable, slow.untrusted], [[22], [24]]);
   assert.deepEqual(r.source.missing.find((m) => m.code === "label-unverifiable").issues, [22]);
   assert.match(renderReport(r), /Not counted for slow, its labeller's permission unreadable with this token: #22\./);
+  // A rate limit's 403 says nothing of what the token may read: the report fails, and no labeller is called unverifiable.
+  w.permissions.locked = "rate-limited";
+  await assert.rejects(report(w, ["--compare", "fast,slow", "--json"]), /rate limit|403/i);
 });
 
 test("report --compare: the latest application of the label counts: removed and re-applied by someone else", async () => {
@@ -383,7 +387,7 @@ test("report --compare: an issue counts only when every arm that lists it was ch
 });
 
 test("report --compare: with no billing kind holding dollars, one dollar row still gives n and the Objectives left out", async () => {
-  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin" } };
+  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", teammate: "write" } };
   objective(w, 31, { arms: [FAST], work: [["work-1", 0, 5]], unknown: true, wall: 10 });
   objective(w, 41, { arms: [SLOW], work: [["work-1", 0, 5]], wall: 20 });
   const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
@@ -392,7 +396,7 @@ test("report --compare: with no billing kind holding dollars, one dollar row sti
 
 test("report --compare: a per-pass ledger read from the progress comment counts for the model minutes and fix passes; an unattributed stage still leaves its Objective out", async () => {
   // Arm fast on local stages whose ledger rides on the progress comment (#543); arm slow on Actions, as before.
-  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin" } };
+  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", teammate: "write" } };
   objective(w, 51, { arms: [FAST], route: "comment", work: [["work-1", 1, 10]], wall: 60 });
   objective(w, 52, { arms: [FAST], route: "comment", work: [["work-1", 1.5, 15], ["validation-fix-1", 0.5, 5]], reviews: [[["review", 0.5, 5]]], wall: 90 });
   objective(w, 53, { arms: [FAST], route: "comment", work: [["work-1", 4, 30]], reviews: [[["review", 0, 1]], [["review", 0, 1]]], wall: 180 });

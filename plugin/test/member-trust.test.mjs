@@ -6,7 +6,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RETRY, listComments, localSpendToday, primeWriters, reviewThreads, verifyAuthors } from "../scripts/lib/github.mjs";
-import { AUTHOR_READS_MAX, FAILED_READ_MS, VERIFIED_TTL_MS, decisionSpendMarker, marker, reviewBody, setSelf, setWriters, trustedAuthor } from "../scripts/lib/logic.mjs";
+import { AUTHOR_READS_MAX, FAILED_READ_MS, VERIFIED_TTL_MS, decisionSpendMarker, githubWriter, marker, pushAuthor, reviewBody, setMaintainers, setSelf, setWriters, trustedAuthor } from "../scripts/lib/logic.mjs";
 import { unaddressedReviewComments } from "../scripts/lib/session.mjs";
 import { findingInput } from "../scripts/lib/finding-check.mjs";
 
@@ -183,4 +183,15 @@ test("#605: a writer's own line comment goes to the finding check as a maintaine
   assert.match(input, /^Finding by dev, a maintainer \(someone with write access to the repository\), at src\/a\.ts:3:\n<<<BEGIN t{16}>>>\nRename this\.\n<<<END t{16}>>>$/m);
   assert.doesNotMatch(input, /Pendulum's reviewer/);
   assert.match(findingInput({ repo: "acme/app", prNumber: 12, finding: { id: 6, path: "src/a.ts", line: 3, body: "x" }, reply: "y", diff: "" }, tag), /^Finding by Pendulum's reviewer, at /m);
+});
+
+test("#607: a pinned maintainer is trusted for decisions by id, but the finish card counts their records only on GitHub's answer, as the report does: their permission is read", async () => {
+  const gh = github({ comments: [{ id: 1, user: { login: "keeper", id: 77, type: "User" }, author_association: "MEMBER", body: "hi" }], permissions: { keeper: "read" } });
+  await withGitHub(gh, async () => {
+    setMaintainers(REPO.full, ["keeper#77"]);
+    const [c] = await listComments(REPO, 12, { token: "t" });
+    assert.equal(gh.reads.keeper, 1, "read, as the report reads it");
+    assert.equal(pushAuthor(c), true, "a pinned maintainer still decides");
+    assert.equal(githubWriter(c), false, "no writer by GitHub's answer: the card counts nothing of theirs");
+  });
 });

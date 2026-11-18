@@ -389,11 +389,13 @@ test("finish card: an Actions stage's dollars come from its usage artifact, its 
  * A fake GitHub holding closed Objectives: #3 merged (scratch #3's run, its stages' spend lines in their progress
  * comments; `labels3` its labels), #7 Blocked with a PR a person merged, #8 closed with its PR still open. Comments posted
  * are there on the next read. `failCard`: the status the card's POST answers with; `failBody`: the PR body PATCH's.
+ * `extra3`: more comments on #3; `permissions`: each login's permission on the repository (none: a 404); `onTimeline3`,
+ * called as #3's timeline is read.
  */
-function fakeRepo({ failCard = 0, failOn = 3, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"], labels8 = ["pendulum:objective", "pendulum:in-review"], dropLabels = false, pr80 = {} } = {}) {
+function fakeRepo({ failCard = 0, failOn = 3, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"], labels8 = ["pendulum:objective", "pendulum:in-review"], dropLabels = false, pr80 = {}, extra3 = [], permissions = {}, onTimeline3 = () => {} } = {}) {
   const issue = (number, labels) => ({ number, state: "closed", state_reason: "completed", closed_at: real.issue.closed_at, labels: labels.map((name) => ({ name })), body: "", user: { login: "kirkmarple-clockgrove", type: "User" } });
   const closed = [issue(3, labels3), issue(7, ["pendulum:objective", "pendulum:blocked"]), issue(8, labels8)];
-  const comments = { 3: withSpend({ work: { usd: 0.35637 }, review: { usd: 0.163442 } }), 7: [], 8: [] };
+  const comments = { 3: [...withSpend({ work: { usd: 0.35637 }, review: { usd: 0.163442 } }), ...extra3], 7: [], 8: [] };
   const prs = { 3: [{ ...real.pr, user: bot }], 7: [{ number: 70, merged_at: "2026-11-17T02:27:36Z", created_at: "2026-11-17T02:20:00Z" }], 8: [{ number: 80, node_id: "PR_80", state: "open", draft: false, merged_at: null, created_at: "2026-11-17T02:20:00Z", ...pr80 }] };
   const writes = [];
   const reads = [];
@@ -421,9 +423,11 @@ function fakeRepo({ failCard = 0, failOn = 3, failBody = 0, labels3 = ["pendulum
     if (method === "GET" && p === `/commits/${real.pr.merge_commit_sha}/check-runs`) return json({ total_count: real.checks.length, check_runs: real.checks });
     if (method === "GET" && p === "/actions/artifacts") return json({ total_count: 0, artifacts: [] });
     if (method === "GET" && /^\/commits\/c+\/check-runs$/.test(p)) return json({ total_count: 0, check_runs: [] });
-    if (method === "GET" && p === "/issues/3/timeline") return json(real.timeline);
+    if (method === "GET" && p === "/issues/3/timeline") return onTimeline3(), json(real.timeline);
     if (method === "GET" && /^\/issues\/\d+\/timeline$/.test(p)) return json([]);
     if (method === "GET" && p.endsWith("/collaborators")) return json([{ login: "kirkmarple-clockgrove" }]);
+    const perm = /^\/collaborators\/([^/]+)\/permission$/.exec(p);
+    if (method === "GET" && perm) return permissions[decodeURIComponent(perm[1])] ? json({ permission: permissions[decodeURIComponent(perm[1])] }) : json({ message: "Not Found" }, 404);
     if (method === "PATCH" && p === "/pulls/4" && failBody) return json({ message: "failed" }, failBody);
     const c = /^\/issues\/(\d+)\/comments$/.exec(p);
     if (c && method === "GET") return json(comments[c[1]] ?? []);
@@ -496,6 +500,30 @@ test("finish card: the dispatcher's Done pass posts it once when an Objective cl
   const second = await tickOver(fake);
   assert.deepEqual(second.finished, []);
   assert.ok(!fake.writes.slice(before).some((w) => w.includes(finishMarker(3)) || w.includes(finishMarker(8)) || w.startsWith("PATCH /pulls/4")), "posted once: a merge and a close are final");
+});
+
+test("finish card (#607): a read-only member's forged stage comment changes nothing on the card; a writer's stage is still a run of unknown cost", async () => {
+  const cardOf = (fake) => fake.writes.find((w) => w.startsWith(`POST /issues/3/comments ${finishMarker(3)}\n`));
+  const at = "2026-11-17T02:26:00Z";
+  let nextId = 950;
+  const stage = (login, association, key) => ({ id: (nextId += 1), user: { login, type: "User" }, author_association: association, created_at: at, updated_at: at, body: [`<!-- pendulum:3:progress:work:${key} -->`, "Pendulum work: started.", spendLine({ usd: 999, usdByBilling: { api: 999 }, billing: "api" })].join("\n") });
+  const plain = fakeRepo();
+  await tickOver(plain);
+  // A member and a collaborator with read access alone: the permission read says so; neither counts.
+  const forged = fakeRepo({ extra3: [stage("reader-607", "MEMBER", "local-f1"), stage("triage-607", "COLLABORATOR", "local-f22")], permissions: { "reader-607": "read", "triage-607": "triage" } });
+  await tickOver(forged);
+  assert.equal(cardOf(forged), cardOf(plain), "the same card, figure for figure");
+  assert.ok(forged.reads.includes("/collaborators/reader-607/permission"), "the member's permission is read");
+  // A writer's stage comment: a stage of unknown cost, never its $999.
+  const writer = fakeRepo({ extra3: [stage("writer-607", "MEMBER", "local-w1")], permissions: { "writer-607": "write" } });
+  await tickOver(writer);
+  assert.match(cardOf(writer), /\n### ✅ Merged in 3 min 54 s · \$0\.52 \+ unknown\n/);
+  assert.doesNotMatch(cardOf(writer), /999/);
+  // The permission's window ending during the card's reads (another repository's writer list starts the list over): the
+  // writer verified as the comments were read still counts.
+  const rolled = fakeRepo({ extra3: [stage("writer2-607", "MEMBER", "local-w2")], permissions: { "writer2-607": "write" }, onTimeline3: () => setWriters("acme/other", []) });
+  await tickOver(rolled);
+  assert.match(cardOf(rolled), /\n### ✅ Merged in 3 min 54 s · \$0\.52 \+ unknown\n/);
 });
 
 test("finish card: a passing failure waits for a later tick, by the tick's own clock; any other failure, or a refused PR body, does not hold it (B1, S9)", async () => {
@@ -678,12 +706,20 @@ test("finish card (#544): the summary marker carries the card's own figures, fro
   assert.match(renderFinishCard(sandboxed), / · plus 1 AI run of unknown cost$/m);
   assert.deepEqual(card.finishSummary(sandboxed).sandbox, { usd: 0.02, cents: 2, unknown: 1, why: ["sandbox"], foreign: [] });
   // A teammate's vendor comment of one of Pendulum's stages is that stage's, no run of its own; one of no stage is a
-  // run of unknown cost of its stage's kind, one each.
+  // run of unknown cost of its stage's kind, one each. The teammate is a writer (on the writer list); a member who is not
+  // counts nothing.
   const teammate = { login: "teammate", type: "User" };
   const theirs = (id, at, key) => ({ ...comment(id, at, `<!-- pendulum:3:vendor:${key} -->\nx\n${spendLine({ usd: 0.5, vendorUsd: 0.5 })}`), user: teammate, author_association: "MEMBER" });
-  const foreign = withSelf(() => data({ comments: [...real.comments, theirs(905, "2026-11-17T02:26:41Z", keyOf("work")), theirs(906, "2026-11-17T02:26:42Z", "review:zz9"), theirs(907, "2026-11-17T02:26:43Z", "work:zz8")] }));
-  assert.deepEqual(foreign.sandbox, { usd: 0, unknown: 2 });
-  assert.deepEqual(card.finishSummary(foreign).sandbox.foreign, ["review", "work"]);
+  const theirComments = [...real.comments, theirs(905, "2026-11-17T02:26:41Z", keyOf("work")), theirs(906, "2026-11-17T02:26:42Z", "review:zz9"), theirs(907, "2026-11-17T02:26:43Z", "work:zz8")];
+  assert.equal(withSelf(() => data({ comments: theirComments })).sandbox, null, "a MEMBER association alone is no writer's");
+  setWriters("clockgrove/pendulum-scratch", ["teammate"]);
+  try {
+    const foreign = withSelf(() => data({ comments: theirComments }));
+    assert.deepEqual(foreign.sandbox, { usd: 0, unknown: 2 });
+    assert.deepEqual(card.finishSummary(foreign).sandbox.foreign, ["review", "work"]);
+  } finally {
+    setWriters("clockgrove/pendulum-scratch", []);
+  }
 
   // Another issue's, another version's or a broken one reads as none.
   const body = card.finishCardBody(runs[0]);

@@ -1563,14 +1563,14 @@ test("report (#568): the finish card's path books each pass under its model from
  * per-model usage (`modelUsage`, read by the real parser): its usage record, and its progress comment with the spend and
  * ledger lines the stage's end writes from it.
  */
-function subAgentStage(n, { sonnetUsd = 0.2 } = {}) {
-  const result = (opus, sonnet) => JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "s1", num_turns: 3, total_cost_usd: Math.round((opus + sonnet) * 1e6) / 1e6, modelUsage: { "claude-opus-5-5": { inputTokens: 1000, outputTokens: 500, cacheReadInputTokens: 4000, cacheCreationInputTokens: 2000, costUSD: opus }, "claude-sonnet-5-5": { inputTokens: 300, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 700, costUSD: sonnet } } });
+function subAgentStage(n, { opusUsd = 0.5, sonnetUsd = 0.2, opusName = "claude-opus-5-5", sonnetName = "claude-sonnet-5-5" } = {}) {
+  const result = (opus, sonnet) => JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "s1", num_turns: 3, total_cost_usd: Math.round((opus + sonnet) * 1e6) / 1e6, modelUsage: { [opusName]: { inputTokens: 1000, outputTokens: 500, cacheReadInputTokens: 4000, cacheCreationInputTokens: 2000, costUSD: opus }, [sonnetName]: { inputTokens: 300, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 700, costUSD: sonnet } } });
   const pass = (label, opus, sonnet, started, ended) => ({ ...parseClaude(result(opus, sonnet), "claude-opus-5-5"), label, effort: "medium", started, ended, billing: "subscription" });
   const dir = mkdtempSync(join(tmpdir(), "usage-local-"));
   writeUsage(dir, {
     harness: "claude",
     model: "claude-opus-5-5",
-    records: [pass("work-1", 0.5, sonnetUsd, "2026-11-17T03:00:00Z", "2026-11-17T03:05:00Z"), pass("validation-fix-1", 0.1, 0, "2026-11-17T03:06:00Z", "2026-11-17T03:07:00Z")],
+    records: [pass("work-1", opusUsd, sonnetUsd, "2026-11-17T03:00:00Z", "2026-11-17T03:05:00Z"), pass("validation-fix-1", 0.1, 0, "2026-11-17T03:06:00Z", "2026-11-17T03:07:00Z")],
     passes: 1,
     exit: "delivered",
     reason: "",
@@ -1646,10 +1646,35 @@ test("report (#568): what no pass names stays under the stage's model by stage, 
   // With no ledger, or one that names no model: whole.
   assert.deepEqual(parts(null), whole);
   assert.deepEqual(parts([entry(null, 0.3)]), whole);
-  // A rounding difference within the line's millionths is none.
-  assert.deepEqual(parts([entry("claude-opus-5-5", 0.1), entry("claude-opus-5-5", 0.2)], cost(0.300001), { input: 20, output: 2, cached: null, written: null }), [
+  // Booked exactly, in millionths: a millionth the passes fall short of is left under the stage's model, by stage; one
+  // they pass it by (each pass's dollars rounded on its own) comes off the own model's part; none is lost or added.
+  const two = { input: 20, output: 2, cached: null, written: null };
+  assert.deepEqual(parts([entry("claude-opus-5-5", 0.1), entry("claude-opus-5-5", 0.2)], cost(0.300001), two), [
     ["claude-fable-5-2", "pass", 1, 0, 0, 0, null],
     ["claude-opus-5-5", "pass", 0, 0.3, 0, 0, 20],
+    ["claude-fable-5-2", "stage", 0, 0.000001, 0, 0, 0],
+  ]);
+  assert.deepEqual(parts([entry("claude-fable-5-2", 0.1000006), entry("claude-opus-5-5", 0.2000006)], cost(0.300001), two), [
+    ["claude-fable-5-2", "pass", 1, 0.1, 0, 0, 10],
+    ["claude-opus-5-5", "pass", 0, 0.200001, 0, 0, 10],
+  ]);
+  // An own-model part at $0 has nothing to give: the stage is booked whole.
+  assert.deepEqual(parts([entry("claude-opus-5-5", 0.1000006), entry("claude-opus-5-5", 0.2000006)], cost(0.300001), two), [["claude-fable-5-2", "stage", 1, 0.300001, 0, 0, 20]]);
+  // The left runs of unknown cost name the stage's reasons no pass names.
+  const why = modelParts({ model: "claude-fable-5-2", cost: cost(0.3, { unknownRuns: 2, unknownWhy: ["sandbox", "unreported"] }), tokens, stages: 1, ledger: [entry("claude-fable-5-2", 0.3), entry("claude-opus-5-5", null, { usdUnknown: 1, usdUnknownWhy: ["unreported"] })], prices });
+  assert.deepEqual(why.map((x) => [x.key, x.basis, x.cost.unknownRuns, x.cost.unknownWhy]), [
+    ["claude-fable-5-2", "pass", 0, []],
+    ["claude-opus-5-5", "pass", 1, ["unreported"]],
+    ["claude-fable-5-2", "stage", 1, ["sandbox"]],
+  ]);
+  // From local mode's own record, a pass's model counts only where the stage publishes it, as its ledger line would: a
+  // Bedrock inference profile ARN (it names an AWS account) is no row; its pass stays under the stage's model.
+  const ARN = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";
+  const local = modelParts({ model: "claude-fable-5-2", recorded: "claude-fable-5-2", cost: cost(0.3), tokens, stages: 1, ledger: [entry("claude-fable-5-2", 0.1), entry("claude-opus-5-5", 0.1), entry(ARN, 0.1)], local: true, published: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2"], prices });
+  assert.deepEqual(local.map((x) => [x.key, x.basis, x.cost.usd.api]), [
+    ["claude-fable-5-2", "pass", 0.1],
+    ["claude-opus-5-5", "pass", 0.1],
+    ["claude-fable-5-2", "stage", 0.1],
   ]);
 });
 
@@ -1774,4 +1799,71 @@ test("report (#563): a full first page with no Link header ends the read, and so
   // With GitHub's Link headers, no note.
   const { json: linked } = await report({ ...w, noLink: false }, { since: "2026-11-17" });
   assert.ok(!linked.source.missing.some((m) => m.code === "no-link"));
+});
+
+/** Each cost kind summed over a breakdown's rows, to a millionth: what the totals must equal exactly. */
+const rowSums = (rows) => Object.fromEntries(["api", "subscription", "credits", "unknown", "sandbox"].map((k) => [k, Math.round(rows.reduce((t, x) => t + x.cost.usd[k], 0) * 1e6) / 1e6]));
+
+test("report (#568): the model rows add up to the totals exactly, by pass and by Claude Code's per-model usage, each model's dollars rounded on its own", async () => {
+  // The pass path: #3's review stage split between Fable and Opus.
+  const { json: passes } = await report(answeredWorld(), { issue: 3 });
+  assert.deepEqual(rowSums(passes.breakdowns.model), usd(passes.totals));
+  // Claude Code's per-model usage at a tenth of a millionth: Opus $0.1000006 and Sonnet $0.2000006 in a pass the harness
+  // reports at $0.300001. Each model's dollars to a millionth are $0.100001 and $0.200001, a millionth over the stage's:
+  // it comes off the stage's own model, and the rows add up to the stage's dollars.
+  const w = blank();
+  w.issues.push(objectiveIssue(41));
+  const { rec, comment: c } = subAgentStage(41, { opusUsd: 0.1000006, sonnetUsd: 0.2000006 });
+  w.comments.push(c);
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  mkdirSync(join(clone, ".pendulum", "41", "usage-work-1"), { recursive: true });
+  writeFileSync(join(clone, ".pendulum", "41", "usage-work-1", "result.json"), JSON.stringify(rec));
+  const { r } = await localReport(w, clone);
+  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.cost.usd.subscription]), [["claude-opus-5-5", 0.2], ["claude-sonnet-5-5", 0.200001]]);
+  assert.deepEqual(usd(r.totals), { api: 0, subscription: 0.400001, credits: 0, unknown: 0, sandbox: 0 });
+  assert.deepEqual(rowSums(r.breakdowns.model), usd(r.totals));
+});
+
+test("report (#568): Claude Code's per-model usage counts only where every model is one the stage publishes: an ARN or an alias gives no row of its own", async () => {
+  const ARN = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";
+  for (const [name, names] of [["a Bedrock inference profile ARN", { sonnetName: ARN }], ["an alias", { opusName: "opus" }]]) {
+    const w = blank();
+    w.issues.push(objectiveIssue(42));
+    const { rec, comment: c } = subAgentStage(42, names);
+    w.comments.push(c);
+    const clone = mkdtempSync(join(tmpdir(), "clone-"));
+    mkdirSync(join(clone, ".pendulum", "42", "usage-work-1"), { recursive: true });
+    writeFileSync(join(clone, ".pendulum", "42", "usage-work-1", "result.json"), JSON.stringify(rec));
+    const { r } = await localReport(w, clone);
+    // By its passes instead, from its ledger line: all on Opus.
+    assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.subscription]), [["claude-opus-5-5", 1, 0.8]], name);
+    assert.ok(!JSON.stringify(r).includes("arn:") && !JSON.stringify(r).includes('"opus"'), `${name}: never in the report`);
+    assert.ok(!renderReport(r).includes("arn:"), name);
+  }
+});
+
+test("report (#568): the finish card's path books a Claude stage by Claude Code's per-model usage in the clone, as the stage path does", async () => {
+  // #3's work stage on Opus with Sonnet sub-agents, its local record in the clone: $0.30637 on Opus, $0.05 on Sonnet.
+  const w = answeredWorld();
+  const work = { ...w.recs.work, models: { "claude-opus-5-5": { input: 10_000, cached: 200_000, written: 40_000, output: 10_000, usd: 0.30637 }, "claude-sonnet-5-5": { input: 5_000, cached: 40_000, written: 5_000, output: 2_000, usd: 0.05 } } };
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  mkdirSync(join(clone, ".pendulum", "3", "usage-work-1"), { recursive: true });
+  writeFileSync(join(clone, ".pendulum", "3", "usage-work-1", "result.json"), JSON.stringify(work));
+  w.comments.push(await finishCard3(w));
+  // Read in the clone, as the command reads there, from the card and (`--by account`) from the stages.
+  const inClone = async (by) => {
+    const fake = fakeGitHub(w);
+    return over(fake, async () => buildReport(await readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", appId: APP.id, checkout: clone, by, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }), { by, now: new Date(NOW).toISOString() }));
+  };
+  const card = { json: await inClone([]) };
+  const stages = { json: await inClone(["account"]) };
+  assert.deepEqual([card.json.source.read.summaries, stages.json.source.read.summaries], [1, 0]);
+  const noAccount = (f) => ({ ...f, breakdowns: { ...f.breakdowns, account: undefined } });
+  assert.deepEqual(noAccount(figures(card.json)), noAccount(figures(stages.json)));
+  assert.deepEqual(modelRows(card.json), [
+    ["claude-opus-5-5", 1, 0.38637, 0.38637, null],
+    ["claude-sonnet-5-5", 0, 0.05, 0.05, null],
+    ["claude-fable-5-2", 1, 0.163442, 0.163442, null],
+  ]);
+  assert.deepEqual(rowSums(card.json.breakdowns.model), usd(card.json.totals));
 });

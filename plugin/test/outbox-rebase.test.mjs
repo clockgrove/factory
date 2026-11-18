@@ -7,7 +7,8 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JUDGE_AT_ONCE, JUDGE_PATH_MAX_BYTES } from "../scripts/lib/outbox.mjs";
+import { DECLARE_GENERATED, JUDGE_AT_ONCE, JUDGE_PATH_MAX_BYTES } from "../scripts/lib/outbox.mjs";
+import { runRegeneration } from "../scripts/lib/checkout.mjs";
 import { KEPT_QUESTION, keptInput, openKeptCheck } from "../scripts/lib/kept.mjs";
 import { open, quiet, repos } from "./fixtures/outbox.mjs";
 
@@ -943,8 +944,53 @@ test("#515: a hunk whose own question is over 64 KiB is not judged, naming that 
   t.go("add", "docs/models.md");
   t.go("-c", "core.editor=true", "rebase", "--continue");
   const { asked, judge } = hunkReader();
-  assert.match(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge }), new RegExp(`: docs/models\\.md \\([0-9a-f]{7}\\): hunk 1 of 2 \\(@@ -1,605 \\+1,605 @@\\): not judged: the hunk with the lines around it is over ${JUDGE_PATH_MAX_BYTES / 1024} KiB$`));
+  assert.match(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge }), new RegExp(`: docs/models\\.md \\([0-9a-f]{7}\\): hunk 1 of 2 \\(@@ -1,605 \\+1,605 @@\\): not judged: the hunk with the lines around it is over ${JUDGE_PATH_MAX_BYTES / 1024} KiB; `));
   assert.deepEqual(asked, []);
+});
+
+test("#619: an undeclared file whose hunk is over the limit is Blocked naming the declaring step as the fix", async () => {
+  const line = (who) => `{"by":"${who}","rows":"${"x".repeat(100_000)}"}\n`;
+  const t = await sentBack({ base: { "golden.json": line("base") }, commits: [{ "golden.json": line("branch") }], main: { "golden.json": line("main") } });
+  assert.throws(() => t.go("rebase", "-q", "origin/main"));
+  t.go("checkout", "-q", "origin/main", "--", "golden.json");
+  t.go("-c", "core.editor=true", "rebase", "--continue");
+  const left = await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge: hunkReader().judge, regenerate: true });
+  assert.ok(left.includes(`golden.json`) && left.endsWith(`over ${JUDGE_PATH_MAX_BYTES / 1024} KiB; ${DECLARE_GENERATED}`), left);
+  assert.match(DECLARE_GENERATED, /`pendulum-generated`.*PENDULUM_REGENERATE/);
+});
+
+test("#619: a declared generated file both sides changed takes the base's side unjudged, and the regeneration check passes only on the command's own output with nothing written outside the declared paths", async () => {
+  // golden.json is one line of over 64 KiB that gen.sh writes from a.txt and b.txt; the branch changes a.txt, main b.txt.
+  const pad = "x".repeat(100_000);
+  const golden = (a, b) => `{"a":"${a}","b":"${b}","pad":"${pad}"}\n`;
+  const gen = `printf '{"a":"%s","b":"%s","pad":"%s"}\\n' "$(cat a.txt)" "$(cat b.txt)" "$(head -c 100000 /dev/zero | tr '\\0' x)" > golden.json\n`;
+  const t = await sentBack({
+    base: { ".gitattributes": "golden.json pendulum-generated\n", "gen.sh": gen, "a.txt": "a0\n", "b.txt": "b0\n", "golden.json": golden("a0", "b0") },
+    commits: [{ "a.txt": "a1\n", "golden.json": golden("a1", "b0") }],
+    main: { "b.txt": "b1\n", "golden.json": golden("a0", "b1") },
+  });
+  assert.deepEqual([...(await t.box.generated(t.box.conflicts))], ["golden.json"]);
+  // The conflict pass: the base's golden.json, then the command, its output committed.
+  assert.throws(() => t.go("rebase", "-q", "origin/main"));
+  t.go("checkout", "-q", "origin/main", "--", "golden.json");
+  t.go("-c", "core.editor=true", "rebase", "--continue");
+  const { asked, judge } = hunkReader();
+  const env = { ...process.env, ...quiet };
+  const check = (command) => runRegeneration(t.r.work, command, { env, echo: false, generated: (paths) => t.box.generated(paths) });
+  // Not yet regenerated: no Block (nothing judged), and the check is red naming the file the command rewrote.
+  assert.equal(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge, regenerate: true }), "");
+  assert.deepEqual([asked, t.box.regenerated], [[], ["golden.json"]]);
+  const stale = await check("sh gen.sh");
+  assert.ok(!stale.green && /not committed as the command writes them on this tree: golden\.json\./.test(stale.failed.output), stale.failed?.output);
+  t.go("commit", "-q", "-am", "regenerate");
+  // Committed: green, and the file is the command's output on the merged tree (the branch's a.txt with main's b.txt).
+  assert.equal((await check("sh gen.sh")).green, true);
+  assert.equal(t.go("show", "HEAD:golden.json"), golden("a1", "b1"));
+  assert.equal(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge, regenerate: true }), "");
+  // A command that writes outside the declared paths, or exits non-zero, is a red.
+  const outside = await check("sh gen.sh && echo stray > stray.txt");
+  assert.ok(!outside.green && /outside the declared `pendulum-generated` paths: stray\.txt\./.test(outside.failed.output), outside.failed?.output);
+  assert.equal((await check("exit 3")).failed.code, 3);
 });
 
 test("#452: the file a hunk is judged against: an empty file is shown empty, a missing one as missing", () => {

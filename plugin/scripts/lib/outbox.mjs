@@ -62,6 +62,10 @@ export const JUDGE_VIEW_LINES = 60;
  * packed in order up to it, and a hunk whose own question (the hunk with the file or its view) is over it is not judged.
  */
 export const JUDGE_PATH_MAX_BYTES = 64 * 1024;
+/** The gitattributes attribute that declares a path generated: written whole by the repository's `regenerate` command. */
+export const GENERATED_ATTR = "pendulum-generated";
+/** What a hunk over JUDGE_PATH_MAX_BYTES is told beside "not judged": the declaring step, for a file that is generated. */
+export const DECLARE_GENERATED = `if the file is generated, declare it instead: give its path the \`${GENERATED_ATTR}\` attribute in \`.gitattributes\` on the default branch and set PENDULUM_REGENERATE to the command that writes it (docs/INSTALL.md, Generated files); its conflicts then take the default branch's side and the command writes it again`;
 /** The most of one file's diff the fence check is given (box.outside): a larger change is not judged, and stays refused. */
 export const FENCE_DIFF_MAX = 32 * 1024;
 /** The most fenced files the fence check asks about in one reading of the fence; the rest stay refused. */
@@ -483,17 +487,39 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
+   * The `paths` that `rev`'s tree (the default branch's as fetched, by default) declares generated: those whose
+   * GENERATED_ATTR attribute is set there, read by git itself (`git check-attr --source`, git 2.40) in Pendulum's mirror,
+   * so no .gitattributes of the branch or setting of the agent's checkout counts. A Set; empty when git cannot read it.
+   */
+  box.generated = async (paths, rev = base) => {
+    const list = [...new Set(paths)].filter(Boolean);
+    if (!list.length || !SHA.test(String(rev || ""))) return new Set();
+    const r = await git(["check-attr", `--source=${rev}`, "-z", "--stdin", GENERATED_ATTR], { input: list.map((p) => `${p}\0`).join("") });
+    if (r.code !== 0) {
+      log(`generated paths: git check-attr exited ${r.code}; none counted`);
+      return new Set();
+    }
+    // `<path> NUL <attribute> NUL <value> NUL` each: set, or given a value, is declared; unspecified or unset is not.
+    const f = r.stdout.split("\0");
+    const out = new Set();
+    for (let i = 0; i + 2 < f.length; i += 3) if (f[i + 2] !== "unspecified" && f[i + 2] !== "unset") out.add(f[i]);
+    return out;
+  };
+
+  /**
    * What a send-back's conflict pass left in the checkout, read before anything of it is pushed: why it is not the
    * branch at `from` rebased onto `onto` (the default branch's head Pendulum's own rebase conflicted on), or "" when it
    * is. Not: a rebase, merge or cherry-pick left in progress (HEAD is then the default branch plus some of the commits);
    * a head that does not contain `onto` (the conflict pass gave up); or the branch's change not kept in it (keptLeft,
    * on content; with no `judge`, a stage with no decider, commitsLeft first). Read on git's exit codes and fields only.
    * `box.rebaseNote`: a path the branch's commits changed and undid, which the head changes anyway (unsettled `undone`),
-   * said for the progress comment, never a Block; "" when none.
+   * said for the progress comment, never a Block; "" when none. `regenerate` (the repository has a regeneration
+   * command): a path `onto` declares generated is not checked, and `box.regenerated` lists each one left out.
    */
-  box.rebaseLeft = async ({ from, onto, judge = null, maxMs = JUDGE_MAX_MS }) => {
+  box.rebaseLeft = async ({ from, onto, judge = null, maxMs = JUDGE_MAX_MS, regenerate = false }) => {
     box.rebaseNote = "";
     box.rebaseHead = "";
+    box.regenerated = [];
     const busy = await box.inProgress();
     if (busy.code !== undefined) return `Pendulum could not check the checkout for a rebase left in progress (exit ${busy.code})`;
     if (busy.ops.length) return `the conflict pass left a ${busy.ops.join(" and ")} in progress`;
@@ -516,6 +542,13 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       return `Pendulum could not compare the rebased branch with the branch before it${e?.why ? `: ${e.why}` : ""}`;
     }
     box.rebaseNote = open.undone?.length ? `the branch's commits changed ${listed(open.undone)} and undid it, yet the head changes ${open.undone.length > 1 ? "them" : "it"}: an extra change for the review, not a loss` : "";
+    // Declared generated paths (box.generated, as `onto` declares them) are no hunk's to judge: the conflict pass takes
+    // the base's side of them and the repository's command writes them again (worker.mjs, checkout.mjs runRegeneration).
+    if (regenerate && open.paths.length) {
+      const declared = await box.generated(open.paths, onto);
+      box.regenerated = open.paths.filter((p) => declared.has(p));
+      open.paths = open.paths.filter((p) => !declared.has(p));
+    }
     if (!open.paths.length) return "";
     try {
       const left = await keptLeft({ ...open, from, judge, maxMs });
@@ -709,7 +742,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       const limit = `${JUDGE_PATH_MAX_BYTES / 1024} KiB`;
       const hunks = list.map((h, i) => ({ at: i + 1, text: h.text, header: h.header, raw: h, over: "" }));
       if (Buffer.byteLength(file ?? "") <= JUDGE_MAX_BYTES) {
-        for (const h of hunks) if (Buffer.byteLength(h.text) + Buffer.byteLength(file ?? "") > JUDGE_PATH_MAX_BYTES) h.over = `not judged: the hunk with the file is over ${limit}`;
+        for (const h of hunks) if (Buffer.byteLength(h.text) + Buffer.byteLength(file ?? "") > JUDGE_PATH_MAX_BYTES) h.over = `not judged: the hunk with the file is over ${limit}; ${DECLARE_GENERATED}`;
         return { file, hunks };
       }
       // Where the change's lines are in the head's file: from its base side, or (what the merge would still change) the
@@ -724,7 +757,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       for (const h of hunks) {
         const room = JUDGE_PATH_MAX_BYTES - Buffer.byteLength(h.text);
         h.view = room > 0 ? hunkView({ file, hunk: h.raw, moves, max: room, context: JUDGE_VIEW_LINES, whole: false }) : null;
-        if (!h.view) h.over = `not judged: the hunk with the lines around it is over ${limit}`;
+        if (!h.view) h.over = `not judged: the hunk with the lines around it is over ${limit}; ${DECLARE_GENERATED}`;
       }
       return { file: null, hunks };
     };

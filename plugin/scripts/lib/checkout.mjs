@@ -320,6 +320,54 @@ export async function runValidation(checkout, commands, opts = {}) {
   return { green: true, results, failed: null, failures: [], head };
 }
 
+/**
+ * The regeneration check (the repository's `regenerate` command, after a conflict pass that met declared generated
+ * files): the command run once from the checkout's root, as a validation command is, then read exactly, on git's own
+ * trees. Green when it exits 0, changes no path but declared generated ones (`generated(paths)`: outbox.mjs
+ * box.generated, as the default branch declares them), and leaves every generated path as HEAD has it: the committed
+ * generated files are then what the command writes on this tree. Anything else is a red with runValidation's shape, its
+ * output naming the paths; what the command wrote stays in the checkout for the fix pass. The checkout's tree before
+ * and after is a tree object written through a scratch index (ignored files are no part of it).
+ */
+export async function runRegeneration(checkout, command, { generated, ...opts } = {}) {
+  const env = opts.env || process.env;
+  const gitEnv = scrubbedEnv(env);
+  const inBox = (inner) => exec(...backend(gitEnv).sandbox.git(inner, gitEnv), { env: gitEnv, maxBytes: 64 * 1024 * 1024 }).catch((e) => ({ code: null, stdout: "", stderr: String(e?.message || e) }));
+  const git = (args) => inBox(["git", "-C", checkout, ...args]);
+  const snapshot = async () => {
+    const r = await inBox(["sh", "-c", 'set -e; d="$(git -C "$1" rev-parse --absolute-git-dir)"; i="$d/pendulum-regenerate.index"; trap \'rm -f "$i"\' EXIT; if [ -f "$d/index" ]; then cp "$d/index" "$i"; fi; GIT_INDEX_FILE="$i" git -C "$1" add -A; GIT_INDEX_FILE="$i" git -C "$1" write-tree', "sh", checkout]);
+    return r.code === 0 ? r.stdout.trim() : "";
+  };
+  const names = async (a, b) => {
+    const r = await git(["diff", "--name-only", "--no-renames", "-z", a, b]);
+    return r.code === 0 ? r.stdout.split("\0").filter(Boolean) : null;
+  };
+  const head = (await git(["rev-parse", "HEAD"])).stdout.trim();
+  const red = (r, why) => {
+    const failed = { command, ok: false, code: r?.code ?? 1, timedOut: !!r?.timedOut, output: `${why ? `${why}\n` : ""}${r?.output ?? ""}`.trim().slice(-20_000) };
+    failed.full = failed.output;
+    return { green: false, results: [failed], failed, failures: [failed], head };
+  };
+  const before = await snapshot();
+  if (!before) return red(null, "regeneration: Pendulum could not read the checkout's tree before the command");
+  // A validation command's environment (runValidation): the HEAD under test, and a throwaway database where one is set up.
+  const r = await sh(checkout, command, { ...opts, extraEnv: { ...(opts.extraEnv || {}), ...(head ? { GITHUB_SHA: head } : {}), PENDULUM_DB_WRAP: "1" } });
+  if (!r.ok) return red(r, `regeneration: the command ${r.timedOut ? "timed out" : `exited ${r.code}`}, so the generated files are not regenerated`);
+  const after = await snapshot();
+  const wrote = after ? await names(before, after) : null;
+  const uncommitted = after ? await names("HEAD", after) : null;
+  if (!wrote || !uncommitted) return red({ ...r, code: 1 }, "regeneration: Pendulum could not read the checkout's tree after the command");
+  const declared = await generated([...wrote, ...uncommitted]);
+  const outside = wrote.filter((p) => !declared.has(p));
+  const stale = uncommitted.filter((p) => declared.has(p));
+  const why = [
+    outside.length ? `regeneration: the command changed ${outside.length} path(s) outside the declared \`pendulum-generated\` paths: ${outside.join(", ")}. It may write only paths the default branch's .gitattributes declares; those changes are still in the checkout, uncommitted` : "",
+    stale.length ? `regeneration: ${stale.length} generated file(s) are not committed as the command writes them on this tree: ${stale.join(", ")}. The command's output is in the checkout: commit those files as it left them` : "",
+  ].filter(Boolean);
+  if (why.length) return red({ ...r, code: 1 }, why.join("\n"));
+  return { green: true, results: [{ command, ...r, full: "" }], failed: null, failures: [], head };
+}
+
 // Run by `node` in the checkout's sandbox (installDeps), as Pendulum's other commands on the agent's tree are.
 // `check`: every direct dependency of each package.json (not below node_modules) that the install linked is whole: the
 // link resolves, its package.json is there and each bin it declares exists. A dependency not linked at all is skipped

@@ -615,7 +615,7 @@ How a change applies:
 
 ## Configuration
 
-Local mode reads the repository's `.github/workflows/pendulum.yml` `env:` block as committed on the default branch: harness, models, validation, protected paths, budgets.
+Local mode reads the repository's `.github/workflows/pendulum.yml` `env:` block as committed on the default branch: harness, models, validation, the regeneration command for declared generated files (INSTALL.md, Generated files), protected paths, budgets.
 The repository's `PENDULUM_*` variables go over it, as on the Action (INSTALL.md, Settings in layers), listed with the local token; `serve` prints each setting that is set and its layer once its start checks pass, and names the ones left at Pendulum's defaults only with `--verbose`.
 
 **Reading the variables.** A variable may lower a cap, so the start's read fails closed: `serve` starts no stage until a read gets through (it waits a network outage out, and tries again from 15 seconds, doubling to five minutes) or GitHub says the token may not read them (403 or 404: the workflow's values, with the warning).

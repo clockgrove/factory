@@ -980,7 +980,7 @@ export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run =
 const PASSES = [];
 export const stagePasses = () => [...PASSES];
 let RUNNING = 0;
-/** How many harness passes of this process are running now, their records not yet in stagePasses. */
+/** How many harness passes of this process have not returned yet (a pass's record joins stagePasses at its end, just before). */
 export const passesRunning = () => RUNNING;
 
 /**
@@ -1359,7 +1359,8 @@ async function runOnce(opts) {
   let rec;
   try {
     rec = await runPass(opts);
-    PASSES.push(rec);
+    // A pass that ran is among them since its end (runPass); one refused before its start joins them now.
+    if (!PASSES.includes(rec)) PASSES.push(rec);
   } finally {
     RUNNING -= 1;
   }
@@ -1583,7 +1584,11 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     else delete rec.sessionTotal;
   }
   // The pass's own dollars, or its unknown cost, join the stage's spend so far; its key spend is the relay's total there.
+  // Its record joins the stage's passes (stagePasses) at the same moment, with its label and times, so no progress write
+  // counts its dollars in the spend line without its row, or the other way round.
+  Object.assign(rec, { label, started, ended });
   metered.end(rec);
+  PASSES.push(rec);
   // The pass's spend through the relayed key joins its record (gateway-relay.mjs addKeySpend): max_usd, daily_usd, `usd`.
   if (relay) {
     const pass = await relay.endPass();

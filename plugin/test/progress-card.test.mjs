@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GITHUB_COMMENT_MAX, PROGRESS_LEDGER_ROOM, appliedExit, endStep, progressReporter } from "../scripts/lib/session.mjs";
+import { GITHUB_COMMENT_MAX, PROGRESS_LEDGER_ROOM, appliedExit, endStep, liveActivity, progressReporter } from "../scripts/lib/session.mjs";
 import { repoOf } from "../scripts/lib/github.mjs";
 import { decisionsReadOf, findingsOf, ledgerOfComment, rebaseCostOf, setSelf, spendOf, spendParts } from "../scripts/lib/logic.mjs";
 import { stageHarnessOf } from "../scripts/lib/cost-join.mjs";
@@ -36,15 +36,18 @@ async function withEnv(vars, fn) {
 
 /**
  * The stage's real reporter on a fake GitHub with a fake clock: `drive(p, clock)` writes its lines. Returns every body
- * written, its key line removed.
+ * written, its key line removed. `delayMs`: how long the fake GitHub takes to answer a write; `posted`: given the list of
+ * bodies as it fills; `opts`: the reporter's own options (its spend so far, its passes).
  */
-async function reporter(stage, drive, { start = "2026-11-18T04:41:10Z", runId = "1794976879130", env = {} } = {}) {
+async function reporter(stage, drive, { start = "2026-11-18T04:41:10Z", runId = "1794976879130", env = {}, delayMs = 0, posted: seen = null, opts = {} } = {}) {
   const real = globalThis.fetch;
   const realNow = Date.now;
   const posted = [];
+  seen?.(posted);
   globalThis.fetch = async (url, init = {}) => {
     const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
     if ((init.method || "GET") === "GET") return json([]);
+    if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
     posted.push(JSON.parse(init.body).body);
     return json({ id: 9, user: { login: "me", type: "User" }, body: posted.at(-1) });
   };
@@ -56,7 +59,7 @@ async function reporter(stage, drive, { start = "2026-11-18T04:41:10Z", runId = 
   try {
     await withEnv(ZONE, async () => {
       // The stage's own environment, given: an Actions stage of no workflow run, whatever runner runs this test.
-      const p = progressReporter(repoOf("acme/app"), 433, { token: () => "t" }, { stage, runId, harness: "claude", model: stage === "review" ? "claude-fable-5-2" : "claude-opus-5-5", soFar: null, env: { ...ZONE, ...env } });
+      const p = progressReporter(repoOf("acme/app"), 433, { token: () => "t" }, { stage, runId, harness: "claude", model: stage === "review" ? "claude-fable-5-2" : "claude-opus-5-5", soFar: null, env: { ...ZONE, ...env }, ...opts });
       await drive(p, clock);
     });
   } finally {
@@ -198,8 +201,8 @@ test("render (spec 4.3): delivered, each step's Took and cents on its row, AI ju
       "| 8:41 PM | Waited for CI ×2 · passed, last on `e755fde` | 7 min 40 s | — |",
       "| 8:41 PM | Reviewed the change · Fable 5.2 | 5 min 52 s | $1.59 |",
       "| 8:47 PM | Answered 3 review comments (1 from an outside reviewer) · Opus 5.5 | 11 min 14 s | $1.51 |",
-      "| 9:07 PM | Checked the answers · 2 of 2 fixes proven by tests, 1 of 1 judged resolved | 25 s | — |",
       "| 8:49 PM | AI judge calls ×7 | — | unknown |",
+      "| 9:07 PM | Checked the answers · 2 of 2 fixes proven by tests, 1 of 1 judged resolved | 25 s | — |",
       "| | **Total** | **26 min** | **$3.10 + unknown** |",
     ].join("\n"),
   );
@@ -292,8 +295,8 @@ test("render (spec 4.4): Blocked, the action line and the reason's first sentenc
       "| 6:27 PM | Set up | 15 s | — |",
       "| 6:27 PM | Waited for CI ×2 · passed, last on `86f7710` | 1 min | — |",
       "| 6:28 PM | Answered 2 review comments · Opus 5.5 | 1 min 49 s | $0.52 |",
-      "| 6:30 PM | Checked the answers · 0 of 2 judged resolved; still open: `src/loop.ts:134`, `src/routes.ts:992` | 20 s | — |",
       "| 6:30 PM | AI judge calls ×2 | — | unknown |",
+      "| 6:30 PM | Checked the answers · 0 of 2 judged resolved; still open: `src/loop.ts:134`, `src/routes.ts:992` | 20 s | — |",
       "| | **Total** | **4 min** | **$0.52 + unknown** |",
     ].join("\n"),
   );
@@ -512,4 +515,103 @@ test("the Now row is the last step still open: the reviewer beside CI, a build w
   // A held red renders as the wait that failed, fixed by the stage's next pass.
   const held = render({ stage: "review", issue: 1, started: t0, now: t0 + 600_000, lines: [[t0, "pass", { step: "ci", begin: true }], [t0, "wait", { step: "ci", sha: "abc1234", wait: true, end: t0 + 60_000, outcome: "failed" }], [t0 + 61_000, "red; held", { step: "ci", red: "held-answer", check: "pnpm test" }], [t0 + 600_000, "exit: delivered", endStep({ issue: 1, exit: "delivered" })]], exit: "delivered", spend: 0, parts: {} });
   assert.match(held.card, /^\| 8:41 PM \| Waited for CI · failed: `pnpm test`; fixed while answering the review \| 1 min \| — \|$/m);
+});
+
+test("a run's end reaches the card at once: a snapshot between the worker's run ending and the next step agrees in the headline, its row and the live status", async () => {
+  // The stage's spend and passes as harness.mjs keeps them: the run open, then its record booked when it ends.
+  let rec = null;
+  let started = false;
+  const soFar = async () => (rec ? { usd: 2.51, unknown: 0, running: 0, byBilling: { subscription: 2.51 } } : { usd: 0, unknown: started ? 1 : 0, running: started ? 1 : 0 });
+  const line = (e) => JSON.stringify(e);
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  let posted = [];
+  // Until GitHub has answered `n` writes (the fake answers each after `delayMs`), on the real clock (Date.now is faked).
+  const landed = async (n) => {
+    for (const until = performance.now() + 10_000; posted.length < n && performance.now() < until; ) await settle(5);
+  };
+  posted = await reporter(
+    "work",
+    async (p, clock) => {
+      await p("install", { step: "setup", span: true, end: at("2026-11-18T04:41:30Z") });
+      clock("2026-11-18T04:42:00Z");
+      started = true;
+      await p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
+      const live = liveActivity(p, { harness: "claude", model: "claude-opus-5-5" });
+      await landed(3);
+      // 29 minutes on, a tool call's line is written; GitHub is still answering it when the run ends.
+      clock("2026-11-18T05:11:00Z");
+      live.onLine(line({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "npm test" } }] } }));
+      live.onLine(line({ type: "result", subtype: "success", total_cost_usd: 2.51, num_turns: 78 }));
+      await settle(5);
+      rec = { label: "work-1", harness: "claude", model: "claude-opus-5-5", usd: 2.51, started: "2026-11-18T04:42:01Z", ended: "2026-11-18T05:11:00Z" };
+      clock("2026-11-18T05:11:02Z");
+      await live.finish();
+      await landed(5);
+    },
+    { delayMs: 100, posted: (list) => (posted = list), opts: { soFar, passesOf: () => (rec ? [rec] : []) } },
+  );
+  const last = cardOf(posted.at(-1));
+  assert.equal(
+    last,
+    [
+      "<!-- pendulum:433:progress:work:1794976879130 -->",
+      "**⏳ Work running** · issue #433 · 30 min so far · **$2.51** so far",
+      "Started 8:41 PM PST · updated 9:11 PM PST · API-equivalent, not billed",
+      "",
+      "| Time | Step | Took | Cost |",
+      "| :-- | :-- | --: | --: |",
+      "| 8:41 PM | Set up | 20 s | — |",
+      "| 8:42 PM | Built the change · Opus 5.5 | 28 min 59 s | $2.51 |",
+    ].join("\n"),
+  );
+  // Every write agrees with itself: the run is the Now row exactly while its cost is not reported, never once it ended.
+  assert.ok(posted.some((b) => /\*\*Now:\*\* building the change · Opus 5\.5 · 29 min, 1 turn, 1 tool call, active now \| running \| when it ends \|/.test(b)), "the running build's own write");
+  for (const body of posted.map(cardOf).filter((b) => /building the change|Built the change/.test(b))) {
+    const open = /\*\*Now:\*\* building the change/.test(body);
+    assert.equal(/1 AI run has not reported a cost yet/.test(body), open, body);
+    assert.equal(/\$2\.51/.test(body), !open, body);
+    assert.doesNotMatch(body, /finished|ended/, body);
+  }
+});
+
+test("a step whose run has ended is never the Now row; an earlier run's activity never speaks for the step after it", () => {
+  const t0 = at("2026-11-18T04:41:00Z");
+  const data = (lines, passes = [], snap = null) => progressData({ stage: "work", issue: 1, started: t0, now: t0 + 1_800_000, lines, passes, snap, zone: "UTC" });
+  const work = [t0 + 30_000, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }];
+  const ended = [{ label: "work-1", usd: 2.51, started: iso(t0 + 31_000), ended: iso(t0 + 1_740_000) }];
+  const over = { model: "claude-opus-5-5", snap: { elapsedMin: 29, turns: 78, toolCalls: 120, idleMin: 0, ended: true, tokens: { input: 1, output: 1 }, subagentsActive: [] } };
+  // The worker's run ended and nothing follows it yet: no Now row, and its row carries its cost.
+  assert.equal(data([[t0, "install", { step: "setup", span: true, end: t0 + 20_000 }], work], ended, over).current, null);
+  const c = render({ stage: "work", issue: 1, started: t0, now: t0 + 1_800_000, lines: [work], passes: ended, snap: over, status: "claude finished: 29 min, 78 turns; ended; $2.51", spend: 2.51, parts: { usdByBilling: { subscription: 2.51 }, running: true } });
+  assert.doesNotMatch(c.card, /\*\*Now:\*\*|finished/);
+  assert.match(c.card, /^\| 8:41 PM \| Built the change · Opus 5\.5 \| 28 min 29 s \| \$2\.51 \|$/m);
+  // A drift advisory written beside the build is no Now row once the build ended; nor is a wait that ended.
+  assert.equal(data([work, [t0 + 600_000, "drift advisory", { step: "drift", verdict: "scope_creep" }]], ended).current, null);
+  assert.equal(data([[t0, "wait", { step: "ci", sha: "abc1234", wait: true, end: t0 + 60_000, outcome: "passed" }]]).current, null);
+  // A run killed with no end line leaves a snapshot that never ended: the CI wait after it is the Now row, in its own words.
+  const killed = { model: "claude-opus-5-5", snap: { ...over.snap, ended: false } };
+  const waiting = render({ stage: "work", issue: 1, started: t0, now: t0 + 1_800_000, lines: [work, [t0 + 1_750_000, "wait", { step: "ci", sha: "abc1234", wait: true }]], passes: ended, snap: killed, spend: 2.51, parts: { running: true } });
+  assert.match(waiting.card, /^\| 9:10 PM \| \*\*Now:\*\* waiting for CI on `abc1234` · 50 s \| running \| — \|$/m);
+  assert.doesNotMatch(waiting.details, /Right now/);
+});
+
+test("rows are in order of their first time, the AI judge's included; the Now row is last", () => {
+  const t0 = at("2026-11-18T20:53:00Z");
+  const lines = [
+    [t0, "install", { step: "setup", span: true, end: t0 + 20_000 }],
+    [t0 + 30_000, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }],
+    [t0 + 130_000, "drift advisory", { step: "drift", verdict: "scope_creep" }],
+    [t0 + 1_800_000, "validation pass 1 (required checks)", { step: "ci", begin: true }],
+    [t0 + 1_800_000, "waiting", { step: "ci", sha: "abc1234", wait: true }],
+  ];
+  const passes = [
+    { label: "work-1", model: "claude-opus-5-5", usd: 2.51, started: iso(t0 + 31_000), ended: iso(t0 + 1_790_000) },
+    { label: "decision", decision: true, calls: 2, usd: 0.004, started: iso(t0 + 120_000), ended: iso(t0 + 240_000) },
+  ];
+  const c = render({ stage: "work", issue: 1, started: t0, now: t0 + 1_900_000, lines, passes, spend: 2.514, parts: { usdByBilling: { subscription: 2.51, api: 0.004 }, running: true } });
+  const rows = c.card.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("| Time") && !l.startsWith("| :--"));
+  assert.deepEqual(
+    rows.map((l) => l.split(" | ").slice(0, 2).join(" | ")),
+    ["| 12:53 PM | Set up", "| 12:53 PM | Built the change · Opus 5.5", "| 12:55 PM | AI judge calls ×2", "| 12:55 PM | Drift advisory · AI judge flagged possible scope creep; advice only", "| 1:23 PM | Waited for CI", "| 1:23 PM | **Now:** waiting for CI on `abc1234` · 2 min"],
+  );
 });

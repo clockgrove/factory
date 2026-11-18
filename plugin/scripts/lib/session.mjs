@@ -1245,15 +1245,31 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   progress.models = (recorded) => {
     if (ran && recorded) progress.ran({ ...ran, ...ranModels(recorded) });
   };
-  /** The live status line (what the harness is doing now); written at most every `everyMs`, never twice at once. */
+  /**
+   * The live status line (what the harness is doing now); written at most every `everyMs`, never twice at once. A forced
+   * one that comes while a write is in flight is written after it, in the same `writing`, never dropped: a run's end
+   * (liveActivity finish) is what puts its ended record on the card.
+   */
+  let liveAgain = false;
+  const liveWrite = () => {
+    writing = (async () => {
+      do {
+        liveAgain = false;
+        await write();
+      } while (liveAgain);
+    })().finally(() => {
+      writing = null;
+    });
+  };
   progress.live = (text, { everyMs = 120_000, force = false, snap = null, model: liveModel = null } = {}) => {
     status = sanitize(text, { max: 2000 });
     liveNow = snap ? { snap, model: liveModel } : null;
     if (!force && Date.now() - lastWrite < everyMs) return;
-    if (writing) return;
-    writing = write().finally(() => {
-      writing = null;
-    });
+    if (writing) {
+      if (force) liveAgain = true;
+      return;
+    }
+    liveWrite();
   };
   /** A run with no usage artifact (local mode) records its final dollars here, where any dispatcher can sum them. */
   /**
@@ -1359,7 +1375,10 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
     tracker.feed(line);
     // The drift advisory's watcher (drift.mjs), when on: its own checkpoint clock, never in the run's way.
     drift?.feed(line);
-    progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { snap: tracker.snapshot(), model });
+    // The run's own end line writes nothing: its record is not booked until the harness exits, so the comment would show
+    // it finished with its cost not counted. `finish`, once the record is booked, writes the run's end.
+    const snap = tracker.snapshot();
+    if (!snap.ended) progress?.live(activityLine(snap, { harness, model, billing: progress?.billingOf?.() ?? null }), { snap, model });
     // The hand-off's own throttle (at most every two minutes): the plan comment follows plan.md while the harness works.
     tick?.();
   };

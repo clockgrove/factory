@@ -399,11 +399,11 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.scope), ["by", "compare", "defaultPeriod", "issues", "label", "parent", "since", "until"]);
   assert.deepEqual(keys(r.words), ["api", "credits", "sandbox", "subscription", "unknown"]);
   assert.deepEqual(keys(r.totals), ["cost", "decisionRecords", "objectives", "passes", "stages", "tokens"]);
-  const cost = [".unknownDecisionCalls:number", ".unknownRuns:number", ".unknownWhy[]", ".usd.api:number", ".usd.credits:number", ".usd.sandbox:number", ".usd.subscription:number", ".usd.unknown:number"];
+  const cost = [".unknownDecisionCalls:number", ".unknownRuns:number", ".unknownUnsplitRuns:number", ".unknownWhy[]", ".usd.api:number", ".usd.credits:number", ".usd.sandbox:number", ".usd.subscription:number", ".usd.unknown:number"];
   assert.deepEqual(shape(r.objectives.find((o) => o.issue === 5).cost).map((s) => s.replace(/\[\]:string$/, "[]")), cost);
-  assert.deepEqual(keys(r.unknown), ["decisionCalls", "items", "reasons", "runs", "stages"]);
+  assert.deepEqual(keys(r.unknown), ["decisionCalls", "items", "reasons", "runs", "stages", "unsplitRuns"]);
   assert.deepEqual(keys(r.unknown.reasons[0]), ["code", "runs", "stages", "text"]);
-  assert.deepEqual(keys(r.unknown.items[0]), ["decisionCalls", "issue", "runs", "stage", "why"]);
+  assert.deepEqual(keys(r.unknown.items[0]), ["decisionCalls", "issue", "runs", "stage", "unsplitRuns", "why"]);
   assert.deepEqual(keys(r.breakdowns), ["account", "harness", "model", "pass", "stage", "version"]);
   assert.deepEqual(keys(r.breakdowns.stage[0]), ["cost", "key", "stages", "tokens"]);
   assert.deepEqual(keys(r.breakdowns.pass[0]), ["cost", "decisionRecords", "key", "modelMinutes", "passes", "tokens"]);
@@ -422,7 +422,7 @@ test("report: --json keeps its schema: every field the documented shape names, o
   // The documented schema names every top-level field and the version (docs/REPORT.md).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "docs", "REPORT.md"), "utf8");
   assert.ok(doc.includes(REPORT_SCHEMA));
-  const named = ["decisionRecords", "unknownDecisionCalls", "decisionCalls", "reviewRounds", "reviewerPasses", "pricedMinutes", "pricedPasses", "usable"];
+  const named = ["decisionRecords", "unknownDecisionCalls", "unknownUnsplitRuns", "unsplitRuns", "decisionCalls", "reviewRounds", "reviewerPasses", "pricedMinutes", "pricedPasses", "usable"];
   for (const k of [...keys(r), ...keys(r.hotSpots), ...keys(r.source), ...keys(r.findings), ...keys(r.findings.totals), ...r.findings.outcomes, ...named]) assert.ok(doc.includes(`\`${k}\``), `docs/REPORT.md names ${k}`);
 });
 
@@ -981,7 +981,7 @@ const reviewed = (extra = []) => ({
   pulls: [],
   artifacts: {},
 });
-const api = (n) => ({ usd: { api: n, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownDecisionCalls: 0, unknownWhy: [] });
+const api = (n) => ({ usd: { api: n, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownDecisionCalls: 0, unknownUnsplitRuns: 0, unknownWhy: [] });
 
 test("report (#546): each finding counts once, at the outcome its latest record says, against the stage and reviewer model that raised it, beside the review stages' dollars", async () => {
   const { json: r } = await report(reviewed(), { issue: 11 });
@@ -1393,8 +1393,8 @@ test("report (#566 S6): a vendor comment standing alone with no model dollars an
   w.issues.push(objectiveIssue(42, { state: "open", labels: ["pendulum:blocked"] }));
   w.comments.push(comment(42, ["<!-- pendulum:42:vendor:work:9001-abcdef012345 -->", "Pendulum's sandbox cost for this stage:", "- sandbox stopped", spendMarker(0.04, { vendorUsd: 0.04 })].join("\n")));
   const { json: r } = await report(w, { since: "2026-11-17" });
-  assert.deepEqual(byIssue(r, 42).cost, { usd: { api: 0, subscription: 0, credits: 0, unknown: 0, sandbox: 0.04 }, unknownRuns: 1, unknownDecisionCalls: 0, unknownWhy: ["unreported"] });
-  assert.deepEqual(r.unknown.items, [{ issue: 42, stage: "work", runs: 1, decisionCalls: 0, why: ["unreported"] }]);
+  assert.deepEqual(byIssue(r, 42).cost, { usd: { api: 0, subscription: 0, credits: 0, unknown: 0, sandbox: 0.04 }, unknownRuns: 1, unknownDecisionCalls: 0, unknownUnsplitRuns: 1, unknownWhy: ["unreported"] });
+  assert.deepEqual(r.unknown.items, [{ issue: 42, stage: "work", runs: 1, decisionCalls: 0, unsplitRuns: 1, why: ["unreported"] }]);
   const card = objectiveStages({ issue: 42, comments: w.comments, mine: pendulumOwn(APP.id) });
   assert.deepEqual(card.stages.map((s) => [s.usd, s.unknown, s.why]), [[null, 1, ["unreported"]]]);
 });
@@ -1455,7 +1455,7 @@ test("report (#566 R8, R9): each missing entry gives its Objectives and the stag
   const stagesWithUnknown = r.unknown.items.length - 1;
   assert.equal(r.unknown.stages, stagesWithUnknown);
   assert.equal(r.unknown.reasons.reduce((t, x) => t + x.stages, 0), r.unknown.items.length + 1, "a stage with two reasons is under each");
-  assert.match(md, new RegExp(`^- Runs of unknown cost: ${runs} in ${stagesWithUnknown} stage\\(s\\) and 1 record\\(s\\) outside a stage \\(decision calls, or a vendor comment with no stage\\)\\. By reason \\(a stage that names two is under each\\): `, "m"));
+  assert.match(md, new RegExp(`^- Runs of unknown cost: ${runs} \\(${r.unknown.unsplitRuns} not known to be passes or decision calls\\) in ${stagesWithUnknown} stage\\(s\\) and 1 record\\(s\\) outside a stage \\(decision calls, or a vendor comment with no stage\\)\\. By reason \\(a stage that names two is under each\\): `, "m"));
   assert.match(md, new RegExp(`^\\*\\*Answer and fix passes\\*\\*: [^\\n]*; not recorded \\(a stage with no per-pass ledger\\): ${r.hotSpots.answerAndFixPasses.unrecorded.map((n) => `#${n}`).join(", ")}$`, "m"));
   assert.match(md, /^- Missing: stages with no per-pass ledger[^\n]* \(3 Objective\(s\), 7 stage\(s\): #5, #7, #8\)$/m);
 });

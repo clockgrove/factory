@@ -121,7 +121,9 @@ test("ledger line (#569): pass times are written in Unix milliseconds (`ms`); a 
   const old = '<!-- pendulum:ledger {"m":"claude-opus-5-5","b":"api","p":[{"l":"review","t":[1794882387,1794882398],"u":0.1}]} -->';
   assert.deepEqual(["started", "ended"].map((k) => ledgerOfComment(old).ledger[0][k]), ["2026-11-17T02:26:27Z", "2026-11-17T02:26:38Z"]);
   // A time no date can hold reads as none, never a throw.
-  assert.deepEqual(["started", "ended"].map((k) => ledgerOfComment('<!-- pendulum:ledger {"p":[{"l":"work-1","ms":[1e17,1794882398000]}]} -->').ledger[0][k]), [null, "2026-11-17T02:26:38.000Z"]);
+  assert.deepEqual(["started", "ended"].map((k) => ledgerOfComment('<!-- pendulum:ledger {"p":[{"l":"work-1","ms":[9e15,1794882398000]}]} -->').ledger[0][k]), [null, "2026-11-17T02:26:38.000Z"]);
+  // A pass with both: `ms` is the time, `t` (never written beside it) is not read.
+  assert.deepEqual(["started", "ended"].map((k) => ledgerOfComment('<!-- pendulum:ledger {"p":[{"l":"work-1","ms":[1794882387400,1794882398900],"t":[1,2]}]} -->').ledger[0][k]), [e.started, e.ended]);
 });
 
 test("ledger line (#543): bounded at LEDGER_MAX characters; a ledger that does not fit is not written, and the comment says so", async () => {

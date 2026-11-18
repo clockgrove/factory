@@ -201,7 +201,7 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     const ledger = onComment?.ledger ?? (Array.isArray(record?.ledger) ? record.ledger : null);
     const version = [rec?.ran?.pendulum, onComment?.version, record?.ran?.pendulum].find((v) => typeof v === "string" && VERSION.test(v)) ?? null;
     const tokens = onComment ? onComment.ledger.reduce((t, p) => addTokens(t, p.tokens), zeroTokens()) : tokensOf(record?.tokens);
-    const s = { stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? ledgerModel(c.body) ?? modelId(record?.model), harness, usd, unknown, why, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true, sandbox: null, ledger, version, tokens, key };
+    const s = { stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? ledgerModel(c.body) ?? modelId(record?.model), harness, usd, unknown, why, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true, sandbox: null, ledger, version, tokens, key, ...(from.noPass === true ? { noPass: true } : {}) };
     stages.push(s);
     byKey.set(`${stage}:${key}`, s);
   }
@@ -898,7 +898,7 @@ export function finishSummary(d) {
     ...objectivePasses(d),
     cost: { usd: t.usd, cents: Math.round(t.usd * 100), unknown: t.unknown, why: t.why, byBilling: t.byBilling },
     sandbox: d.sandbox ? { usd: d.sandbox.usd, cents: rows.at(-1).cents, unknown: d.sandbox.unknown, why: sandboxWhy(d), foreign: [...(d.foreignVendors ?? [])] } : null,
-    stages: d.stages.map((s, i) => ({ kind: s.kind, key: s.key ?? null, part: s.part, model: s.model, harness: s.harness, version: s.version ?? null, ms: s.start ? ms(s.end) - ms(s.start) : null, ...money({ ...s, cents: rows[i].cents }), why: s.why, sandbox: s.sandbox, churn: s.churn.map((c) => c.row), tokens: s.tokens ?? zeroTokens(), passes: Array.isArray(s.ledger) ? stagePassFigures(s.ledger) : null, ...(s.unattributed ? { unattributed: true } : {}) })),
+    stages: d.stages.map((s, i) => ({ kind: s.kind, key: s.key ?? null, part: s.part, model: s.model, harness: s.harness, version: s.version ?? null, ms: s.start ? ms(s.end) - ms(s.start) : null, ...money({ ...s, cents: rows[i].cents }), why: s.why, sandbox: s.sandbox, churn: s.churn.map((c) => c.row), tokens: s.tokens ?? zeroTokens(), passes: Array.isArray(s.ledger) ? stagePassFigures(s.ledger) : null, ...(s.noPass ? { noPass: true } : {}), ...(s.unattributed ? { unattributed: true } : {}) })),
     asked: b.asked.map((r) => ({ part: r.part ?? null, what: r.what ?? "sandbox", ...money(r) })),
     churn: b.churn.map((r) => ({ row: r.row, stages: r.stages, ...money(r) })),
   };
@@ -1013,7 +1013,7 @@ export function readSummary(body, n) {
     const tokens = tokensRead(s?.tokens);
     const passes = s?.passes === null ? null : passesRead(s?.passes);
     if (!money || !stageWhy || own === undefined || !tokens || passes === undefined || !STAGE_KINDS.has(s.kind) || (s.key !== null && !/^[A-Za-z0-9:-]{1,100}$/.test(String(s.key))) || !countOf(s.part) || (s.model !== null && modelId(s.model) === null) || (s.harness !== null && !HARNESSES.has(s.harness)) || (s.version !== null && !VERSION.test(String(s.version))) || (s.ms !== null && countOf(s.ms) === undefined)) return null;
-    return { kind: s.kind, key: s.key, part: s.part, model: s.model, harness: s.harness, version: s.version, ms: s.ms, ...money, why: stageWhy, sandbox: own ? { usd: own.usd, unknown: own.unknown } : null, churn: Array.isArray(s.churn) ? s.churn.filter((c) => Object.hasOwn(CHURN, c)) : [], tokens, passes, ...(s.unattributed === true ? { unattributed: true } : {}) };
+    return { kind: s.kind, key: s.key, part: s.part, model: s.model, harness: s.harness, version: s.version, ms: s.ms, ...money, why: stageWhy, sandbox: own ? { usd: own.usd, unknown: own.unknown } : null, churn: Array.isArray(s.churn) ? s.churn.filter((c) => Object.hasOwn(CHURN, c)) : [], tokens, passes, ...(s.noPass === true ? { noPass: true } : {}), ...(s.unattributed === true ? { unattributed: true } : {}) };
   });
   const asked = (Array.isArray(v.asked) ? v.asked : []).map((r) => {
     const money = moneyRead(r, { nullable: true });

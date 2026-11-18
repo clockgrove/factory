@@ -2950,6 +2950,8 @@ export function findingsOf(body) {
 /**
  * The largest per-pass ledger line a progress comment carries (ledgerMarker), in characters. A stage whose ledger does
  * not fit gets a line saying so and a marker with its pass count alone (`cut`): its usage record stays the ledger's source.
+ * A pass's times in milliseconds (`ms`) take 7 characters more than the seconds of a line from before them (`t`), a few
+ * percent of a typical pass's entry, so a little fewer passes fit: a stage of 20 still does.
  */
 export const LEDGER_MAX = 6_000;
 const LEDGER = /^<!-- pendulum:ledger (\{[^\n]*\}) -->$/m;

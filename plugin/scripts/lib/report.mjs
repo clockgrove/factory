@@ -355,7 +355,7 @@ export function markerIssue(c) {
  * place of `pendulum`. The Objective it belongs to when the comment is on that issue, else null. The report reads no
  * figure from it (no legacy reader): it says that such a stage is there and unread (`legacy-records`).
  */
-const LEGACY_PROGRESS = new RegExp(`^<!-- ${PREVIOUS_NAME}:(\\d+):progress:(?:work|review):[A-Za-z0-9:-]{1,100} -->`);
+const LEGACY_PROGRESS = new RegExp(`^<!-- ${PREVIOUS_NAME}:(\\d+):progress:(?:work|review):[A-Za-z0-9:-]{1,100} -->(?:\n|$)`);
 export function legacyIssue(c) {
   const m = LEGACY_PROGRESS.exec(c?.body || "");
   if (!m) return null;
@@ -1281,23 +1281,28 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
  * merged Objective the median and p25..p75 (spread.mjs, the bench baseline's) of the dollars of each billing kind (a
  * merged Objective with runs of unknown cost left out of every dollar measure, and counted), the model minutes, the wall
  * clock, the review rounds and the fix passes (a merged Objective whose measure is not recorded left out of it), and the
- * runs of unknown cost; and the review findings of its Objectives with a findings record (armFindings), counts only. No
- * total across kinds, no difference between the arms and no significance: the figures only, with n in every measure and
- * every arm's rows.
+ * runs of unknown cost; and the review findings of its Objectives with a findings record (armFindings), counts only. A
+ * merged Objective with stages from before the rename to Pendulum (`legacyStages`, #567) has figures that leave those
+ * stages out, a lower bound: it is left out of every measure but the wall clock and of the findings, counted in each
+ * `leftOut` and listed in `legacy`. No total across kinds, no difference between the arms and no significance: the
+ * figures only, with n in every measure and every arm's rows.
  */
 function comparisonOf(arms, objectives, measures) {
   const both = new Set(arms[0].trusted.filter((n) => arms[1].trusted.includes(n)));
-  const measured = (rows, pick, digits) => {
+  // Over `rows`, out of `of` (the merged Objectives): those of `of` not measured are `leftOut`.
+  const measured = (rows, pick, digits, of = rows) => {
     const xs = rows.map(pick);
     const s = spread(xs, digits);
-    return { median: s.median, p25: s.p25, p75: s.p75, n: s.n, leftOut: rows.length - s.n };
+    return { median: s.median, p25: s.p25, p75: s.p75, n: s.n, leftOut: of.length - s.n };
   };
   return {
     inBoth: [...both].sort((a, b) => a - b),
     arms: arms.map((arm) => {
       const rows = objectives.filter((o) => arm.trusted.includes(o.issue) && !both.has(o.issue));
       const merged = rows.filter((o) => o.outcome === "merged");
-      const known = merged.filter((o) => !o.cost.unknownRuns);
+      // Its figures whole: no stage from before the rename left unread (#567).
+      const whole = merged.filter((o) => !o.legacyStages);
+      const known = whole.filter((o) => !o.cost.unknownRuns);
       const reasons = new Map();
       for (const o of rows) for (const code of o.cost.unknownWhy) reasons.set(code, (reasons.get(code) ?? 0) + 1);
       const m = (o) => measures.get(o.issue) ?? {};
@@ -1308,16 +1313,17 @@ function comparisonOf(arms, objectives, measures) {
         outcomes: Object.fromEntries([...OUTCOMES, null].map((k) => [k ?? "unread", rows.filter((o) => o.outcome === k).length])),
         merged: merged.length,
         usdPerMerged: Object.fromEntries(COST_KINDS.map((k) => [k, { ...measured(known, (o) => o.cost.usd[k], 6), leftOut: merged.length - known.length }])),
-        modelMinutes: measured(merged, (o) => m(o).modelMinutes ?? null, 2),
+        modelMinutes: measured(whole, (o) => m(o).modelMinutes ?? null, 2, merged),
         wallMinutes: measured(merged, (o) => m(o).wallMinutes ?? null, 2),
-        reviewRounds: measured(merged, (o) => o.stages.review, 2),
-        fixPasses: measured(merged, (o) => m(o).fixPasses ?? null, 2),
-        findings: armFindings(rows),
+        reviewRounds: measured(whole, (o) => o.stages.review, 2, merged),
+        fixPasses: measured(whole, (o) => m(o).fixPasses ?? null, 2, merged),
+        findings: armFindings(rows.filter((o) => !o.legacyStages)),
+        legacy: rows.filter((o) => o.legacyStages > 0).map((o) => o.issue),
         unknown: { runs: rows.reduce((t, o) => t + o.cost.unknownRuns, 0), objectives: rows.filter((o) => o.cost.unknownRuns).map((o) => o.issue), reasons: [...reasons].map(([code, count]) => ({ code, objectives: count, text: UNKNOWN_WHY[code] })).sort((a, b) => b.objectives - a.objectives || a.code.localeCompare(b.code)) },
         untrusted: [...arm.untrusted].sort((a, b) => a - b),
         unverifiable: [...arm.unverifiable].sort((a, b) => a - b),
         unchecked: arm.listed.filter((n) => !checked(arm, n)).sort((a, b) => a - b),
-        objectives: rows.map((o) => ({ issue: o.issue, outcome: o.outcome, usd: { ...o.cost.usd }, unknownRuns: o.cost.unknownRuns, modelMinutes: m(o).modelMinutes ?? null, wallMinutes: m(o).wallMinutes ?? null, reviewRounds: o.stages.review, fixPasses: m(o).fixPasses ?? null, findings: o.findings?.findings ?? null })),
+        objectives: rows.map((o) => ({ issue: o.issue, outcome: o.outcome, usd: { ...o.cost.usd }, unknownRuns: o.cost.unknownRuns, modelMinutes: m(o).modelMinutes ?? null, wallMinutes: m(o).wallMinutes ?? null, reviewRounds: o.stages.review, fixPasses: m(o).fixPasses ?? null, findings: o.findings?.findings ?? null, legacyStages: o.legacyStages })),
       };
     }),
   };
@@ -1484,7 +1490,7 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   if (source.artifacts.unreadable) out.push({ code: "artifacts-unreadable", count: source.artifacts.unreadable, counts: none, issues: [], text: "artifact lists the token may not read (it needs actions: read), or artifacts that name no workflow run" });
   return {
     // Partial when the call budget stopped the reads, or stages from before the rename went unread.
-    complete: !source.stopped && !missing.legacy.issues.size,
+    complete: !out.some((m) => PARTIAL_CODES.includes(m.code)),
     stoppedAt: source.stopped ?? null,
     maxCalls: calls.max,
     calls: { planned: calls.planned, plannedAtLeast: !!calls.open, made: calls.made, byKind: { ...calls.byKind } },
@@ -1807,6 +1813,7 @@ function renderComparison(c, words) {
     if (arm.untrusted.length) out.push(`- Not counted for ${name(arm)}, its label applied by someone who cannot push: ${issues(arm.untrusted)}.`);
     if (arm.unverifiable.length) out.push(`- Not counted for ${name(arm)}, its labeller's permission unreadable with this token: ${issues(arm.unverifiable)}.`);
     if (arm.unchecked.length) out.push(`- Not counted for ${name(arm)}, its labeller not read before the call budget ran out: ${issues(arm.unchecked)}.`);
+    if (arm.legacy.length) out.push(`- Left out of ${name(arm)}'s measures but the wall clock, and of its findings, with stages from before the rename to Pendulum not read: ${issues(arm.legacy)}.`);
   }
   for (const arm of [a, b]) {
     out.push("", `**${name(arm)}**: ${arm.n} Objective(s), ${arm.merged} merged.`, "", table(["Issue", "Outcome", ...COST_KINDS.map((k) => kindName[k]), "Unknown runs", "Model min", "Wall min", "Review rounds", "Fix passes", "Findings"], arm.objectives.map((o) => [`#${o.issue}`, o.outcome ?? "unread", ...COST_KINDS.map((k) => (o.usd[k] ? money(o.usd[k]) : "—")), o.unknownRuns, o.modelMinutes ?? "—", o.wallMinutes ?? "—", o.reviewRounds, o.fixPasses ?? "—", o.findings ?? "—"])));

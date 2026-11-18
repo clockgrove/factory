@@ -9,6 +9,7 @@ import { findingsMarker, harnessMarker, ledgerMarker, setSelf, spendMarker } fro
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
 import { readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
+import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
 import { baselineOf } from "../../bench/lib/baseline.mjs";
 
 // `pendulum report --compare` (#545): two experiment arms side by side, from Pendulum's own records alone, each arm's
@@ -283,7 +284,7 @@ test("report --compare: a stage Pendulum cannot attribute to itself leaves its O
   const [fast] = r.comparison.arms;
   assert.deepEqual(fast.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
   assert.deepEqual(fast.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
-  assert.deepEqual(fast.objectives.find((o) => o.issue === 11), { issue: 11, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null, findings: null });
+  assert.deepEqual(fast.objectives.find((o) => o.issue === 11), { issue: 11, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null, findings: null, legacyStages: 0 });
   // Its dollars are not known whole either: it is left out of every dollar measure.
   assert.deepEqual(fast.usdPerMerged.api, { median: 3.25, p25: 2.875, p75: 3.625, n: 2, leftOut: 1 });
 });
@@ -382,7 +383,7 @@ test("report --compare: a per-pass ledger read from the progress comment counts 
   const [after] = s.comparison.arms;
   assert.deepEqual(after.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
   assert.deepEqual(after.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
-  assert.deepEqual(after.objectives.find((o) => o.issue === 51), { issue: 51, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null, findings: null });
+  assert.deepEqual(after.objectives.find((o) => o.issue === 51), { issue: 51, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null, findings: null, legacyStages: 0 });
 });
 
 test("report --compare (#546): each arm counts the review findings of its Objectives with a findings record, outcome by outcome", async () => {
@@ -431,4 +432,27 @@ test("report --compare (#544): a merged Objective read from its finish card give
   assert.deepEqual(cards.json.comparison, stages.json.comparison);
   const [fast] = cards.json.comparison.arms;
   assert.deepEqual(fast.objectives.filter((o) => o.outcome === "merged").map((o) => [o.issue, o.modelMinutes, o.fixPasses, o.wallMinutes]), [[11, 10, 0, 60], [12, 25, 1, 90], [13, 32, 0, 180]]);
+});
+
+test("report --compare (#567): a merged Objective with stages from before the rename is a lower bound: left out of every measure but the wall clock, counted in leftOut and listed in legacy", async () => {
+  const w = experiment();
+  // The App's work stage on #11 under the previous marker; the same on #16 (in both arms) and #15 (its label not vouched for).
+  const old = (n) => ({ id: (nextId += 1), issue_url: issueUrl(n), user: BOT, author_association: "CONTRIBUTOR", performed_via_github_app: { id: APP.id, slug: APP.slug }, created_at: at(2), updated_at: at(2), body: [`<!-- ${PREVIOUS_NAME}:${n}:progress:work:8800 -->`, "work: started.", `<!-- ${PREVIOUS_NAME}:spend {"usd":40} -->`].join("\n") });
+  w.comments.push(old(11), old(15), old(16));
+  const { code, json: r, out } = await report(w, ["--compare", "fast,slow", "--json"]);
+  assert.equal(code, 0);
+  const [fast, slow] = r.comparison.arms;
+  assert.deepEqual(r.source.missing.find((m) => m.code === "legacy-records")?.issues, [11]);
+  assert.equal(r.source.complete, false);
+  assert.deepEqual([fast.legacy, slow.legacy], [[11], []]);
+  // #11's row keeps its own figures, marked; the measures leave it out, but the wall clock, which no stage gives.
+  assert.deepEqual(fast.objectives.find((o) => o.issue === 11), { issue: 11, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, modelMinutes: 10, wallMinutes: 60, reviewRounds: 0, fixPasses: 0, findings: null, legacyStages: 1 });
+  assert.deepEqual(fast.usdPerMerged.api, { median: 3.25, p25: 2.875, p75: 3.625, n: 2, leftOut: 1 });
+  assert.deepEqual(fast.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
+  assert.deepEqual(fast.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
+  assert.deepEqual(fast.reviewRounds, { median: 1.5, p25: 1.25, p75: 1.75, n: 2, leftOut: 1 });
+  assert.deepEqual(fast.wallMinutes, { median: 90, p25: 75, p75: 135, n: 3, leftOut: 0 });
+  assert.deepEqual(slow.usdPerMerged.subscription, { median: 4, p25: 3.5, p75: 4.5, n: 2, leftOut: 1 });
+  const md = renderReport(JSON.parse(out));
+  assert.match(md, /^- Left out of fast's measures but the wall clock, and of its findings, with stages from before the rename to Pendulum not read: #11\.$/m);
 });

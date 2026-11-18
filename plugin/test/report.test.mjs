@@ -342,7 +342,7 @@ test("report: the call budget: the planned calls are printed before any read, an
   assert.equal(kept.progressRun, "44002648279");
   assert.deepEqual(kept.ran, { pendulum: PENDULUM_VERSION });
   for (const k of ["reason", "session", "basis", "credential", "cache", "sessionTotal"]) assert.ok(!Object.hasOwn(kept, k), k);
-  // The report reads no timelines, workflow runs or jobs (the scorer's walk-away reads), and writes nothing.
+  // With no finish card, the report reads no timelines, workflow runs or jobs (the scorer's walk-away reads), and writes nothing.
   assert.ok(!full.calls.some((c) => /timeline|\/actions\/runs|\/jobs|^(POST|PATCH|PUT|DELETE)/.test(c)));
 });
 

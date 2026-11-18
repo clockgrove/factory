@@ -920,11 +920,11 @@ export function scoreObjective(collected, opts = {}) {
             ? `merged; ${unprompted.length} unprompted human action(s), none asked for`
             : `merged with no human action after the label${ownerNote}`,
   };
-  // Labelled before the rename (`renamed`): a walk-away, and an asked-only yes, are not known; a miss or an External
-  // result stays one, as read, noted.
+  // Labelled before the rename (`renamed`): a walk-away with every input source read, and an asked-only yes, are not
+  // known; anything else stays as read, noted (a walk-away with an input source unread still breaks the streak).
   if (renamed) {
     walkAway.clockRenamed = true;
-    if (walkAway.bucket === "walk-away") Object.assign(walkAway, { value: null, bucket: "unknown", reason: RENAMED_WHY });
+    if (walkAway.value && walkAway.unseen.length === 0) Object.assign(walkAway, { value: null, bucket: "unknown", reason: RENAMED_WHY });
     else walkAway.reason = `${walkAway.reason} (${RENAMED_NOTE})`;
     if (walkAway.askedOnly.value) walkAway.askedOnly = { value: null, reason: RENAMED_WHY };
     else walkAway.askedOnly.reason = `${walkAway.askedOnly.reason} (${RENAMED_NOTE})`;

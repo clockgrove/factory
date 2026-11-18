@@ -36,7 +36,10 @@ export function endedAt(row) {
 /** One finished row's verdict for the streak: `{ok, why}`; an External row's is `{ok: null, external: true, why}`, skipped. */
 export function verdict(row) {
   const escapes = (row.quality?.escapes || []).filter(isP1);
-  // A walk-away merge labelled before the rename (bucket `unknown`): skipped, unless a P1 escape breaks it.
+  // A walk-away merge labelled before the rename (bucket `unknown`): skipped, unless a P1 escape or an input source not
+  // read breaks it.
+  const unread = row.walkAway?.unseen === undefined ? ["input sources not recorded"] : row.walkAway.unseen;
+  if (row.walkAway?.bucket === "unknown" && unread.length) return { ok: false, why: `input not readable (${unread.join(", ")}): walk-away unproven` };
   if (row.walkAway?.bucket === "unknown" && !escapes.length) return { ok: null, unknown: true, why: `walk-away unknown: ${row.walkAway.reason}` };
   if (row.walkAway?.bucket === "external" && !escapes.length) return { ok: null, external: true, why: `external: Blocked: ${[...new Set((row.walkAway.blocks || []).map((b) => b.cause))].join(", ")}` };
   if (!row.mergedAt) return { ok: false, why: `not merged (${row.exit})` };

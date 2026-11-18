@@ -1549,3 +1549,26 @@ test("an Objective labelled before the rename to Pendulum (#567): an External re
   const pooled = pooledStreak([{ ...row, repository: REPO }], { from: "2031-02-01T00:00:00Z" });
   assert.deepEqual([pooled.finished, pooled.external], [0, 1]);
 });
+
+test("an Objective labelled before the rename to Pendulum (#567): a walk-away with an input source unread stays as read and breaks the streak, never unknown", async () => {
+  const { streaks, pooledStreak, verdict } = await import("../lib/streak.mjs");
+  const unread = () => ({ ...cleanMerge(42), bodyEdits: null });
+  const known = scoreObjective(unread(), { prices, now: NOW });
+  const row = scoreObjective(renamed(unread()), { prices, now: NOW });
+  assert.deepEqual(known.walkAway.unseen, ["body edits"]);
+  assert.deepEqual([row.walkAway.value, row.walkAway.bucket, row.walkAway.unseen, row.walkAway.clockRenamed], [true, "walk-away", ["body edits"], true]);
+  assert.equal(row.walkAway.reason, `${known.walkAway.reason} (${RENAMED_NOTE})`);
+  assert.deepEqual(verdict(row), verdict(known));
+  assert.equal(verdict(row).ok, false);
+  const seq = Object.values(streaks([row], { from: "2031-02-01T00:00:00Z" }).harnesses).flatMap((h) => h.sequence);
+  assert.deepEqual(seq.map((x) => [x.issue, x.ok]), [[42, false]]);
+  const pooled = pooledStreak([{ ...row, repository: REPO }], { from: "2031-02-01T00:00:00Z" });
+  assert.deepEqual([pooled.finished, pooled.walkAway, pooled.sequence.map((x) => x.ok)], [1, 0, [false]]);
+  // verdict itself: an unknown row with an input source unread, or none recorded, is a break before any skip.
+  const clean = scoreObjective(renamed(cleanMerge(42)), { prices, now: NOW });
+  assert.equal(clean.walkAway.bucket, "unknown");
+  for (const unseen of [["workflow runs"], undefined]) {
+    const v = verdict({ ...clean, walkAway: { ...clean.walkAway, unseen } });
+    assert.deepEqual([v.ok, v.why], [false, `input not readable (${(unseen ?? ["input sources not recorded"]).join(", ")}): walk-away unproven`]);
+  }
+});

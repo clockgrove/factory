@@ -15,9 +15,14 @@ const PASS_LABEL = /^[a-z][a-z0-9-]{0,60}$/;
 
 /** A cost with every kind at zero: dollars per kind (COST_KINDS), the runs of unknown cost and why (UNKNOWN_WHY codes). */
 export const zeroCost = () => ({ usd: Object.fromEntries(COST_KINDS.map((k) => [k, 0])), unknownRuns: 0, unknownWhy: [] });
+/**
+ * `c` added into `into`; a cost that splits its runs of unknown cost (the report's `unknownDecisionCalls` and
+ * `unknownUnsplitRuns`) takes `c`'s, 0 where `c` has none.
+ */
 export const addCost = (into, c) => {
   for (const k of COST_KINDS) into.usd[k] = round6(into.usd[k] + c.usd[k]);
   into.unknownRuns += c.unknownRuns;
+  for (const k of ["unknownDecisionCalls", "unknownUnsplitRuns"]) if (Object.hasOwn(into, k)) into[k] += c[k] ?? 0;
   into.unknownWhy = [...new Set([...into.unknownWhy, ...c.unknownWhy])].sort();
   return into;
 };

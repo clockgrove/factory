@@ -57,8 +57,8 @@ export function runningPendulum(root = OWN_ROOT, version = PENDULUM_VERSION, hom
  *   launcher's plugin, unpacked with no git checkout), when it is a build of this version.
  * - On GitHub Actions, the ref the workflow's `uses:` named, which action.yml's first step reads (`github.action_ref`,
  *   before any nested action) and passes as PENDULUM_ACTION_REF. It counts only when the runner's checkout of the
- *   action (GITHUB_ACTION_PATH) ends with `/<ref>`, an exact match on a path the runner chose; else, or set but empty,
- *   the build is `+unknown`. The release's tag, or a moving tag of its line (`v0`, `v0.10`), is the release; a commit
+ *   action (GITHUB_ACTION_PATH, its backslashes read as `/` on Windows) ends with `/<ref>`, an exact match on a path the
+ *   runner chose; else, or set but empty, the build is `+unknown`. The release's tag, or a moving tag of its line (`v0`, `v0.10`), is the release; a commit
  *   SHA is its first 12 characters (a SHA pin of a release too: a SHA is never taken for a tag); any other ref (a
  *   branch) is its name.
  * - Otherwise (PENDULUM_ACTION_REF not set at all: local mode, or a command run from a person's own workflow), it is
@@ -72,7 +72,8 @@ export function pendulumBuild({ env = process.env, version = PENDULUM_VERSION, r
   if (handed && (handed === version || (handed.startsWith(`${version}+`) && /^[A-Za-z0-9.-]{1,40}$/.test(handed.slice(version.length + 1))))) return handed;
   if (env.PENDULUM_ACTION_REF !== undefined) {
     const ref = String(env.PENDULUM_ACTION_REF).trim();
-    const path = String(env.GITHUB_ACTION_PATH || "").replace(/\/+$/, "");
+    // A Windows runner's path has backslashes: compared with `/` for each, so the match is the same on every runner.
+    const path = String(env.GITHUB_ACTION_PATH || "").replace(/\\/g, "/").replace(/\/+$/, "");
     if (!ref || !path.endsWith(`/${ref}`)) return meta("unknown");
     const [major, minor] = version.split(".");
     if (ref === `v${version}` || ref === `v${major}` || ref === `v${major}.${minor}`) return version;

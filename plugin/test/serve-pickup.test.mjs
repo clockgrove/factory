@@ -326,6 +326,17 @@ test("#565 W6: a build records the Pendulum it really is: its release at its tag
   for (const v of [actions("main"), `9.9.8+${head.slice(0, 12)}.dirty`]) assert.match(v, /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?$/, "a version the report and the card read");
 });
 
+test("#569 N8: on a Windows runner, whose action path has backslashes, the workflow's ref is matched as on any other runner", () => {
+  const actions = (ref, path) => pendulumBuild({ env: { GITHUB_ACTIONS: "true", PENDULUM_ACTION_REF: ref, GITHUB_ACTION_PATH: path }, version: "0.10.2" });
+  const base = "D:\\a\\_actions\\clockgrove\\pendulum";
+  assert.equal(actions("v0.10.2", `${base}\\v0.10.2`), "0.10.2");
+  assert.equal(actions("v0.10", `${base}\\v0.10\\`), "0.10.2", "a trailing backslash");
+  assert.equal(actions("main", `${base}\\main`), "0.10.2+main");
+  assert.equal(actions("fix/565", `${base}\\fix\\565`), "0.10.2+fix-565", "a branch with a slash, checked out in two folders");
+  assert.equal(actions("v0.10.2", `${base}\\main`), "0.10.2+unknown", "still an exact match: another ref's path is unknown");
+  assert.equal(actions("main", "D:\\a\\_actions\\clockgrove\\pendulum-main"), "0.10.2+unknown", "a folder that only ends with the ref's name is none");
+});
+
 test("deadHereHolder: a holder with this process's pid that is not its own loop's is the loop it was before it started again, so dead", () => {
   const id = machineIdentity();
   const own = holderId(id, process.pid);

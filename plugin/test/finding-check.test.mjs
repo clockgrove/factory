@@ -1067,7 +1067,7 @@ test("#546: the real finding check writes each finding's outcome into the review
     const comments = gh.state.issueComments.map((c) => ({ ...c, issue_url: "https://api.github.com/repos/acme/app/issues/7" }));
     const r = buildReport(reportRead(comments), { now: "2026-11-18T00:00:00Z" });
     const outcomes = (o) => ({ "fixed-test": 0, "fixed-verdict": 0, answered: 0, "not-fixed": 0, "not-checkable": 0, open: 0, ...o });
-    const api = (n) => ({ usd: { api: n, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownWhy: [] });
+    const api = (n) => ({ usd: { api: n, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownDecisionCalls: 0, unknownUnsplitRuns: 0, unknownWhy: [] });
     assert.deepEqual(r.findings.totals, { findings: 7, outcomes: outcomes({ "fixed-test": 1, "fixed-verdict": 1, answered: 2, "not-fixed": 1, "not-checkable": 1, open: 1 }), reviewStages: 1, cost: api(0.5), unnamed: 0 });
     assert.deepEqual(r.findings.byReviewer, [
       { key: "claude-fable-5-2", outside: false, findings: 6, outcomes: outcomes({ "fixed-test": 1, "fixed-verdict": 1, answered: 1, "not-fixed": 1, "not-checkable": 1, open: 1 }), reviewStages: 1, cost: api(0.5) },

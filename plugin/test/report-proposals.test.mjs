@@ -121,6 +121,7 @@ test("report --rates: each ratio is exact against the published table, within on
   const { code, json: r, md } = await report(world(), ["--issue", "41,42", "--rates", "gpt-6.1-terra,claude-fable-5-2", "--rates", "gpt-6-luna,gpt-6-sol"]);
   assert.equal(code, 0);
   assert.equal(r.rates.words, RATIO_WORDS);
+  assert.equal(r.rates.usable, true, "#569 V11: a ratio was weighed");
   assert.match(RATIO_WORDS, /^ratio of published rates on the recorded token mix \(no dollar unit\)$/);
   assert.deepEqual(r.rates.candidates, ["gpt-6.1-terra", "claude-fable-5-2", "gpt-6-luna", "gpt-6-sol"]);
   // The recorded mix is the model's tokens; each ratio is the candidate's rates over the model's own, on that mix.
@@ -336,6 +337,9 @@ test("report --rates: a review stage whose passes' models no ledger names gives 
   for (const n of ["48", "49"]) {
     const { json: r } = await report(w, ["--issue", n, "--rates", "gpt-6.1-terra"]);
     assert.deepEqual(r.rates.items, [], n);
+    // #569 V11: nothing could be weighed, and the report says so in a field of its own, and in the Markdown.
+    assert.equal(r.rates.usable, false, n);
+    assert.match(renderReport(r), /^No ratio could be weighed: each model and candidate below says why\.$/m, n);
     assert.deepEqual(r.rates.skipped.map((x) => [x.model, x.why]).sort(), [[WORKER, "pass-models"], [REVIEWER, "pass-models"]].sort(), n);
   }
 });

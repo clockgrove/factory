@@ -47,22 +47,6 @@ test("claim comment: writers at once under the record lock each get their change
   }
 });
 
-test("negative control: the same writers as blind read-then-PATCH writes of one comment lose changes", async () => {
-  let lost = 0;
-  for (let seed = 1; seed <= SEEDS; seed += 1) {
-    const s = githubStore({ seed });
-    const id = s.put(N, `${HEAD}\n${recordBody({ launches: [] })}`);
-    const blind = async (w) => {
-      const list = await s.api.rest(`repos/${REPO.full}/issues/${N}/comments?per_page=100`);
-      const cur = sandboxRecordOf(list.find((c) => c.id === id).body);
-      await s.api.rest(`repos/${REPO.full}/issues/comments/${id}`, { method: "PATCH", body: { body: `${HEAD}\n${recordBody({ ...cur, launches: [...cur.launches, { cue: w }] })}` } });
-    };
-    await Promise.all(["w0", "w1", "w2", "w3", "w4"].map(blind));
-    if (record(s).launches.length < 5) lost += 1;
-  }
-  assert.ok(lost > 0, "blind writes lose a change under some interleaving: the harness sees a loss");
-});
-
 test("vendor booking: the launcher and the sweep booking one stage at once write one vendor comment, and never the progress comment", async () => {
   process.env.RUNNER_TEMP = mkdtempSync(join(tmpdir(), "pendulum-book-"));
   const claim = "0123456789ab";

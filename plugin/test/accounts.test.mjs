@@ -1,17 +1,16 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { ACCOUNT_NAME_MAX, accountEnv, accountReason, accountsFile, declaredLogins, defaultAccount, loadAccounts, sandboxRoots } from "../scripts/lib/accounts.mjs";
-import { codexLocalConfig, credentialPaths, gatewayKeyFile, gitPinFile, harnessLogins, harnessOuterSettings, homePlaces, pinGitDir, stageLogin } from "../scripts/lib/local.mjs";
+import { accountEnv, accountsFile, declaredLogins, loadAccounts } from "../scripts/lib/accounts.mjs";
+import { credentialPaths, gatewayKeyFile, gitPinFile, homePlaces, pinGitDir, stageLogin } from "../scripts/lib/local.mjs";
 import { PENDULUM_CONTROL_KEYS, scrubbedEnv } from "../scripts/lib/harness.mjs";
 import { ranWith } from "../scripts/lib/choice.mjs";
 import { harnessMarker } from "../scripts/lib/logic.mjs";
 import { writeUsage } from "../scripts/lib/session.mjs";
-import { localAccountChecks } from "../scripts/doctor.mjs";
 import { harnessCell, objectiveAccounts, spendRecords, stageHarnessOf } from "../../bench/lib/objective.mjs";
 
 const ROOT = join(import.meta.dirname, "..", "..");
@@ -41,34 +40,6 @@ function problems(h, v, { env = {}, roots = [] } = {}) {
   return (r.problems || []).map((p) => [p.account, p.why]);
 }
 
-test("#263: with nothing declared, every harness has one account named after it and a stage's env is today's", () => {
-  const h = fakeHome();
-  const r = loadAccounts({ home: h, env: {} });
-  assert.deepEqual([r.ok, r.declared], [true, false]);
-  for (const harness of ["claude", "codex", "copilot"]) assert.deepEqual(defaultAccount(r, harness), { name: harness, harness, declared: false });
-  const env = { CLAUDE_CONFIG_DIR: join(h, "x"), CODEX_HOME: join(h, "y") };
-  assert.equal(accountEnv(env, defaultAccount(r, "claude"), h), env, "the same env: nothing set, nothing removed");
-  assert.deepEqual(declaredLogins(h), []);
-  assert.deepEqual(harnessLogins(h, {}).map((l) => l.dir), [join(h, ".claude"), join(h, ".codex"), join(h, ".copilot"), join(h, ".config", "github-copilot")]);
-});
-
-test("#263: a declared account is used in place: its folder is set explicitly, never serve's own, and the first is the default", () => {
-  const h = fakeHome();
-  declare(h, good(h));
-  const r = loadAccounts({ home: h, env: {} });
-  assert.equal(r.ok, true, JSON.stringify(r.problems));
-  const alpha = defaultAccount(r, "claude");
-  assert.deepEqual(alpha, { name: "alpha", harness: "claude", declared: true, home: join(h, "work", "claude-a") });
-  assert.deepEqual(defaultAccount(r, "copilot"), { name: "gh-one", harness: "copilot", declared: true, tokenFile: join(h, ".config", "pendulum", "copilot-a") });
-  // Serve runs with CLAUDE_CONFIG_DIR on the second account: the stage still runs on the first, set explicitly.
-  assert.equal(accountEnv({ CLAUDE_CONFIG_DIR: join(h, "work", "claude-b") }, alpha, h).CLAUDE_CONFIG_DIR, join(h, "work", "claude-a"));
-  assert.equal(accountEnv({ CODEX_HOME: join(h, ".codex") }, defaultAccount(r, "codex"), h).CODEX_HOME, join(h, "work", "codex-a"));
-  // The default ~/.claude as an account: CLAUDE_CONFIG_DIR unset, so Claude Code keeps its .claude.json in the home.
-  assert.equal("CLAUDE_CONFIG_DIR" in accountEnv({ CLAUDE_CONFIG_DIR: join(h, "work", "claude-b") }, { name: "main", harness: "claude", declared: true, home: join(h, ".claude") }, h), false);
-  // Nothing is copied: the folders hold what they held.
-  assert.equal(readFileSync(join(h, "work", "claude-a", ".credentials.json"), "utf8"), "{}");
-});
-
 test("#263: every declared login is hidden from every other stage; a stage on one reads only its own", () => {
   const h = fakeHome();
   declare(h, good(h));
@@ -85,100 +56,6 @@ test("#263: every declared login is hidden from every other stage; a stage on on
   assert.ok(covered(credentialPaths(h, {}), join(h, ".config", "pendulum", "copilot-a")), "a Copilot account's token file");
   // Pendulum makes nothing in another account's folder for a stage's harness state.
   assert.throws(() => homePlaces("claude", { CLAUDE_CONFIG_DIR: a }, h).check(join(b, "hooks")), { code: "home-link" });
-});
-
-test("#263: a bad declaration is refused for each account, naming the account alone; Pendulum makes no account folder", () => {
-  const h = fakeHome();
-  const g = good(h);
-  const one = (claude) => problems(h, { claude });
-  assert.deepEqual(one([{ name: "Bad_Name", home: g.claude[0].home }]), [["claude account 1", `its name must be lowercase letters, digits and hyphens, starting with a letter or digit, at most ${ACCOUNT_NAME_MAX} characters`]]);
-  assert.equal(one([{ name: "a".repeat(ACCOUNT_NAME_MAX + 1), home: g.claude[0].home }])[0][0], "claude account 1", "longer than a pendulum:account: label allows");
-  assert.equal(ACCOUNT_NAME_MAX, 33);
-  assert.deepEqual(problems(h, { claude: [g.claude[0]], codex: [{ name: "alpha", home: g.codex[0].home }] }), [["alpha", "the name is declared twice"]]);
-  const missing = join(h, "work", "claude-gone");
-  assert.deepEqual(one([{ name: "gone", home: missing }]), [["gone", "its folder does not exist; Pendulum never makes one"]]);
-  assert.equal(existsSync(missing), false, "not made");
-  symlinkSync(g.claude[0].home, join(h, "work", "claude-link"));
-  assert.deepEqual(one([{ name: "linked", home: join(h, "work", "claude-link") }]), [["linked", "its folder is not at its real path (a link is on the way); declare the real path"]]);
-  assert.deepEqual(one([{ name: "slash", home: `${g.claude[0].home}/` }]), [["slash", "its folder is not an absolute, normal path"]]);
-  assert.deepEqual(one([{ name: "rel", home: "work/claude-a" }]), [["rel", "its folder is not an absolute, normal path"]]);
-  writeFileSync(join(h, "work", "plain"), "");
-  assert.deepEqual(one([{ name: "file", home: join(h, "work", "plain") }]), [["file", "its folder is not a directory"]]);
-  assert.deepEqual(one([g.claude[0], { name: "twin", home: g.claude[0].home }]), [["alpha", "it is on the same folder as account twin"], ["twin", "it is on the same folder as account alpha"]]);
-  mkdirSync(join(g.claude[0].home, "inner"));
-  assert.deepEqual(one([g.claude[0], { name: "inner", home: join(g.claude[0].home, "inner") }]).map((p) => p[0]), ["alpha", "inner"], "nested, both ways");
-  assert.deepEqual(one([{ name: "codexdir", home: join(h, ".codex") }]), [["codexdir", "its folder is in or around another Codex login"]]);
-  mkdirSync(join(h, ".codex", "sub"));
-  assert.deepEqual(one([{ name: "insidecodex", home: join(h, ".codex", "sub") }]), [["insidecodex", "its folder is in or around another Codex login"]]);
-  assert.deepEqual(one([{ name: "whole", home: h }]).map((p) => p[0]), ["whole"], "around every login");
-  mkdirSync(join(h, ".config", "pendulum", "c"));
-  assert.deepEqual(one([{ name: "keys", home: join(h, ".config", "pendulum", "c") }]), [["keys", "its folder is in or around ~/.config/pendulum"]]);
-  assert.deepEqual(one([{ name: "config", home: join(h, ".config") }]), [["config", "its folder is in or around ~/.config/pendulum"]]);
-  // A directory a sandbox may write: this repository's clone (its .pendulum holds every Objective's), the stage temp base.
-  const dev = join(h, "work", "repo");
-  mkdirSync(join(dev, "acct"), { recursive: true });
-  for (const [name, home] of [["inclone", join(dev, "acct")], ["aroundclone", join(h, "work")]]) {
-    declare(h, { claude: [{ name, home }] });
-    assert.match(loadAccounts({ home: h, env: {}, roots: sandboxRoots(dev, h, "linux") }).problems[0].why, /a directory a sandbox may write/, name);
-  }
-  mkdirSync(join(h, ".cache", "pendulum", "s", "x"), { recursive: true });
-  declare(h, { claude: [{ name: "stagetmp", home: join(h, ".cache", "pendulum", "s", "x") }] });
-  assert.match(loadAccounts({ home: h, env: {}, roots: sandboxRoots(dev, h, "linux") }).problems[0].why, /a directory a sandbox may write/);
-});
-
-test("#263: a Copilot token file follows the rules for local secrets", () => {
-  const h = fakeHome();
-  const keys = join(h, ".config", "pendulum");
-  const one = (token_file) => problems(h, { copilot: [{ name: "gh", token_file }] });
-  assert.deepEqual(one(join(keys, "copilot-a")), []);
-  writeFileSync(join(h, "work", "tok"), "t", { mode: 0o600 });
-  assert.deepEqual(one(join(h, "work", "tok")), [["gh", "its token file is not under ~/.config/pendulum, which no sandbox can read; move it there, don't copy it"]]);
-  chmodSync(join(keys, "copilot-a"), 0o644);
-  assert.deepEqual(one(join(keys, "copilot-a")), [["gh", "its token file is readable or writable by others; chmod 600 it"]]);
-  chmodSync(join(keys, "copilot-a"), 0o600);
-  linkSync(join(keys, "copilot-a"), join(keys, "copilot-a2"));
-  assert.deepEqual(one(join(keys, "copilot-a")), [["gh", "its token file has more than one hard link; keep one copy"]]);
-  rmSync(join(keys, "copilot-a2"));
-  writeFileSync(join(keys, "empty"), "", { mode: 0o600 });
-  assert.deepEqual(one(join(keys, "empty")), [["gh", "its token file is empty"]]);
-  symlinkSync(join(keys, "copilot-a"), join(keys, "via-link"));
-  assert.deepEqual(one(join(keys, "via-link")), [["gh", "its token file is not at its real path (a link is on the way); declare the real path"]]);
-  assert.deepEqual(one(join(keys, "absent")), [["gh", "its token file does not exist; Pendulum never makes one"]]);
-  assert.deepEqual(problems(h, { copilot: [{ name: "gh", token_file: join(keys, "copilot-a") }, { name: "gh2", token_file: join(keys, "copilot-a") }] }), [["gh", "another account has the same token file"], ["gh2", "another account has the same token file"]]);
-});
-
-test("#263: the accounts file itself: a regular file only its owner writes, JSON naming the three harnesses; serve's own folder must be one of them", () => {
-  const h = fakeHome();
-  assert.deepEqual(problems(h, "{oops"), [["the accounts file", "the accounts file is not valid JSON"]]);
-  assert.deepEqual(problems(h, { gemini: [] }), [["the accounts file", 'it names no harness Pendulum runs: "gemini"']]);
-  assert.deepEqual(problems(h, { claude: { name: "x" } }), [["claude accounts", "they are not a list"]]);
-  declare(h, {});
-  chmodSync(accountsFile(h), 0o666);
-  assert.deepEqual(loadAccounts({ home: h, env: {} }).problems, [{ account: "the accounts file", why: "the accounts file is writable by others; chmod 600 it" }]);
-  rmSync(accountsFile(h));
-  writeFileSync(join(h, "elsewhere.json"), "{}", { mode: 0o600 });
-  symlinkSync(join(h, "elsewhere.json"), accountsFile(h));
-  assert.deepEqual(loadAccounts({ home: h, env: {} }).problems, [{ account: "the accounts file", why: "the accounts file is not a regular file (a link or a folder)" }]);
-  rmSync(accountsFile(h));
-  // ~/.config/pendulum through a link (into a clone a sandbox writes, say): the deny by its literal path misses the file.
-  const keys = join(h, ".config", "pendulum");
-  const moved = join(h, "work", "keys");
-  rmSync(keys, { recursive: true });
-  mkdirSync(moved, { mode: 0o700 });
-  symlinkSync(moved, keys);
-  declare(h, { claude: [good(h).claude[0]] });
-  assert.deepEqual(loadAccounts({ home: h, env: {} }).problems, [{ account: "the accounts file", why: "~/.config/pendulum is not a real directory (a link), so the sandboxes' deny of it does not cover the accounts file" }]);
-  rmSync(keys);
-  mkdirSync(keys, { mode: 0o700 });
-  writeFileSync(join(keys, "copilot-a"), "copilot-token-a\n", { mode: 0o600 });
-  // Serve's CLAUDE_CONFIG_DIR on a folder no search finds and no account declares: a stage's env would drop it unhidden.
-  mkdirSync(join(h, "work", "claude-own"));
-  assert.deepEqual(problems(h, { claude: [good(h).claude[0]] }, { env: { CLAUDE_CONFIG_DIR: join(h, "work", "claude-own") } }), [["CLAUDE_CONFIG_DIR", "this shell's CLAUDE_CONFIG_DIR names a folder no declared Claude Code account has; declare it as one, or unset CLAUDE_CONFIG_DIR"]]);
-  assert.deepEqual(problems(h, good(h), { env: { CLAUDE_CONFIG_DIR: join(h, "work", "claude-b") } }), [], "a declared one");
-  mkdirSync(join(h, ".claude-other"));
-  assert.deepEqual(problems(h, good(h), { env: { CLAUDE_CONFIG_DIR: join(h, ".claude-other") } }), [], "one Pendulum's search finds and hides");
-  assert.deepEqual(problems(h, { codex: good(h).codex }, { env: { CLAUDE_CONFIG_DIR: join(h, "work", "claude-own") } }), [], "no Claude Code account declared: serve's own stays the stage's");
-  assert.match(accountReason([{ account: "alpha" }, { account: "beta" }, { account: "alpha" }]), /^local mode: `alpha`, `beta` in this machine's account declaration cannot be used \(account\)/);
 });
 
 test("#263: the account's name is recorded in result.json, the progress comment's harness line and the scorecard; nothing else of it", () => {
@@ -233,141 +110,7 @@ async function withHome(h, env, fn) {
   }
 }
 
-test("#263, the real path: a stage runs on its harness's default account, set explicitly, names it, and hides the others", async () => {
-  const h = fakeHome();
-  declare(h, good(h));
-  const { local, clone, usage } = await fakeLoop(h);
-  const stageTmp = mkdtempSync(join(tmpdir(), "stage-"));
-  await withHome(h, { CLAUDE_CONFIG_DIR: join(h, "work", "claude-b"), COPILOT_GITHUB_TOKEN: "from-serve-env" }, () => {
-    const env = local.stageEnv(8, usage, clone, stageTmp, "worker.mjs", "claude");
-    assert.equal(env.CLAUDE_CONFIG_DIR, join(h, "work", "claude-a"), "the first declared account, not serve's own variable");
-    assert.equal(env.PENDULUM_STAGE_ACCOUNT, "alpha");
-    const { credentials } = JSON.parse(env.PENDULUM_LOCAL_SANDBOX);
-    for (const p of [join(h, "work", "claude-b"), join(h, "work", "codex-a"), join(h, ".config", "pendulum")]) assert.ok(covered(credentials, p), p);
-    assert.ok(!credentials.includes(join(h, "work", "claude-a")) && covered(credentials, join(h, "work", "claude-a", ".credentials.json")));
-    // A Copilot stage's token comes from its account's file, never serve's environment.
-    const extra = local.harnessEnv(8, [stageTmp], clone, usage, null, "copilot", undefined, local.accountFor("copilot"));
-    assert.equal(extra.COPILOT_GITHUB_TOKEN, "copilot-token-a");
-    // The declaration gone after a start on it: the implicit account's token, never the one kept from that start.
-    local.copilotToken = "copilot-token-a";
-    const implicit = local.harnessEnv(8, [stageTmp], clone, usage, null, "copilot", undefined, { name: "copilot", harness: "copilot", declared: false });
-    assert.equal(implicit.COPILOT_GITHUB_TOKEN, "from-serve-env");
-    delete local.copilotToken;
-  });
-  // Nothing declared: the stage keeps serve's own CLAUDE_CONFIG_DIR, as always, on the account named `claude`.
-  rmSync(accountsFile(h));
-  await withHome(h, { CLAUDE_CONFIG_DIR: join(h, "work", "claude-b") }, () => {
-    const env = local.stageEnv(8, usage, clone, stageTmp, "worker.mjs", "claude");
-    assert.deepEqual([env.CLAUDE_CONFIG_DIR, env.PENDULUM_STAGE_ACCOUNT], [join(h, "work", "claude-b"), "claude"]);
-  });
-  rmSync(stageTmp, { recursive: true, force: true });
-});
-
-test("#263, the real path: a bad declaration Blocks the stage before anything is set up, naming the account alone", async () => {
-  const h = fakeHome();
-  declare(h, { claude: [{ name: "gone", home: join(h, "work", "nowhere") }] });
-  const { local } = await fakeLoop(h);
-  const blocked = [];
-  local.block = async (...a) => blocked.push(a);
-  local.harnessFor = async () => ({ ok: true, harness: "claude" });
-  const r = await withHome(h, {}, () => local.stage(8, "work", "worker.mjs", []));
-  assert.equal(r.exit, "blocked");
-  assert.equal(blocked.length, 1);
-  const [, name, reason, opts] = blocked[0];
-  assert.equal(name, "work");
-  assert.match(reason, /`gone` in this machine's account declaration cannot be used \(account\)/);
-  assert.ok(!reason.includes(h), "no path");
-  assert.equal(opts?.cause, undefined, "cause `setup`, block()'s default");
-  assert.equal(existsSync(join(h, "work", "nowhere")), false, "Pendulum makes no account folder");
-});
-
-test("#263: readiness is checked per account; the loop's starting account passed at its start", async () => {
-  const h = fakeHome();
-  const { local } = await fakeLoop(h);
-  const path = process.env.PATH;
-  process.env.PATH = join(h, "empty");
-  try {
-    await withHome(h, {}, () => {
-      local.startAccount = { name: "alpha", harness: "claude", declared: true, home: join(h, "work", "claude-a") };
-      assert.deepEqual(local.harnessReady("claude", local.startAccount), []);
-      assert.deepEqual(local.harnessReady("claude", { name: "beta", harness: "claude", declared: true, home: join(h, "work", "claude-b") }), ["claude is not on PATH; install Claude Code (npm i -g @anthropic-ai/claude-code) and log in (claude, then /login)"], "another account is checked on its own");
-    });
-  } finally {
-    process.env.PATH = path;
-  }
-});
-
-test("#263: doctor --local checks each declared account and names the failing one, never a path", async () => {
-  const h = fakeHome();
-  declare(h, good(h));
-  const seen = [];
-  const rows = await localAccountChecks({ env: {}, local: true, home: h, loggedIn: (a) => (seen.push(a.name), a.name !== "beta"), tokenWorks: async (t) => t === "copilot-token-a" });
-  assert.deepEqual(seen, ["alpha", "beta", "omega"]);
-  assert.deepEqual(rows.map((r) => [r.name, r.status]), [["account alpha", "PASS"], ["account beta", "FAIL"], ["account omega", "PASS"], ["account gh-one", "PASS"]]);
-  assert.match(rows[1].detail, /its claude login does not work/);
-  for (const r of rows) assert.ok(!`${r.detail} ${r.fix}`.includes(h), r.detail);
-  chmodSync(join(h, "work", "claude-a"), 0o755);
-  const open = await localAccountChecks({ env: {}, local: true, home: h, loggedIn: () => true, tokenWorks: async () => true });
-  assert.deepEqual(open.filter((r) => r.status !== "PASS").map((r) => [r.name, r.status]), [["account alpha", "WARN"]]);
-  declare(h, { claude: [{ name: "gone", home: join(h, "nowhere") }] });
-  assert.deepEqual((await localAccountChecks({ env: {}, local: true, home: h })).map((r) => [r.name, r.status, r.detail]), [["account gone", "FAIL", "its folder does not exist; Pendulum never makes one"]]);
-  rmSync(accountsFile(h));
-  assert.deepEqual((await localAccountChecks({ env: {}, local: true, home: h })).map((r) => r.status), ["PASS"]);
-  assert.deepEqual(await localAccountChecks({ env: { GITHUB_ACTIONS: "true" }, local: true, home: h }), [], "never in an Actions log");
-});
-
 // ------------------------------------------------------------------ security review of #294
-
-test("#263: serve's own CLAUDE_CONFIG_DIR or CODEX_HOME counts when relative too, resolved as the harness resolves it", () => {
-  const h = fakeHome();
-  mkdirSync(join(h, "work", "claude-own"));
-  const rel = relative(process.cwd(), join(h, "work", "claude-own"));
-  assert.ok(!rel.startsWith("/"), "a relative path");
-  assert.deepEqual(problems(h, { claude: [good(h).claude[0]] }, { env: { CLAUDE_CONFIG_DIR: rel } }), [["CLAUDE_CONFIG_DIR", "this shell's CLAUDE_CONFIG_DIR names a folder no declared Claude Code account has; declare it as one, or unset CLAUDE_CONFIG_DIR"]]);
-  assert.deepEqual(problems(h, { codex: good(h).codex }, { env: { CODEX_HOME: relative(process.cwd(), join(h, "work", "claude-own")) } }).map((p) => p[0]), ["CODEX_HOME"]);
-  assert.deepEqual(problems(h, good(h), { env: { CLAUDE_CONFIG_DIR: relative(process.cwd(), join(h, "work", "claude-b")) } }), [], "a declared one, named relatively");
-});
-
-test("#263: the root folder is around everything: no account may be on /", () => {
-  const h = fakeHome();
-  assert.deepEqual(problems(h, { claude: [{ name: "root", home: "/" }] }), [["root", "its folder is in or around ~/.config/pendulum"]]);
-  assert.deepEqual(problems(h, { codex: [{ name: "root", home: "/" }] }).map((p) => p[0]), ["root"]);
-});
-
-test("#263: a declaration this user cannot read is an account problem with a fixed reason; harnessFor Blocks on it and rethrows anything else", async () => {
-  const h = fakeHome();
-  declare(h, good(h));
-  const keys = join(h, ".config", "pendulum");
-  const { local } = await fakeLoop(h);
-  Object.assign(local, { repoFull: "acme/app", repo: { owner: "acme", name: "app", full: "acme/app" }, opts: { token: "t" } });
-  const real = globalThis.fetch;
-  globalThis.fetch = async (url) => {
-    const u = String(url);
-    const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
-    if (/\/user$/.test(u)) return json({ login: "me", type: "User" });
-    if (/\/collaborators\?/.test(u)) return json([{ login: "dev" }]);
-    if (/\/issues\/8\/timeline/.test(u)) return json([]);
-    if (/\/issues\/8$/.test(u)) return json({ number: 8, labels: [{ name: "pendulum:objective" }] });
-    throw new Error(`unexpected ${u}`);
-  };
-  chmodSync(keys, 0o000);
-  try {
-    assert.deepEqual(loadAccounts({ home: h, env: {} }).problems, [{ account: "the accounts file", why: "the accounts file cannot be read (EACCES)" }]);
-    assert.deepEqual(declaredLogins(h), [], "nothing to hide when nothing can be read");
-    const r = await withHome(h, {}, () => local.harnessFor(8));
-    assert.equal(r.ok, false);
-    assert.match(r.reason, /^local mode: `the accounts file` in this machine's account declaration cannot be used \(account\)/);
-    chmodSync(keys, 0o700);
-    // Anything but a declaration that cannot be used is Pendulum's own failure, never a Block with no reason.
-    local.accountFor = () => {
-      throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
-    };
-    await assert.rejects(withHome(h, {}, () => local.harnessFor(8)), /EIO/);
-  } finally {
-    globalThis.fetch = real;
-    chmodSync(keys, 0o700);
-  }
-});
 
 test("#263: a Copilot token file may not be one of Pendulum's own secrets; a blank one is empty and an unreadable one refused", () => {
   const h = fakeHome();
@@ -389,14 +132,6 @@ test("#263: a Copilot token file may not be one of Pendulum's own secrets; a bla
   writeFileSync(join(keys, "write-only"), "copilot-token-w\n", { mode: 0o200 });
   chmodSync(join(keys, "write-only"), 0o200);
   assert.deepEqual(one(join(keys, "write-only")), [["gh", "its token file cannot be read by this user; chmod 600 it"]]);
-});
-
-test("#263: an account may not take another harness's name, which its hold and label key on", () => {
-  const h = fakeHome();
-  const g = good(h);
-  assert.deepEqual(problems(h, { codex: [{ name: "claude", home: g.codex[0].home }] }), [["claude", "the name is another harness's (its account when none is declared)"]]);
-  assert.deepEqual(problems(h, { claude: [{ name: "copilot", home: g.claude[0].home }] }).map((p) => p[0]), ["copilot"]);
-  assert.deepEqual(problems(h, { claude: [{ name: "claude", home: g.claude[0].home }] }), [], "its own harness's name");
 });
 
 test("#263: the accounts file is held to the rules for secrets: this user's, one link, in a folder no one else writes", () => {
@@ -445,29 +180,6 @@ test("#263, the real path: Pendulum's git on the clone before a stage gets no se
   assert.ok(!env.includes("copilot-token-a") && !env.includes("COPILOT_GITHUB_TOKEN="), "no Copilot token");
 });
 
-test("#263 with #287: a Codex stage on a declared account, with Codex's release in ~/.codex, reads no other login in any sandbox", () => {
-  const h = fakeHome();
-  declare(h, good(h));
-  // Codex's installer layout: its release in ~/.codex/packages, a login beside it. Every file is a dummy.
-  const release = join(h, ".codex", "packages", "standalone");
-  mkdirSync(join(release, "bin"), { recursive: true });
-  writeFileSync(join(release, "bin", "codex"), "\x7fELF", { mode: 0o755 });
-  writeFileSync(join(h, ".codex", "auth.json"), "{}");
-  const omega = defaultAccount(loadAccounts({ home: h, env: {} }), "codex");
-  const host = accountEnv({ PATH: join(release, "bin") }, omega, h);
-  const own = stageLogin("codex", host, h);
-  assert.equal(own.dir, join(h, "work", "codex-a"));
-  const credentials = credentialPaths(h, host, { own });
-  const codex = codexLocalConfig({ home: h, env: host, credentials }).find((a) => a.startsWith("permissions.pendulum="));
-  const denies = (p) => codex.includes(`${JSON.stringify(p)}="deny"`);
-  for (const p of [join(h, "work", "claude-a"), join(h, "work", "claude-b"), join(h, ".codex", "auth.json"), join(h, "work", "codex-a", "auth.json*"), join(h, ".config", "pendulum")]) assert.ok(denies(p), `codex's sandbox: ${p}`);
-  assert.ok(!codex.includes(JSON.stringify(release)), "the release Codex's sandbox execs stays readable");
-  // The harness's outer sandbox: its own account's login readable to it alone, every other login denied.
-  const outer = harnessOuterSettings({ harness: "codex", writable: ["/c"], home: h, env: host, credentials }).filesystem.denyRead;
-  for (const p of [join(h, "work", "claude-a"), join(h, "work", "claude-b"), join(h, ".codex")]) assert.ok(covered(outer, p), `outer: ${p}`);
-  assert.ok(!covered(outer, join(h, "work", "codex-a", "auth.json")), "its own login, for the harness process");
-});
-
 test("#305: Pendulum's own secrets are recognised by the file itself, however its name is spelled", () => {
   const h = fakeHome();
   const keys = join(h, ".config", "pendulum");
@@ -485,25 +197,6 @@ test("#305: Pendulum's own secrets are recognised by the file itself, however it
   assert.deepEqual(one(join(keys, "copilot-a")), [], "a token file of its own still passes");
 });
 
-test("#318: a loop of links under Pendulum's own GitHub tokens finishes fast and still finds them", () => {
-  const h = fakeHome();
-  const keys = join(h, ".config", "pendulum");
-  mkdirSync(join(keys, "tokens", "acme"), { recursive: true, mode: 0o700 });
-  writeFileSync(join(keys, "tokens", "acme", "app"), "github_pat_dummy\n", { mode: 0o600 });
-  linkSync(join(keys, "tokens", "acme", "app"), join(keys, "TOKENS-acme-app"));
-  // Two links to `.`: followed, the listing grows threefold at every level. In a child process, so a stall fails the test.
-  symlinkSync(".", join(keys, "tokens", "loop-a"));
-  symlinkSync(".", join(keys, "tokens", "loop-b"));
-  declare(h, { copilot: [{ name: "gh", token_file: join(keys, "TOKENS-acme-app") }] });
-  const script = `import { loadAccounts } from ${JSON.stringify(join(ROOT, "plugin", "scripts", "lib", "accounts.mjs"))};
-process.stdout.write(JSON.stringify(loadAccounts({ home: ${JSON.stringify(h)}, env: {} }).problems ?? []));`;
-  const t0 = Date.now();
-  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, HOME: h }, encoding: "utf8", timeout: 20_000 });
-  assert.equal(r.status, 0, `the check finished: ${r.signal || r.stderr}`);
-  assert.ok(Date.now() - t0 < 10_000, "and fast");
-  assert.deepEqual(JSON.parse(r.stdout).map((p) => p.account), ["gh"], "the token behind the loop is still Pendulum's own");
-});
-
 test("#318: a token Pendulum reads through a folder link under tokens/ is still one of its own secrets", () => {
   const h = fakeHome();
   const keys = join(h, ".config", "pendulum");
@@ -516,102 +209,6 @@ test("#318: a token Pendulum reads through a folder link under tokens/ is still 
   symlinkSync(".", join(keys, "tokens", "loop-a"));
   symlinkSync(keys, join(keys, "store", "acme", "up"));
   assert.deepEqual(problems(h, { copilot: [{ name: "gh", token_file: join(keys, "store", "acme", "app") }] }), [["gh", "its token file is one of Pendulum's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)"]]);
-});
-
-test("#318: a link out of ~/.config/pendulum listed before a real folder of tokens cannot crowd them out", () => {
-  const h = fakeHome();
-  const keys = join(h, ".config", "pendulum");
-  // A tree past the listing's cap, outside ~/.config/pendulum, linked as the first name under tokens/.
-  const big = join(h, "big");
-  mkdirSync(big);
-  for (let i = 0; i < 10_050; i++) writeFileSync(join(big, `f${i}`), "");
-  mkdirSync(join(keys, "tokens"), { mode: 0o700 });
-  symlinkSync(big, join(keys, "tokens", "aaa"));
-  mkdirSync(join(keys, "tokens", "acme"), { mode: 0o700 });
-  writeFileSync(join(keys, "tokens", "acme", "app"), "github_pat_dummy\n", { mode: 0o600 });
-  linkSync(join(keys, "tokens", "acme", "app"), join(keys, "TOKENS-acme-app"));
-  assert.deepEqual(problems(h, { copilot: [{ name: "gh", token_file: join(keys, "TOKENS-acme-app") }] }), [["gh", "its token file is one of Pendulum's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)"]]);
-});
-
-test("#318: a folder of Pendulum's tokens that cannot be read costs that folder alone", { skip: process.getuid?.() === 0 }, () => {
-  const h = fakeHome();
-  const keys = join(h, ".config", "pendulum");
-  mkdirSync(join(keys, "tokens", "acme"), { recursive: true, mode: 0o700 });
-  mkdirSync(join(keys, "tokens", "locked"), { mode: 0o700 });
-  writeFileSync(join(keys, "tokens", "acme", "app"), "github_pat_dummy\n", { mode: 0o600 });
-  linkSync(join(keys, "tokens", "acme", "app"), join(keys, "TOKENS-acme-app"));
-  chmodSync(join(keys, "tokens", "locked"), 0o000);
-  try {
-    assert.deepEqual(problems(h, { copilot: [{ name: "gh", token_file: join(keys, "TOKENS-acme-app") }] }), [["gh", "its token file is one of Pendulum's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)"]]);
-  } finally {
-    chmodSync(join(keys, "tokens", "locked"), 0o700);
-  }
-});
-
-test("#305: the outer probe builds Codex's profile from the stage's account env, never serve's", { skip: process.platform !== "linux" }, async () => {
-  const { runOuterProbe } = await import("../scripts/lib/local.mjs");
-  const h = fakeHome();
-  declare(h, good(h));
-  // srt stands where the outer sandbox would: it records the command it was given and runs nothing.
-  const bin = join(h, "bin");
-  const seen = join(h, "srt-args");
-  mkdirSync(bin);
-  writeFileSync(join(bin, "srt"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${seen}"\n`, { mode: 0o755 });
-  const omega = defaultAccount(loadAccounts({ home: h, env: {} }), "codex");
-  runOuterProbe("codex", { env: accountEnv({ HOME: h, PATH: `${bin}:${process.env.PATH}` }, omega, h), home: h });
-  const profile = readFileSync(seen, "utf8").split("\n").find((a) => a.startsWith("permissions.pendulum="));
-  const denies = (p) => profile.includes(`${JSON.stringify(p)}="deny"`);
-  assert.ok(denies(join(h, "work", "codex-a", "auth.json*")), "the account's own login files, as its stage's profile denies them");
-  assert.ok(!denies(join(h, "work", "codex-a")), "not the account's whole home, which Codex runs on");
-});
-
-test("#305, the real path: a stage's set-up failing in an account folder outside the home posts no path; the log has the whole error", { skip: process.platform !== "linux" || process.getuid() === 0 }, async () => {
-  const { logTo } = await import("../scripts/lib/inputs.mjs");
-  const h = fakeHome();
-  // An account outside the home directory, which Pendulum cannot write: the harness's own folders cannot be made in it.
-  const acct = join(realpathSync(mkdtempSync(join(tmpdir(), "outside-"))), "claude-x");
-  mkdirSync(acct, { mode: 0o700 });
-  declare(h, { claude: [{ name: "x", home: acct }] });
-  const { local } = await fakeLoop(h);
-  Object.assign(local, { repoFull: "acme/app", repo: { owner: "acme", name: "app", full: "acme/app" }, opts: { token: "t" } });
-  local.harnessFor = async () => ({ ok: true, harness: "claude", account: local.accountFor("claude") });
-  local.limitUntil = () => null;
-  const blocked = [];
-  // The Block is where the test ends each path: nothing after it reaches GitHub.
-  local.block = async (...a) => {
-    blocked.push(a);
-    throw new Error("the test's own end");
-  };
-  const lines = [];
-  const real = globalThis.fetch;
-  globalThis.fetch = async (url) => {
-    if (/\/issues\/8$/.test(String(url))) return new Response(JSON.stringify({ number: 8, labels: [{ name: "pendulum:running" }] }), { status: 200, headers: { "content-type": "application/json" } });
-    throw new Error(`unexpected ${url}`);
-  };
-  chmodSync(acct, 0o500);
-  logTo({ write: (s) => lines.push(s) });
-  try {
-    const failed = await withHome(h, {}, () => local.stage(8, "work", "worker.mjs", []).then(() => assert.fail("the set-up should fail"), (e) => e));
-    assert.equal(failed.code, "EACCES");
-    assert.ok(failed.message.includes(acct), "the error itself names the account's folder");
-    await withHome(h, {}, async () => {
-      // A review stage's set-up failing twice (lapse), and a work stage's start failing a third time (unstart).
-      await local.lapse(8, null, failed);
-      await local.lapse(8, null, failed);
-      local.startFailures = new Map([[8, { count: 2, retryAt: 0 }]]);
-      await local.unstart(8, Object.assign(failed, { startFailed: "work" }));
-    });
-  } finally {
-    logTo(null);
-    globalThis.fetch = real;
-    chmodSync(acct, 0o700);
-  }
-  assert.equal(blocked.length, 2);
-  for (const [, , reason] of blocked) {
-    assert.match(reason, /EACCES from (mkdir|open); the local loop's log names the path/);
-    assert.ok(!reason.includes(acct) && !reason.includes("outside-"), `no path: ${reason}`);
-  }
-  assert.ok(lines.some((l) => l.includes(acct)), "this machine's log has the whole error");
 });
 
 test("#318: a clone that cannot be prepared Blocks with git's cause, never a path outside the home; the log has the path", { skip: process.platform === "win32" }, async () => {

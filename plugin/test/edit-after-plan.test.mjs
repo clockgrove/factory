@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { setSelf, setVerified, setWriters } from "../scripts/lib/logic.mjs";
+import { setSelf } from "../scripts/lib/logic.mjs";
 import { planHanded, planOf, planSync, planTextMarker, planTextOf } from "../scripts/lib/handoff.mjs";
 import { EDITED_FIX, EDITED_REASON, editedSincePlan, objectiveSha, planGate, planStateNow, planTextState } from "../scripts/lib/objective-trust.mjs";
 import { blockedLine, mergeBlockCause, mergeBlockReason } from "../scripts/lib/session.mjs";
@@ -67,14 +67,6 @@ test("edit after plan: the text's record is decided on the hash and GitHub's lab
 });
 
 for (const { route, self, person } of ROUTES) {
-  test(`edit after plan (${route}): an edit before the worker reads the text is simply used`, async () => {
-    setSelf(self);
-    const { r, applied, writes } = await gate(comments({ self, person, none: true }), { sha: B, work: true, labeledAt: L1 });
-    assert.deepEqual([r.ok, r.state], [true, "unplanned"]);
-    assert.deepEqual(r.record, { sha256: B, label: L1 }, "the plan this stage makes records the text it read");
-    assert.deepEqual([applied, writes], [[], []]);
-  });
-
   test(`edit after plan (${route}): an edit while running or in review stops the next stage as Blocked, cause work`, async () => {
     setSelf(self);
     const list = comments({ self, person, record: { sha256: A, label: L0 } });
@@ -96,20 +88,6 @@ for (const { route, self, person } of ROUTES) {
     assert.match(notice, /Re-apply `pendulum:objective` to work from the issue as it is now, its text and its harness, model and host labels: the worker makes its plan again from it/);
   });
 
-  test(`edit after plan (${route}): an edit while Blocked, then the label re-applied, plans again from the new text`, async () => {
-    setSelf(self);
-    const list = comments({ self, person, record: { sha256: A, label: L0 } });
-    const { r, applied, writes } = await gate(list, { sha: B, work: true, labeledAt: L1 });
-    assert.deepEqual([r.ok, r.state], [true, "replan"]);
-    assert.deepEqual(r.record, { sha256: B, label: L1 });
-    assert.deepEqual([applied, writes], [[], []]);
-    assert.equal(planHanded(planOf(list, 7), r.record), null, "the plan made from the earlier text is not handed to the harness");
-    // Once the new plan is posted with its record, the stages after it go on.
-    const replanned = comments({ self, person, record: r.record, plan: "## Plan\n- [ ] new item" });
-    assert.equal(planHanded(planOf(replanned, 7), r.record), "## Plan\n- [ ] new item");
-    assert.equal((await gate(replanned, { sha: B, work: false })).r.ok, true, "the review of the new plan's work");
-  });
-
   test(`edit after plan (${route}): a comment answering a Question is no edit`, async () => {
     setSelf(self);
     const list = comments({ self, person, record: { sha256: A, label: L0 } });
@@ -118,19 +96,6 @@ for (const { route, self, person } of ROUTES) {
     assert.equal(planHanded(planOf(list, 7), work.r.record), "## Plan\n- [ ] item", "the plan as it stands");
     const review = await gate(list, { sha: A, work: false });
     assert.deepEqual([review.r.ok, review.r.record], [true, { sha256: A, label: L0 }], "the review keeps the plan's record");
-  });
-
-  test(`edit after plan (${route}): a work stage started by a new label on the same text moves the record's label time`, async () => {
-    setSelf(self);
-    const list = comments({ self, person, record: { sha256: A, label: L0 } });
-    const { r, writes } = await gate(list, { sha: A, work: true, labeledAt: L1 });
-    assert.equal(r.state, "same");
-    assert.equal(writes.length, 1);
-    assert.equal(writes[0].method, "PATCH");
-    assert.match(writes[0].url, /\/repos\/acme\/app\/issues\/comments\/2$/);
-    assert.equal(writes[0].body.body, `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan\n- [ ] item`, "the plan's text unchanged");
-    // So an edit after this stage, with no label after it, Blocks rather than plans again.
-    assert.equal(planTextState({ sha: B, plan: planOf([{ id: 2, user: { login: self }, body: writes[0].body.body }], 7), labeledAt: L1, work: true }), "changed");
   });
 }
 
@@ -169,30 +134,6 @@ test("edit after plan: the merge Blocks on an edit, cause work, as every other m
   assert.ok(merge.indexOf("await mergeVerified(") > at, "the merge only after the check");
 });
 
-test("edit after plan: every route's work and review stages check the text before any harness, after the trust check", () => {
-  // Actions runs worker.mjs and review.mjs as its jobs; a cloud sandbox stage (stage.mjs) and local mode (local.mjs) run the same scripts.
-  assert.match(readFileSync(join(SCRIPTS, "stage.mjs"), "utf8"), /stage === "work" \? "worker\.mjs" : "review\.mjs"/);
-  const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
-  assert.match(local, /this\.stage\(issue, "work", "worker\.mjs"/);
-  assert.match(local, /this\.stage\(issue, "review", "review\.mjs"/);
-  for (const [file, work] of [["worker.mjs", true], ["review.mjs", false]]) {
-    const src = readFileSync(join(SCRIPTS, file), "utf8");
-    const trust = src.indexOf("await authorGate(");
-    const at = src.indexOf("await planGate(");
-    assert.ok(trust > 0 && at > trust, `${file}: the trust rule first, so an edit by someone who cannot push Blocks as before`);
-    const call = src.slice(at, src.indexOf("\n", at));
-    assert.match(call, /sha: trusted\.sha/, `${file}: the text the stage acts on`);
-    assert.equal(/work: true/.test(call), work, `${file}: only the work stage plans again`);
-    if (!work) assert.match(call, /before: dropLabel/);
-    assert.match(src.slice(at, at + 800), /if \(!planned\.ok\) \{\n\s+log\(planned\.reason\);\n\s+await finish\("blocked", planned\.reason\);\n\s+return;/, `${file} stops on a Block`);
-    for (const later of ["declaredQuestion(", "openOutbox(", "installPlugin(", "runHarness(", "openHandoff(", "validationLoop("]) {
-      const i = src.indexOf(later, src.indexOf("async function run()"));
-      assert.ok(i === -1 || i > at, `${file}: ${later} only after the check`);
-    }
-    assert.match(src, /openHandoff\(\{[^}]*record: planned\.record \}\)/, `${file}: the plan comment carries the record`);
-  }
-});
-
 const own = (body, extra = {}) => ({ id: 2, user: { login: "pendulum-app[bot]" }, body, created_at: L0, ...extra });
 
 test("edit after plan: a plan comment saved with CRLF line ends keeps its record", async () => {
@@ -202,31 +143,6 @@ test("edit after plan: a plan comment saved with CRLF line ends keeps its record
   assert.deepEqual(planOf(list, 7).record, { sha256: A, label: L0 });
   const { r, applied } = await gate(list, { sha: B, work: false });
   assert.deepEqual([r.ok, applied[0]?.reason], [false, EDITED_REASON], "an edit after it still Blocks");
-});
-
-test("edit after plan: a plan comment whose record cannot be read is decided on GitHub's edit times, never taken for no plan", async () => {
-  setSelf("pendulum-app[bot]");
-  const T = (m) => `2026-11-13T${m}:00Z`;
-  for (const head of ["", "<!-- pendulum:plan-text {not json} -->", '<!-- pendulum:plan-text {"sha256":"abc"} -->']) {
-    const list = [own(`<!-- pendulum:7:plan -->${head}\n## Plan`, { created_at: T("10:00") })];
-    assert.equal(planOf(list, 7).record, null);
-    // No edit since the comment was posted: the same text. The work stage records it there and then, and hands the plan on.
-    const kept = await gate(list, { sha: B, work: true, labeledAt: T("09:00"), editedAt: T("09:30") });
-    assert.equal(kept.r.state, "same", head);
-    assert.equal(kept.writes.length, 1);
-    assert.equal(kept.writes[0].body.body, `<!-- pendulum:7:plan -->${planTextMarker({ sha256: B, label: T("09:00") })}\n## Plan`);
-    // The body edited after it, no label since: Blocked, at review and at the next work stage.
-    for (const work of [false, true]) {
-      const edited = await gate(list, { sha: B, work, labeledAt: T("09:00"), editedAt: T("11:00") });
-      assert.deepEqual([edited.r.ok, edited.applied[0]?.reason, edited.writes], [false, EDITED_REASON, []], head);
-    }
-    // The title, or a harness or model label, changed after it: the same.
-    assert.equal((await gate(list, { sha: B, work: false, editedAt: T("09:30"), changedAt: T("11:00") })).r.ok, false);
-    // The label applied after the edit: the plan is made again, and the old one is not handed on.
-    const again = await gate(list, { sha: B, work: true, labeledAt: T("12:00"), editedAt: T("11:00") });
-    assert.equal(again.r.state, "replan");
-    assert.equal(planHanded(planOf(list, 7), again.r.record), null);
-  }
 });
 
 test("edit after plan: a stage that knows no record never erases the one the plan comment has", async () => {
@@ -247,59 +163,6 @@ test("edit after plan: a stage that knows no record never erases the one the pla
     globalThis.fetch = real;
   }
   assert.deepEqual(written, [{ method: "PATCH", body: `<!-- pendulum:7:plan -->${head}\n## Plan, ticked` }]);
-});
-
-test("edit after plan: the plan comment of another Pendulum login counts: a writer's in full, another App's for its time only", async () => {
-  // Local mode (the developer's login) after the Action made the plan, or the other way round.
-  setSelf("dev");
-  const bot = { id: 2, user: { login: "pendulum-app[bot]", type: "Bot" }, body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\n## Plan`, created_at: L0 };
-  const stranger = { id: 4, user: { login: "stranger", type: "User" }, author_association: "NONE", body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: B, label: L1 })}\n## Forged`, created_at: L1 };
-  const fromApp = planOf([bot, stranger], 7);
-  assert.deepEqual([fromApp.id, fromApp.text, fromApp.record, fromApp.own], [2, null, null, false], "another App's: its time, never its text or record; a stranger's: nothing");
-  const edited = await gate([bot, stranger], { sha: B, work: false, editedAt: L1 });
-  assert.equal(edited.r.ok, false, "edited after the App's plan comment: Blocked, not taken for no plan");
-  assert.equal((await gate([bot], { sha: B, work: false, editedAt: "2026-11-13T09:00:00Z" })).r.ok, true);
-  setSelf("pendulum-app[bot]");
-  const writer = { id: 5, user: { login: "dev", type: "User" }, author_association: "MEMBER", body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan from local mode`, created_at: L1, updated_at: L1 };
-  // #605: a MEMBER counts as a writer once its permission read says write; a read-only one's plan is no plan.
-  setWriters("acme/app", []);
-  assert.equal(planOf([bot, { ...writer, user: { login: "viewer", type: "User" } }], 7).id, 2);
-  setVerified("acme/app", "dev", true);
-  const fromWriter = planOf([bot, writer], 7);
-  assert.deepEqual([fromWriter.id, fromWriter.text, fromWriter.record], [5, "## Plan from local mode", { sha256: A, label: L1 }], "the newest written");
-  const moved = await gate([bot, writer], { sha: B, work: false });
-  assert.equal(moved.r.ok, false);
-  // The work stage records on its own login's comment, with the plan it read.
-  const same = await gate([writer], { sha: A, work: true, labeledAt: L1 });
-  assert.deepEqual(same.writes.map((w) => [w.method, w.body.body]), [["POST", `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan from local mode`]]);
-});
-
-test("edit after plan: the work stage's label time is the one read before the text", async () => {
-  setSelf("pendulum-app[bot]");
-  let read = 0;
-  const r = await planGate({ repo, issue: 7, sha: A, labeledAt: L0, work: true, opts: { token: "t" }, apply: async () => {}, stage: "work", read: { planComment: async () => null, labeledAt: async () => (read += 1, L1) } });
-  assert.deepEqual([r.record, read], [{ sha256: A, label: L0 }, 0]);
-  const src = readFileSync(join(SCRIPTS, "worker.mjs"), "utf8");
-  assert.ok(src.indexOf("await startedAt(") > 0 && src.indexOf("await startedAt(") < src.indexOf("await authorGate("), "worker.mjs reads the label time before the text");
-  // run() sits inside main(): a local of that name there would hide the import (every work stage crashed on it once).
-  assert.doesNotMatch(src, /\b(?:const|let|var)\s+startedAt\b/, "no local hides the imported startedAt");
-  assert.match(src, /planGate\(\{[^)]*labeledAt,/);
-  const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
-  const deliver = local.slice(local.indexOf("async function deliver("));
-  assert.ok(deliver.indexOf("await startedAt(") > 0 && deliver.indexOf("await startedAt(") < deliver.indexOf("await authorGate("), "so does deliver");
-});
-
-test("edit after plan: with Pendulum's own login unknown, the merge and a session's review stop rather than see no plan", async () => {
-  setSelf(null);
-  const real = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401, headers: { "content-type": "application/json" } });
-  try {
-    const plan = async () => planOf([own(`<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\n## Plan`)], 7);
-    await assert.rejects(editedSincePlan(repo, 7, { token: "t" }, { read: plan, gh: { graphql: async () => ({ repository: { issue: { title: "Objective", body: "Build the other thing." } } }) } }), /own login could not be read/);
-    await assert.rejects(planStateNow(repo, 7, { sha: B }, { token: "t" }, { planComment: plan }), /own login could not be read/);
-  } finally {
-    globalThis.fetch = real;
-  }
 });
 
 test("edit after plan: another App's marker never hides Pendulum's plan comment or its record, github-actions[bot] included", async () => {

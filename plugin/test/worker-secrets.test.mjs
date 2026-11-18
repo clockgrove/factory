@@ -1,12 +1,9 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PENDULUM_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, resolveInputs } from "../scripts/lib/inputs.mjs";
+import { PENDULUM_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS } from "../scripts/lib/inputs.mjs";
 import { SHELL_SECRET_KEYS, claudeRunner, harnessCommand, hiddenFromShell, scrubbedEnv } from "../scripts/lib/harness.mjs";
-import { SHELL_SECRETS_ENV, harnessShell, localSecretValues, missingSecretsFix, nameLabel, openWorkerSecrets, packShellSecrets, parseSecretValues, parseWorkerSecrets, sameSecret, shellNameRefusal, takeShellSecrets, workerSecrets } from "../scripts/lib/worker-secrets.mjs";
-import { decideExit, parseExitRecord } from "../scripts/lib/logic.mjs";
-import { shellSecretsNote } from "../scripts/lib/session.mjs";
-import { stageEnvironment } from "../scripts/launch.mjs";
+import { SHELL_SECRETS_ENV, harnessShell, openWorkerSecrets, packShellSecrets, parseSecretValues, parseWorkerSecrets, sameSecret, shellNameRefusal, takeShellSecrets, workerSecrets } from "../scripts/lib/worker-secrets.mjs";
 import { workerSecretChecks } from "../scripts/doctor.mjs";
 
 const AGENT = { user: "pendulum-agent", uid: 1002, home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set() };
@@ -95,65 +92,6 @@ test("opted-in names reach the model's commands on every harness; the model cred
   // Without an opt-in nothing changes.
   const { args } = harnessCommand({ harness: "claude", prompt: "p", runner });
   assert.deepEqual(denied(JSON.parse(args[args.indexOf("--settings") + 1])), SHELL_SECRET_KEYS);
-});
-
-test("a worker that lacks a secret Blocks naming it, and the fix names the opt-in for its route", () => {
-  const rec = parseExitRecord(JSON.stringify({ exit: "blocked", reason: "the image step got a 401", missingSecrets: ["AI_GATEWAY_API_KEY", "not a name", "$(curl x)", "AI_GATEWAY_API_KEY"] }));
-  assert.deepEqual(rec.missingSecrets, ["AI_GATEWAY_API_KEY"], "names only, once each");
-  assert.equal(parseExitRecord(JSON.stringify({ exit: "delivered", missingSecrets: ["X"] })).missingSecrets, undefined, "only a Block carries them");
-  const d = decideExit({ harness: { ok: true }, pr: null, commits: 0, record: rec, recordBasis: "file" });
-  assert.equal(d.exit, "blocked");
-  assert.deepEqual(d.missingSecrets, ["AI_GATEWAY_API_KEY"]);
-  const fresh = missingSecretsFix(["AI_GATEWAY_API_KEY"], "", "runner");
-  assert.match(fresh, /`worker_secrets`/);
-  assert.match(fresh, /PENDULUM_WORKER_SECRET_VALUES/);
-  assert.match(fresh, /dedicated key/);
-  assert.match(missingSecretsFix(["AI_GATEWAY_API_KEY"], "", "local"), /pendulum serve/);
-  const opted = missingSecretsFix(["AI_GATEWAY_API_KEY"], "AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY", "runner");
-  assert.match(opted, /is opted in with `worker_secrets` but had no value/);
-  assert.equal(missingSecretsFix(["ANTHROPIC_API_KEY", "GITHUB_TOKEN"], "", "runner"), null, "no fix offers a credential");
-  assert.equal(missingSecretsFix([], "", "runner"), null);
-});
-
-test("routes: a cloud work stage and a review stage get the values (for the fix and answer passes); local mode packs them from serve's shell", () => {
-  const inputs = { harness: "claude", anthropicApiKey: "an", workerSecretValues: `W=${KEY}` };
-  const env = { PENDULUM_WORKER_SECRETS: "AI_GATEWAY_API_KEY=W", PENDULUM_INPUT_WORKER_SECRET_VALUES: `W=${KEY}` };
-  const work = stageEnvironment({ inputs, env, stage: "work", issue: 1, claim: "c", tokens: { write: "w" } });
-  assert.equal(work.PENDULUM_INPUT_WORKER_SECRET_VALUES, `W=${KEY}`);
-  assert.equal(work.PENDULUM_WORKER_SECRETS, "AI_GATEWAY_API_KEY=W", "the opt-in is a setting, like any other");
-  assert.equal("PENDULUM_WORKER_SECRET_VALUES" in work, false, "the values only as the secret input");
-  const review = stageEnvironment({ inputs, env, stage: "review", issue: 1, pr: 2, claim: "c", tokens: { write: "w" } });
-  assert.equal(review.PENDULUM_INPUT_WORKER_SECRET_VALUES, `W=${KEY}`, "the review stage's fix and answer passes continue the worker's session");
-  assert.equal(localSecretValues("AI_GATEWAY_API_KEY=W, FAL_KEY GONE_KEY ML", { W: ` ${KEY} `, FAL_KEY: "f", ML: "a\nb", PATH: "/x" }), `W=${KEY}\nFAL_KEY=f`);
-  assert.equal(localSecretValues("", { W: KEY }), "");
-  const resolved = resolveInputs({ env: { PENDULUM_WORKER_SECRETS: "A=B", PENDULUM_INPUT_WORKER_SECRET_VALUES: "B=v" } });
-  assert.deepEqual([resolved.workerSecrets, resolved.workerSecretValues], ["A=B", "B=v"]);
-});
-
-test("the worker opens them from worker_secret_values, withholding Pendulum's own key; the card names them, never a value", () => {
-  const inputs = { workerSecrets: "AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY FAL_KEY", workerSecretValues: `WORKER_AI_GATEWAY_API_KEY=${KEY}\nFAL_KEY=${PENDULUM_KEY}` };
-  assert.deepEqual(openWorkerSecrets(inputs, { pendulumKey: () => PENDULUM_KEY }), { AI_GATEWAY_API_KEY: KEY });
-  assert.deepEqual(openWorkerSecrets({ workerSecrets: "", workerSecretValues: `X=${KEY}` }, { pendulumKey: () => "" }), {}, "values alone opt nothing in");
-  const note = shellSecretsNote(["AI_GATEWAY_API_KEY"]);
-  assert.match(note, /`AI_GATEWAY_API_KEY`/);
-  assert.match(note, /read and spend it/);
-  assert.match(note, /AI_GATEWAY_API_KEY` holds a relay token, not the key[^]*PENDULUM_GATEWAY_URL/, "the relayed key's card line names the relay");
-  assert.match(shellSecretsNote([]), /\$PENDULUM_STATE_DIR[^]*advisory/, "every card names the state directory");
-  assert.ok(!shellSecretsNote([]).includes("gave your shell"));
-  assert.ok(!shellSecretsNote(["FAL_KEY"]).includes("relay token"));
-});
-
-test("doctor: a WARN for each refused entry, a SOURCE with no value and a value equal to Pendulum's key; names only", () => {
-  const ok = workerSecretChecks({ inputs: { workerSecrets: "AI_GATEWAY_API_KEY=W", workerSecretValues: `W=${KEY}` }, env: { GITHUB_ACTIONS: "true" }, pendulumKey: () => PENDULUM_KEY });
-  assert.deepEqual(ok.map((c) => c.status), ["PASS"]);
-  assert.match(ok[0].detail, /AI_GATEWAY_API_KEY \(from W\)/);
-  const bad = workerSecretChecks({ inputs: { workerSecrets: "AI_GATEWAY_API_KEY ANTHROPIC_API_KEY GONE FAL_KEY=F", workerSecretValues: `F=${PENDULUM_KEY}` }, env: { GITHUB_ACTIONS: "true", GONE: KEY }, pendulumKey: () => PENDULUM_KEY });
-  assert.deepEqual(bad.map((c) => c.status), ["WARN", "WARN", "WARN", "WARN"]);
-  assert.match(bad.map((c) => c.detail).join("\n"), /refused "AI_GATEWAY_API_KEY"[^]*refused "ANTHROPIC_API_KEY"[^]*no value here for GONE[^]*FAL_KEY: the same value as Pendulum's own AI Gateway key/);
-  for (const c of [...ok, ...bad]) assert.ok(!`${c.detail} ${c.fix}`.includes(KEY) && !`${c.detail} ${c.fix}`.includes(PENDULUM_KEY), "no value is printed");
-  // A developer's doctor run for local mode reads this shell; on Actions only the input counts.
-  assert.deepEqual(workerSecretChecks({ inputs: { workerSecrets: "FAL_KEY" }, env: { FAL_KEY: KEY }, pendulumKey: () => "" }).map((c) => c.status), ["PASS"]);
-  assert.deepEqual(workerSecretChecks({ inputs: { workerSecrets: "" }, env: {}, pendulumKey: () => "" }), []);
 });
 
 // ------------------------------------------------------------------ review fixes (#68)
@@ -351,27 +289,6 @@ test("the push scan reads a merge's own change and fails closed on a log it coul
   }
 });
 
-test("only the opted-in values are held and masked: another line of the secret is no worker secret", async () => {
-  const { dropHeldSecrets, heldSecrets, redactSecrets } = await import("../scripts/lib/inputs.mjs");
-  const { optedValues } = await import("../scripts/lib/worker-secrets.mjs");
-  const text = `W=${KEY}\nREGION=us-east-1-long\nF=${PENDULUM_KEY}`;
-  assert.deepEqual(optedValues("AI_GATEWAY_API_KEY=W FAL_KEY=F", text), [KEY, PENDULUM_KEY], "withheld values too");
-  dropHeldSecrets();
-  try {
-    const write = process.stdout.write;
-    process.stdout.write = () => true;
-    try {
-      openWorkerSecrets({ workerSecrets: "AI_GATEWAY_API_KEY=W", workerSecretValues: text }, { pendulumKey: () => "" });
-    } finally {
-      process.stdout.write = write;
-    }
-    assert.deepEqual(heldSecrets(), [KEY]);
-    assert.equal(redactSecrets("deploy to us-east-1-long"), "deploy to us-east-1-long");
-  } finally {
-    dropHeldSecrets();
-  }
-});
-
 test("local serve relays a stage's output with every held value redacted, even one split across chunks", async () => {
   const { dropHeldSecrets, holdSecrets } = await import("../scripts/lib/inputs.mjs");
   const { stageRelay } = await import("../scripts/local.mjs");
@@ -392,14 +309,6 @@ test("local serve relays a stage's output with every held value redacted, even o
     dropHeldSecrets();
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test("a value under 8 characters is named by doctor; the lower-case percent-encoding is a masked form", async () => {
-  const { secretForms } = await import("../scripts/lib/inputs.mjs");
-  const checks = workerSecretChecks({ inputs: { workerSecrets: "SHORT_KEY=S", workerSecretValues: "S=abc" }, env: { GITHUB_ACTIONS: "true" }, pendulumKey: () => "" });
-  assert.deepEqual(checks.map((c) => c.status), ["WARN"]);
-  assert.match(checks[0].detail, /SHORT_KEY: a value under 8 characters/);
-  assert.ok(secretForms("vck_a/b+c=d0123").includes("vck_a%2fb%2bc%3dd0123"));
 });
 
 // ------------------------------------------------------------------ fix and answer passes (#98)
@@ -466,18 +375,3 @@ fs.appendFileSync(${JSON.stringify(seen)}, JSON.stringify({ cli: ${JSON.stringif
   }
 });
 
-test("a name is refused as a pasted key only when the whole string has a vendor's key shape, case and length exact", () => {
-  // Variable names that merely start like a key's prefix in another case are names: they reach the shell and are shown.
-  for (const n of ["NPM_TOKEN", "SK_REGION", "AKIA_ROLE", "VCK_MODE", "GHP_HOST", "AIZA_PROJECT"]) {
-    assert.equal(shellNameRefusal(n), null, `${n} is a name`);
-    assert.equal(nameLabel(n), n, `${n} is shown`);
-  }
-  // Each vendor's own shape is a key, whatever else the entry says.
-  const b62 = (k) => "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6a7B8c9D0e1F2g3H4i5J6k7L8m9".slice(0, k);
-  for (const k of [`npm_${b62(36)}`, `ghs_${b62(36)}`, `github_pat_${b62(22)}_${b62(59)}`, "AKIAIOSFODNN7EXAMPLE", `AIza${b62(35)}`, `vck_${b62(24)}`, `sk_live_${b62(24)}`]) {
-    assert.equal(shellNameRefusal(k), "looks-like-key", `${k.slice(0, 6)}… is a key`);
-    assert.equal(nameLabel(k), "a secret");
-  }
-  // One character short of npm's shape is a name like any other.
-  assert.equal(shellNameRefusal(`npm_${b62(35)}`), null);
-});

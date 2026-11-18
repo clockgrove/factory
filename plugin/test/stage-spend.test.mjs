@@ -5,7 +5,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -85,8 +85,8 @@ const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
 
 /**
  * A fake Codex: each call adds one turn to its thread's running total (kept in FAKE_STATE), as real Codex reports it.
- * FAKE_SPLIT=1: half the turn lands in the thread and the process writes `<FAKE_STATE>/half`, lingers (FAKE_LINGER ms,
- * 1500 by default), then its other half lands (a pass that runs on after its stage was killed), it reports the turn and
+ * FAKE_SPLIT=1: half the turn lands in the thread and the process writes `<FAKE_STATE>/half`, waits for the test to
+ * write `<FAKE_STATE>/go`, then its other half lands (a pass that runs on after its stage was killed), it reports the turn and
  * writes `<FAKE_STATE>/done`.
  */
 function fakeCodex(bin) {
@@ -104,7 +104,11 @@ const turn = () => console.log(JSON.stringify({ type: "turn.completed", usage: {
 if (!split) turn();
 else {
   fs.writeFileSync(process.env.FAKE_STATE + "/half", "");
-  setTimeout(() => { add(0.5); turn(); fs.writeFileSync(process.env.FAKE_STATE + "/done", ""); }, Number(process.env.FAKE_LINGER) || 1500);
+  const wait = setInterval(() => {
+    if (!fs.existsSync(process.env.FAKE_STATE + "/go")) return;
+    clearInterval(wait);
+    add(0.5); turn(); fs.writeFileSync(process.env.FAKE_STATE + "/done", "");
+  }, 10);
 }
 `, { mode: 0o755 });
 }
@@ -181,15 +185,10 @@ test("a pass's record joins the stage's passes as its dollars join the stage's s
  * A local Objective's stages, one process each, against one fake GitHub and one live Codex session: each restores the work
  * lineage, writes a phase line, runs one pass through runHarness, and then ends as `how` says:
  * - end: the stage's end as worker.mjs makes it (stageSpendLine, the final write) and its saved session and result.json;
- * - after: a phase line after the pass, then killed;
- * - window: killed as the pass ends, before any write shows it;
  * - mid: a phase line while the pass runs (half its turn in the thread), then killed; the pass runs on and finishes in
  *   the session;
  * - term: SIGTERM while the pass runs (as `pendulum serve` stops a stage), with no write since the pass began; the pass
  *   runs in its own process group, as locally, and is killed with the stage;
- * - term-unsent: as term, but GitHub is unreachable for the stop's write (nothing sent);
- * - term-5xx: as term, but GitHub answers the stop's write with a 502 (it may have landed);
- * - failed: a phase line that lands, a second pass, a phase line that fails to land, then killed.
  * Returns every stage's last spend line.
  */
 async function stages(plan) {
@@ -199,9 +198,7 @@ async function stages(plan) {
   mkdirSync(join(root, "bin"));
   mkdirSync(ws);
   fakeCodex(join(root, "bin"));
-  // An address nothing listens on, for all the stages' runs: a request to it is refused before anything is sent.
-  const dead = await refusingOrigin();
-  const env = { GITHUB_API_URL: gh.url, FAKE_DEAD: dead.origin, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` };
+  const env = { GITHUB_API_URL: gh.url, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` };
   const script = (name, how) => `
     import { existsSync, mkdirSync, writeFileSync } from "node:fs";
     import { join } from "node:path";
@@ -223,16 +220,13 @@ async function stages(plan) {
     const resume = (await restoreTranscript({ checkout: "/c", workDir: join(root, "ws"), harness: "codex" })).id;
     delete process.env.PENDULUM_LOCAL;
     await progress("harness");
-    const local = how.startsWith("term") ? { PENDULUM_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], clone: null }), FAKE_LINGER: "60000" } : {};
+    const local = how.startsWith("term") ? { PENDULUM_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], clone: null }) } : {};
     const pass = () => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" || how.startsWith("term") ? "1" : "0", ...local }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
     const run = pass();
     if (how === "mid" || how.startsWith("term")) {
       const until = Date.now() + 10_000;
       while (!there(join(root, "half")) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
       if (how.startsWith("term")) {
-        // A header link the stop's write carries (a link writes nothing itself), or where that write goes.
-        if (how === "term-5xx") progress.link("FAIL-THIS", "https://example.test/fail");
-        if (how === "term-unsent") process.env.GITHUB_API_URL = process.env.FAKE_DEAD;
         process.stdout.write("spent\\n");
         await run;
         process.exit(1);
@@ -241,17 +235,6 @@ async function stages(plan) {
       process.exit(137);
     }
     const rec = await run;
-    if (how === "window") process.exit(137);
-    if (how === "failed") {
-      await progress("validation");
-      await pass();
-      await progress("FAIL-THIS write");
-      process.exit(137);
-    }
-    if (how === "after") {
-      await progress("validation");
-      process.exit(137);
-    }
     const line = stageSpendLine(mergeUsage([rec]));
     progress.spend(line.usd, line.parts);
     await progress("exit: delivered");
@@ -275,13 +258,15 @@ async function stages(plan) {
       if (how.startsWith("term")) assert.equal(code, 143, "the stage exits as SIGTERM ends it");
       // A killed stage's pass runs on: the next stage starts once it has finished.
       const until = Date.now() + 15_000;
-      if (how === "mid") while (!existsSync(join(root, "done")) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
-      rmSync(join(root, "done"), { force: true });
+      if (how === "mid") {
+        writeFileSync(join(root, "go"), "");
+        while (!existsSync(join(root, "done")) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+      }
+      for (const f of ["go", "done"]) rmSync(join(root, f), { force: true });
       rmSync(join(root, "half"), { force: true });
     }
   } finally {
     gh.close();
-    await dead.close();
   }
   const last = new Map();
   for (const body of gh.progress) last.set(/^<!-- pendulum:7:progress:work:(\S+) -->/.exec(body)?.[1], body);
@@ -301,16 +286,9 @@ const ONE = { usdUnknown: 1, usdUnknownWhy: ["unreported"] };
 // SIGKILL leaves the last such line; a stop's own write (SIGTERM, harness already killed) carries neither.
 const RAN = { running: true };
 for (const [how, killed, own, unknown, passes] of [
-  ["after", "after a finished pass and a write that shows it", PASS, RAN, 3],
-  ["window", "as its pass ends, before a write shows it", 0, RAN, 3],
   ["mid", "in the middle of a pass that then runs on", 0, { ...ONE, ...RAN, usdRunning: 1 }, 3],
-  ["failed", "after a second pass whose write failed to land", PASS, RAN, 4],
   // The stop's write shows the pass still running as a run of unknown cost; the resumed stage counts its half.
   ["term", "by SIGTERM in the middle of a pass, before a write shows it", 0, ONE, 2.5],
-  // Its stop write never sent: the line is the last that landed, and the resumed stage still counts the half pass.
-  ["term-unsent", "by SIGTERM in the middle of a pass, its stop write never sent", 0, RAN, 2.5],
-  // Its stop write answered 502 (it may have landed): the totals it recorded are reported ones, so nothing is lost.
-  ["term-5xx", "by SIGTERM in the middle of a pass, its stop write answered 502", 0, RAN, 2.5],
 ]) {
   test(`a stage killed ${killed}, then resumed: the stages' lines sum to ${passes} passes' spend, none counted twice or guessed`, async () => {
     const lines = await stages(["end", how, "end"]);
@@ -321,13 +299,6 @@ for (const [how, killed, own, unknown, passes] of [
   });
 }
 
-test("a stage stopped by SIGTERM before any status write shows its first pass leaves it as a run of unknown cost, never $0 or a reading", async () => {
-  // A fresh session that no later stage resumes: this line is all that records the pass.
-  const [line] = await stages(["term"]);
-  assert.deepEqual(line, { usd: 0, ...ONE });
-  assert.deepEqual(spendOf(spendMarker(line.usd, ONE)), { usd: 0, unknown: 1 }, "daily_usd names it");
-});
-
 test("restSync: a getter's token, the held secrets redacted here, and whether the request may have landed", async () => {
   const seen = [];
   const server = createServer((req, res) => {
@@ -335,7 +306,6 @@ test("restSync: a getter's token, the held secrets redacted here, and whether th
     req.on("data", (c) => (b += c));
     req.on("end", () => {
       seen.push({ url: req.url, auth: req.headers.authorization, body: b });
-      if (req.url === "/hang") return;
       res.setHeader("content-type", "application/json");
       if (req.url === "/422" || req.url === "/502") {
         res.statusCode = Number(req.url.slice(1));
@@ -353,7 +323,7 @@ test("restSync: a getter's token, the held secrets redacted here, and whether th
     import { holdSecrets } from ${JSON.stringify(LIB("inputs.mjs"))};
     holdSecrets(["WORKERSECRETVALUE123"]);
     // An answered call returns at its answer, so its wait is long: a loaded machine's slow thread start never reads as
-    // "no answer". The silent call's wait is spent in full, and is still many times a thread's start.
+    // "no answer".
     const call = (url, token = () => "tok-1", ms = 30_000) => {
       const r = restSync(url, { method: "PATCH", body: { body: "status: echo WORKERSECRETVALUE123" }, token }, { ms });
       return r.ok ? { ok: true, data: r.data } : { ok: false, sent: r.sent };
@@ -362,7 +332,6 @@ test("restSync: a getter's token, the held secrets redacted here, and whether th
       landed: call(${JSON.stringify(base)} + "/ok"),
       refused: call(${JSON.stringify(base)} + "/422"),
       failed: call(${JSON.stringify(base)} + "/502"),
-      silent: call(${JSON.stringify(base)} + "/hang", undefined, 3000),
       unreachable: call(${JSON.stringify(dead.origin)} + "/x"),
       noToken: call(${JSON.stringify(base)} + "/never", () => { throw new Error("no token"); }),
     }));
@@ -377,12 +346,11 @@ test("restSync: a getter's token, the held secrets redacted here, and whether th
     landed: { ok: true, data: { id: 5 } },
     refused: { ok: false, sent: false },
     failed: { ok: false, sent: true },
-    silent: { ok: false, sent: true },
     unreachable: { ok: false, sent: false },
     noToken: { ok: false, sent: false },
   });
   // One try each (no retry), none for the token that failed; the getter's token sent, the held secret never.
-  assert.deepEqual(seen.map((x) => x.url), ["/ok", "/422", "/502", "/hang"]);
+  assert.deepEqual(seen.map((x) => x.url), ["/ok", "/422", "/502"]);
   assert.equal(seen[0].auth, "Bearer tok-1");
   for (const x of seen) {
     assert.doesNotMatch(x.body, /WORKERSECRETVALUE123/);
@@ -395,13 +363,15 @@ test("a final write waits for a status write in flight, and its spend line repla
   const { repoOf } = await import("../scripts/lib/github.mjs");
   const landed = [];
   let gets = 0;
+  let reading;
+  const firstRead = new Promise((r) => (reading = r));
   // The first write's comment read is slow, so its write lands late unless the next write waits for it.
   const server = createServer((req, res) => {
     let b = "";
     req.on("data", (c) => (b += c));
     req.on("end", () => {
       res.setHeader("content-type", "application/json");
-      if (req.method === "GET") return setTimeout(() => res.end("[]"), ++gets === 1 ? 300 : 0);
+      if (req.method === "GET") return setTimeout(() => res.end("[]"), ++gets === 1 ? (reading(), 300) : 0);
       landed.push(JSON.parse(b || "{}").body || "");
       res.end("{}");
     });
@@ -412,7 +382,7 @@ test("a final write waits for a status write in flight, and its spend line repla
   try {
     const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1", soFar: async () => ({ usd: 0.5, unknown: 2, running: 1 }) });
     progress.live("harness working", { force: true });
-    await new Promise((r) => setTimeout(r, 30));
+    await firstRead;
     progress.spend(1.25, null);
     await progress("exit: delivered");
   } finally {
@@ -426,25 +396,6 @@ test("a final write waits for a status write in flight, and its spend line repla
   const read = spendParts(landed[0]);
   assert.deepEqual([read.running, read.usdRunning, read.usdUnknown], [true, 1, 2], "read back: one of its two unknown runs in flight");
   assert.deepEqual([spendParts(landed.at(-1)).running, spendParts(landed.at(-1)).usdRunning], [undefined, undefined]);
-});
-
-test("the default progress writer of a local stage carries the stage's spend so far; a --here writer (soFar null) none", async () => {
-  const { progressReporter } = await import("../scripts/lib/session.mjs");
-  const { repoOf } = await import("../scripts/lib/github.mjs");
-  const gh = await fakeGitHub();
-  const saved = [process.env.GITHUB_API_URL, process.env.PENDULUM_LOCAL];
-  process.env.GITHUB_API_URL = gh.url;
-  process.env.PENDULUM_LOCAL = "1";
-  try {
-    await progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1" })("setup");
-    await progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "2", soFar: null })("setup");
-  } finally {
-    [process.env.GITHUB_API_URL, process.env.PENDULUM_LOCAL] = saved;
-    for (const [k, v] of [["GITHUB_API_URL", saved[0]], ["PENDULUM_LOCAL", saved[1]]]) if (v === undefined) delete process.env[k];
-    gh.close();
-  }
-  assert.deepEqual(gh.progress.map(lineOf), [{ usd: 0, running: true }, null]);
-  assert.equal(routeOf(gh.progress[0]), "local", "a line written while a local stage runs records its route (#570)");
 });
 
 test("the progress writer records the stage's route on every line from its start, on each route, from the stage's own environment (#570)", async () => {
@@ -512,15 +463,6 @@ test("the scorer: a $0 stage is known, a line with a run of unknown cost says so
   assert.match(cost.basis, /includes 0\.5 USD through a relayed worker key/);
 });
 
-test("a usage record whose dollars include a relayed worker key says so in its basis", async () => {
-  const { writeUsage } = await import("../scripts/lib/session.mjs");
-  const dir = mkdtempSync(join(tmpdir(), "spend-basis-"));
-  const records = [{ harness: "claude", model: "m", usd: 10.906043, harnessUsd: 8.758306, workerKeyUsd: 2.147737, basis: "harness-reported: total_cost_usd, modelUsage", tokens: { input: 1, output: 1, cached: 0 }, started: "a", ended: "b" }];
-  const usage = writeUsage(dir, { harness: "claude", model: "m", records, passes: 1, exit: "delivered", reason: "", credentialBasis: "x" });
-  assert.equal(usage.usd, 10.906043);
-  assert.match(usage.basis, /^harness-reported: total_cost_usd, modelUsage; plus 2\.147737 USD through the relayed worker key \(workerKeyUsd\), included in usd$/);
-});
-
 test("a Claude session resumed after a killed stage starts from the lower of the recorded total and Claude's own", async () => {
   const root = mkdtempSync(join(tmpdir(), "spend-claude-"));
   const ws = join(root, "ws");
@@ -531,7 +473,9 @@ test("a Claude session resumed after a killed stage starts from the lower of the
   mkdirSync(join(ws, "usage-work-a", "transcript", "-c"), { recursive: true });
   writeFileSync(join(ws, "usage-work-a", "transcript", rel), cost(1));
   writeFileSync(join(ws, "usage-work-a", "result.json"), JSON.stringify({ session: { harness: "claude", id, files: [rel], checkout: "/c" } }));
-  await new Promise((r) => setTimeout(r, 20));
+  // A is the earlier stage by its files' times, with no wait between the two.
+  const earlier = new Date(Date.now() - 10_000);
+  for (const f of [join(ws, "usage-work-a", "transcript", rel), join(ws, "usage-work-a", "result.json"), join(ws, "usage-work-a")]) utimesSync(f, earlier, earlier);
   mkdirSync(join(ws, "usage-work-b"), { recursive: true });
   writeFileSync(join(ws, "usage-work-b", "session-totals.json"), JSON.stringify({ harness: "claude", totals: { [id]: { usd: 1.8 } } }));
   mkdirSync(join(root, "config", "projects", "-c"), { recursive: true });

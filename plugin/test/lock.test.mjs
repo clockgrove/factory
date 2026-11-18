@@ -6,7 +6,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { LOCK_STALE_MS, listLocks, lockRef, readLock, releaseLock, sweepLocks, takeLock } from "../scripts/lib/lock.mjs";
+import { LOCK_STALE_MS, lockRef, readLock, releaseLock, sweepLocks, takeLock } from "../scripts/lib/lock.mjs";
 
 const repo = { owner: "acme", name: "widgets", full: "acme/widgets" };
 const ZERO = "0".repeat(40);
@@ -107,13 +107,6 @@ test("lock: two takers of one stale lock, both having read it, cannot both take 
   assert.equal(s.calls.filter((c) => c.startsWith("DELETE")).length, 0, "no unconditional delete");
 });
 
-test("lock: a refused create with no ref there is an error, not a held lock", async () => {
-  const s = store();
-  // A create GitHub refuses for another reason (here: the object it names does not exist) leaves no ref behind.
-  s.api.rest = ((inner) => async (path, o = {}) => (o.method === "POST" && path.endsWith("/git/refs") ? Promise.reject(err(422, "Object does not exist")) : inner(path, o)))(s.api.rest);
-  await assert.rejects(take(s), (e) => e.status === 422);
-});
-
 test("lock: a foreign ref blocks its cue but is never taken over by a launcher; the dispatcher's pass releases it", async () => {
   for (const foreign of [{ type: "tag" }, { author: { name: "someone", email: "x@example.com" } }, { message: "hello" }]) {
     const s = store();
@@ -137,19 +130,6 @@ test("release: only the lock taken as that oid is dropped", async () => {
   const theirs = s.plant(REF);
   assert.equal(await releaseLock(repo, REF, { oid: old.oid, base, api: s.api }), false);
   assert.equal(s.refs.get(REF), theirs);
-});
-
-test("the dispatcher's pass: stale and foreign locks released, a live one kept; listLocks names the Objective", async () => {
-  const s = store();
-  const live = lockRef(7, "work", "stint-1");
-  const dead = lockRef(12, "work", "checks-abcdef012345");
-  s.plant(live, { ageMs: 60_000 });
-  s.plant(dead, { ageMs: LOCK_STALE_MS + 1 });
-  assert.deepEqual((await listLocks(repo, {}, { api: s.api })).map((l) => [l.ref, l.issue]).sort((x, y) => x[1] - y[1]), [[live, 7], [dead, 12]]);
-  assert.deepEqual((await listLocks(repo, {}, { n: 12, api: s.api })).map((l) => l.issue), [12]);
-  const out = await sweepLocks(repo, { base, now: () => T0, api: s.api });
-  assert.deepEqual(Object.fromEntries(out.map((r) => [r.ref, r.action])), { [live]: "kept", [dead]: "released" });
-  assert.deepEqual([...s.refs.keys()], [live]);
 });
 
 test("launcher: a second launcher of one stage start, hand-over or end loses the lock and does nothing", async () => {

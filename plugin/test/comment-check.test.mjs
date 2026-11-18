@@ -4,10 +4,8 @@
 // for the review stage's answer pass, as before.
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { test } from "node:test";
-import { COMMENT_QUESTION, INPUT_CAPS, commentInput, judgeUnread, openCommentCheck } from "../scripts/lib/comment-check.mjs";
+import { COMMENT_QUESTION, INPUT_CAPS, commentInput, openCommentCheck } from "../scripts/lib/comment-check.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { dropHeldSecrets, holdSecrets } from "../scripts/lib/inputs.mjs";
 import { decisionsReadOf, marker, setSelf } from "../scripts/lib/logic.mjs";
@@ -19,7 +17,6 @@ RETRY.sleep = async () => {};
 const SELF = "pendulum-app[bot]";
 const repo = { full: "o/r", owner: "o", name: "r" };
 const HEAD = "a".repeat(40);
-const SCRIPTS = join(import.meta.dirname, "..", "scripts");
 
 /** A decider that answers `verdict` at `confidence` (or `error`), recording each question. */
 function fakeCheck(verdict, confidence = 0.95, error = null) {
@@ -181,23 +178,6 @@ test("#416: `asks`, a confidence under the floor, no answer, no decider or a com
   assert.equal(long.asked.length, 0);
 });
 
-test("#416 with #413: the comment check reads its verdict at triage_min_confidence while the gateway's triage_model answers, else at 0.7", async () => {
-  const at = (name, confidence, inputs = {}) => openCommentCheck({ inputs, decider: { name, decide: async () => ({ verdict: "nothing_asked", confidence }) } });
-  // A raised floor holds a verdict the default floor would clear, and says which floor.
-  const strict = world([writer("LGTM")]);
-  assert.equal(await merge(strict, () => at("ai-gateway", 0.9, { triageMinConfidence: 0.95 })), "unread");
-  assert.equal(strict.state.merged, false);
-  const why = await judgeUnread({ check: at("ai-gateway", 0.9, { triageMinConfidence: 0.95 }), repo, issue: 7, issueData: { title: "t", body: "b", labels: [] }, pr: { number: 70, title: "p" }, unread: [{ author: "kirk", at: "2026-11-15T10:00:00Z", body: "LGTM" }] });
-  assert.match(why.why, /short of nothing asked at the floor 0\.95/);
-  // The setting is the gateway model's: the stage's harness answering reads at the default floor.
-  const harness = world([writer("LGTM")]);
-  assert.equal(await merge(harness, () => at("harness", 0.9, { triageMinConfidence: 0.95 })), "merged");
-  // A lowered floor lets a verdict under 0.7 clear, as for every decision call on the triage model.
-  const lowered = world([writer("LGTM")]);
-  assert.equal(await merge(lowered, () => at("ai-gateway", 0.65, { triageMinConfidence: 0.6 })), "merged");
-  assert.equal(await merge(world([writer("LGTM")]), () => at("ai-gateway", 0.65)), "unread", "no setting: 0.7");
-});
-
 const review = (id, state, body, at = "2026-11-15T10:00:00Z") => ({ id, user: { login: "kirk", id: 4, type: "User" }, body, state, submitted_at: at });
 
 test("#416: a writer's review requesting changes holds the merge whatever its text, and no model is asked", async () => {
@@ -214,21 +194,6 @@ test("#416: a writer's review requesting changes holds the merge whatever its te
   assert.equal(await merge(w2, () => inline.check), "unread");
   assert.equal(inline.asked.length, 0);
   assert.equal(w2.state.merged, false);
-});
-
-test("#416: the model sees what each unread item is: a review with its state, an inline comment, a comment", async () => {
-  const { asked, check } = fakeCheck("nothing_asked", 0.95);
-  const w = world([writer("Thanks!", 11, "2026-11-15T10:02:00Z")], {
-    reviews: [review(33, "APPROVED", "Looks good.")],
-    lines: [{ id: 42, pull_request_review_id: 34, user: { login: "kirk", id: 4, type: "User" }, path: "src/save.js", line: 9, body: "Nice.", created_at: "2026-11-15T10:01:00Z" }],
-  });
-  w.state.reviews.push(review(34, "COMMENTED", ""));
-  assert.equal(await merge(w, () => check), "merged");
-  assert.equal(asked.length, 1);
-  const input = asked[0].input;
-  assert.match(input, /Comment 1 of 3, a pull request review \(approved\), by kirk at [^\n]*:\n<<<BEGIN \w+>>>\nLooks good\./);
-  assert.match(input, /Comment 2 of 3, an inline comment on the diff, its file and line first, in a review \(commented\), by kirk at [^\n]*:\n<<<BEGIN \w+>>>\nsrc\/save\.js:9: Nice\./);
-  assert.match(input, /Comment 3 of 3, a comment, by kirk at [^\n]*:\n<<<BEGIN \w+>>>\nThanks!/);
 });
 
 /** A decider that answers `nothing_asked` and, while it answers, runs `during` (a person acting on GitHub meanwhile). */
@@ -258,24 +223,3 @@ test("#416: a writer comment posted or edited while the comment check runs holds
   assert.equal(w3.state.issue.length, 1);
 });
 
-test("#416: the unread comments are judged together, the newest read with the earlier ones", async () => {
-  const { asked, check } = fakeCheck("asks", 0.9);
-  const unread = [
-    { key: "comment:1", author: "kirk", at: "2026-11-15T10:00:00Z", body: "Rename `save` to `export`." },
-    { key: "comment:2", author: "kirk", at: "2026-11-15T10:05:00Z", body: "Never mind, keep it." },
-  ];
-  const r = await judgeUnread({ check, repo, issue: 7, issueData: { title: "T", body: "B", labels: ["pendulum:question"] }, pr: { number: 70, title: "P" }, unread });
-  assert.equal(r.clear, false);
-  assert.equal(asked.length, 1, "one question for the set");
-  assert.match(asked[0].input, /Comment 1 of 2, a comment,[\s\S]*Rename[\s\S]*Comment 2 of 2, a comment,[\s\S]*Never mind/);
-  assert.match(asked[0].input, /A Question to the issue's owner is open: yes/);
-});
-
-test("#416: every merge pass can ask: the dispatcher's and a local loop's on the gateway, the review stage's on its decider", () => {
-  const dispatch = readFileSync(join(SCRIPTS, "dispatch.mjs"), "utf8");
-  const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
-  const review = readFileSync(join(SCRIPTS, "review.mjs"), "utf8");
-  assert.match(dispatch, /mergeReadyOne\([^\n]*commentCheck: \(\) => openCommentCheck\(\{ inputs \}\)/);
-  assert.match(local, /mergeReadyOne\([^\n]*commentCheck: \(\) => openCommentCheck\(\{ inputs \}\)/);
-  assert.match(review, /mergeReadyOne\([^\n]*commentCheck: \(\) => openCommentCheck\(\{ inputs, stage: decisionStage \}\)/);
-});

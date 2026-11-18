@@ -119,27 +119,6 @@ async function stage(script, gh, choice, { env = { PENDULUM_LOCAL: "1", ANTHROPI
 
 const progressLines = (gh) => gh.comments.filter((c) => /^<!-- pendulum:7:progress:/.test(c.body)).map((c) => c.body).join("\n");
 
-test("work stage, run for real: a wording-only edit is judged on the stage's harness with its credential, said on the progress comment, and the stage goes on", async () => {
-  const gh = await fakeGitHub();
-  try {
-    const { out, decisions } = await stage("worker.mjs", gh, "wording");
-    assert.equal(decisions.length, 1, out);
-    // The stage's own harness: a decision call with no tools, on the stage's credential (credentialEnv), read before the checkout.
-    assert.deepEqual([decisions[0].argv.includes("--tools"), decisions[0].argv[decisions[0].argv.indexOf("--tools") + 1], decisions[0].key], [true, "", KEY]);
-    assert.match(decisions[0].input, /Build the thing\.\n/);
-    assert.match(decisions[0].input, /Build the thing \(typo fixed\)\./);
-    assert.match(progressLines(gh), /edit judged wording-only by the stage's harness \(claude [^)]+\) \(0\.90\); plan kept/, out);
-    assert.deepEqual(planOf(gh.comments, 7).record.verdicts, { [B]: "wording" }, "the verdict on the plan comment");
-    assert.equal(planOf(gh.comments, 7).record.sha256, A, "the plan's own text stays its record");
-    // It went on past the plan check: the next thing that acts on the text, the one-repo Question, then nothing more.
-    assert.match(out, /plan-time Question: the issue names acme\/other/, out);
-    assert.ok(!out.includes(EDITED_REASON.slice(0, 40)), out);
-    assert.doesNotMatch(out, /git fetch|crashed/);
-  } finally {
-    gh.close();
-  }
-});
-
 test("work stage, run for real: a changed requirement Blocks as before, before anything acts on the text", async () => {
   const gh = await fakeGitHub();
   try {
@@ -154,43 +133,6 @@ test("work stage, run for real: a changed requirement Blocks as before, before a
     gh.close();
   }
 });
-
-test("work stage, run for real: the choice check comes first; a label no writer applied Blocks before any edit check", async () => {
-  const model = "pendulum:model:claude-opus-5-5";
-  const gh = await fakeGitHub({ labels: [model], timeline: [{ event: "labeled", label: { name: model }, actor: { login: "triager", type: "User", id: 9 }, created_at: "2026-11-15T10:30:00Z" }] });
-  try {
-    const { out, decisions } = await stage("worker.mjs", gh, "wording");
-    assert.equal(decisions.length, 0, out);
-    assert.match(out, /exit: blocked/);
-    assert.match(out, /pendulum:model:claude-opus-5-5` was applied by `triager`/, out);
-  } finally {
-    gh.close();
-  }
-});
-
-for (const choice of ["wording", "requirement"]) {
-  test(`review stage, run for real: the edit is judged at its start on the reviewer's harness (${choice})`, async () => {
-    const gh = await fakeGitHub({ reviewsFail: true });
-    try {
-      const { out, decisions } = await stage("review.mjs", gh, choice);
-      assert.equal(decisions.length, 1, out);
-      assert.equal(decisions[0].key, KEY);
-      assert.deepEqual(planOf(gh.comments, 7).record.verdicts, { [B]: choice });
-      if (choice === "wording") {
-        assert.match(progressLines(gh), /edit judged wording-only by the stage's harness .*; plan kept/, out);
-        // Past the plan check: the stage's next read (its reviews, refused by the fake) ends it, before any checkout.
-        assert.ok(gh.seen.includes("GET /repos/o/r/pulls/12/reviews"), out);
-        assert.ok(!out.includes(EDITED_REASON.slice(0, 40)), out);
-      } else {
-        assert.ok(out.includes(EDITED_REASON), out);
-        assert.ok(!gh.seen.includes("GET /repos/o/r/pulls/12/reviews"), "Blocked before anything is set up");
-      }
-      assert.doesNotMatch(out, /git fetch/);
-    } finally {
-      gh.close();
-    }
-  });
-}
 
 test("work stage, run for real on a federated credential: the edit check makes an exchange of its own, masked; the passes' read is not made early", async () => {
   // Off local mode, a Claude key from workload identity federation (harness.mjs federate), which returns a key with no

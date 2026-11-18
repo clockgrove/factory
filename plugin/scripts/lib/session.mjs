@@ -763,7 +763,8 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * reviewer's, never on code scanning's), or when its thread is resolved: the finding check's yes on Pendulum's own
  * answer (logic.mjs pendulumReply; finding-check.mjs) resolves it, as a person may, so an answer the check read as not
  * resolving the finding, or did not judge, leaves the finding open. `reviewIds` (Pendulum's own reviews on the PR) decides which roots are the reviewer's by structure, which
- * also holds in local mode, where reviewer and developer are one login. Findings GitHub took in no line (postReview set
+ * also holds in local mode, where reviewer and developer are one login; with no ids and no `reviewerLogin`, the ids are
+ * those of the marked reviews it reads itself. Findings GitHub took in no line (postReview set
  * them out in the body of Pendulum's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one
  * is answered once a comment under Pendulum's resolved marker for it (finding-check.mjs) is on the PR. Pendulum's own
  * reviews and markers are those by Pendulum or someone who can push (trustedAuthor). An open finding Pendulum answered
@@ -774,8 +775,14 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const byId = new Map(comments.map((c) => [c.id, c]));
-  // A named reviewer's comment is never Pendulum's own, even where the author filter stands in for the review ids.
-  const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
+  // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push); a failed read throws.
+  const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
+  const marked = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r));
+  // A root is Pendulum's reviewer's by its review ids; not given, by the App's login. With neither (local mode, the ids'
+  // read failed) the ids are those of the reviews just read: never every root, so no other text passes as the reviewer's,
+  // and never none, so no open finding goes uncounted (#601). A named reviewer's comment is never Pendulum's own.
+  const ids = reviewIds ?? (reviewerLogin ? null : new Set(marked.map((r) => r.id)));
+  const ours = (c) => !namedReviewer(c, thirdParty) && (ids ? ids.has(c.pull_request_review_id) : !!reviewerLogin && c.user?.login === reviewerLogin);
   const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
   const theirs = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty)) : [];
   const ourIds = new Set(roots.map((c) => c.id));
@@ -791,15 +798,27 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   // `earlierPrBody`: that answer said its fix is in the PR body (its marker's `:pr_body`, handoff.mjs postReplies, #584).
   const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)), ...(PR_BODY_REPLY.test(answer.get(c.id)) ? { earlierPrBody: true } : {}) } : {}) });
   const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, namedReviewer(c, thirdParty)), ...earlier(c) }));
-  // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push), and the findings in their bodies.
-  const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
-  const own = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r) && (reviewIds ? reviewIds.has(r.id) : !reviewerLogin || r.user?.login === reviewerLogin));
+  // The findings in the bodies of Pendulum's own reviews.
+  const own = marked.filter((r) => (ids ? ids.has(r.id) : r.user?.login === reviewerLogin));
   const inBody = own.flatMap((r) => bodyFindings(r.body).map((f) => ({ id: bodyFindingId(r.id, f.n), path: f.path, line: f.line, body: f.body, inBody: true, ...(r.commit_id ? { raisedOn: r.commit_id } : {}), ...(r.submitted_at ? { raisedAt: r.submitted_at } : {}) })));
   if (!inBody.length) return open;
   const trusted = (await listComments(repo, prNumber, { token })).filter(trustedAuthor);
   const done = new Set(trusted.map((c) => BODY_RESOLVED.exec(c.body || "")?.[1]).filter(Boolean));
   const said = new Map(trusted.map((c) => [BODY_REPLY.exec(c.body || "")?.[1], c.body]).filter(([id]) => id));
   return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)), ...(PR_BODY_REPLY.test(said.get(f.id)) ? { earlierPrBody: true } : {}) } : f))];
+}
+/**
+ * The ids of Pendulum's own reviews on PR `prNumber` of Objective `issue` (marker(issue, "review"), by a trusted author:
+ * trustedAuthor), which unaddressedReviewComments takes as its reviewer's. A transient failure of the read is sent again
+ * within rest's bound; a read that still fails is logged and gives null (#601).
+ */
+export async function ownReviewIds(repo, prNumber, issue, opts) {
+  try {
+    return new Set(((await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true })) || []).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
+  } catch (e) {
+    log(`#${issue}: Pendulum's reviews on PR #${prNumber} could not be read (${errCode(e)})`);
+    return null;
+  }
 }
 /** Pendulum's earlier answer as the next answer pass reads it: its marker and heading off, sanitised and cut. */
 const answerText = (body) =>

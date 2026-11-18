@@ -61,7 +61,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { lineClock, whenText } from "./clock.mjs";
+import { lineClock, logTime, whenText } from "./clock.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
 import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { REAP_NOW_MS, agentUser, atStop, exec, git, reapAgentNow, runnerCommand, trapStops } from "./proc.mjs";
@@ -2679,8 +2679,8 @@ async function afterReset(lost, deadlineAt) {
   const now = OUTAGE.now();
   const left = lost.resetAt - now;
   if (!(left > 0)) return;
-  if (lost.resetAt > Math.max(Number.isFinite(deadlineAt) ? deadlineAt : now, now) + OUTAGE.exitWaitMs) return void log(`the rate limit resets at ${whenText(lost.resetAt)}, past this job's time: its Block cannot be written before then`);
-  log(`waiting for the rate limit's reset at ${whenText(lost.resetAt)} to write the Block`);
+  if (lost.resetAt > Math.max(Number.isFinite(deadlineAt) ? deadlineAt : now, now) + OUTAGE.exitWaitMs) return void log(`the rate limit resets at ${logTime(lost.resetAt)}, past this job's time: its Block cannot be written before then`);
+  log(`waiting for the rate limit's reset at ${logTime(lost.resetAt)} to write the Block`);
   await OUTAGE.sleep(left + 1000);
 }
 
@@ -2741,7 +2741,7 @@ export async function usageLimitExit(e, { local, records, finish, block, pause =
   const noReset = !Number.isFinite(e.resetAt);
   const usageLimit = { harness: e.refusal.harness, reset: noReset ? null : new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(noReset ? { noReset: true } : {}), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}), ...(local && pause ? { continue: pause } : {}) };
   if (local) {
-    const reason = noReset ? `${e.refusal.harness} reached its usage limit or quota (${refusalFields(e.refusal)}) with no reset reported` : `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
+    const reason = noReset ? `${e.refusal.harness} reached its usage limit or quota (${refusalFields(e.refusal)}) with no reset reported` : `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${whenText(usageLimit.reset)}`;
     log(`paused: ${reason}; the claim stays, and serve ${noReset ? "moves the Objective to a free account" : "resumes the stage after the reset"}`);
     await finish("paused", reason, null, usageLimit);
     return;
@@ -3142,7 +3142,7 @@ export async function clearSlowHangs(repo, { issue, prNumber, removals, since, n
     r.cleared = true;
     out.cleared = true;
     clears += 1;
-    log(`#${issue}: the step Pendulum judged hung when it took PR #${prNumber} out of the merge queue at ${r.at} then finished green, and its job too, before the queue's own deadline; that removal counts toward no try`);
+    log(`#${issue}: the step Pendulum judged hung when it took PR #${prNumber} out of the merge queue at ${logTime(r.at)} then finished green, and its job too, before the queue's own deadline; that removal counts toward no try`);
   }
   return out;
 }
@@ -3465,7 +3465,7 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
   if (pending?.state !== "handed") return null;
   if (pending.head && head && pending.head !== head) {
     await writeQueueRed(repo, issue, prNumber, { ...pending, state: "superseded" }, { token });
-    return { state: "superseded", line: `merge queue run red at ${pending.at}: the PR's head moved on since (${pending.head.slice(0, 7)} → ${head.slice(0, 7)}); not read` };
+    return { state: "superseded", line: `merge queue run red at ${logTime(pending.at)}: the PR's head moved on since (${pending.head.slice(0, 7)} → ${head.slice(0, 7)}); not read` };
   }
   const q = await queueRedOf({ repo, issue, prNumber, base, at: pending.at, after: pending.after, names: await names(), triage, token, actionsToken });
   const where = q.sha ? ` on ${q.sha.slice(0, 7)}` : "";
@@ -3475,7 +3475,7 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
     const reads = pending.reads + 1;
     if (reads < QUEUE_RED_READS) {
       await writeQueueRed(repo, issue, prNumber, { ...pending, reads }, { token });
-      return { state: "pending", line: `merge queue run red at ${pending.at}: ${q.reason}; read again by the next review stage` };
+      return { state: "pending", line: `merge queue run red at ${logTime(pending.at)}: ${q.reason}; read again by the next review stage` };
     }
     q.kind = "none";
   }
@@ -4155,7 +4155,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
           const by = hung.map((h) => h.by).filter(Boolean).sort()[0] ?? null;
           await upsertComment(repo, issue, requeueWaitMarker(issue), requeueWaitBody(issue, prNumber, { at: stalledAt, code: HUNG_CODE }, hung, by), opts).catch((e) => log(`#${issue}: hung removal record: ${errCode(e)}`));
         }
-        log(`#${issue}: whether Pendulum's removal of PR #${prNumber} from the merge queue at ${slow.pending.at} counts as a try waits for its hung step's job, at the latest until ${slow.pending.by}; the PR stays out until then`);
+        log(`#${issue}: whether Pendulum's removal of PR #${prNumber} from the merge queue at ${logTime(slow.pending.at)} counts as a try waits for its hung step's job, at the latest until ${logTime(slow.pending.by)}; the PR stays out until then`);
         return "pending";
       }
       if (slow.cleared) retry = queueRetry(removals, { since, self });
@@ -4163,7 +4163,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // The steps the newest removal judged hung, for its requeue record and a Block's words.
     if (retry.last?.code === HUNG_CODE) lastHung = removals.find((r) => r.at === retry.last.at)?.hung ?? null;
     if (retry.hold) {
-      log(`#${issue}: a person took PR #${prNumber} out of the merge queue at ${retry.hold.at} (${retry.hold.code}); it stays out until it is enqueued again, reviewed again, gets a new head or re-enters`);
+      log(`#${issue}: a person took PR #${prNumber} out of the merge queue at ${logTime(retry.hold.at)} (${retry.hold.code}); it stays out until it is enqueued again, reviewed again, gets a new head or re-enters`);
       return "held";
     }
     // The queue took it out for a conflict with a PR ahead of it (the PR does not conflict with the default branch, or

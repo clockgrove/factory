@@ -617,7 +617,7 @@ After the start, a failed read keeps the last values read.
 - The file is repository content, and any other `PENDULUM_*` name is one Pendulum reads as its own control, so local mode leaves it out of every stage, names it in the log, and doctor warns.
   The other routes' own settings (`PENDULUM_SANDBOX_VCPUS`, `PENDULUM_ACCOUNTS`, `PENDULUM_AUTO_ACCOUNT`) are left out too, without a warning.
 
-**Your own environment** wins over both the workflow and the variables for these (`PENDULUM_PG_BIN` aside, below):
+**Your own environment** wins over both the workflow and the variables for these (`PENDULUM_PG_BIN` and `PENDULUM_TIME_ZONE` aside, below):
 
 - **`PENDULUM_HARNESS`, `PENDULUM_MODEL`, `PENDULUM_SUBAGENT_MODEL`, `PENDULUM_REVIEWER_MODEL`, `PENDULUM_REVIEWER_EFFORT`, `PENDULUM_EFFORT`:** pick another harness or model; another harness drops the workflow's models for its own defaults.
   These are this machine's defaults: an Objective's harness and model labels override them for that Objective ([USAGE.md](USAGE.md), Choose the harness and models).
@@ -633,6 +633,7 @@ After the start, a failed read keeps the last values read.
 - **`PENDULUM_LOCAL_VALIDATION`:** the validation commands local mode runs, when some of the workflow's cannot run in a sandbox; the required checks on GitHub still run the full set before a merge.
 - **`PENDULUM_LOCAL_DB=1`, `PENDULUM_LOCAL_DB_INIT`, `PENDULUM_PG_BIN`:** a throwaway Postgres per validation command (Databases, below).
   `PENDULUM_PG_BIN` is the exception to your shell winning: it comes from the workflow's env block, and a shell value reaches a stage only when `PENDULUM_LOCAL_ENV` names it, with the workflow's value winning over it.
+- **`PENDULUM_TIME_ZONE`:** the zone visible times are written in (INSTALL.md, Time zone). The other exception: the repository's setting wins, and your shell's applies, to `serve` and its stages, only where the workflow and the variables set none.
 - **`PENDULUM_LOCAL_APP_ID`, `PENDULUM_LOCAL_APP_KEY`:** the Pendulum App's id and the path of its private key.
   - Blocked and Question notices then post as the App, so their @mention reaches the `PENDULUM_NOTIFY` user even when that is you: GitHub notifies no one of their own mention, and doctor warns when that would happen.
   - The key must be a real file under `~/.config/pendulum` (no sandbox reads there; not a symlink, one hard link, mode 600, and no `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `COPILOT_HOME` that holds it, since the harness reads its own home).

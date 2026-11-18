@@ -17,7 +17,7 @@ import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
 import { activePendulumJobs, addLabels, blockedByRelations, checksOn, downloadArtifactResult, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { clockText, whenText } from "./lib/clock.mjs";
+import { clockText, logTime, whenText } from "./lib/clock.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
 import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, restartedAt, vendorEvidence, stateOf, spendText, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
@@ -911,7 +911,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
           unclaimed.push(n);
           statuses[n] = "Queued";
           issue.labels = (issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "pendulum:running");
-          log(`  #${n}: Running since ${since} with no claim and no stage on any machine (a start that never wrote its claim); back to Queued`);
+          log(`  #${n}: Running since ${logTime(since)} with no claim and no stage on any machine (a start that never wrote its claim); back to Queued`);
           continue;
         }
         // The stint's work job on the runners (relaunch.mjs stintWorkJob), read at most once a tick for this Objective:

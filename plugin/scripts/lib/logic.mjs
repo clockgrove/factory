@@ -6,7 +6,7 @@ import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, passRead, rerunRead, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
-import { lineClock, whenText } from "./clock.mjs";
+import { lineClock, logTime, whenText } from "./clock.mjs";
 
 /** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
 export { refusalCause };
@@ -3566,7 +3566,7 @@ export function launchDecision({ ev, state, record = null, trusted = false, from
   }
   // The per-Objective concurrency group serialises launchers; a stage still running in the sandbox outlives its
   // launcher, so the record says whether one holds it. Past staleMs the holder is taken for gone.
-  if (stageHolds(record, now, staleMs)) return { skip: `stage ${record.stage} is running in the sandbox since ${record.at}` };
+  if (stageHolds(record, now, staleMs)) return { skip: `stage ${record.stage} is running in the sandbox since ${logTime(record.at)}` };
   if (ev.kind === "swept") {
     // A stage that stopped to wait for CI on its branch's head, whose checks finished with no launch (the event lost).
     if (record?.waiting === "checks" && record.head && record.head === headSha && checksDone) return { stage: record.stage };

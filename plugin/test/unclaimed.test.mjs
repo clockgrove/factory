@@ -232,7 +232,7 @@ test("serve: a pendulum:local Objective Running for minutes with no claim and no
   const fake = await fakeGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:running"], timeline: runningSince(10 * 60_000) });
   try {
     const { picks, log } = await serveTicks(fake, { ticks: 2 });
-    const said = log.match(/#7: Running since \S+ with no claim and no stage on any machine \(a start that never wrote its claim\); back to Queued/g) || [];
+    const said = log.match(/#7: Running since \w{3} \d{1,2}, \d{1,2}:\d\d:\d\d [AP]M \S+ with no claim and no stage on any machine \(a start that never wrote its claim\); back to Queued/g) || [];
     assert.equal(said.length, 1, log);
     assert.ok(fake.state.writes.includes("DELETE /repos/o/r/issues/7/labels/pendulum%3Arunning"), fake.state.writes.join("\n"));
     // Queued again: this loop's next pick takes it (and marks it Running anew), and nothing Blocks it.
@@ -639,7 +639,7 @@ test("serve: an Objective labelled pendulum:local by a pick where no Action ran 
     fake.state.workflow = "active";
     repo.addWorkflow();
     const { picks, log } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
-    assert.match(log, /#7: Running since \S+ with no claim and no stage on any machine \(a start that never wrote its claim\); back to Queued/);
+    assert.match(log, /#7: Running since \w{3} \d{1,2}, \d{1,2}:\d\d:\d\d [AP]M \S+ with no claim and no stage on any machine \(a start that never wrote its claim\); back to Queued/);
     assert.deepEqual(picks, [7], log);
     assert.ok(!fake.state.labels.has("pendulum:blocked"));
   } finally {

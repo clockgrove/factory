@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
-import { whenText } from "../scripts/lib/clock.mjs";
+import { logTime, whenText } from "../scripts/lib/clock.mjs";
 import { RETRY, rest } from "../scripts/lib/github.mjs";
 import { NetworkDown, OUTAGE, networkBack, passCutOff, resetNetwork, unreachable, waitOutages } from "../scripts/lib/network.mjs";
 import { openOutbox } from "../scripts/lib/outbox.mjs";
@@ -83,7 +83,7 @@ test("rest: calls that cannot leave this machine wait for one probe loop, then g
       const net = netLines(lines);
       assert.equal(net.length, 2, net.join(""));
       assert.match(net[0], /network: api\.github\.test is unreachable from this machine \(EAI_AGAIN\); waiting for it to answer again, for up to 15 min/);
-      assert.match(net[1], /network: api\.github\.test answers again after 1 min \(unreachable since Nov 14, 8:47 AM UTC\)/);
+      assert.match(net[1], /network: api\.github\.test answers again after 1 min \(unreachable since Nov 14, 8:47:00 AM UTC\)/);
       assert.deepEqual(retryLines(lines), [], "no retry lines for a network that is down");
     },
   );
@@ -487,7 +487,7 @@ test("worker.mjs, run for real: a stage whose first reads swallow the outage sti
   const first = /network: \S+ is unreachable from this machine \(ECONNREFUSED\)/.exec(out);
   assert.ok(first, out);
   const lostAt = /still unreachable after .* \(since ([^)]+)\)/.exec(out)[1];
-  assert.deepEqual({ ...result.outage, since: whenText(result.outage.since) }, { host: new URL(origin).host, code: "ECONNREFUSED", since: lostAt, origin }, "the first loss, not the moment the stage ended");
+  assert.deepEqual({ ...result.outage, since: logTime(result.outage.since) }, { host: new URL(origin).host, code: "ECONNREFUSED", since: lostAt, origin }, "the first loss, not the moment the stage ended");
   assert.match(result.outage.since, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/, "the record keeps its ISO time");
   assert.ok(!/crashed/.test(out), out);
 });
@@ -602,8 +602,8 @@ test("rest: a flap that then stays down past a minute is logged as its own loss,
       const net = netLines(lines);
       assert.equal(net.length, 4, net.join(""));
       assert.match(net[1], /answers again after 35 s/);
-      assert.match(net[2], /api\.github\.test is unreachable from this machine again \(EAI_AGAIN\) since Nov 14, 8:48 AM UTC; on and off since Nov 14, 8:47 AM UTC/);
-      assert.match(net[3], /api\.github\.test answers again after 6 h \(unreachable since Nov 14, 8:48 AM UTC; on and off since Nov 14, 8:47 AM UTC\)/);
+      assert.match(net[2], /api\.github\.test is unreachable from this machine again \(EAI_AGAIN\) since Nov 14, 8:48:05 AM UTC; on and off since Nov 14, 8:47:00 AM UTC/);
+      assert.match(net[3], /api\.github\.test answers again after 6 h \(unreachable since Nov 14, 8:48:05 AM UTC; on and off since Nov 14, 8:47:00 AM UTC\)/);
     },
   );
 });

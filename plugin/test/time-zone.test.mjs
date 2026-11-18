@@ -6,13 +6,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { LINE_CLOCK, clockText, lineClock, objectiveZone, timeZone, useObjectiveZone, whenText, zoneMarker } from "../scripts/lib/clock.mjs";
-import { VARIABLE_SETTINGS, WORKFLOW_SETTINGS, resolveInputs, timeZoneName, variableSettings } from "../scripts/lib/inputs.mjs";
+import { LINE_CLOCK, clockText, lineClock, logTime, objectiveZone, repositoryZone, timeZone, useObjectiveZone, whenText, zoneMarker } from "../scripts/lib/clock.mjs";
+import { VARIABLE_SETTINGS, WORKFLOW_SETTINGS, machineSettings, resolveInputs, settingLayers, timeZoneName, variableSettings } from "../scripts/lib/inputs.mjs";
 import { setSelf, spendMarker, vendorBody, vendorLine } from "../scripts/lib/logic.mjs";
 import { progressReporter } from "../scripts/lib/session.mjs";
 import { repoOf } from "../scripts/lib/github.mjs";
 import { finishCardBody, finishData, renderFinishCard } from "../scripts/lib/finish-card.mjs";
-import { takeZone } from "../scripts/local.mjs";
+import { Local, takeZone } from "../scripts/local.mjs";
 import { timeZoneCheck } from "../scripts/doctor.mjs";
 import { phaseMinutes, stageLastWrite } from "../../bench/lib/phases.mjs";
 
@@ -49,6 +49,9 @@ test("a given zone renders with its abbreviation across both of its daylight-sav
   assert.equal(clockText(at("2026-11-01T09:30:00Z"), { env }), "1:30 AM PST");
   assert.equal(whenText(at("2026-11-17T17:00:05Z"), { env }), "Nov 17, 9:00 AM PST");
   assert.equal(clockText(at("2026-11-17T17:00:05Z"), { env, seconds: true }), "9:00:05 AM PST");
+  assert.equal(logTime(at("2026-11-17T17:00:12Z"), { env }), "Nov 17, 9:00:12 AM PST", "a log line keeps the seconds");
+  // Intl's short name: an offset where the zone has no abbreviation in English.
+  assert.equal(clockText(at("2026-11-17T17:00:00Z"), { env: { GITHUB_ACTIONS: "true", PENDULUM_TIME_ZONE: "Europe/Berlin" } }), "6:00 PM GMT+1");
   // A progress line's clock: the zone's time, then its UTC minute hidden.
   assert.equal(lineClock(at("2026-11-17T17:00:05Z"), { env }), "9:00 AM PST<!-- 17:00Z -->");
   assert.equal(clockText(NaN, { env }), "?");
@@ -73,7 +76,9 @@ test("on Actions and in the cloud sandbox the default is UTC, whatever the machi
     assert.equal(timeZone({ PENDULUM_STAGE_CLAIM: "c1" }).zone, "UTC", "a cloud sandbox's stage");
     assert.equal(clockText(at("2026-11-17T17:00:00Z"), { env: { GITHUB_ACTIONS: "true" } }), "5:00 PM UTC");
     // The setting, from the env block or a repository variable (laid over the env) or `with:`.
-    assert.equal(timeZone({ GITHUB_ACTIONS: "true", PENDULUM_TIME_ZONE: "america/los_angeles" }).zone, "America/Los_Angeles");
+    // The name as given, when Intl knows it: `EST` is not shown as ICU's America/Panama.
+    assert.equal(timeZone({ GITHUB_ACTIONS: "true", PENDULUM_TIME_ZONE: "EST" }).zone, "EST");
+    assert.equal(clockText(at("2026-11-17T17:00:00Z"), { env: { GITHUB_ACTIONS: "true", PENDULUM_TIME_ZONE: "EST" } }), "12:00 PM EST");
     assert.equal(timeZone({ GITHUB_ACTIONS: "true", PENDULUM_INPUT_TIME_ZONE: "Europe/Berlin", PENDULUM_TIME_ZONE: "Asia/Tokyo" }).zone, "Europe/Berlin");
   });
 });
@@ -104,8 +109,12 @@ test("an Objective's zone line wins over the repository's setting on the Actions
   const body = `${zoneMarker("America/Los_Angeles")}\n\n## Goal\nA thing.\n\n## Acceptance\n- it works`;
   assert.equal(objectiveZone(body), "America/Los_Angeles");
   assert.deepEqual(timeZone(env, { objective: objectiveZone(body) }), { zone: "America/Los_Angeles", from: "objective", set: "Europe/Berlin", invalid: null });
-  // Invalid, ambiguous or not on a line of its own: no Objective zone, so the setting applies.
-  for (const b of ["<!-- pendulum:tz Mars/Olympus_Mons -->\nx", "<!-- pendulum:tz +05:30 -->", `${zoneMarker("Asia/Tokyo")}\n${zoneMarker("Europe/Paris")}`, `see ${zoneMarker("Asia/Tokyo")}`, "<!-- pendulum:tz  Asia/Tokyo -->", "<!--pendulum:tz Asia/Tokyo-->", null]) {
+  // Only the body's first line counts: a later one, a fenced example or a quoted one names nothing.
+  const fenced = `## Goal\nA thing.\n\n\`\`\`\n${zoneMarker("Asia/Tokyo")}\n\`\`\`\n`;
+  assert.equal(objectiveZone(`${zoneMarker("America/Los_Angeles")}\r\n\n${fenced}`), "America/Los_Angeles", "the real first line, beside a fenced example");
+  assert.equal(objectiveZone(`${zoneMarker("Asia/Tokyo")}\n${zoneMarker("Europe/Paris")}`), "Asia/Tokyo");
+  // Invalid, or not the body's first line: no Objective zone, so the setting applies.
+  for (const b of [fenced, `\`\`\`\n${zoneMarker("Asia/Tokyo")}\n\`\`\``, `x\n${zoneMarker("Asia/Tokyo")}`, `> ${zoneMarker("Asia/Tokyo")}`, ` ${zoneMarker("Asia/Tokyo")}`, "<!-- pendulum:tz Mars/Olympus_Mons -->\nx", "<!-- pendulum:tz +05:30 -->", `see ${zoneMarker("Asia/Tokyo")}`, `${zoneMarker("Asia/Tokyo")} x`, "<!-- pendulum:tz  Asia/Tokyo -->", "<!--pendulum:tz Asia/Tokyo-->", null]) {
     assert.equal(objectiveZone(b), null, String(b));
     assert.equal(timeZone(env, { objective: objectiveZone(b) }).zone, "Europe/Berlin", String(b));
   }
@@ -115,6 +124,10 @@ test("an Objective's zone line wins over the repository's setting on the Actions
     assert.equal(clockText(at("2026-11-17T17:00:00Z"), { env }), "9:00 AM PST");
     assert.equal(useObjectiveZone("<!-- pendulum:tz Mars/Olympus_Mons -->"), null);
     assert.equal(clockText(at("2026-11-17T17:00:00Z"), { env }), "6:00 PM GMT+1");
+    // The shared holds issue is no one Objective's: its comments take the repository's zone, whatever this stage's.
+    useObjectiveZone(body);
+    assert.equal(repositoryZone(env), "Europe/Berlin");
+    assert.equal(whenText(at("2026-11-17T17:00:00Z"), { env, zone: repositoryZone(env) }), "Nov 17, 6:00 PM GMT+1");
   } finally {
     useObjectiveZone(null);
   }
@@ -217,10 +230,27 @@ test("the finish card writes its times in the Objective's zone; its markers and 
   assert.equal(renderFinishCard(data(real.issue.body)).includes("UTC"), true, "the test's own env: GITHUB_ACTIONS unset, TZ UTC");
 });
 
-test("serve writes its own times in the repository's zone, as its stages do", () => {
-  const env = { PENDULUM_TIME_ZONE: "Asia/Tokyo" };
-  takeZone({ PENDULUM_TIME_ZONE: "Europe/Berlin" }, env);
-  assert.equal(env.PENDULUM_TIME_ZONE, "Europe/Berlin");
-  takeZone({}, env);
+test("serve and its stages take the repository's zone, else the developer's shell's, else the machine's", () => {
+  const env = {};
+  takeZone({ PENDULUM_TIME_ZONE: "Europe/Berlin" }, env, "Asia/Tokyo");
+  assert.equal(env.PENDULUM_TIME_ZONE, "Europe/Berlin", "the repository's wins");
+  takeZone({}, env, "Asia/Tokyo");
+  assert.equal(env.PENDULUM_TIME_ZONE, "Asia/Tokyo", "the shell's where the repository sets none");
+  takeZone({}, env, undefined);
   assert.ok(!("PENDULUM_TIME_ZONE" in env));
+  // The layers serve and doctor report, and the settings a local stage gets (machineSettings over the repository's).
+  const shell = { PENDULUM_TIME_ZONE: "Asia/Tokyo", PENDULUM_MODEL: "m" };
+  assert.deepEqual(machineSettings(shell, { PENDULUM_TIME_ZONE: "Europe/Berlin" }), { PENDULUM_MODEL: "m" });
+  assert.deepEqual(machineSettings(shell, {}), shell);
+  const layered = (workflow) => settingLayers({ workflow, machine: shell });
+  assert.deepEqual([layered({ PENDULUM_TIME_ZONE: "Europe/Berlin" }).values.PENDULUM_TIME_ZONE, layered({ PENDULUM_TIME_ZONE: "Europe/Berlin" }).from.PENDULUM_TIME_ZONE], ["Europe/Berlin", "workflow"]);
+  assert.deepEqual([layered({}).values.PENDULUM_TIME_ZONE, layered({}).from.PENDULUM_TIME_ZONE], ["Asia/Tokyo", "machine"]);
+  assert.equal(layered({ PENDULUM_MODEL: "w" }).values.PENDULUM_MODEL, "m", "the other machine settings still win");
+  // A local stage's env (serve's baseEnv): the repository's zone, else the shell's.
+  withEnv({ PENDULUM_TIME_ZONE: "Asia/Tokyo" }, () => {
+    const loop = Object.assign(Object.create(Local.prototype), { wf: { PENDULUM_TIME_ZONE: "Europe/Berlin" }, harness: "claude" });
+    assert.equal(loop.baseEnv().PENDULUM_TIME_ZONE, "Europe/Berlin");
+    loop.wf = {};
+    assert.equal(loop.baseEnv().PENDULUM_TIME_ZONE, "Asia/Tokyo");
+  });
 });

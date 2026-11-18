@@ -2386,7 +2386,8 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
     const merged = env.GITHUB_ACTIONS ? env : { ...settingLayers({ workflow: workflowSettings(wf).kept, variables }).values, ...env };
     // What a local stage reads, as serve's baseEnv builds it: the repository's settings, under this shell's own
     // (inputs.mjs machineSettings) only.
-    const stage = env.GITHUB_ACTIONS ? env : { ...settingLayers({ workflow: workflowSettings(wf).kept, variables }).values, ...machineSettings(env) };
+    const repoValues = settingLayers({ workflow: workflowSettings(wf).kept, variables }).values;
+    const stage = env.GITHUB_ACTIONS ? env : { ...repoValues, ...machineSettings(env, repoValues) };
     return { wf, committed: from, env: merged, stage, inputs: resolveInputs({ args, env: merged }), layers, listed, checks: [...more, ...checks] };
   };
   if (env.GITHUB_ACTIONS || args.checkout || (committed && !committed.noClone)) return settle(committed ? committed.wf : readWorkflowEnv(checkout), committed);

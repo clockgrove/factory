@@ -9,6 +9,7 @@
 import { downloadArtifactResult, listComments, rest } from "./github.mjs";
 import { objectiveRecords, objectiveSpend, objectiveWindow, pendulumOwn, unlinedStages } from "./finish-card.mjs";
 import { log } from "./inputs.mjs";
+import { logTime } from "./clock.mjs";
 import { marker, spendText } from "./logic.mjs";
 
 /** What fixes a cap Block: the setting raised or unset, then the label. */
@@ -84,6 +85,6 @@ export async function stageStart({ inputs, repo, issue, pr = null, opts, apply, 
   const afterBlock = rerunAfter(comments, n, { self, mine: pendulumOwn(appId) });
   const token = inputs.githubToken || opts.token;
   const r = await capGate({ repo, issue: n, cap: inputs.maxObjectiveUsd, pr, notify: inputs.notify, opts, apply, before, stage, self, appId, comments, records: (k, want) => objectiveRecords(repo, k, { token, want, download: (a) => downloadArtifactResult(repo, a, token) }) });
-  if (r.ok && r.spent) log(`max_objective_usd: the Objective's known spend${r.since ? ` since ${r.since}` : ""} is ${totalWords(r.spent)} of ${usd(Number(inputs.maxObjectiveUsd))}${unknownWords(r.spent.unknown)}`);
+  if (r.ok && r.spent) log(`max_objective_usd: the Objective's known spend${r.since ? ` since ${logTime(r.since)}` : ""} is ${totalWords(r.spent)} of ${usd(Number(inputs.maxObjectiveUsd))}${unknownWords(r.spent.unknown)}`);
   return { ...r, afterBlock };
 }

@@ -1,9 +1,10 @@
 // Visible times (#586): every time Pendulum writes for a person to read, in one form and one zone. The zone, first that
-// names a zone: the Objective's own (the `<!-- pendulum:tz NAME -->` line its filer's machine put in its body,
+// names a zone: the Objective's own (the `<!-- pendulum:tz NAME -->` first line its filer's machine put in its body,
 // objectiveZone; a stage takes it once it has read its issue, useObjectiveZone), the repository's `time_zone` setting
 // (PENDULUM_TIME_ZONE), an IANA zone name, the machine's own zone in local mode and on a developer's command line, else
 // UTC (Actions, the cloud sandbox). Nothing is inferred from GitHub's own fields.
-// The platform's Intl does the zone's rules (its offsets and daylight saving) and names the zone's abbreviation.
+// The platform's Intl does the zone's rules (its offsets and daylight saving) and names the zone: its short name, an
+// abbreviation where Intl has one (`PST`), else an offset (`GMT+1`).
 // Machine-read text never comes here: hidden markers, spend lines, the summary marker and every record's JSON stay ISO
 // 8601 UTC, and a progress line carries its UTC minute in a hidden stamp beside the visible time (lineClock).
 import { input, timeZoneName } from "./inputs.mjs";
@@ -19,15 +20,16 @@ export const onOwnMachine = (env = process.env) => env.PENDULUM_LOCAL === "1" ||
 
 /** The hidden line of an Objective's body that names its filer's zone (`pendulum zone` prints this machine's). */
 export const zoneMarker = (zone) => `<!-- pendulum:tz ${zone} -->`;
-const ZONE_LINE = /^<!-- pendulum:tz ([A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+){0,3}) -->\r?$/gm;
+const ZONE_LINE = /^<!-- pendulum:tz ([A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+){0,3}) -->\r?(?:\n|$)/;
 
 /**
- * The zone an Objective's body names (zoneMarker, on a line of its own), as Intl names it; null with none, with more
- * than one, or with one Intl does not know, so the next zone down applies. It changes only how times read.
+ * The zone an Objective's body names: its first line, exactly zoneMarker's (a marker on any later line, in a code
+ * fence or quoted, names nothing), and a zone Intl knows; else null, so the next zone down applies. It changes only
+ * how times read.
  */
 export function objectiveZone(body) {
-  const found = [...String(body ?? "").matchAll(ZONE_LINE)];
-  return found.length === 1 ? timeZoneName(found[0][1]) : null;
+  const found = ZONE_LINE.exec(String(body ?? ""));
+  return found ? timeZoneName(found[1]) : null;
 }
 
 // The Objective this process works on: its zone, once read (useObjectiveZone); null names none.
@@ -53,6 +55,12 @@ export function timeZone(env = process.env, { objective = OBJECTIVE_ZONE } = {})
   return onOwnMachine(env) ? { zone: machineZone(), from: "machine", set: null, invalid } : { zone: "UTC", from: "utc", set: null, invalid };
 }
 
+/**
+ * The zone of text that is no one Objective's (the shared holds issue's comments): timeZone's with no Objective's zone,
+ * whatever Objective this process works on.
+ */
+export const repositoryZone = (env = process.env) => timeZone(env, { objective: null }).zone;
+
 const FORMATS = new Map();
 /** One Intl formatter per zone and options, kept: building one is the costly part. */
 function formatter(zone, options) {
@@ -66,9 +74,10 @@ function formatter(zone, options) {
 const msOf = (t) => (t instanceof Date ? t.getTime() : typeof t === "number" ? t : Date.parse(t));
 
 /**
- * `t` as a person reads it in the zone (`zone`, else timeZone(env)'s): "9:00 AM PST". `seconds` adds them ("9:00:05 AM
- * PST"), `date` the month and day ("Nov 17, 9:00 AM PST"), and `abbr: false` leaves out the zone's abbreviation (for rows
- * under a heading that names the zone). Intl's narrow spaces are written as plain ones. "?" for no time.
+ * `t` as a person reads it in the zone (`zone`, else timeZone(env)'s): "9:00 AM PST", the zone's short name as Intl
+ * gives it (an offset, "GMT+1", where Intl has no abbreviation). `seconds` adds them ("9:00:05 AM PST"), `date` the month
+ * and day ("Nov 17, 9:00 AM PST"), and `abbr: false` leaves out the zone's name (for rows under a heading that names
+ * the zone). Intl's narrow spaces are written as plain ones. "?" for no time.
  */
 export function clockText(t, { env = process.env, zone = timeZone(env).zone, seconds = false, date = false, abbr = true } = {}) {
   const at = msOf(t);
@@ -79,6 +88,9 @@ export function clockText(t, { env = process.env, zone = timeZone(env).zone, sec
 
 /** `t` with its date, as a person reads it in the zone: "Nov 17, 9:00 AM PST" (clockText's `date`). */
 export const whenText = (t, opts = {}) => clockText(t, { ...opts, date: true });
+
+/** `t` as a log line names it, to the second: "Nov 17, 9:00:12 AM PST" (whenText with `seconds`). */
+export const logTime = (t, opts = {}) => whenText(t, { ...opts, seconds: true });
 
 /** `t`'s UTC minute, the hidden stamp of a progress line: "17:00Z". */
 const utcMinute = (t) => `${new Date(msOf(t)).toISOString().slice(11, 16)}Z`;

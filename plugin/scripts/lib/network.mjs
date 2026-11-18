@@ -16,7 +16,7 @@ import http from "node:http";
 import https from "node:https";
 import { BlockList, isIP } from "node:net";
 import { log } from "./inputs.mjs";
-import { whenText } from "./clock.mjs";
+import { logTime, whenText } from "./clock.mjs";
 import { BARE_BUSY_TYPES } from "./usage.mjs";
 
 /** Node fetch's connect-level failures: no byte of the request left this machine, or its connect timed out. */
@@ -379,17 +379,17 @@ function episode(origin, code, resetAt = null, key = origin, check = probe) {
       if (stop.signal.aborted) break;
       if ((await check(origin)) === null) {
         ep.back = OUTAGE.now();
-        if (!quiet) log(`network: ${host} answers again after ${minutesText(ep.back - lostAt)} (unreachable since ${whenText(lostAt)}${flap ? `; on and off since ${whenText(since)}` : ""})`);
+        if (!quiet) log(`network: ${host} answers again after ${minutesText(ep.back - lostAt)} (unreachable since ${logTime(lostAt)}${flap ? `; on and off since ${logTime(since)}` : ""})`);
         if (gen === GEN) RECENT.set(key, { since, end, code: ep.code, back: ep.back });
         return true;
       }
       if (quiet && OUTAGE.now() - lostAt >= OUTAGE.flapMs) {
         quiet = false;
-        log(`network: ${host} is unreachable from this machine again (${ep.code || "no answer"}) since ${whenText(lostAt)}; on and off since ${whenText(since)}; waiting for it to answer again${Number.isFinite(end) ? `, until ${whenText(end)}` : ""}`);
+        log(`network: ${host} is unreachable from this machine again (${ep.code || "no answer"}) since ${logTime(lostAt)}; on and off since ${logTime(since)}; waiting for it to answer again${Number.isFinite(end) ? `, until ${logTime(end)}` : ""}`);
       }
     }
     if (!stop.signal.aborted) {
-      log(`network: ${host} still unreachable after ${minutesText(OUTAGE.now() - since)} (since ${whenText(since)}); no longer waiting`);
+      log(`network: ${host} still unreachable after ${minutesText(OUTAGE.now() - since)} (since ${logTime(since)}); no longer waiting`);
       // Past the process's limit it waits no more for anything: a caller that swallowed this wait's NetworkDown and
       // goes on gets its next unreachable request's error at once, not a fresh wait of its own.
       stopWaiting();
@@ -433,11 +433,11 @@ function spentEpisode(origin, resetAt, key) {
   };
   ep.done = (async () => {
     if (end > limit) {
-      log(`network: ${name} is spent until ${whenText(resetAt)}, past this process's wait (until ${whenText(limit)}); no longer waiting for it`);
+      log(`network: ${name} is spent until ${logTime(resetAt)}, past this process's wait (until ${logTime(limit)}); no longer waiting for it`);
       givenUp();
       return false;
     }
-    if (!again) log(`network: ${name} is spent until ${whenText(resetAt)}; no request goes against it until then (${minutesText(end - now)})`);
+    if (!again) log(`network: ${name} is spent until ${logTime(resetAt)}; no request goes against it until then (${minutesText(end - now)})`);
     await OUTAGE.sleep(end - OUTAGE.now(), stop.signal);
     if (stop.signal.aborted) {
       givenUp();

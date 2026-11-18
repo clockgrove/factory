@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { openDecider, settleDecisionCosts } from "../scripts/lib/decider.mjs";
 import { DECIDE_RETRY, NEVER_SENT, answerCost, gatewayDecider } from "../scripts/lib/adapters/decider-ai-gateway.mjs";
 import { decisionPrompt, parseAnswer } from "../scripts/lib/adapters/decider-harness.mjs";
-import { DECISION_RUN, DECISION_SH, decisionLaunch, decisionSpend, runDecision, stagePasses, stageSpendNow } from "../scripts/lib/harness.mjs";
+import { DECISION_RUN, DECISION_SH, carveDriftReserve, decisionLaunch, decisionSpend, driftReserve, passMaxUsd, runDecision, stagePasses, stageSpendNow } from "../scripts/lib/harness.mjs";
 import { cacheSummary } from "../scripts/lib/usage.mjs";
 import { TRIAGE_QUESTION } from "../scripts/lib/triage.mjs";
 import { DRIFT_QUESTION } from "../scripts/lib/drift.mjs";
@@ -415,3 +415,16 @@ test("#479: a stage's gateway call the gateway gives no cost for is of unknown c
   });
 });
 
+
+test("#479: the drift reserve: 10% of max_usd, at least one call's cap, none with no cap; passes get the rest", () => {
+  assert.equal(driftReserve(25), 2.5);
+  assert.equal(driftReserve(1), DECISION_RUN.maxUsd);
+  assert.equal(driftReserve(0), 0);
+  // max_usd $1: $0.30 reserved, so a pass starts with $0.70.
+  carveDriftReserve(1);
+  try {
+    assert.equal(passMaxUsd(1), 0.7);
+  } finally {
+    carveDriftReserve(0);
+  }
+});

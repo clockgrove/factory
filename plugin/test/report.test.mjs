@@ -1090,10 +1090,13 @@ async function localReport(w, clone) {
 /** Each cost kind summed over a breakdown's rows, to a millionth: what the totals must equal exactly. */
 const rowSums = (rows) => Object.fromEntries(["api", "subscription", "credits", "unknown", "sandbox"].map((k) => [k, Math.round(rows.reduce((t, x) => t + x.cost.usd[k], 0) * 1e6) / 1e6]));
 
+const modelRows = (r) => r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api, x.basis.pass?.cost.usd.api ?? null, x.basis.stage?.cost.usd.api ?? null]);
+
 test("report (#568): the model rows add up to the totals exactly, by pass and by Claude Code's per-model usage, each model's dollars rounded on its own", async () => {
   // The pass path: #3's review stage split between Fable and Opus.
   const { json: passes } = await report(answeredWorld(), { issue: 3 });
   assert.deepEqual(rowSums(passes.breakdowns.model), usd(passes.totals));
+  assert.deepEqual(modelRows(passes), [["claude-opus-5-5", 1, 0.43637, 0.43637, null], ["claude-fable-5-2", 1, 0.163442, 0.163442, null]]);
   // Claude Code's per-model usage at a tenth of a millionth: Opus $0.1000006 and Sonnet $0.2000006 in a pass the harness
   // reports at $0.300001. Each model's dollars to a millionth are $0.100001 and $0.200001, a millionth over the stage's:
   // it comes off the stage's own model, and the rows add up to the stage's dollars.
@@ -1295,3 +1298,50 @@ test("report (#570 V5): an Objective merged in the period counts with every stag
   assert.deepEqual([q.n, q.usd.api.n, q.usd.api.median, q.fixPasses.n, q.fixPasses.median, q.wallMinutes.n, q.leftOut.map((x) => x.issue)], [2, 1, 0.519812, 1, 1, 1, [7]]);
 });
 
+
+const threadCalls = (calls) => calls.filter((c) => /^GET \/issues\/\d+\/comments/.test(c));
+
+test("report (#563 S1): a period that starts between two review rounds reads the Objective's earlier round from its thread: each finding counts once, in its own period", async () => {
+  // #11's first round (06:00) was last written before 07:00, so the repository-wide read since 07:00 does not hold it.
+  const issue = await report(reviewed(), { issue: 11, since: "2026-11-17T07:00:00Z" });
+  const { json: later, calls } = await report(reviewed(), { since: "2026-11-17T07:00:00Z" });
+  assert.deepEqual(later.findings.totals, { findings: 1, outcomes: outcomes({ open: 1 }), reviewStages: 1, cost: api(0.3), unnamed: 0 });
+  assert.deepEqual(later.findings, issue.json.findings, "the period reads the same as --issue");
+  // One read of #11's own thread, planned before it was made.
+  assert.deepEqual(threadCalls(calls), ["GET /issues/11/comments?per_page=100&page=1"]);
+  assert.equal(later.source.calls.planned, later.source.calls.made);
+  // A ∪ B == A + B: the first period counts the first round's findings, the second only the one the second raised.
+  const { json: whole } = await report(reviewed(), { since: "2026-11-17" });
+  const { json: before } = await report(reviewed(), { since: "2026-11-17", until: "2026-11-17T07:00:00Z" });
+  assert.equal(before.findings.totals.findings + later.findings.totals.findings, whole.findings.totals.findings);
+  assert.equal(before.findings.totals.reviewStages + later.findings.totals.reviewStages, whole.findings.totals.reviewStages);
+  // An Objective opened since the period's start has every comment in the repository-wide read: no thread is read.
+  assert.deepEqual(threadCalls((await report(reviewed(), { since: "2026-11-17" })).calls), []);
+});
+
+test("report (#566 S3): a merged Objective whose PR lies past the PR list's early stop is read from its own branch's PRs, not reported closed unmerged", async () => {
+  // The synthetic seed defect-pulls-early-stop: #1 merged before the period, a decision-spend line dated in it, and a full
+  // first page of PRs updated since the period's start but its last one, so the list stops before #1's PR.
+  const w = blank();
+  w.issues.push(objectiveIssue(1, { created: "2026-09-01T00:00:00Z" }), objectiveIssue(2, { created: "2026-11-16T00:00:00Z" }));
+  w.comments.push(comment(1, `<!-- pendulum:1:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 2, usd: 0.03 })}`, { user: ME, at: "2026-11-17T01:00:00Z" }));
+  w.comments.push(comment(2, `<!-- pendulum:2:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 1, usd: 0.01 })}`, { user: ME, at: "2026-11-17T02:00:00Z" }));
+  // Newest updated first, as GitHub answers `sort=updated&direction=desc`: #2's merged PR on the first page.
+  w.pulls.push(ownPull(2, { created: "2026-11-16T05:00:00Z", merged: "2026-11-16T06:00:00Z", updated: "2026-11-17T00:00:00Z" }));
+  for (let i = 0; i < 98; i += 1) w.pulls.push(ownPull(500 + i, { created: "2026-11-15T00:00:00Z", updated: `2026-11-1${i % 2 ? 6 : 5}T12:00:00Z` }));
+  w.pulls.push(ownPull(700, { created: "2026-10-20T00:00:00Z", updated: "2026-10-21T00:00:00Z" }));
+  w.pulls.push(ownPull(1, { created: "2026-09-02T00:00:00Z", merged: "2026-09-02T01:00:00Z" }));
+  // An older closed Objective with only a stranger's paste of a marker in the period: it counts nothing, so no PR is read for it.
+  w.issues.push(objectiveIssue(3, { created: "2026-09-01T00:00:00Z" }));
+  w.comments.push(comment(3, `<!-- pendulum:3:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 1, usd: 9 })}`, { user: { login: "stranger", type: "User" }, association: "NONE", at: "2026-11-17T03:00:00Z" }));
+  const { json: r, calls } = await report(w, { since: "2026-11-01" });
+  assert.deepEqual(r.objectives.map((o) => [o.issue, o.outcome]), [[1, "merged"], [2, "merged"]]);
+  assert.deepEqual(r.hotSpots.blockedOrUnmergedSpend.items, []);
+  // #1 was created before the stop, so its branch's PRs are read; #2's PR was created since it and is on the list.
+  const heads = calls.filter((c) => c.includes("/pulls?") && c.includes("head="));
+  assert.deepEqual(heads, [`GET /pulls?state=all&head=${encodeURIComponent("acme:pendulum/1")}&per_page=100&page=1`]);
+  assert.ok(!calls.some((c) => c.includes("/pulls?state=all&sort=updated") && c.includes("page=2")), "the list still stops early");
+  // The call budget stopped before #1's branch was read: its end is unknown, never closed unmerged.
+  const stopped = await report(w, { since: "2026-11-01", "max-calls": r.source.calls.made - 1 });
+  assert.deepEqual([byIssue(stopped.json, 1).outcome, stopped.json.source.stoppedAt], [null, "pulls"]);
+});

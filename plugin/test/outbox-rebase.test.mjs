@@ -378,3 +378,38 @@ test("#452: in local mode a conflict pass the check cannot pass is kept on a bra
   assert.equal(t.r.run(t.r.work, "rev-parse", "pendulum/1-conflict-pass"), head);
 });
 
+
+test("outbox: a binary file the conflict left is decided exactly, never by the decision model (#362)", async () => {
+  const bin = (t) => Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(t)]);
+  const run = async (side) => {
+    const r = repos();
+    r.put(r.work, "img.bin", bin("base"));
+    r.run(r.work, "commit", "-q", "-m", "img");
+    r.run(r.work, "push", "-q", "origin", "HEAD:main");
+    r.run(r.other, "pull", "-q", "origin", "main");
+    r.put(r.work, "img.bin", bin("objective"));
+    r.run(r.work, "commit", "-q", "-m", "c1");
+    r.run(r.work, "push", "-q", "origin", "HEAD:pendulum/1");
+    r.put(r.other, "img.bin", bin("main"));
+    r.run(r.other, "commit", "-q", "-m", "main");
+    r.run(r.other, "push", "-q", "origin", "HEAD:main");
+    const box = await open(r);
+    const from = box.expected();
+    assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null);
+    const onto = box.base;
+    const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=w@w", "-c", "user.name=w", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
+    go("fetch", "-q", "origin", "main");
+    assert.throws(() => go("rebase", "-q", "origin/main"));
+    go("checkout", "-q", side, "img.bin");
+    go("add", "img.bin");
+    go("-c", "core.editor=true", "rebase", "--continue");
+    const j = fakeJudge();
+    return { left: await box.rebaseLeft({ from, onto, judge: j.judge }), asked: j.asked };
+  };
+  // In a rebase, --theirs is the commit being replayed: the branch's version.
+  const branch = await run("--theirs");
+  assert.equal(branch.left, "");
+  const main = await run("--ours");
+  assert.match(main.left, /: img\.bin \([0-9a-f]{7}\): a binary or Git LFS file that is not the branch's version$/);
+  assert.deepEqual([...branch.asked, ...main.asked], [], "never asked");
+});

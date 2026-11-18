@@ -210,3 +210,22 @@ test("#421: pauses on GitHub's spent rate limit count from the first only while 
   });
 });
 
+
+test("#264: the back-off streak is the account's, shared by every serve; it ends when a pass that started after the newest limit completes", () => {
+  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
+  const [a, b] = [accountHolds({ dir }), accountHolds({ dir })];
+  const alpha = { harness: "claude", account: "alpha" };
+  const t = Date.UTC(2031, 0, 1);
+  // The provider refuses past the reset it stated, met by two serves in turn: one streak.
+  assert.equal(a.limit({ ...alpha, reset: t - MIN, now: t }), t + 2 * MIN);
+  const t1 = t + 2 * MIN;
+  assert.equal(b.limit({ ...alpha, reset: t1 - MIN, now: t1 }), t1 + 5 * MIN);
+  // A pass that started before the newest limit and ended after it: the streak stays.
+  const t2 = t1 + 5 * MIN;
+  a.served({ ...alpha, now: t2, started: t1 - 1 });
+  assert.equal(a.limit({ ...alpha, reset: t2 - MIN, now: t2 }), t2 + 10 * MIN);
+  // A pass that started after it: the streak ends.
+  const t3 = t2 + 10 * MIN;
+  a.served({ ...alpha, now: t3, started: t2 + 1 });
+  assert.equal(a.limit({ ...alpha, reset: t3 - MIN, now: t3 + 1 }), t3 + 1 + 2 * MIN);
+});

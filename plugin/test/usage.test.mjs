@@ -387,3 +387,28 @@ test("copilot metering cannot be talked down: negative or forged-low credits, un
   rmSync(dir, { recursive: true, force: true });
 });
 
+
+test("a session restored from an earlier job counts its own share: the transcript's last cost-state is the prior total", async () => {
+  const { transcriptTotal } = await import("../scripts/lib/usage.mjs");
+  // Shapes and numbers from a real resumed session: Claude Code writes a cost-state line as each process ends.
+  const state = (usd, input, output, written) => JSON.stringify({ type: "cost-state", sessionId: "s1", totalCostUSD: usd, modelUsage: { "claude-haiku-5-5": { inputTokens: input, outputTokens: output, cacheReadInputTokens: 0, cacheCreationInputTokens: written, costUSD: usd } } });
+  const transcript = [JSON.stringify({ type: "user", message: { content: "say hi" } }), state(0.0040019, 1, 90, 20000), JSON.stringify({ type: "assistant" }), state(0.0060084, 2, 150, 21446), ""].join("\n");
+  const prior = transcriptTotal(transcript);
+  assert.equal(prior.usd, 0.0060084, "the last cost-state line wins");
+  assert.equal(prior.models["claude-haiku-5-5"].output, 150);
+  assert.equal(transcriptTotal('{"type":"user"}\n'), null, "no cost-state: no prior total");
+  const reported = parseUsage("claude", JSON.stringify({ type: "system", subtype: "init", session_id: "s1", claude_code_version: "2.1.277" }) + "\n" + JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, session_id: "s1", total_cost_usd: 0.00635726, modelUsage: { "claude-haiku-5-5": { inputTokens: 4, outputTokens: 182, cacheReadInputTokens: 21446, cacheCreationInputTokens: 21446, costUSD: 0.00635726 } } }), "claude-haiku-5-5", 0);
+  const own = sinceSession(reported, prior);
+  assert.ok(Math.abs(own.usd - 0.00034886) < 1e-9, `resumed pass usd ${own.usd}`);
+  assert.equal(own.models["claude-haiku-5-5"].output, 32);
+});
+
+test("copilot caps: --max-ai-credits from what is left, at least 30, and none with no cap", () => {
+  const credits = (maxUsd, creditUsd) => {
+    const a = harnessCommand({ harness: "copilot", prompt: "P", maxUsd, creditUsd }).args;
+    return a.includes("--max-ai-credits") ? a[a.indexOf("--max-ai-credits") + 1] : null;
+  };
+  assert.equal(credits(25, 0.01), "2500");
+  assert.equal(credits(0.1, 0.01), "30", "Copilot refuses fewer than 30");
+  assert.equal(credits(0, 0.01), null, "no cap set, no flag");
+});

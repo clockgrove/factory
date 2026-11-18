@@ -39,8 +39,8 @@ const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, PARTIAL_CODES, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportModels, reportScope } from "./lib/report.mjs";
 import { ghLoginToken, activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, timeZoneName, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
-import { machineZone, whenText, zoneMarker } from "./lib/clock.mjs";
+import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, timeZoneName, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_FALLBACK_SETTINGS, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { logTime, machineZone, whenText, zoneMarker } from "./lib/clock.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -394,12 +394,16 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
  */
 export const HOT_SETTINGS = ["PENDULUM_MAX_CONCURRENT", "PENDULUM_LOCAL_MAX_CONCURRENT", "PENDULUM_MODEL", "PENDULUM_SUBAGENT_MODEL", "PENDULUM_REVIEWER_MODEL", "PENDULUM_EFFORT", "PENDULUM_REVIEWER_EFFORT", "PENDULUM_VALIDATION", "PENDULUM_LOCAL_VALIDATION", "PENDULUM_RESUME_POLICY", "PENDULUM_PROMPT_CACHE_TTL", "PENDULUM_SIBLING_HOLD", "PENDULUM_REBASE_LIMIT", "PENDULUM_GUESS_HOURS", "PENDULUM_TIME_ZONE"];
 
+// The zone this shell set when serve started (inputs.mjs MACHINE_FALLBACK_SETTINGS), before takeZone wrote the repository's.
+const SHELL_ZONE = process.env.PENDULUM_TIME_ZONE;
 /**
- * Serve's own visible times (its log, the notices it posts) in the repository's zone, as its stages write theirs
- * (lib/clock.mjs timeZone reads PENDULUM_TIME_ZONE from this process's env): the settings `wf` in force name it, or none does.
+ * Serve's own visible times (its log, the notices it posts) in the zone its stages write theirs in (lib/clock.mjs
+ * timeZone reads PENDULUM_TIME_ZONE from this process's env): the repository's settings in force (`wf`), else this
+ * shell's own (`shell`), else none.
  */
-export function takeZone(wf, env = process.env) {
-  if (wf?.PENDULUM_TIME_ZONE) env.PENDULUM_TIME_ZONE = wf.PENDULUM_TIME_ZONE;
+export function takeZone(wf, env = process.env, shell = SHELL_ZONE) {
+  const zone = wf?.PENDULUM_TIME_ZONE || shell;
+  if (zone) env.PENDULUM_TIME_ZONE = zone;
   else delete env.PENDULUM_TIME_ZONE;
 }
 
@@ -411,7 +415,7 @@ export function takeZone(wf, env = process.env) {
  * values are not read), cut at 80 characters.
  */
 export function settingsChanges(before = {}, after = {}, env = process.env, layers = null) {
-  const shell = machineSettings(env);
+  const shell = machineSettings(env, after);
   const show = (v) => (v === undefined ? "unset" : JSON.stringify(v.length > 80 ? `${v.slice(0, 77)}...` : v));
   const layer = (k) => (!layers ? "" : after[k] === undefined ? " (Pendulum's default)" : layers[k] === "variable" ? " (repository variable)" : " (workflow)");
   return [...new Set([...Object.keys(before), ...Object.keys(after)])]
@@ -1321,7 +1325,8 @@ export class Local {
     // The workflow's models belong to its harness: a developer who picks another one locally gets that one's defaults.
     if ((wf.PENDULUM_HARNESS || "claude").toLowerCase() !== this.harness) for (const k of MODEL_SETTINGS) delete wf[k];
     // The developer's own harness, model and session settings win over the repository's (inputs.mjs MACHINE_SETTINGS).
-    for (const k of MACHINE_SETTINGS) if (k !== "PENDULUM_HARNESS" && process.env[k]) wf[k] = process.env[k];
+    // The zone visible times are written in is the shell's only where the repository's names none (MACHINE_FALLBACK_SETTINGS).
+    for (const k of MACHINE_SETTINGS) if (k !== "PENDULUM_HARNESS" && process.env[k] && !(wf[k] && MACHINE_FALLBACK_SETTINGS.includes(k))) wf[k] = process.env[k];
     // A worker secret's NAME or SOURCE never joins every stage's env through PENDULUM_LOCAL_ENV (lib/local.mjs localBaseEnv).
     const env = { ...localBaseEnv(process.env, list(process.env.PENDULUM_LOCAL_ENV || this.wf.PENDULUM_LOCAL_ENV), { workerSecrets: wf.PENDULUM_WORKER_SECRETS || "" }), ...wf };
     // The developer's own PENDULUM_LOCAL_* settings win over the workflow's.
@@ -1756,7 +1761,7 @@ export class Local {
           // nothing else holds on it, and a serve with it off writes no guess.
           if (this.auto && runs.account && result?.exit === "blocked" && result.limitRefused) {
             const end = this.holdStore(hold).spent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), window: result.limitRefused.limitType ?? null, steps: this.guessSteps() });
-            log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${whenText(end)}`);
+            log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${logTime(end)}`);
           }
           // `served`: a harness pass the provider served in this stage (writeUsage's servedPasses, which leaves the stage's
           // decision calls out), the progress outagePaused reads between pauses.
@@ -2169,7 +2174,7 @@ export class Local {
     // Only a serve with automatic choice on keeps a guess (a stage this serve did not pick for cannot end here: its env
     // never says so, accounts.mjs STAGE_AUTO_ENV); one with it off Blocks the stage as on any no-reset limit.
     const end = this.auto ? this.holdStore(hold).spent({ harness: l.harness, account: hold.key, now, window: l.limitType ?? null, steps: this.guessSteps() }) : null;
-    if (end !== null) log(`#${issue}: ${limitName(l.harness, account)} reached its usage limit or quota with no reset reported; automatic account choice passes it over until ${whenText(end)}`);
+    if (end !== null) log(`#${issue}: ${limitName(l.harness, account)} reached its usage limit or quota with no reset reported; automatic account choice passes it over until ${logTime(end)}`);
     if (end !== null && !result.pinned && this.freeAccounts(l.harness, hold.key).length) return this.limitPaused(issue, { ...result, usageLimit: { ...l, noReset: false, reset: new Date(end).toISOString(), held: true, guessed: true } });
     const h = HARNESS_NAMES[l.harness] || l.harness;
     const states = this.accountStates(l.harness);
@@ -2475,8 +2480,8 @@ export class Local {
     if ((this.limitSaid ??= new Set()).has(key)) return;
     this.limitSaid.add(key);
     const who = limitName(harness, account);
-    if (guessed) log(`${who} reached its usage limit with no reset reported; automatic account choice passes it over until about ${whenText(until)}`);
-    else log(`${who}'s usage limit is spent until ${whenText(until)}; no stage starts on ${who} until then`);
+    if (guessed) log(`${who} reached its usage limit with no reset reported; automatic account choice passes it over until about ${logTime(until)}`);
+    else log(`${who}'s usage limit is spent until ${logTime(until)}; no stage starts on ${who} until then`);
   }
 
   /**
@@ -3141,10 +3146,10 @@ export class Local {
         if (!off || off.harness || off.pinWait) return r;
         const now = clock();
         if (now - off.since >= OUTAGE.blockMs) {
-          log(`#${issue}: still paused on ${lostText(off.host, off.code, off.endpoint)} from ${whenText(off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage; this run stops waiting`);
+          log(`#${issue}: still paused on ${lostText(off.host, off.code, off.endpoint)} from ${logTime(off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage; this run stops waiting`);
           return r;
         }
-        if (!said) log(`#${issue}: waiting here for ${off.host} to answer, as serve would, up to ${minutesText(OUTAGE.blockMs)} from ${whenText(off.since)}`);
+        if (!said) log(`#${issue}: waiting here for ${off.host} to answer, as serve would, up to ${minutesText(OUTAGE.blockMs)} from ${logTime(off.since)}`);
         said = true;
         const due = await this.outageDue(off, now);
         if (due || now - beatAt >= beatEvery) {

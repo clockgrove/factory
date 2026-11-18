@@ -232,9 +232,15 @@ export const VARIABLE_SETTINGS = new Set([...WORKFLOW_SETTINGS].filter((k) => !W
 export const MODEL_SETTINGS = ["PENDULUM_MODEL", "PENDULUM_SUBAGENT_MODEL", "PENDULUM_REVIEWER_MODEL", "PENDULUM_REVIEWER_EFFORT", "PENDULUM_EFFORT"];
 /**
  * The settings this machine's own environment sets over the repository's in local mode (local.mjs baseEnv): the harness,
- * models and session settings, set to a non-empty value, and local mode's own settings (PENDULUM_LOCAL_*), set at all.
+ * models and session settings, set to a non-empty value, and local mode's own settings (PENDULUM_LOCAL_*), set at all;
+ * and, under the repository's, MACHINE_FALLBACK_SETTINGS.
  */
-export const MACHINE_SETTINGS = ["PENDULUM_HARNESS", ...MODEL_SETTINGS, "PENDULUM_RESUME_POLICY", "PENDULUM_COMPACTION_WINDOW", "PENDULUM_PROMPT_CACHE_TTL", "PENDULUM_TRIAGE_MODEL", "PENDULUM_TRIAGE_MIN_CONFIDENCE", "PENDULUM_DRIFT_MODEL", "PENDULUM_DECISION_ROUTE", "PENDULUM_WORKER_SECRETS"];
+export const MACHINE_SETTINGS = ["PENDULUM_HARNESS", ...MODEL_SETTINGS, "PENDULUM_RESUME_POLICY", "PENDULUM_COMPACTION_WINDOW", "PENDULUM_PROMPT_CACHE_TTL", "PENDULUM_TRIAGE_MODEL", "PENDULUM_TRIAGE_MIN_CONFIDENCE", "PENDULUM_DRIFT_MODEL", "PENDULUM_DECISION_ROUTE", "PENDULUM_WORKER_SECRETS", "PENDULUM_TIME_ZONE"];
+/**
+ * MACHINE_SETTINGS this machine's environment sets only where the repository's settings set none (the repository's
+ * wins): the zone visible times are written in (lib/clock.mjs), a developer's own when the repository names none.
+ */
+export const MACHINE_FALLBACK_SETTINGS = ["PENDULUM_TIME_ZONE"];
 const MACHINE_LOCAL = LOCAL_WORKFLOW_SETTINGS.filter((k) => k.startsWith("PENDULUM_LOCAL_"));
 
 /**
@@ -378,18 +384,27 @@ export function guessHoursMs(value) {
   return guessHoursValid(hours) ? hours.map((h) => h * 3600_000) : null;
 }
 
+// timeZoneName's answers, by the text it was given: each is checked once.
+const ZONE_NAMES = new Map();
 /**
- * A `time_zone` value as the platform's Intl names that IANA zone (`america/los_angeles` reads as `America/Los_Angeles`),
- * or null when it is none: empty, a name Intl does not know, or a bare offset (`+05:30`), which follows no zone's rules.
+ * A `time_zone` value as the zone name to show, as given (`EST` stays `EST`, never ICU's `America/Panama`), when the
+ * platform's Intl knows it as a zone; null when it is none: empty, a name Intl does not know, or a bare offset
+ * (`+05:30`), which follows no zone's rules.
  */
 export function timeZoneName(value) {
   const v = String(value ?? "").trim();
   if (!/^[A-Za-z]/.test(v)) return null;
-  try {
-    return new Intl.DateTimeFormat("en-US", { timeZone: v }).resolvedOptions().timeZone;
-  } catch {
-    return null;
+  if (!ZONE_NAMES.has(v)) {
+    let ok = true;
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: v });
+    } catch {
+      ok = false;
+    }
+    if (ZONE_NAMES.size < 256) ZONE_NAMES.set(v, ok ? v : null);
+    else return ok ? v : null;
   }
+  return ZONE_NAMES.get(v);
 }
 
 /** A `triage_min_confidence` value as a number from 0 to 1, or null when it is none (empty, not a number, out of range). */
@@ -403,10 +418,13 @@ export function confidenceValue(value) {
 /** Why a variable's value for setting `name` is not taken (VALUE_RULES), or null. */
 export const valueProblem = (name, value) => (VALUE_RULES[name] && !VALUE_RULES[name][0](value) ? `not ${VALUE_RULES[name][1]}` : null);
 
-/** This machine's own settings in local mode, from its environment (`env`): MACHINE_SETTINGS's rule. */
-export function machineSettings(env = process.env) {
+/**
+ * This machine's own settings in local mode, from its environment (`env`): MACHINE_SETTINGS's rule, a
+ * MACHINE_FALLBACK_SETTINGS one only where the repository's settings (`repo`, when given) set none.
+ */
+export function machineSettings(env = process.env, repo = null) {
   const own = {};
-  for (const k of MACHINE_SETTINGS) if (env[k]) own[k] = env[k];
+  for (const k of MACHINE_SETTINGS) if (env[k] && !(repo?.[k] && MACHINE_FALLBACK_SETTINGS.includes(k))) own[k] = env[k];
   for (const k of MACHINE_LOCAL) if (env[k] !== undefined) own[k] = env[k];
   return own;
 }
@@ -449,7 +467,7 @@ export function settingLayers({ workflow = {}, variables = {}, machine = {} } = 
   take("workflow", Object.fromEntries(Object.entries(workflow).filter(([k]) => WORKFLOW_SETTINGS.has(k))));
   const v = variableSettings(variables);
   take("variable", v.kept);
-  take("machine", Object.fromEntries(Object.entries(machine).filter(([k]) => WORKFLOW_SETTINGS.has(k))));
+  take("machine", Object.fromEntries(Object.entries(machine).filter(([k]) => WORKFLOW_SETTINGS.has(k) && !(values[k] && MACHINE_FALLBACK_SETTINGS.includes(k)))));
   return { values, from, excluded: v.excluded, unknown: v.unknown, invalid: v.invalid };
 }
 

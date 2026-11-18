@@ -151,14 +151,14 @@ These stay in the reviewed workflow file only, since they steer trust, where mon
 
 ## Time zone
 
-Pendulum writes the times people read (progress comment lines, the finish card, a third-party review's wait, Block and pause notices, the logs) in one zone, with its abbreviation: `9:00 AM PST`. The zone is the first of these that names one:
+Pendulum writes the times people read (progress comment lines, the finish card, a third-party review's wait, Block and pause notices, the logs) in one zone, named by Intl's short name for it: an abbreviation where it has one (`9:00 AM PST`), else an offset (`10:00 AM GMT+1`). Log lines keep the seconds. The zone is the first of these that names one:
 
-1. The Objective's own: a hidden first line of its body, `<!-- pendulum:tz America/Los_Angeles -->`, which the pendulum-file skill writes from the filer's machine (`pendulum zone` prints that line for this machine). Its stages and its finish card use it; the dispatcher, the launcher and `serve` write their own lines in the next zone down.
-2. `PENDULUM_TIME_ZONE` (`time_zone` under `with:`, setup's `--time-zone`): an IANA zone name from the tz database, such as `Europe/Berlin`. Display only, so a repository variable may set it; `serve` takes a change at its next tick.
-3. In local mode, and for a command you run, the machine's own zone.
+1. The Objective's own: a hidden first line of its body, exactly `<!-- pendulum:tz America/Los_Angeles -->` (the same line anywhere else, in a code fence included, names nothing), which the pendulum-file skill writes from the filer's machine (`pendulum zone` prints that line for this machine). Its stages and its finish card use it; the dispatcher, the launcher and `serve` write their own lines in the next zone down, and so does every stage on the shared holds issue.
+2. `PENDULUM_TIME_ZONE` (`time_zone` under `with:`, setup's `--time-zone`): an IANA zone name from the tz database, such as `Europe/Berlin`, shown as you write it. Display only, so a repository variable may set it; `serve` takes a change at its next tick.
+3. In local mode, and for a command you run, your shell's `PENDULUM_TIME_ZONE`, else the machine's own zone (LOCAL.md, Configuration).
 4. UTC, on Actions and in the cloud sandbox.
 
-A zone line or a setting that names no IANA zone (a typo, a bare offset such as `+05:30`, two zone lines) is ignored for the next one down; doctor's `time zone` row names the setting's zone, or warns of one it ignores, and the job log, `serve` and doctor name an invalid variable. Nothing is read from GitHub's own fields: a profile's location is free text and commit times carry `+0000`. Hidden markers, spend lines, the finish card's summary line and every record's JSON stay ISO 8601 UTC whatever the zone, and each progress line keeps its UTC minute in a hidden `HH:MMZ` stamp, which the scorecard reads.
+A zone line or a setting that names no IANA zone (a typo, or a bare offset such as `+05:30`) is ignored for the next one down; doctor's `time zone` row names the setting's zone, or warns of one it ignores, and the job log, `serve` and doctor name an invalid variable. Nothing is read from GitHub's own fields: a profile's location is free text and commit times carry `+0000`. Hidden markers, spend lines, the finish card's summary line and every record's JSON stay ISO 8601 UTC whatever the zone, and each progress line keeps its UTC minute in a hidden `HH:MMZ` stamp, which the scorecard reads.
 
 ## Third-party reviewers
 

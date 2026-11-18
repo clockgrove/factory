@@ -41,7 +41,7 @@ import { waitOnAccounts } from "./account-wait.mjs";
 import { addLabels, collaboratorPermission, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
 import { HOLD_MAX_MS, accountHolds, clamped, forgotten as forgottenAt, heldRecord, holdKey, liveWindows, readingOf } from "./holds.mjs";
 import { guessHoursMs, input, log } from "./inputs.mjs";
-import { whenText } from "./clock.mjs";
+import { logTime, repositoryZone, whenText } from "./clock.mjs";
 import { isSelf, pushAuthor, selfLogin } from "./logic.mjs";
 
 /** Pendulum's holds issue: the label is a hint to find it, the exact title and Pendulum's own login are what count. */
@@ -304,7 +304,7 @@ export async function writeReading(repo, { harness, account, windows = {}, silen
   if (!r) return null;
   const pct = (w) => `${Math.round(w.used * 100)}%`;
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
-  const text = silent ? `Pendulum: ${name} ran a stage and its provider reported no quota reading, so automatic account choice puts it after the accounts that report one.` : `Pendulum: ${name} has used ${Object.entries(r.windows).map(([w, v]) => `${pct(v)} of ${w} until ${whenText(v.resetsAt)}`).join(", ")}, as its provider last reported.`;
+  const text = silent ? `Pendulum: ${name} ran a stage and its provider reported no quota reading, so automatic account choice puts it after the accounts that report one.` : `Pendulum: ${name} has used ${Object.entries(r.windows).map(([w, v]) => `${pct(v)} of ${w} until ${whenText(v.resetsAt, { zone: repositoryZone() })}`).join(", ")}, as its provider last reported.`;
   await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${quotaLine(r)}\n${text}` } });
   if (found.relabel) await addLabels(repo, issue, [HOLDS_LABEL], opts).catch(() => {});
   const gone = read.readings.filter((x) => x.account === account || (declared && !declared.includes(x.account))).map((x) => x.id);
@@ -334,8 +334,8 @@ export async function writeHold(repo, { kind, harness, account, reset = null, wi
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
   const human =
     kind === "spent"
-      ? `Pendulum: ${name} reached its usage limit with no reset reported; automatic account choice passes it over until ${whenText(until)}.`
-      : `Pendulum: ${name} reached its usage limit${made?.window ? ` (${made.window})` : ""}; it is held until ${whenText(until)}.`;
+      ? `Pendulum: ${name} reached its usage limit with no reset reported; automatic account choice passes it over until ${whenText(until, { zone: repositoryZone() })}.`
+      : `Pendulum: ${name} reached its usage limit${made?.window ? ` (${made.window})` : ""}; it is held until ${whenText(until, { zone: repositoryZone() })}.`;
   const post = (r, text) => rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${holdLine(r)}\n${text}` } });
   await post(made, human);
   // Its record is written: the clean-up, each step on its own, none failing the hold.
@@ -494,11 +494,11 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
     },
     async hold(r) {
       const { until } = await writeHold(repo, { kind: "limit", harness, account, reset: r.resetAt, window: r.limitType ?? null, now: now() }, opts);
-      log(`${who} account ${account} is busy until ${whenText(r.resetAt)}; held until ${whenText(until)} while this stage waits for it`);
+      log(`${who} account ${account} is busy until ${logTime(r.resetAt)}; held until ${logTime(until)} while this stage waits for it`);
     },
     async spent(limitRefused) {
       const { until } = await writeHold(repo, { kind: "spent", harness, account, window: limitRefused?.limitType ?? null, now: now(), steps }, opts);
-      log(`${who} account ${account} reached its usage limit with no reset reported; automatic account choice passes it over until ${whenText(until)}`);
+      log(`${who} account ${account} reached its usage limit with no reset reported; automatic account choice passes it over until ${logTime(until)}`);
     },
     async reading(quota, { warmUntil = null } = {}) {
       if (!quota || quota.harness !== harness || (!quota.windows && quota.silent !== true)) return null;

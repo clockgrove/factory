@@ -1183,7 +1183,7 @@ test("#575: run --wait waits in place for a stage paused on this machine's netwo
     assert.equal(probes, 3, "one probe a poll until the host answers");
     assert.equal(r.exit, "delivered");
     assert.equal(code, 0);
-    assert.match(log, /#7: waiting here for api\.anthropic\.test to answer, as serve would, up to 12 h from Nov 17, 8:47 AM UTC/);
+    assert.match(log, /#7: waiting here for api\.anthropic\.test to answer, as serve would, up to 12 h from Nov 17, 8:47:00 AM UTC/);
     assert.match(log, /#7: resuming \(api\.anthropic\.test answers again\)/);
     assert.ok(!/#7: paused, resumable/.test(log));
     assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
@@ -1205,7 +1205,7 @@ test("#575: run --wait on a stage paused on this machine's network stops at serv
     assert.equal(code, 75);
     assert.deepEqual(started, ["work"], "never resumed while its host does not answer");
     assert.equal(probes, 3);
-    assert.match(log, /#7: still paused on this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from Nov 17, 8:47 AM UTC, past Pendulum's 12 h bound for an outage; this run stops waiting/);
+    assert.match(log, /#7: still paused on this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from Nov 17, 8:47:00 AM UTC, past Pendulum's 12 h bound for an outage; this run stops waiting/);
     assert.match(log, /#7: paused, resumable \(exit 75\): its claim stays on this machine; `pendulum run 7 --wait --repo acme\/app` resumes it here/);
     assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");

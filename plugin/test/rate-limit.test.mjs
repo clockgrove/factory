@@ -134,7 +134,7 @@ test("a waiting process: a spent primary limit waits to its reset for all caller
       assert.ok(seen.slice(1).every((r) => r.at >= reset), "every later request after the reset");
       assert.equal(seen.filter((r) => r.method === "POST").length, 1, "the create once");
       assert.equal(limitLines(lines).length, 2, lines.join(""));
-      assert.match(limitLines(lines)[0], /rate limit on api\.github\.test is spent until Nov 14, 9:07 AM UTC; no request goes against it until then/);
+      assert.match(limitLines(lines)[0], /rate limit on api\.github\.test is spent until Nov 14, 9:07:00 AM UTC; no request goes against it until then/);
       assert.match(limitLines(lines)[1], /has reset; requests go again after 20 min/);
       assert.deepEqual(retryLines(lines), [], "no try spent on it");
       assert.ok(now() >= reset);
@@ -282,7 +282,7 @@ test("worker.mjs, run for real off the local route: a reset 20 minutes ahead is 
   try {
     const { out, result } = await worker(gh, { virtual: true });
     assert.equal(refused, 1);
-    assert.match(out, /network: GitHub's core API rate limit on \S+ is spent until \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+; no request goes against it until then/);
+    assert.match(out, /network: GitHub's core API rate limit on \S+ is spent until \w{3} \d{1,2}, \d{1,2}:\d\d:\d\d [AP]M \S+; no request goes against it until then/);
     assert.match(out, /network: GitHub's core API rate limit on \S+ has reset; requests go again after 20 min/);
     assert.equal(gh.seen.filter((r) => /\/issues\/7$/.test(r.url)).length >= 2, true, "the issue read again after the reset");
     // The stage went on to its own end (the fake names no author: its own Block), not a crash or a rate-limit end.
@@ -310,7 +310,7 @@ test("worker.mjs, run for real off the local route: a reset past the stage's dea
     const { out, result } = await worker(gh, { virtual: true, env: { PENDULUM_INPUT_TIMEOUT_MINUTES: "5" } });
     assert.equal(result?.exit, "blocked", out);
     assert.ok(Math.abs(Date.parse(result.outage.reset) - reset) < 1500, result.outage.reset);
-    assert.match(out, /waiting for the rate limit's reset at \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+ to write the Block/);
+    assert.match(out, /waiting for the rate limit's reset at \w{3} \d{1,2}, \d{1,2}:\d\d:\d\d [AP]M \S+ to write the Block/);
     const notice = gh.seen.find((r) => r.method === "POST" && /\/issues\/7\/comments$/.test(r.url) && r.body.includes("pendulum:block"));
     assert.ok(notice, `${out}\n${gh.seen.map((r) => `${r.method} ${r.url} ${r.body.slice(0, 200)}`).join("\n")}`);
     assert.match(JSON.parse(notice.body).body, /<!-- pendulum:block \{"cause":"provider-quota"\} -->/);
@@ -437,7 +437,7 @@ test("a quota drained again soon after its reset, until a later reset, is a new 
       const p = rest("repos/o/r/issues/7", { token: "t" });
       await settle(p, release);
       assert.equal(limitLines(lines).length, 4, lines.join(""));
-      assert.match(limitLines(lines)[2], /is spent until Nov 14, 9:57 AM UTC; no request goes against it until then \(50 min\)/);
+      assert.match(limitLines(lines)[2], /is spent until Nov 14, 9:57:\d\d AM UTC; no request goes against it until then \(50 min\)/);
     },
   );
 });

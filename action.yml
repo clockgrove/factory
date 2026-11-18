@@ -72,7 +72,7 @@ inputs:
     description: How many hours automatic account choice passes over an account whose usage limit or quota reported no reset, by how many in a row (the last for every one after); `1, 4, 24` when empty. A list of hours, comma or space separated, each a number above 0 and at most 192 (8 days, the longest hold kept). In local mode, machine.json's `guess_hours` wins on that machine.
     required: false
   time_zone:
-    description: The IANA zone (America/Los_Angeles) the times Pendulum writes for people to read are in, with the zone's abbreviation; hidden markers and records stay UTC. An Objective's own zone line (pendulum-file writes its filer's) wins over it; with neither, the machine's own zone in local mode, else UTC.
+    description: The IANA zone (America/Los_Angeles) the times Pendulum writes for people to read are in, with Intl's short name for the zone (PST, or GMT+1 where it has no abbreviation); hidden markers and records stay UTC. An Objective's own zone line (pendulum-file writes its filer's) wins over it; with neither, the machine's own zone in local mode, else UTC.
     required: false
   rebase_limit:
     description: How many times in 24 hours a PR goes back to its worker to rebase after other PRs merged (each a worker run) before its Objective Blocks; 5 when empty. A whole number above 0. Scheduling only.

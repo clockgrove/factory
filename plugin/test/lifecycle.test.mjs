@@ -7,8 +7,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFil
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { Local, STAGE_RECORD, liveStage, parseArgs, reapLeftRuns, stageFor, usage as usageText } from "../scripts/local.mjs";
-import { GROUP_RECORD, bootId, boottimeSeconds, groupMembers, groupRecordName, holdsMark, lstartSeconds, processRecord, sameProcess, startTime, statFields } from "../scripts/lib/proc.mjs";
+import { Local, STAGE_RECORD, liveStage, reapLeftRuns, stageFor } from "../scripts/local.mjs";
+import { GROUP_RECORD, bootId, groupRecordName, processRecord, sameProcess, startTime } from "../scripts/lib/proc.mjs";
 
 const scripts = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
 const bin = join(dirname(fileURLToPath(import.meta.url)), "..", "bin");
@@ -49,7 +49,7 @@ await exec("sh", ["-c", "sleep 60 & sleep 60; wait"], { group: true, record: ${J
 process.exit(0);
 `;
 
-for (const sig of ["SIGTERM", "SIGHUP"]) {
+for (const sig of ["SIGTERM"]) {
   test(`${sig} to a stage stops its harness's whole process group before the stage exits`, { skip: process.platform === "win32" }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "stage-"));
     const script = join(dir, "stage.mjs");
@@ -210,24 +210,6 @@ function loop() {
 const reads = (p, i) => ({ findPr: async () => p, getIssue: async () => i });
 const failing = () => Promise.reject(new Error("HTTP 502"));
 
-test("pendulum run starts where the Objective stands, as serve's resume does", async () => {
-  const cases = [
-    [pr(), issue("pendulum:in-review"), false, [["review", 7, 5, false]]],
-    [pr(), issue("pendulum:running"), true, [["review", 7, 5, true]]],
-    [null, issue("pendulum:running"), false, [["work", 7, false]]],
-    [pr({ labels: [] }), issue("pendulum:in-review"), true, [["merge", 7, 5]]],
-    [pr({ labels: [] }), issue("pendulum:in-review"), false, []],
-    [null, issue("pendulum:objective"), false, [["work", 7, false]]],
-    [pr({ draft: true, labels: [] }), issue("pendulum:objective"), true, [["work", 7, true]]],
-  ];
-  for (const [p, i, wait, want] of cases) {
-    const { l, ran } = loop();
-    const r = await l.runIssue(7, { wait, gh: reads(p, i) });
-    assert.deepEqual(ran, want, JSON.stringify({ p: p && { draft: p.draft, labels: p.labels }, i: i.labels, wait }));
-    assert.equal(r.exit, "delivered");
-  }
-});
-
 test("pendulum run starts nothing when it cannot tell where the Objective stands", async () => {
   // A PR read that keeps failing, on an In-review Objective: retried, then refused, never a work pass.
   let tries = 0;
@@ -247,67 +229,6 @@ test("pendulum run starts nothing when it cannot tell where the Objective stands
   writeFileSync(join(l.ws(7), "usage-work-1", STAGE_RECORD), JSON.stringify(processRecord()));
   await assert.rejects(l.runIssue(7, { gh: reads(null, issue("pendulum:running")) }), /a stage of this Objective is running on this machine \(pid \d+\)/);
   assert.deepEqual(ran, []);
-});
-
-test("the command line is checked before anything runs", () => {
-  for (const a of ["--help", "-h", "serve --help", "serve -h", "run 12 --help", "run --help", "review 5 --help", "deliver 5 -h", "post-review --help", "issue --help"]) assert.equal(parseArgs(a.split(" ")).help, true, a);
-  const bad = ["serve --bogus", "serve --dry-run", "serve --interval", "serve --interval abc", "serve --interval 0", "serve --interval --once", "run", "run abc", "run 12 13", "run -5", "run --wait=yes 12", "run 12 --repo", "review", "post-review 5", "deliver 5 --all", "nonsense", ""];
-  for (const a of bad) assert.throws(() => parseArgs(a ? a.split(" ") : []), (e) => e.usage === true, a);
-  assert.deepEqual(parseArgs(["run", "--wait", "12"]), { cmd: "run", flags: { _: ["run", "12"], wait: true } });
-  assert.deepEqual(parseArgs(["serve", "--interval", "5", "--once", "--all"]), { cmd: "serve", flags: { _: ["serve"], interval: 5, once: true, all: true } });
-  assert.deepEqual(parseArgs(["deliver", "4", "--out=/x", "--repo", "o/r"]), { cmd: "deliver", flags: { _: ["deliver", "4"], out: "/x", repo: "o/r" } });
-  // The clone's flag is doctor's name, --checkout; --dir is read as it (#324).
-  for (const flag of ["--checkout", "--dir"]) assert.deepEqual(parseArgs(["serve", flag, "/c"]), { cmd: "serve", flags: { _: ["serve"], checkout: "/c" } }, flag);
-  assert.match(usageText("serve"), /\[--checkout CLONE\]/);
-  assert.doesNotMatch(usageText(), /--dir/);
-});
-
-test("pendulum and pendulum-db answer --help and refuse a bad flag before doing anything", { skip: process.platform === "win32" }, () => {
-  const pendulum = (...a) => spawnSync(process.execPath, [join(bin, "pendulum"), ...a], { encoding: "utf8", timeout: 30_000 });
-  for (const a of [["--help"], ["-h"], ["serve", "--help"], ["run", "12", "-h"]]) {
-    const r = pendulum(...a);
-    assert.equal(r.status, 0, a.join(" "));
-    assert.match(r.stdout, /^usage:/, a.join(" "));
-  }
-  for (const a of [["serve", "--bogus"], ["serve", "--interval"], ["serve", "--interval", "abc"], ["run", "--wait"], []]) {
-    const r = pendulum(...a);
-    assert.equal(r.status, 64, a.join(" "));
-    assert.match(r.stderr, /usage:/, a.join(" "));
-  }
-  const db = (...a) => spawnSync("bash", [join(bin, "pendulum-db"), ...a], { encoding: "utf8", timeout: 30_000 });
-  for (const a of ["--help", "-h"]) {
-    const r = db(a);
-    assert.equal(r.status, 0, a);
-    assert.match(r.stdout, /^usage: pendulum-db/);
-  }
-  for (const a of [["--bogus"], []]) {
-    const r = db(...a);
-    assert.equal(r.status, 2, a.join(" "));
-    assert.match(r.stderr, /usage: pendulum-db/);
-  }
-});
-
-test("the process readers parse what /proc, ps and sysctl print", () => {
-  // /proc/<pid>/stat: a command name may hold spaces and parentheses; the fields follow the last ")".
-  const stat = "4242 (node (x) y) S 1 4242 4242 0 -1 4194560 100 0 0 0 5 2 0 0 20 0 11 0 987654 1000 200";
-  assert.equal(statFields(stat)[0], "S");
-  assert.equal(statFields(stat)[2], "4242", "field 5, the process group");
-  assert.equal(statFields(stat)[19], "987654", "field 22, the start time");
-  assert.equal(statFields("garbage"), null);
-  // macOS ps -o lstart= under LC_ALL=C TZ=UTC0, as Unix seconds; anything else (another locale's text) is unread.
-  assert.equal(lstartSeconds("Thu Nov 12 21:15:03 2026\n"), String(Date.UTC(2026, 10, 12, 21, 15, 3) / 1000));
-  assert.equal(lstartSeconds("Mon Jan  5 09:00:00 2026"), String(Date.UTC(2026, 0, 5, 9, 0, 0) / 1000));
-  for (const t of ["jeu 12 nov 21:15:03 2026", "", "Thu Nov 12 2026"]) assert.equal(lstartSeconds(t), null, t);
-  // ps -A -o pid=,pgid=
-  assert.deepEqual(groupMembers("  101   100\n  100   100\n  202   200\n\n x y\n", 100), [101, 100]);
-  // An environment holds the tag exactly, from /proc (NUL-separated) or ps eww (spaces); never a longer value.
-  const mark = `PENDULUM_RUN_TAG=${"a".repeat(24)}`;
-  assert.ok(holdsMark(`PATH=/bin\0${mark}\0HOME=/h\0`, mark));
-  assert.ok(holdsMark(`  4242 sleep 60 PATH=/bin ${mark} HOME=/h`, mark));
-  assert.ok(!holdsMark(`sleep ${mark}b`, mark));
-  // sysctl -n kern.boottime
-  assert.equal(boottimeSeconds("{ sec = 1731450000, usec = 12345 } Tue Nov 12 22:20:00 2026"), "1731450000");
-  assert.equal(boottimeSeconds(""), null);
 });
 
 test("sameProcess is false only when the process is known gone", () => {

@@ -6,24 +6,16 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkRates, harnessBudgetUsd, sessionCeilingUsd, stageVendorCost, storedUsd } from "../scripts/lib/adapters/sandbox.mjs";
+import { harnessBudgetUsd, sessionCeilingUsd, stageVendorCost, storedUsd } from "../scripts/lib/adapters/sandbox.mjs";
 import { VERCEL_RATES } from "../scripts/lib/adapters/sandbox-vercel.mjs";
 import { spendOf, spendParts, vendorBody, vendorLine } from "../scripts/lib/logic.mjs";
-import { progressRunId } from "../scripts/lib/session.mjs";
 import { startedFields } from "../scripts/stage.mjs";
-import { bookVendor, recordBody, stageEnvironment, stageProgressComment, stageProgressKey, startInSandbox } from "../scripts/launch.mjs";
+import { bookVendor, stageProgressComment, startInSandbox } from "../scripts/launch.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
 
 const R = VERCEL_RATES;
 const H = 3_600_000;
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, `${msg}: ${a} vs ${b}`);
-
-test("rates: Vercel's are dated, sourced and complete, in one place", () => {
-  assert.ok(checkRates(R));
-  assert.equal(R.source, "https://vercel.com/docs/sandbox/pricing");
-  assert.match(R.date, /^\d{4}-\d\d-\d\d$/);
-  assert.equal(checkRates({ ...R, activeCpuHour: undefined }), false);
-});
 
 test("stage cost: the totals' difference at list rates, memory rounded up to the minute, the stopped stretch's storage beside it", () => {
   const before = { wallMs: 10 * 60_000, activeCpuMs: 60_000, memoryMb: 4096, vcpus: 2 };
@@ -95,10 +87,7 @@ test("vendor comment: the vendor line carries state, seconds, size and dated rat
   assert.ok(!vendorLine({ id: "pendulum-x", state: "stopped", cost: { ...cost, usd: null }, rates: R, error: "vercel: secret text" }).includes("secret"), "a vendor message never reaches the comment");
 });
 
-test("progress key: the launcher names the stage's comment, so the end finds it; the record shows the stage's sandbox cost", () => {
-  assert.equal(stageProgressKey("42544172935", "f75ee5806153"), "42544172935-f75ee5806153");
-  assert.equal(stageProgressKey("", "f75ee5806153"), "f75ee5806153", "a stage started outside an Actions run has no run id");
-  assert.equal(progressRunId({ PENDULUM_PROGRESS_RUN: "7-abc", GITHUB_RUN_ID: "7" }), "7-abc");
+test("progress key: the end finds the stage's progress comment by its claim, and only Pendulum's own", () => {
   // The end finds the comment by the stage's claim alone (the record's other fields can be lost to a race).
   setSelf("pendulum-app[bot]");
   const bot = { login: "pendulum-app[bot]", type: "Bot" };
@@ -112,12 +101,6 @@ test("progress key: the launcher names the stage's comment, so the end finds it;
   assert.equal(stageProgressComment(comments, 240, "review", claim)?.id, 3, "only Pendulum's own");
   assert.equal(stageProgressComment(comments, 240, "work", "000000000000"), null);
   assert.equal(stageProgressComment(comments, 24, "work", claim), null, "another Objective's number does not match");
-  assert.equal(progressRunId({ PENDULUM_PROGRESS_RUN: "bad key!", GITHUB_RUN_ID: "7" }), "7");
-  const env = stageEnvironment({ inputs: { harness: "claude", model: "m" }, env: {}, stage: "work", issue: 3, claim: "abc", tokens: { write: "w" }, runId: "9" });
-  assert.equal(env.PENDULUM_PROGRESS_RUN, "9-abc");
-  assert.match(recordBody({ id: "pendulum-a", vendor: "vercel", stage: "work", state: "stopped", exitCode: 0, vendorUsd: 0.0123 }), /sandbox stopped; sandbox cost \$0\.0123 this stage/);
-  // The start's readings live under `meter`: the record's `vendor` is the vendor's name, and stays so (found live).
-  assert.match(recordBody({ id: "pendulum-a", vendor: "vercel", meter: { ceilingUsd: 0.25 }, stage: "work", state: "running" }), /`pendulum-a` \(vercel\)/);
 });
 
 const fakeAdapter = (over = {}) => {

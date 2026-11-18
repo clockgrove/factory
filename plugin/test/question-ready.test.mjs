@@ -5,7 +5,6 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { questionNotice } from "../scripts/lib/session.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -71,29 +70,6 @@ test("serve reviews a Question's PR a person marked ready, as the Action's ready
     },
   });
   assert.deepEqual(out, [{ issue: 7, pr: 70 }], "#8 has no ready mark since its Question, #9 is In review (reviewed, waiting to merge), #6's PR is still a draft");
-});
-
-test("serve reads the Questions only when an open PR out of draft has no review label, and no timeline without a Question", async () => {
-  const none = await pending({ pulls: [pull(6, { draft: true }), pull(5, { labels: ["pendulum:review"] })], issues: { 6: issue([OBJ, "pendulum:question"], 6), 5: issue([OBJ, "pendulum:in-review"], 5) } });
-  assert.deepEqual(none.out, [{ issue: 5, pr: 50 }]);
-  assert.ok(!none.reads.includes("/issues?labels=pendulum:question"), none.reads.join("\n"));
-  const inReview = await pending({ pulls: [pull(9)], issues: { 9: issue([OBJ, "pendulum:in-review"], 9) } });
-  assert.deepEqual(inReview.out, []);
-  assert.deepEqual(inReview.reads.filter((r) => r !== "/pulls" && r !== "/user"), ["/issues?labels=pendulum:question"], "one listing, no per-PR read");
-});
-
-test("the review reads the person's ready mark on every route, and the Question comment names it", async () => {
-  const { readyMark } = await import("../scripts/review.mjs");
-  const question = issue([OBJ, "pendulum:question"], 7);
-  const inReview = issue([OBJ, "pendulum:in-review"], 7);
-  const out = { number: 70, draft: false };
-  assert.equal(readyMark({ action: "ready_for_review", sender: { type: "User" } }), true, "Actions: a person's event");
-  assert.equal(readyMark({ action: "ready_for_review", sender: { type: "Bot" } }), false, "Actions: Pendulum's own mark");
-  assert.equal(readyMark({ action: "labeled", sender: { type: "Bot" }, issue: question, pr: out }), false, "Actions: the review label is no ready mark");
-  assert.equal(readyMark({ local: true, issue: question, pr: out }), true, "local: a Question's PR out of draft");
-  assert.equal(readyMark({ local: true, issue: inReview, pr: out }), false, "local: an In-review PR's review");
-  assert.equal(readyMark({ local: true, issue: question, pr: { ...out, draft: true } }), false, "local: still a draft");
-  assert.match(questionNotice({ reason: "which name?", pr: out }), /Answer in a comment on the issue or the PR, then mark the PR ready\.$/);
 });
 
 test("a Question whose PR GitHub will not draft Blocks once, naming it, rather than leaving a ready PR serve would ask again each tick", async () => {

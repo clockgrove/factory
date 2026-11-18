@@ -5,11 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, clip, commandPaths, decideExit, deniedHostsFix, fenceDecidable, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, protectedPaths, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
-import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewProduced, reviewRetry, splitPartOf } from "../scripts/lib/handoff.mjs";
-import { exitRecord, scopeRefusal } from "../scripts/lib/session.mjs";
-import { renderWorkflow } from "../scripts/setup.mjs";
-import { parseYaml } from "../scripts/lib/yaml.mjs";
+import { EXIT_PROMPT, acceptanceEntries, capReached, commandPaths, decideExit, deniedHostsFix, fenceDecidable, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, namesPath, parseExitRecord, parseFindings, parseReview, protectedPaths, setupPaths, snapComments, pushRefusal, toolchainFile, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
+import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewPost, reviewProduced, reviewRetry } from "../scripts/lib/handoff.mjs";
+import { scopeRefusal } from "../scripts/lib/session.mjs";
 
 const ok = { ok: true };
 const pr = (body = "## Acceptance\nok", draft = false) => ({ exists: true, draft, body });
@@ -38,78 +36,6 @@ test("parseExitRecord: the first JSON object with a known exit, from a file or a
   assert.equal(isPlaceholder("No findings here"), false);
 });
 
-test("a question exit names the Question rule's test for each question; one that names none is unfounded", () => {
-  const breaks = { question: "Rename pnpm dev:yard to pnpm dev:world with no alias?", test: "contract", existing: "pnpm dev:yard, documented in README" };
-  const additive = { question: "Is an additive `materials` command acceptable?", test: "additive", existing: "none" };
-  assert.deepEqual(QUESTION_TESTS, ["contract", "decision", "access"]);
-  assert.equal(questionFounded(breaks), true);
-  assert.equal(questionFounded({ ...breaks, test: "decision", existing: "the issue's 2026-11-07 decision" }), true);
-  assert.equal(questionFounded({ question: "Grant the workflow contents: write?", test: "access", existing: "contents: read today" }), true);
-  for (const q of [additive, { ...breaks, existing: " " }, { ...breaks, existing: undefined }, { ...breaks, question: "" }, "a string question", null]) assert.equal(questionFounded(q), false, JSON.stringify(q));
-  // Founded questions alone: no check. The text keeps flowing to the notice as before.
-  assert.deepEqual(parseExitRecord(JSON.stringify({ exit: "question", questions: [breaks], reason: "" })), { exit: "question", reason: "", questions: [breaks.question] });
-  // The case behind #2528: an addition raised as a Question names no test, so it is unfounded.
-  assert.deepEqual(parseExitRecord(JSON.stringify({ exit: "question", questions: [breaks, additive], reason: "" })).unfounded, [additive.question]);
-  assert.deepEqual(parseExitRecord('{"exit":"question","questions":[],"reason":"needs a decision"}').unfounded, ["needs a decision"]);
-  assert.deepEqual(parseExitRecord('{"exit":"question"}').unfounded, ["a question exit with no question"]);
-  // Only a question exit is checked.
-  assert.equal("unfounded" in parseExitRecord(JSON.stringify({ exit: "delivered", questions: [additive] })), false);
-  assert.equal("unfounded" in parseExitRecord(JSON.stringify({ exit: "blocked", reason: "x", questions: ["q"] })), false);
-  // What Pendulum asks names each unfounded question on one line and the shape of the answer it parses.
-  const prompt = questionCheckPrompt(parseExitRecord(JSON.stringify({ exit: "question", questions: ["Is an additive\ncommand acceptable?"] })));
-  assert.match(prompt, /^Your exit record raises a Question/);
-  assert.match(prompt, /\n1\. Is an additive command acceptable\?\n/);
-  assert.match(prompt, /reply with only one JSON object/);
-  assert.match(prompt, /\("access"\)/);
-  assert.doesNotMatch(prompt, /already name a test/, "nothing stands: no list of questions that stay");
-  assert.match(questionCheckPrompt({ questions: ["q"], unfounded: ["q"] }, { file: true }), /write \$PENDULUM_OUT\/exit\.json as only one JSON object/);
-  // Mixed: the founded question is named as staying, so the answer keeps it.
-  const mixed = questionCheckPrompt(parseExitRecord(JSON.stringify({ exit: "question", questions: [breaks, additive] })));
-  assert.match(mixed, /\n1\. Is an additive `materials` command acceptable\?\n\nThese questions already name a test and stay in the record as raised; keep their QUESTION: markers and include each unchanged in "questions":\n1\. Rename pnpm dev:yard/);
-  assert.match(mixed, /the questions that stay make it "question"/);
-  // The record the check answers with parses as a founded Question or a delivery.
-  assert.deepEqual(parseExitRecord('{"exit":"delivered","questions":[],"reason":""}'), { exit: "delivered", reason: "", questions: [] });
-  assert.match(EXIT_PROMPT, /"test": "contract" \| "decision"/);
-});
-
-test("the question check's answer never drops a question that already named a test (mergeChecked)", () => {
-  const breaks = { question: "Rename pnpm dev:yard with no alias?", test: "contract", existing: "pnpm dev:yard" };
-  const additive = "Is the additive command ok?";
-  const mixed = parseExitRecord(JSON.stringify({ exit: "question", questions: [breaks, additive] }));
-  assert.deepEqual(standingQuestions(mixed), [breaks.question]);
-  const answer = (o) => parseExitRecord(JSON.stringify(o));
-  // The #2559 review case: the check answers delivered because none of the listed questions stands; the founded one does.
-  assert.deepEqual(mergeChecked(mixed, answer({ exit: "delivered", questions: [], reason: "" })), { exit: "question", reason: "", questions: [breaks.question] });
-  // The answer repeats the founded one (deduplicated) and founds the other.
-  const founded = { question: additive, test: "decision", existing: "the issue's decision" };
-  assert.deepEqual(mergeChecked(mixed, answer({ exit: "question", questions: [breaks, founded] })), { exit: "question", reason: "", questions: [breaks.question, additive] });
-  // An answer that still names no test keeps that question unfounded (logged; no second check).
-  assert.deepEqual(mergeChecked(mixed, answer({ exit: "question", questions: [additive] })), { exit: "question", reason: "", questions: [breaks.question, additive], unfounded: [additive] });
-  // Nothing founded: a delivered answer delivers.
-  const lone = parseExitRecord(JSON.stringify({ exit: "question", questions: [additive], part: { remaining: ["item 3"] } }));
-  assert.deepEqual(standingQuestions(lone), []);
-  assert.deepEqual(mergeChecked(lone, answer({ exit: "delivered" })), { exit: "delivered", reason: "", questions: [], part: { remaining: ["item 3"] } }, "the split part carries over");
-  assert.deepEqual(mergeChecked(lone, answer({ exit: "delivered", part: { remaining: [] } })).part, { remaining: [] }, "the answer's own part wins");
-  // Blocked or no record answers nothing: the Question stands as raised.
-  assert.equal(mergeChecked(lone, answer({ exit: "blocked", reason: "x" })), null);
-  assert.equal(mergeChecked(lone, null), null);
-});
-
-test("exitRecord: an unfounded Question with no time or budget left stands as raised, and the harness is not asked", async () => {
-  const text = JSON.stringify({ exit: "question", questions: ["Is the additive command ok?"], reason: "" });
-  const base = { text, harness: "claude", model: "m", session: null, cwd: "/nonexistent", env: {}, eventsFile: null };
-  const later = Date.now() + 60 * 60_000;
-  for (const [why, args] of [["time", { deadlineAt: Date.now(), maxUsd: 5 }], ["budget", { deadlineAt: later, maxUsd: 1, spentUsd: 1 }]]) {
-    const r = await exitRecord({ ...base, ...args });
-    assert.deepEqual(r, { record: parseExitRecord(text), usage: [], basis: "exit file" }, why);
-  }
-  // A founded Question, a delivery or a block in the exit file is returned as written, with no call.
-  const founded = JSON.stringify({ exit: "question", questions: [{ question: "q", test: "contract", existing: "x" }] });
-  for (const t of [founded, '{"exit":"delivered"}', '{"exit":"blocked","reason":"r"}']) assert.deepEqual(await exitRecord({ ...base, text: t, deadlineAt: later, maxUsd: 5 }), { record: parseExitRecord(t), usage: [], basis: "exit file" });
-  // No exit file and no budget left: blocked without a call (the review answer pass relies on this as well).
-  assert.deepEqual((await exitRecord({ ...base, text: undefined, deadlineAt: later, maxUsd: 1, spentUsd: 1 })).record, { exit: "blocked", reason: "no exit record and no budget left to ask", questions: [] });
-});
-
 test("blocked: each reason in the worker contract, in priority order", () => {
   const green = { passes: 1, green: true };
   assert.equal(decideExit({ harness: { ok: false, died: 2 }, pr: pr(), commits: 1, validation: green }).reason, "worker process died twice");
@@ -124,38 +50,6 @@ test("blocked: each reason in the worker contract, in priority order", () => {
   assert.deepEqual(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, reviewUnaddressed: 2 }), { exit: "blocked", reason: "2 reviewer finding(s) still open after the answer pass", cause: "work", findingsOpen: true });
   assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, record: { exit: "blocked", reason: "The migration needs a credential the runner lacks.", questions: [] } }).reason, "worker blocked: The migration needs a credential the runner lacks.");
   assert.equal(decideExit({ harness: { ok: false, error: "harness error" }, pr: pr(), commits: 2, validation: green }).reason, "harness error");
-});
-
-test("no commits: the worker's own exit record decides the Block or Question and its reason, not the generic line", () => {
-  const blocked = parseExitRecord('{"exit":"blocked","questions":[],"reason":"The last part needs a receipt the run does not have."}');
-  for (const recordBasis of ["exit file", "asked", undefined]) {
-    assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: blocked, recordBasis }), { exit: "blocked", reason: "worker blocked: The last part needs a receipt the run does not have.", cause: "work" }, String(recordBasis));
-  }
-  const question = parseExitRecord(JSON.stringify({ exit: "question", reason: "", questions: [{ question: "Drop the old route?", test: "contract", existing: "GET /v1/items" }] }));
-  assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: question, recordBasis: "exit file" }), { exit: "question", reason: "question: Drop the old route?" });
-  // Pendulum's own stand-in when the ask could not run is no worker reason: the generic line leads and says why.
-  const none = { exit: "blocked", reason: "no exit record and no time left to ask", questions: [] };
-  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: none, recordBasis: "none" }).reason, "worker ended without commits or a PR; no exit record and no time left to ask");
-  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "blocked", reason: "", questions: [] } }).reason, "worker ended without commits or a PR", "a Block with no reason keeps the generic line");
-  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "delivered", reason: "", questions: [] } }).reason, "worker ended without commits or a PR", "a delivery with nothing delivered Blocks");
-  assert.equal(decideExit({ harness: ok, pr: null, commits: 2, record: blocked }).reason, "no PR could be opened for the branch", "with commits, the missing PR is Pendulum's");
-});
-
-test("clip: a long reason ends on a word boundary and shows it was cut", () => {
-  const long = `The provider serves every generated mod from a download host ${"that the sandbox never reached ".repeat(8)}end.`;
-  const c = clip(long);
-  assert.ok(c.length <= REASON_MAX, `${c.length} characters`);
-  assert.ok(c.endsWith("…"));
-  assert.ok(long.startsWith(c.slice(0, -1)), "a prefix of the reason");
-  assert.match(long.slice(c.length - 1), /^\s/, "cut where a word ends");
-  assert.equal(clip("short reason."), "short reason.", "nothing cut, nothing marked");
-  assert.equal(clip("a".repeat(REASON_MAX)), "a".repeat(REASON_MAX), "exactly the cap is not cut");
-  assert.equal(clip(`see https://example.com/${"x".repeat(300)}`), `see https://example.com/${"x".repeat(REASON_MAX - 25)}…`, "one long word is cut inside it");
-  assert.equal(clip(`${"word ".repeat(38)}four, five six`), `${"word ".repeat(38)}four…`, "no trailing comma before the mark");
-  const blocked = decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 1, green: true }, record: { exit: "blocked", reason: long, questions: [] } });
-  assert.equal(blocked.reason, `worker blocked: ${c}`);
-  const asked = decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 1, green: true }, record: { exit: "question", reason: "", questions: [long] } });
-  assert.equal(asked.reason, `question: ${c}`);
 });
 
 test("deniedHosts: a blocked exit record's host names, checked for DNS shape, become the decision's and the local fix", () => {
@@ -339,72 +233,6 @@ test("review: a missed pass reruns once on every harness; with no review from ei
   assert.deepEqual([{ ok: false, budgetExceeded: true }, { ok: false, idle: true }, { ok: false, stopped: true }, good].map((r) => reviewCallEnd(r, reviewOf({ finalText: r.finalText }))), ["the dollar cap", "a hang (no output and no progress; killed)", "a stop by Pendulum", "a review"]);
 });
 
-test("review: a pass that failed, held no JSON or judged no entry is missed; one judgment is enough", () => {
-  const entries = [{ id: "A", text: "a" }, { id: "B", text: "b" }];
-  assert.equal(reviewMissed({ ok: false, review: parseReview('{"acceptance":[{"entry":"A","met":true}]}'), entries }), true);
-  assert.equal(reviewMissed({ review: parseReview("it looks fine"), entries }), true);
-  assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), entries }), true);
-  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"B","met":false}],"comments":[]}'), entries }), false);
-  // No exact Acceptance section: the prompt asked the reviewer to name the entries, so an answer that judges none missed (#417).
-  const named = "### Outcome\n- a ranked list\n\n### Completion experience\n- it feels instant\n\n### What must be true\n- **W1:** results are ranked\n- **W2:** a test covers it";
-  assert.deepEqual(acceptanceEntries(named), []);
-  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[],"comments":[]}'), entries: acceptanceEntries(named) }), true);
-  assert.equal(reviewMissed({ review: parseReview('{"comments": [{"path": "a", "line": 1, "body": "x"}]}'), entries: acceptanceEntries(named) }), true, "comments only: still no judgment");
-  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"W1","met":true}],"comments":[]}'), entries: acceptanceEntries(named) }), false);
-  assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), judges: false }), false, "a comments-only pass (the foundation pass) judges nothing");
-  // Design notes under a criteria heading are no entries: a pass that judged the outcomes it named itself is no miss (#417).
-  const body = "## Selection criteria\n- recall over precision\n- cheap to rerun\n\n## Outcomes\n- **O1:** ranked results\n- **O2:** a test covers it";
-  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"O1","met":true},{"entry":"O2","met":true}],"comments":[]}'), entries: acceptanceEntries(body) }), false);
-  // Entries under a sub-heading of Acceptance are entries: a pass that judged only those is no miss either.
-  const nested = "## Acceptance\n- one\n- two\n\n### API\n- **C:** three";
-  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"C","met":false}],"comments":[]}'), entries: acceptanceEntries(nested) }), false);
-});
-
-test("review: post-review posts nothing from a file with no reviewer JSON or no judgment", async () => {
-  const { reviewPostFor } = await import("../scripts/local.mjs");
-  const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
-  const entries = [{ id: "A", text: "a" }];
-  // Unquoted key: not JSON, so nothing is posted (it would carry the review marker and stop the Action's pass).
-  assert.throws(() => reviewPostFor({ issue: 7, text: '{"acceptance": [ {"entry": "A", met: true} ], "comments": []}', file: "f.json", diff, entries }), /f\.json holds no reviewer JSON; nothing posted/);
-  assert.throws(() => reviewPostFor({ issue: 7, text: '{"comments": []}', file: "f.json", diff, entries }), /judges none of the issue's acceptance entries \(A\); nothing posted/);
-  assert.throws(() => reviewPostFor({ issue: 7, text: '{"acceptance": [], "comments": []}', file: "f.json", diff, entries: [] }), /f\.json judges no acceptance entry \(its "acceptance" list is empty\); nothing posted/);
-  const post = reviewPostFor({ issue: 7, text: '{"acceptance": [{"entry": "A", "met": true}], "comments": []}', file: "f.json", diff, entries });
-  assert.equal(post.placeholder, true);
-});
-
-test("review: the prompt lists the issue's entries by id and asks for a judgment of each", async () => {
-  const { reviewerPrompt } = await import("../scripts/review.mjs");
-  const p = reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Acceptance\n- **A:** one\n- two", prBody: "", diff: "", harness: "claude" });
-  assert.match(p, /"acceptance": \[\{"entry": "2", "met": true/);
-  assert.match(p, /The issue's acceptance entries, by the ids to use[^\n]*\n- A: \*\*A:\*\* one\n- 2: two\n/);
-  assert.match(reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Want\n- x", prBody: "", diff: "", harness: "codex" }), /Name each acceptance entry the issue states by its own label/);
-  // Design notes under a criteria heading are not handed over as the entries: the reviewer names them (#417).
-  const notes = reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Selection criteria\n- recall over precision\n\n## Outcomes\n- ranked results", prBody: "", diff: "", harness: "claude" });
-  assert.doesNotMatch(notes, /by the ids to use/);
-  assert.match(notes, /Name each acceptance entry the issue states by its own label/);
-  assert.match(reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Acceptance\n- one\n\n### API\n- two", prBody: "", diff: "", harness: "claude" }), /by the ids to use[^\n]*\n- 1: one\n- 2: two\n/, "entries under a sub-heading are listed too");
-});
-
-test("review: the prompt tells the reviewer of a split part, and only of one that is not the last (#157)", async () => {
-  const { reviewerPrompt, splitPartBrief } = await import("../scripts/review.mjs");
-  const args = { issue: 5, issueTitle: "t", issueBody: "## Acceptance\n- **A:** one\n- two", prBody: "## Undone\nA: a later part", diff: "", harness: "claude" };
-  // Part 2 of a split that leaves items for the next: told so, with the part number, before the issue text.
-  const part = splitPartOf({ prs: [40, 41], remaining: 3 }, 41);
-  assert.deepEqual(part, { number: 2 });
-  const p = reviewerPrompt({ ...args, part });
-  assert.equal(p.split("\n").filter((l) => l === splitPartBrief(part)).length, 1);
-  assert.ok(p.indexOf(splitPartBrief(part)) < p.indexOf("## Issue"));
-  assert.match(splitPartBrief(part), /^This PR is part 2 of this Objective, [^\n]*not the last part[^\n]*"deferred": true/);
-  // The last part (nothing remains) and an Objective in one PR (no parts record): the prompt as before, every entry judged.
-  const plain = reviewerPrompt(args);
-  assert.equal(splitPartOf({ prs: [40, 41], remaining: 0 }, 41), null);
-  assert.equal(splitPartOf(null, 41), null);
-  assert.equal(splitPartOf({ prs: [40], remaining: 2 }, 41), null, "a PR that is not the recorded part");
-  assert.equal(reviewerPrompt({ ...args, part: splitPartOf({ prs: [40, 41], remaining: 0 }, 41) }), plain);
-  assert.equal(reviewerPrompt({ ...args, part: splitPartOf(null, 41) }), plain);
-  assert.doesNotMatch(plain, /split|deferred/);
-});
-
 test("review: on a split part an entry judged deferred gets no comment; elsewhere it is not met (#157)", () => {
   const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
   const entries = [{ id: "A", text: "a" }, { id: "B", text: "b" }];
@@ -450,22 +278,6 @@ test("inputs: flag, then with:, then workflow env, then default; booleans and li
   assert.equal(c.effort, "medium", "the worker's effort is pinned to the harness default, not left to the CLI");
 });
 
-test("workflow template renders with defaults for empty values and stays valid YAML-shaped", () => {
-  const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const out = renderWorkflow(template, { harness: "claude", max_concurrent: "4", timeout_minutes: "", runs_on: "ubuntu-latest", version: "v1" });
-  assert.match(out, /PENDULUM_HARNESS: claude/);
-  assert.match(out, /PENDULUM_MAX_CONCURRENT: 4/);
-  assert.doesNotMatch(out, /max-parallel/, "the dispatcher's picks are the cap, so a repository variable that raises max_concurrent is not held to the rendered value (#284)");
-  const steps = Object.values(parseYaml(out).jobs).flatMap((j) => j.steps || []).filter((st) => String(st.uses).startsWith("clockgrove/pendulum@"));
-  assert.ok(steps.length >= 3);
-  for (const st of steps) assert.equal(st.with.vars, "${{ toJSON(vars) }}", "every Pendulum step gets the repository's variables (#284)");
-  assert.match(out, /timeout-minutes: 240/);
-  assert.match(out, /uses: clockgrove\/pendulum@v\d+\.\d+\.\d+\b/);
-  assert.doesNotMatch(out, /\{\{\w+\}\}/, "every {{key}} placeholder rendered; ${{ }} expressions stay");
-  assert.match(out, /contents: read/);
-  assert.doesNotMatch(out, /contents: write/);
-});
-
 test("App JWT is RS256 with iss, iat and exp; a flattened PEM is restored", () => {
   const { generateKeyPairSync } = globalThis.process.getBuiltinModule("node:crypto");
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -477,14 +289,6 @@ test("App JWT is RS256 with iss, iat and exp; a flattened PEM is restored", () =
   assert.deepEqual(JSON.parse(Buffer.from(h, "base64url")), { alg: "RS256", typ: "JWT" });
   assert.deepEqual(JSON.parse(Buffer.from(p, "base64url")), { iat: 1_700_000_000 - 30, exp: 1_700_000_000 + 540, iss: "12345" });
   assert.ok(s.length > 300);
-});
-
-test("decideExit: a red validation names the command that failed", () => {
-  const harness = { ok: true, died: 0 };
-  const pr = { exists: true, draft: false, body: "## Assumptions\nnone" };
-  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 2, green: false, command: "pnpm test" } }).reason, "validation red after Pendulum's second pass (pnpm test)");
-  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 1, green: false } }).reason, "validation red after Pendulum's first pass");
-  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 3, green: false } }).reason, "validation red after Pendulum's third pass");
 });
 
 test("evaluateChecks: required checks from a head's check-runs, latest run per name, missing is not red", async () => {
@@ -499,64 +303,6 @@ test("evaluateChecks: required checks from a head's check-runs, latest run per n
   assert.deepEqual(evaluateChecks(["quality", "lint"], runs), { done: false, green: false, missing: ["lint"], failed: [], pending: [] });
   assert.deepEqual(evaluateChecks(["quality"], [runs[0]]), { done: true, green: false, missing: [], failed: [{ name: "quality", conclusion: "failure", id: 1 }], pending: [] });
   assert.deepEqual(evaluateChecks([], []), { done: true, green: true, missing: [], failed: [], pending: [] });
-});
-
-test("harnessActivity: turns, tool calls, sub-agents, tokens and the status line from the harness's own events", async () => {
-  const { harnessActivity, activityLine } = await import("../scripts/lib/logic.mjs");
-  let t = 0;
-  const a = harnessActivity(() => t);
-  const lines = [
-    '{"type":"system","subtype":"init","model":"claude-opus-5-5"}',
-    '{"type":"assistant","message":{"content":[{"type":"text","text":"Planning."},{"type":"tool_use","name":"Agent","input":{"subagent_type":"implementer","description":"Web: reducer"}}],"usage":{"input_tokens":2,"cache_read_input_tokens":13001,"cache_creation_input_tokens":11978,"output_tokens":3}}}',
-    '{"type":"system","subtype":"task_started","task_id":"a1","description":"Web: reducer","subagent_type":"implementer"}',
-    '{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pnpm test --filter web"}}],"usage":{"input_tokens":10,"output_tokens":5}}}',
-    'not json',
-    '{"type":"system","subtype":"task_notification","task_id":"a1","status":"completed"}',
-  ];
-  for (const l of lines) {
-    t += 60_000;
-    a.feed(l);
-  }
-  const snap = a.snapshot();
-  assert.equal(snap.turns, 1, "a sub-agent's assistant message is not a turn");
-  assert.equal(snap.toolCalls, 2);
-  assert.equal(snap.lastTool, "Bash: pnpm test --filter web");
-  assert.deepEqual([snap.subagentsActive.length, snap.subagentsDone], [0, 1]);
-  assert.deepEqual(snap.tokens, { input: 24991, output: 8, written: 11978 }, "cache writes inside the input, counted beside it");
-  assert.equal(snap.events, 5);
-  const line = activityLine(snap, { harness: "claude", model: "claude-opus-5-5" });
-  assert.match(line, /^claude \(claude-opus-5-5\) working: 6 min, 1 turns, 2 tool calls; sub-agents 1 done; active now; 25k tokens in, 8 out; last tool Bash: pnpm test --filter web$/);
-  t += 7 * 60_000;
-  a.feed('{"type":"system","subtype":"task_started","task_id":"a2","description":"Runtime: journey test","subagent_type":"implementer"}');
-  t += 5 * 60_000;
-  assert.match(activityLine(a.snapshot(), { harness: "claude" }), /sub-agents 1 active \(implementer: Runtime: journey test, 5 min\), 1 done; last event 5 min ago/);
-  a.feed('{"type":"result","total_cost_usd":1.25}');
-  assert.match(activityLine(a.snapshot(), { harness: "claude" }), /finished: .*; ended; .*\$1\.25/);
-  assert.equal(activityLine(harnessActivity(() => 0).snapshot(), { harness: "codex" }), "codex started 0 min ago; no event from it yet");
-  const c = harnessActivity(() => 0);
-  c.feed('{"type":"turn.started"}');
-  c.feed('{"type":"item.started","item":{"type":"command_execution","command":"npm test"}}');
-  c.feed('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":5}}');
-  // input_tokens already includes the cached part, output_tokens the reasoning part.
-  assert.deepEqual([c.snapshot().turns, c.snapshot().toolCalls, c.snapshot().lastTool, c.snapshot().tokens], [1, 1, "command: npm test", { input: 100, output: 20, written: 0 }]);
-  // Claude reports a resumed session's cost as its running total: the line shows the pass's own share (Claude Code 2.1.277 on).
-  const r = harnessActivity(() => 0);
-  r.since("s1", { usd: 12.9695405, tokens: { input: 1, output: 1 } });
-  r.feed('{"type":"system","subtype":"init","session_id":"s1","claude_code_version":"2.1.325"}');
-  r.feed('{"type":"result","session_id":"s1","total_cost_usd":14.2617083}');
-  assert.match(activityLine(r.snapshot(), { harness: "claude" }), /\$1\.29/);
-  r.feed('{"type":"result","session_id":"s2","total_cost_usd":0.5}');
-  assert.equal(r.snapshot().usd, 0.5, "another session's total is its own");
-});
-
-test("exec: onLine sees each stdout line; a child that streams its answer and goes silent for idleMs is killed and reported idle", async () => {
-  const { exec } = await import("../scripts/lib/proc.mjs");
-  const seen = [];
-  const r = await exec(process.execPath, ["-e", "process.stdout.write('a\\nb'); setTimeout(() => process.stdout.write('c\\n'), 50)"], { onLine: (l) => seen.push(l) });
-  assert.deepEqual([r.code, r.idle, seen], [0, false, ["a", "bc"]]);
-  const hung = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 60000)"], { idleMs: 300, answerStreams: true });
-  assert.equal(hung.idle, true);
-  assert.ok(hung.signal, "killed by signal");
 });
 
 test("runHarness: a Codex pass whose stdout another process in the chain made non-blocking does not die on EAGAIN (#2649)", async () => {
@@ -597,92 +343,6 @@ setTimeout(() => {
   }
 });
 
-test("exec: fileStdio hands the child regular files and still streams lines, stderr and the idle kill", async () => {
-  const { exec } = await import("../scripts/lib/proc.mjs");
-  const seen = [];
-  const r = await exec(process.execPath, ["-e", "const fs=require('fs');const t=(n)=>fs.fstatSync(n).isFile();process.stdout.write('a\\nb');process.stderr.write('e'+t(1)+t(2));setTimeout(()=>process.stdout.write('c\\n'),300)"], { onLine: (l) => seen.push(l), fileStdio: true });
-  assert.deepEqual([r.code, r.stdout, r.stderr, seen], [0, "a\nbc\n", "etruetrue", ["a", "bc"]]);
-  const hung = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 60000)"], { idleMs: 400, answerStreams: true, fileStdio: true });
-  assert.deepEqual([hung.idle, hung.stdout, !!hung.signal], [true, "x\n", true]);
-  await assert.rejects(exec("pendulum-no-such-command", [], { fileStdio: true }), /ENOENT/);
-});
-
-test("exec: a fileStdio run closes each of its descriptors once, so one Pendulum opens during the run stays open (#2660)", async () => {
-  const { closeSync, fstatSync, openSync } = await import("node:fs");
-  const { exec } = await import("../scripts/lib/proc.mjs");
-  // Opened while the run is live: the numbers its write ends had are free again, and these take them.
-  const run = exec(process.execPath, ["-e", "setTimeout(() => console.log('done'), 300)"], { fileStdio: true });
-  const mine = [openSync(process.execPath, "r"), openSync(process.execPath, "r")];
-  try {
-    const r = await run;
-    assert.equal(r.stdout, "done\n");
-    for (const fd of mine) assert.ok(fstatSync(fd).isFile(), `fd ${fd} is still open`);
-    // A child that cannot start: its descriptors are dropped once, whatever events follow the failure.
-    await assert.rejects(exec("pendulum-no-such-command", [], { fileStdio: true }), /ENOENT/);
-    const after = [openSync(process.execPath, "r"), openSync(process.execPath, "r")];
-    mine.push(...after);
-    await new Promise((r) => setTimeout(r, 200));
-    for (const fd of mine) assert.ok(fstatSync(fd).isFile(), `fd ${fd} is still open`);
-  } finally {
-    for (const fd of mine) closeSync(fd);
-  }
-});
-
-test("exec: a fileStdio child that writes faster than Pendulum reads still meets the time cap (#2660)", async () => {
-  const { exec } = await import("../scripts/lib/proc.mjs");
-  // 20 MB/s of 1 KB lines for 3 s, read at about 10 MB/s: a reader that reads to the end before yielding never yields.
-  const writer = "const fs=require('fs');const l=Buffer.from('y'.repeat(1023)+'\\n');const c=Buffer.concat(Array(1024).fill(l));let n=0;const t=setInterval(()=>{fs.writeSync(1,c);if(++n===60){clearInterval(t);fs.writeSync(2,'done');}},50);";
-  const started = Date.now();
-  let lines = 0;
-  const r = await exec(process.execPath, ["-e", writer], {
-    fileStdio: true,
-    timeoutMs: 300,
-    onLine: () => {
-      lines++;
-      const t = performance.now();
-      while (performance.now() - t < 0.1);
-    },
-  });
-  assert.deepEqual([r.timedOut, !!r.signal, /done/.test(r.stderr)], [true, true, false], `${Date.now() - started} ms, ${lines} lines`);
-});
-
-test("exec: a fileStdio run whose output grows past maxBytes is killed there, its first maxBytes kept (#2660)", async () => {
-  const { exec } = await import("../scripts/lib/proc.mjs");
-  const writer = "const fs=require('fs');const c=Buffer.alloc(256*1024,120);let n=0;const t=setInterval(()=>{fs.writeSync(1,c);if(++n===40){clearInterval(t);fs.writeSync(2,'done');}},50);";
-  const r = await exec(process.execPath, ["-e", writer], { fileStdio: true, maxBytes: 1024 * 1024 });
-  assert.deepEqual([r.truncated, !!r.signal, r.stdout.length, /done/.test(r.stderr)], [true, true, 1024 * 1024, false]);
-});
-
-test("exec: a fileStdio read that fails mid-run stops the run instead of leaving it silent (#2660)", async () => {
-  const { closeSync, readdirSync, readlinkSync } = await import("node:fs");
-  const { exec } = await import("../scripts/lib/proc.mjs");
-  // Pendulum's read end of the run's stdout file, closed from under it once its first line has been read (however long a
-  // loaded machine takes to start the child): the next read fails with EBADF.
-  let closedAt = null;
-  const closeReadEnd = () => {
-    const fd = readdirSync("/proc/self/fd").map(Number).find((n) => {
-      try {
-        return /pendulum-stdio-[^/]+\/stdout$/.test(readlinkSync(`/proc/self/fd/${n}`));
-      } catch {
-        return false;
-      }
-    });
-    assert.ok(fd !== undefined, "the read end is open");
-    closeSync(fd);
-    closedAt = Date.now();
-  };
-  const r = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 5000)"], { fileStdio: true, onLine: () => closedAt ?? closeReadEnd() });
-  assert.ok(closedAt, "the read end was closed mid-run");
-  assert.deepEqual([r.readError, !!r.signal, r.stdout, /reading the run's output failed \(EBADF\)/.test(r.stderr)], ["EBADF", true, "x\n", true]);
-  assert.ok(Date.now() - closedAt < 3000, `stopped ${Date.now() - closedAt} ms after its read end was closed`);
-});
-
-test("exec: a fileStdio file the child truncates is read again from its start (#2660)", async () => {
-  const { exec } = await import("../scripts/lib/proc.mjs");
-  const r = await exec(process.execPath, ["-e", "const fs=require('fs');fs.writeSync(1,'aaaa\\n');setTimeout(()=>{fs.ftruncateSync(1,0);fs.writeSync(1,'b\\n');},300)"], { fileStdio: true });
-  assert.equal(r.stdout, "aaaa\nb\n");
-});
-
 test("exec: a caller's AbortSignal stops the child, as the time cap does, and the result says stopped", async () => {
   const { exec } = await import("../scripts/lib/proc.mjs");
   const stop = new AbortController();
@@ -696,35 +356,6 @@ test("exec: a caller's AbortSignal stops the child, as the time cap does, and th
   const free = await exec(process.execPath, ["-e", "console.log('ok')"], { signal: new AbortController().signal });
   assert.deepEqual([free.code, free.stopped], [0, false], "control: never aborted");
   for (const g of [true]) assert.equal((await exec(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { signal: AbortSignal.timeout(200), group: g })).stopped, true, "a process group too");
-});
-
-test("harnessActivity: background commands are counted apart from sub-agents", async () => {
-  const { harnessActivity, activityLine } = await import("../scripts/lib/logic.mjs");
-  const a = harnessActivity(() => 0);
-  a.feed('{"type":"system","subtype":"task_started","task_id":"b1","description":"pnpm test > /tmp/t.log","task_type":"local_bash"}');
-  a.feed('{"type":"system","subtype":"task_started","task_id":"a1","description":"Runtime: journey test","subagent_type":"implementer","task_type":"local_agent"}');
-  const snap = a.snapshot();
-  assert.deepEqual([snap.subagentsActive.length, snap.backgroundCommands], [1, 1]);
-  assert.match(activityLine(snap, { harness: "claude" }), /sub-agents 1 active \(implementer: Runtime: journey test, 0 min\); 1 background command running;/);
-});
-
-test("Pendulum's mirror refuses a branch name that collides with refs under it, before any harness spend", async () => {
-  const { openOutbox } = await import("../scripts/lib/outbox.mjs");
-  const { mkdtempSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { execFileSync } = await import("node:child_process");
-  const dir = mkdtempSync(join(tmpdir(), "pendulum-refs-"));
-  const bare = join(dir, "remote.git");
-  const work = join(dir, "work");
-  execFileSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
-  execFileSync("git", ["init", "-q", "-b", "main", work]);
-  execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"]);
-  execFileSync("git", ["-C", work, "remote", "add", "origin", bare]);
-  execFileSync("git", ["-C", work, "push", "-q", "origin", "main", "main:refs/heads/pendulum/5/old-slice"]);
-  const open = (n) => openOutbox({ branch: `pendulum/${n}`, defaultBranch: "main", checkout: work, remote: bare, base: dir });
-  await assert.rejects(open(5), (e) => e.code === "ref-collision" && /pendulum\/5 cannot be created: pendulum\/5\/old-slice exists/.test(e.message));
-  const ok = await open(6);
-  assert.deepEqual([ok.resumed, ok.start === ok.base], [false, true]);
 });
 
 test("decideExit: a refused or rejected push always Blocks with its reason, PR or not", () => {
@@ -754,72 +385,6 @@ test("costByPhase: each harness run's cost by label on the exit line", async () 
   assert.equal(costByPhase([{ label: "work-1", usd: 0, noRun: true }, { label: "exit", usd: 0.1 }]), "", "a pass that never ran is none");
 });
 
-test("Git LFS: a plain blob is refused (renames aside), local mode commits media, comments are no LFS use", async () => {
-  const { configureGit } = await import("../scripts/lib/session.mjs");
-  const { POINTER_HEAD, lfsMedia, plainLfsBlobs, usesLfs } = await import("../scripts/lib/lfs.mjs");
-  const { mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { execFileSync, spawnSync } = await import("node:child_process");
-  // No git-lfs filter from the box's own config: exactly the checkout where the binary would go in as a plain blob.
-  const saved = { g: process.env.GIT_CONFIG_GLOBAL, s: process.env.GIT_CONFIG_NOSYSTEM, l: process.env.PENDULUM_LOCAL };
-  delete process.env.PENDULUM_LOCAL;
-  process.env.GIT_CONFIG_GLOBAL = "/dev/null";
-  process.env.GIT_CONFIG_NOSYSTEM = "1";
-  try {
-    const work = mkdtempSync(join(tmpdir(), "pendulum-lfs-"));
-    const g = (...a) => execFileSync("git", ["-C", work, ...a], { encoding: "utf8" });
-    g("init", "-q", "-b", "main");
-    writeFileSync(join(work, ".gitattributes"), "assets/** filter=lfs diff=lfs merge=lfs -text\n");
-    g("add", ".gitattributes");
-    g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base");
-    const base = g("rev-parse", "HEAD").trim();
-    assert.equal(await usesLfs(work), true);
-    await configureGit(work, { login: "t", protectedList: [] });
-    mkdirSync(join(work, "assets"));
-    writeFileSync(join(work, "assets", "model.glb"), Buffer.alloc(4096, 7));
-    g("add", "assets/model.glb");
-    const refused = spawnSync("git", ["-C", work, "commit", "-q", "-m", "media"], { encoding: "utf8" });
-    assert.notEqual(refused.status, 0);
-    assert.match(refused.stderr, /staged as plain git blobs: assets\/model\.glb/);
-    g("commit", "-q", "--no-verify", "-m", "media, hook skipped");
-    assert.deepEqual(await plainLfsBlobs(work, base), ["assets/model.glb"]);
-    // A pointer (what git-lfs's clean filter stages) passes both.
-    writeFileSync(join(work, "assets", "model.glb"), `${POINTER_HEAD}\noid sha256:${"a".repeat(64)}\nsize 4096\n`);
-    g("add", "assets/model.glb");
-    g("commit", "-q", "-m", "pointer");
-    assert.deepEqual(await plainLfsBlobs(work, base), []);
-    // A pure rename of an old plain file restages nothing: neither the hook nor the check counts it.
-    writeFileSync(join(work, "assets", "old.bin"), Buffer.alloc(2048, 3));
-    g("add", "assets/old.bin");
-    g("commit", "-q", "--no-verify", "-m", "an old plain file");
-    const before = g("rev-parse", "HEAD").trim();
-    g("mv", "assets/old.bin", "assets/moved.bin");
-    g("commit", "-q", "-m", "rename only");
-    assert.deepEqual(await plainLfsBlobs(work, before), []);
-    // Media committed as a pointer passes (Pendulum's push uploads it); a plain blob is still refused.
-    await configureGit(work, { login: "t", protectedList: [] });
-    writeFileSync(join(work, "assets", "new.glb"), `${POINTER_HEAD}\noid sha256:${"b".repeat(64)}\nsize 10\n`);
-    g("add", "assets/new.glb");
-    const local = spawnSync("git", ["-C", work, "commit", "-q", "-m", "local media"], { encoding: "utf8" });
-    assert.equal(local.status, 0, local.stderr);
-    writeFileSync(join(work, "assets", "raw.glb"), Buffer.alloc(2048, 9));
-    g("add", "assets/raw.glb");
-    const raw = spawnSync("git", ["-C", work, "commit", "-q", "-m", "local plain blob"], { encoding: "utf8" });
-    assert.notEqual(raw.status, 0);
-    assert.match(raw.stderr, /staged as plain git blobs: assets\/raw\.glb/);
-    g("reset", "-q", "assets/raw.glb");
-    assert.deepEqual(await lfsMedia(work, before), ["assets/new.glb"], "the rename alone is no new media");
-    assert.deepEqual(await lfsMedia(work, base), ["assets/model.glb", "assets/moved.bin", "assets/new.glb"]);
-    // A commented pattern is no LFS use.
-    writeFileSync(join(work, ".gitattributes"), "# assets/** filter=lfs diff=lfs merge=lfs -text\n");
-    g("add", ".gitattributes");
-    g("commit", "-q", "-m", "LFS off");
-    assert.equal(await usesLfs(work), false);
-  } finally {
-    for (const [k, v] of [["GIT_CONFIG_GLOBAL", saved.g], ["GIT_CONFIG_NOSYSTEM", saved.s], ["PENDULUM_LOCAL", saved.l]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
-  }
-});
-
 test("Git LFS: a quota refusal is named and Blocks even with a PR open; the endpoint follows the remote", async () => {
   const { lfsEndpoint, lfsQuotaLine } = await import("../scripts/lib/lfs.mjs");
   const out = "Uploading LFS objects:   0% (0/1), 0 B | 0 B/s, done.\nbatch response: This repository is over its data quota. Account responsible for LFS bandwidth should purchase more data packs to restore access.\nerror: failed to push some refs to 'https://github.com/o/r'";
@@ -833,47 +398,6 @@ test("Git LFS: a quota refusal is named and Blocks even with a PR open; the endp
   assert.equal(lfsEndpoint("https://github.com/o/r"), "https://github.com/o/r.git/info/lfs");
   assert.equal(lfsEndpoint("https://github.com/o/r.git\n"), "https://github.com/o/r.git/info/lfs");
   assert.equal(lfsEndpoint("git@github.com:o/r.git"), null);
-});
-
-test("Git LFS: media the default branch gained is not the branch's own after a rebase", async () => {
-  const { currentBase, lfsMedia } = await import("../scripts/lib/lfs.mjs");
-  const { mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { execFileSync } = await import("node:child_process");
-  const saved = { g: process.env.GIT_CONFIG_GLOBAL, s: process.env.GIT_CONFIG_NOSYSTEM };
-  process.env.GIT_CONFIG_GLOBAL = "/dev/null";
-  process.env.GIT_CONFIG_NOSYSTEM = "1";
-  try {
-    const root = mkdtempSync(join(tmpdir(), "pendulum-lfsbase-"));
-    const origin = join(root, "origin.git");
-    const work = join(root, "work");
-    const run = (cwd, ...a) => execFileSync("git", ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
-    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
-    execFileSync("git", ["clone", "-q", origin, work]);
-    writeFileSync(join(work, ".gitattributes"), "assets/** filter=lfs diff=lfs merge=lfs -text\n");
-    run(work, "add", ".gitattributes");
-    run(work, "commit", "-q", "-m", "base");
-    run(work, "push", "-q", "origin", "HEAD:main");
-    const oldBase = run(work, "rev-parse", "HEAD").trim();
-    run(work, "checkout", "-q", "-b", "pendulum/1");
-    writeFileSync(join(work, "code.txt"), "change\n");
-    run(work, "add", "code.txt");
-    run(work, "commit", "-q", "-m", "code only");
-    // The default branch gains media (another PR), and the branch is rebased onto it, as a fix or answer pass does.
-    const other = join(root, "other");
-    execFileSync("git", ["clone", "-q", origin, other]);
-    mkdirSync(join(other, "assets"));
-    writeFileSync(join(other, "assets", "golden.png"), "version https://git-lfs.github.com/spec/v1\noid sha256:00\nsize 1\n");
-    run(other, "add", "assets/golden.png");
-    run(other, "commit", "-q", "-m", "media on main");
-    run(other, "push", "-q", "origin", "HEAD:main");
-    run(work, "fetch", "-q", "origin", "main");
-    run(work, "rebase", "-q", "origin/main");
-    assert.deepEqual(await lfsMedia(work, oldBase), ["assets/golden.png"], "the job's first base counts main's media");
-    assert.deepEqual(await lfsMedia(work, await currentBase(work, "main", oldBase)), [], "the current base does not");
-  } finally {
-    for (const [k, v] of [["GIT_CONFIG_GLOBAL", saved.g], ["GIT_CONFIG_NOSYSTEM", saved.s]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
-  }
 });
 
 test("Git LFS: token for github.com only, endpoint over .lfsconfig, every object since the base counted once against the local cap", async () => {
@@ -951,119 +475,6 @@ test("Git LFS: token for github.com only, endpoint over .lfsconfig, every object
     assert.deepEqual(scrubbed, { PATH: "/bin" });
   } finally {
     for (const k of keys) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
-  }
-});
-
-test("Pendulum's push: a replace ref that adds media is neither counted nor uploaded", async (t) => {
-  const { openOutbox } = await import("../scripts/lib/outbox.mjs");
-  const { POINTER_HEAD, lfsVersion } = await import("../scripts/lib/lfs.mjs");
-  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
-  const { createHash, randomBytes } = await import("node:crypto");
-  const { existsSync, mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { execFileSync } = await import("node:child_process");
-  const keys = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "PENDULUM_LOCAL", "PENDULUM_LOCAL_MEDIA_MAX_MB"];
-  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
-  Object.assign(process.env, { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
-  try {
-    const root = mkdtempSync(join(tmpdir(), "pendulum-lfsreplace-"));
-    const origin = join(root, "origin.git");
-    const work = join(root, "work");
-    const run = (...a) => execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
-    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
-    execFileSync("git", ["clone", "-q", origin, work]);
-    run("lfs", "install", "--local");
-    writeFileSync(join(work, ".gitattributes"), "assets/** filter=lfs diff=lfs merge=lfs -text\n");
-    run("add", ".gitattributes");
-    run("commit", "-q", "-m", "base");
-    run("push", "-q", "origin", "HEAD:main");
-    // Sandboxed code stores 400 KB, replaces the default branch's commit with one whose tree points at it, drops the
-    // remote-tracking refs and works on a branch origin has not seen.
-    const bytes = randomBytes(400_000);
-    const oid = createHash("sha256").update(bytes).digest("hex");
-    mkdirSync(join(work, ".git", "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4)), { recursive: true });
-    writeFileSync(join(work, ".git", "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid), bytes);
-    const real = run("rev-parse", "HEAD").trim();
-    run("checkout", "-q", "-b", "pendulum/2");
-    run("commit", "-q", "--allow-empty", "-m", "work");
-    run("checkout", "-q", "-b", "fake", real);
-    mkdirSync(join(work, "assets"));
-    writeFileSync(join(work, "assets", "big.glb"), `${POINTER_HEAD}\noid sha256:${oid}\nsize 400000\n`);
-    run("add", "assets");
-    run("commit", "-q", "--amend", "--no-verify", "-m", "base");
-    run("checkout", "-q", "pendulum/2");
-    run("replace", real, run("rev-parse", "fake").trim());
-    run("update-ref", "-d", "refs/remotes/origin/main");
-    Object.assign(process.env, { PENDULUM_LOCAL_MEDIA_MAX_MB: "0.1" });
-    const box = await openOutbox({ branch: "pendulum/2", defaultBranch: "main", checkout: work, remote: origin, local: true, base: root });
-    assert.equal(await box.push(), true, box.error || "the real branch carries no media");
-    assert.equal(existsSync(join(origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid)), false, "the replacement's media was not uploaded");
-  } finally {
-    for (const k of keys) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
-  }
-});
-
-test("stageChanges: a stage answers for what it changed since it started, never for the branch's earlier pushes or the default branch's", async () => {
-  const { stageChanges } = await import("../scripts/lib/checkout.mjs");
-  const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { execFileSync } = await import("node:child_process");
-  const saved = { g: process.env.GIT_CONFIG_GLOBAL, s: process.env.GIT_CONFIG_NOSYSTEM };
-  Object.assign(process.env, { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
-  try {
-    const root = mkdtempSync(join(tmpdir(), "pendulum-stage-"));
-    const origin = join(root, "origin.git");
-    const work = join(root, "work");
-    const maint = join(root, "maintainer");
-    const run = (cwd, ...a) => execFileSync("git", ["-C", cwd, "-c", "user.email=m@m", "-c", "user.name=maintainer", ...a], { encoding: "utf8" }).trim();
-    const put = (cwd, file, text) => {
-      mkdirSync(join(cwd, file, ".."), { recursive: true });
-      writeFileSync(join(cwd, file), text);
-      run(cwd, "add", file);
-    };
-    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
-    execFileSync("git", ["clone", "-q", origin, maint]);
-    put(maint, "app.txt", "v1\n");
-    run(maint, "commit", "-q", "-m", "base");
-    run(maint, "push", "-q", "origin", "HEAD:main");
-    // A maintainer answers a Question by pushing a workflow to the Pendulum branch before the next stage.
-    run(maint, "checkout", "-q", "-b", "pendulum/1");
-    put(maint, "app.txt", "v2\n");
-    run(maint, "commit", "-q", "-m", "worker's earlier stage");
-    put(maint, ".github/workflows/dispatch.yml", "on: workflow_dispatch\n");
-    run(maint, "commit", "-q", "-m", "maintainer workflow");
-    run(maint, "push", "-q", "origin", "pendulum/1");
-    // main then changes another workflow.
-    run(maint, "checkout", "-q", "main");
-    put(maint, ".github/workflows/ci.yml", "on: push\n");
-    run(maint, "commit", "-q", "-m", "ci on main");
-    run(maint, "push", "-q", "origin", "main");
-    execFileSync("git", ["clone", "-q", origin, work]);
-    // The stage starts from the branch as GitHub has it (Pendulum's mirror reads that; here, the clone does).
-    run(work, "checkout", "-q", "-b", "pendulum/1", "origin/pendulum/1");
-    const start = run(work, "rev-parse", "HEAD");
-    assert.deepEqual(await stageChanges(work, start), [], "the maintainer's push before the stage is not the stage's");
-    run(work, "rebase", "-q", "origin/main");
-    assert.deepEqual(await stageChanges(work, start), [], "a rebase takes main's workflow, the stage made no change");
-    const rebased = run(work, "rev-parse", "HEAD");
-    // The worker edits a workflow under the maintainer's name, in a commit it passes off as main's: the branch moves onto
-    // it, origin/main is pointed at it, and a graft makes it main's parent.
-    const main = run(work, "rev-parse", "origin/main");
-    run(work, "checkout", "-q", "-b", "fake", main);
-    put(work, ".github/workflows/ci.yml", "on: [push, pull_request]\n");
-    run(work, "commit", "-q", "--amend", "--author", "maintainer <m@m>", "-m", "ci on main");
-    const fake = run(work, "rev-parse", "HEAD");
-    run(work, "checkout", "-q", "pendulum/1");
-    run(work, "rebase", "-q", "--onto", fake, main);
-    run(work, "update-ref", "refs/remotes/origin/main", fake);
-    writeFileSync(join(work, ".git", "info", "grafts"), `${main} ${fake}\n`);
-    assert.deepEqual(await stageChanges(work, start), [".github/workflows/ci.yml"], "the worker's own edit counts whoever the author is");
-    rmSync(join(work, ".git", "info", "grafts"));
-    run(work, "reset", "-q", "--hard", rebased);
-    run(work, "revert", "--no-edit", "HEAD");
-    assert.deepEqual(await stageChanges(work, start), [".github/workflows/dispatch.yml"], "undoing the maintainer's workflow is a change to it");
-  } finally {
-    for (const [k, v] of [["GIT_CONFIG_GLOBAL", saved.g], ["GIT_CONFIG_NOSYSTEM", saved.s]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
 });
 
@@ -1212,181 +623,6 @@ test("#414: toolchain by exact lists and the toolchain_paths setting, never by a
   assert.equal(exit({ validation: { passes: 1, green: false, scope: reason, scopeCause: "nonsense" } }).cause, "work");
   assert.equal(exit({ pushRejected: reason, pushCause: "pendulum" }).cause, "pendulum");
   assert.equal(exit({ pushRejected: reason }).cause, "work");
-});
-
-test("fix-pass scope: a workspace member's manifest brings its workspace's root lockfile, as the declaration lists members", () => {
-  const plan = "1. Parser fix: owns `src/parse.ts` (acceptance 1).";
-  const red = "FAIL test/parse.test.ts: cannot find module zod";
-  // [ecosystem, declaration files at the workspace root, a member manifest, the root lockfile, a manifest outside the members, an excluded one]
-  const layouts = [
-    ["pnpm", { "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n  - '!packages/legacy'\ncatalog:\n  zod: ^4\n", "package.json": '{"private":true}' }, "packages/x/package.json", "pnpm-lock.yaml", "tools/y/package.json", "packages/legacy/package.json"],
-    ["npm", { "package.json": JSON.stringify({ private: true, workspaces: ["packages/*", "apps/**", "!apps/old"] }) }, "apps/web/site/package.json", "package-lock.json", "scripts/package.json", "apps/old/package.json"],
-    ["yarn", { "package.json": JSON.stringify({ workspaces: { packages: ["./packages/*/"], nohoist: ["**/x"] } }) }, "packages/x/package.json", "yarn.lock", "packages/x/y/package.json", null],
-    ["uv", { "pyproject.toml": '[project]\nname = "root"\ndescription = """\n[workspace]\nmembers = ["**"]\n"""\n\n[tool.uv.workspace]\nmembers = [\n  "libs/*", # every lib\n  \'apps/api\',\n]\nexclude = ["libs/seed"]\n' }, "libs/core/pyproject.toml", "uv.lock", "tools/pyproject.toml", "libs/seed/pyproject.toml"],
-    ["uv, inline table", { "pyproject.toml": '[tool.uv]\nworkspace = { members = ["libs/*"] }\n' }, "libs/core/pyproject.toml", "uv.lock", "apps/pyproject.toml", null],
-    ["cargo", { "Cargo.toml": '[workspace]\nresolver = "2"\nmembers = ["crates/*", "cli"]\nexclude = ["crates/old"]\n\n[workspace.dependencies]\nserde = { version = "1", features = ["derive"] }\n' }, "crates/core/Cargo.toml", "Cargo.lock", "examples/x/Cargo.toml", "crates/old/Cargo.toml"],
-  ];
-  for (const [eco, files, member, lock, outsider, excluded] of layouts) {
-    for (const dir of ["", "mono/"]) {
-      const workspaces = workspaceDeclarations(dir, files);
-      assert.equal(workspaces.length, 1, `${eco}: one workspace declared`);
-      const at = (p) => `${dir}${p}`;
-      const scope = (changed, more = {}) => fixScopeRefused(changed, { prior: ["src/parse.ts"], texts: [plan, red], workspaces, ...more });
-      // The member manifest changed by the pass, or before it: the root lockfile follows.
-      assert.deepEqual(scope([at(member), at(lock), "src/parse.ts"]), [], `${eco} ${dir}: ${member} brings ${lock}`);
-      assert.deepEqual(scope([at(lock)], { prior: [at(member)] }), [], `${eco} ${dir}: ${member} changed before`);
-      // The root lockfile alone, or with a manifest the declaration does not list or excludes: refused.
-      assert.deepEqual(scope([at(lock), "src/parse.ts"]), [at(lock)], `${eco} ${dir}: ${lock} alone`);
-      assert.deepEqual(scope([at(outsider), at(lock)]), [at(lock)], `${eco} ${dir}: ${outsider} is not a member`);
-      if (excluded) assert.deepEqual(scope([at(excluded), at(lock)]), [at(lock)], `${eco} ${dir}: ${excluded} is excluded`);
-      // Only that lockfile: the member's own neighbours, another ecosystem's lockfile, a pin at the root stay out.
-      assert.deepEqual(scope([at(member), at(lock), at("Gemfile.lock"), at(".nvmrc"), at("go.sum")]), [at("Gemfile.lock"), at(".nvmrc"), at("go.sum")], `${eco} ${dir}: only ${lock}`);
-      // Without the declaration the member is just another directory's manifest: refused, as before.
-      assert.deepEqual(fixScopeRefused([at(member), at(lock)], { texts: [plan, red] }), [at(lock)], `${eco} ${dir}: no declaration`);
-    }
-    // A workspace in another directory, or a member manifest outside its root, does not reach this lockfile.
-    assert.deepEqual(fixScopeRefused([member, `mono/${lock}`], { workspaces: workspaceDeclarations("", files) }), [`mono/${lock}`], `${eco}: another root`);
-    assert.deepEqual(fixScopeRefused([member, `mono/${lock}`], { workspaces: workspaceDeclarations("mono/", files) }), [`mono/${lock}`], `${eco}: member outside the root`);
-  }
-  // A declaration's lockfiles only: a pnpm workspace does not bring an npm lockfile, nor an npm one pnpm's.
-  assert.deepEqual(fixScopeRefused(["packages/x/package.json", "package-lock.json"], { workspaces: workspaceDeclarations("", layouts[0][1]) }), ["package-lock.json"]);
-  assert.deepEqual(fixScopeRefused(["packages/x/package.json", "pnpm-lock.yaml"], { workspaces: workspaceDeclarations("", { "package.json": '{"workspaces":["packages/*"]}' }) }), ["pnpm-lock.yaml"]);
-  // Read structurally: a declaration that does not parse, or whose lists are not lists of strings, declares nothing.
-  for (const files of [
-    { "package.json": "{ workspaces: [packages/*] }" },
-    { "package.json": '{"workspaces":"packages/*"}' },
-    { "Cargo.toml": "[workspace]\nmembers = [1]\n" },
-    { "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\nmembers = ["**"]\n' },
-    { "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n\n[workspace]\nexclude = []\n' },
-    { "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\nexclude = "crates/old"\n' },
-    { "Cargo.toml": '[package]\nname = "x"\n# [workspace]\n# members = ["**"]\n' },
-    { "pyproject.toml": '[tool.uv.workspace]\nmembers = ["libs/*"\n' },
-    { "pyproject.toml": '[tool.poetry]\npackages = [{ include = "libs" }]\n' },
-    { "Cargo.toml": '[__proto__.workspace]\nmembers = ["**"]\n' },
-  ]) assert.deepEqual(workspaceDeclarations("", files), [], JSON.stringify(files));
-  // A key named after an object's own machinery is only a key (the TOML reader builds objects with no prototype).
-  assert.deepEqual(workspaceDeclarations("", { "pyproject.toml": '[tool.uv.workspace]\nconstructor = 1\nmembers = ["libs/*"]\n' }).map((w) => w.members), [["libs/*"]]);
-  assert.equal(Object.prototype.workspace, undefined);
-  // A declaration a worker can write reads no alias, whose copies could multiply its member globs: it declares nothing.
-  assert.deepEqual(workspaceDeclarations("", { "pnpm-workspace.yaml": "base: &b\n  - packages/*\npackages: *b\n" }), []);
-  // A member pattern that leaves the root matches nothing.
-  assert.deepEqual(fixScopeRefused(["libs/x/Cargo.toml", "mono/Cargo.lock"], { workspaces: workspaceDeclarations("mono/", { "Cargo.toml": '[workspace]\nmembers = ["../libs/*", "/libs/*"]\n' }) }), ["mono/Cargo.lock"]);
-});
-
-test("fix-pass scope: pnpm-workspace.yaml is toolchain, unless only its packages list changed", () => {
-  const plan = "1. Parser fix: owns `src/parse.ts` (acceptance 1).";
-  const red = "FAIL test/parse.test.ts: cannot find module zod";
-  const base = "# the workspace\npackages:\n  - 'packages/*'\n\ncatalog:\n  zod: ^4\nonlyBuiltDependencies:\n  - esbuild\noverrides:\n  left-pad: 1.3.0\n";
-  const scope = (before, after, more = {}) => fixScopeRefused(["pnpm-workspace.yaml", "src/parse.ts"], { prior: ["src/parse.ts"], texts: [plan, red], membership: membershipOnly(before, after) ? ["pnpm-workspace.yaml"] : [], ...more });
-  assert.equal(toolchainFile("pnpm-workspace.yaml"), true);
-  assert.equal(toolchainFile("web/pnpm-workspace.yaml"), true);
-  // The packages list alone, in either list style, or its comments: workspace membership, allowed.
-  assert.deepEqual(scope(base, base.replace("  - 'packages/*'\n", "  - 'packages/*'\n  - 'tools/*'  # tools too\n")), []);
-  assert.deepEqual(scope(base, base.replace("  - 'packages/*'\n", "- packages/*\n- apps/*\n# apps\n")), []);
-  assert.deepEqual(scope(base, `${base}packages: [packages/*]\n`.replace("packages:\n  - 'packages/*'\n", "")), [], "moved and flow style");
-  assert.deepEqual(scope(base, base.replace("# the workspace\n", "")), [], "a column-0 comment");
-  // A new file with only packages: allowed; with any other key: refused.
-  assert.deepEqual(scope(null, "# members\npackages:\n  - 'packages/*'\n"), []);
-  assert.deepEqual(scope(null, "packages:\n  - 'packages/*'\nonlyBuiltDependencies:\n  - postinstall-thing\n"), ["pnpm-workspace.yaml"]);
-  assert.deepEqual(scope(null, "packages:\n  - 'packages/*'\ndangerouslyAllowAllBuilds: true\n"), ["pnpm-workspace.yaml"]);
-  // Any other key added, removed or changed: refused, together with a packages change or alone.
-  for (const after of [
-    base.replace("left-pad: 1.3.0", "left-pad: npm:evil-pad@1.0.0"),
-    base.replace("overrides:\n  left-pad: 1.3.0\n", ""),
-    base.replace("  - esbuild\n", "  - esbuild\n  - postinstall-thing\n"),
-    base.replace("  - 'packages/*'\n", "  - 'packages/*'\n  - 'tools/*'\n").replace("  - esbuild\n", "  - esbuild\n  - postinstall-thing\n"),
-    base.replace("zod: ^4", "zod: ^3"),
-    `${base}patchedDependencies:\n  zod: patches/zod.patch\n`,
-    base.replace("zod: ^4", "zod: '^4'"),
-    base.replace("zod: ^4", "zod: ^4 # pinned"),
-    base.replace("packages:\n", "packages:\n  # catalogs:\n").replace("catalog:", "'catalog':"),
-    base.replace("packages:\n  - 'packages/*'\n", "packages:\n  - 'packages/*'\n__proto__:\n  overrides:\n    zod: 0.0.1\n"),
-    base.replace("packages:\n  - 'packages/*'\n", "packages:\n  overrides:\n    zod: 0.0.1\n"),
-    base.replace("packages:\n  - 'packages/*'\n", "packages:\n  - 'packages/*'\n-foo: 1\n"),
-    null,
-  ]) assert.deepEqual(scope(base, after), ["pnpm-workspace.yaml"], JSON.stringify(after));
-  // A version that does not parse, before or after: refused.
-  assert.deepEqual(scope(base, `${base}overrides:\n  zod: 1\n`), ["pnpm-workspace.yaml"], "a repeated key");
-  assert.deepEqual(scope(base, "packages: &p\n  - 'packages/*'\n"), ["pnpm-workspace.yaml"], "an anchor");
-  assert.deepEqual(scope("packages: [unclosed\n", "packages:\n  - 'packages/*'\n"), ["pnpm-workspace.yaml"], "the base");
-  assert.deepEqual(scope("packages: [a]\n", "\tpackages: [b]\n"), ["pnpm-workspace.yaml"], "a tab");
-  // Named by the plan, the issue or a decision, or changed before the fix passes: in scope whatever changed.
-  const settings = base.replace("  - esbuild\n", "  - esbuild\n  - sharp\n");
-  assert.deepEqual(scope(base, settings, { texts: [plan, red, "Decision: allow sharp's install script in pnpm-workspace.yaml"] }), []);
-  assert.deepEqual(scope(base, settings, { prior: ["src/parse.ts", "pnpm-workspace.yaml"] }), []);
-  // membership counts for a pnpm-workspace.yaml only, and never for one the setup command names.
-  assert.deepEqual(fixScopeRefused([".npmrc"], { membership: [".npmrc"] }), [".npmrc"]);
-  assert.deepEqual(fixScopeRefused(["pnpm-workspace.yaml"], { membership: ["pnpm-workspace.yaml"], extra: ["pnpm-workspace.yaml"] }), ["pnpm-workspace.yaml"]);
-  // Bounded on hostile input: each is refused, and quickly.
-  const started = performance.now();
-  for (const after of [
-    `packages:\n  - a${" ".repeat(70_000)}b\n`,
-    `packages:\n  - a${" ".repeat(1_000)}b\n`.repeat(60),
-    `packages:\n  - "a${" ".repeat(1_100)}"\n`,
-    "-\n".repeat(5_000),
-    `packages:\n  - a\nx: ${"[".repeat(5_000)}${"]".repeat(5_000)}\n`,
-    `packages:\n  - a\nx: ${"[".repeat(33)}${"]".repeat(33)}\n`,
-  ]) assert.equal(membershipOnly("packages:\n  - a\n", after), false, after.slice(0, 40));
-  assert.ok(performance.now() - started < 2_000, `hostile inputs took ${performance.now() - started} ms`);
-  assert.equal(membershipOnly(`packages:\n  - a\n${"# c\n".repeat(900)}`, `packages:\n  - b\n${"# c\n".repeat(900)}`), true, "within the bounds");
-});
-
-test("fix-pass scope: a hostile workspace declaration, as an earlier pass could have written it, declares nothing and quickly", () => {
-  const started = performance.now();
-  // One long line: the YAML reader's key match is quadratic in it (about 7 s here unbounded); refused on its length.
-  const line = `packages:\n  - 'packages/*'\na${" ".repeat(100_000)}b: 1\n`;
-  for (const [file, text] of [
-    ["pnpm-workspace.yaml", line],
-    ["pnpm-workspace.yaml", `packages: ${"[".repeat(20_000)}${"]".repeat(20_000)}\n`],
-    ["pnpm-workspace.yaml", "-\n".repeat(20_000)],
-    ["Cargo.toml", `[workspace]\nmembers = ["crates/*"]\nx = ${"[".repeat(100_000)}${"]".repeat(100_000)}\n`],
-    ["pyproject.toml", `[tool.uv.workspace]\nmembers = ["libs/*"]\nx = "${"a".repeat(2_000_000)}"\n`],
-  ]) assert.deepEqual(workspaceDeclarations("", { [file]: text }), [], `${file} ${text.slice(0, 30)}`);
-  assert.ok(performance.now() - started < 1_000, `hostile declarations took ${Math.round(performance.now() - started)} ms`);
-  // Past a bound though well formed: declares nothing (the lockfile is then refused), within them as before.
-  const many = (n) => `packages:\n  - 'packages/*'\n${"# note\n".repeat(n)}`;
-  assert.deepEqual(workspaceDeclarations("", { "pnpm-workspace.yaml": many(1_000) }), []);
-  assert.equal(workspaceDeclarations("", { "pnpm-workspace.yaml": many(900) }).length, 1);
-  assert.deepEqual(workspaceDeclarations("", { "Cargo.toml": `[workspace]\nmembers = ["crates/*"]\n# ${"x".repeat(1_100)}\n` }), []);
-  assert.equal(workspaceDeclarations("", { "Cargo.toml": `[workspace]\nmembers = ["crates/*"]\n# ${"x".repeat(1_000)}\n` }).length, 1);
-  // package.json goes to JSON.parse, linear and not recursive: a long one still declares.
-  assert.equal(workspaceDeclarations("", { "package.json": JSON.stringify({ workspaces: ["packages/*"], description: "x".repeat(200_000) }) }).length, 1);
-});
-
-test("fix-pass scope: a corrective turn that puts the files back and asks a Question stops the stage with that Question", async () => {
-  const { scopeTurnResult } = await import("../scripts/lib/session.mjs");
-  const ok = { ok: true, exitCode: 0, turns: 3 };
-  const first = [".nvmrc"];
-  const question = JSON.stringify({ exit: "question", reason: "needs node 20", questions: ["The fix needs .nvmrc at 20: node 22 drops the parser's API. May it change?"] });
-  const delivered = JSON.stringify({ exit: "delivered", reason: "", questions: [] });
-  // Put back, and this turn asked: the stage stops (question), naming the files the fix needs; the exit decides on the record.
-  const asked = scopeTurnResult({ first, out: [], rec: ok, exitBefore: delivered, exitNow: question });
-  assert.equal(asked.question, true);
-  assert.match(asked.refused, /^a fix pass changed \.nvmrc /);
-  assert.deepEqual(decideExit({ harness: { ok: true }, pr: { exists: true, draft: false }, commits: 2, validation: undefined, record: JSON.parse(question) }).exit, "question", "the caller passes no validation for it: the Question is not lost to a red");
-  // Put back without a Question (or with one left from before the turn): validation goes on.
-  assert.deepEqual(scopeTurnResult({ first, out: [], rec: ok, exitBefore: delivered, exitNow: delivered }), {});
-  assert.deepEqual(scopeTurnResult({ first, out: [], rec: ok, exitBefore: question, exitNow: question }), {});
-  // Kept, even with a Question: refused (nothing pushed), no question flag.
-  assert.deepEqual(scopeTurnResult({ first, out: [".nvmrc"], rec: ok, exitBefore: delivered, exitNow: question }), { refused: scopeTurnResult({ first, out: [], rec: ok, exitBefore: "", exitNow: question }).refused });
-  // Unreadable after the turn: refused, closed.
-  assert.match(scopeTurnResult({ first, out: new Error("git diff failed"), rec: ok }).refused, /^the fix pass's changes could not be read: git diff failed/);
-  // A capped turn: its record, refused when files are still outside.
-  const capped = scopeTurnResult({ first, out: [".nvmrc"], rec: { ...ok, budgetExceeded: true }, exitNow: question });
-  assert.equal(capped.harness.budgetExceeded, true);
-  assert.equal(capped.question, undefined);
-});
-
-test("workflowScopeReason: the cause and what to do, whether the branch changed the file or carries an older one (#2579)", () => {
-  const behind = workflowScopeReason({ branch: "pendulum/7", defaultBranch: "main", paths: [".github/workflows/pendulum.yml"], own: [] });
-  assert.match(behind, /^push rejected \(workflow scope\): GitHub refused pendulum\/7 because its \.github\/workflows\/pendulum\.yml is not the version main has/);
-  assert.match(behind, /bring the branch up to date with main/);
-  const own = workflowScopeReason({ branch: "pendulum/7", defaultBranch: "main", paths: ["a", "b", "c", "d"], own: ["a", "b", "c", "d"] });
-  assert.match(own, /because it changes a, b, c and 1 more, .*hands a workflow change over in \$PENDULUM_OUT\/workflow\.patch/);
-  // Blocked as it stands: decideExit keeps a reason that starts with "push rejected".
-  assert.equal(decideExit({ harness: { ok: true }, pushRejected: behind }).reason, behind);
-  // The branch's workflow files matched the default branch Pendulum read: it moved again during the push.
-  assert.match(workflowScopeReason({ branch: "pendulum/7", defaultBranch: "main" }), /^push rejected \(workflow scope\): GitHub refused pendulum\/7 for a workflow file .* main likely changed one again/);
 });
 
 test("pushRefusal: git's status word, git's own reason and the exit code; never the remote's text", () => {

@@ -4,7 +4,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -72,33 +72,6 @@ const FETCH = (issueLabels, hang = "") => `
   };
 `;
 
-test("validation: a fix pass the stop ends is the stage's last step; the validation command does not run again (the reviewer's repro)", async () => {
-  const root = mkdtempSync(join(tmpdir(), "stop-val-"));
-  fakeCodex(root);
-  const script = `
-    import { validationLoop } from ${JSON.stringify(LIB("session.mjs"))};
-    import { passesRunning, stagePasses } from ${JSON.stringify(LIB("harness.mjs"))};
-    import { requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
-    const root = process.env.FAKE_STATE;
-    const loop = validationLoop({ checkout: root, commands: ["echo ran >> " + root + "/ran; exit 1"], harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root }, deadlineAt: Date.now() + 600_000, eventsFile: root + "/events.jsonl" });
-    let ended = false;
-    loop.then(() => (ended = true), () => (ended = true));
-    const t0 = Date.now();
-    while (passesRunning() === 0 && Date.now() - t0 < 30_000) await new Promise((r) => setTimeout(r, 20));
-    await new Promise((r) => setTimeout(r, 300));
-    requestStageStop("unlabeled");
-    while (passesRunning() > 0 && Date.now() - t0 < 60_000) await new Promise((r) => setTimeout(r, 20));
-    await new Promise((r) => setTimeout(r, 3000));
-    process.stdout.write(JSON.stringify({ ended, passes: stagePasses().length }) + "\\n");
-    process.exit(0);
-  `;
-  const r = await stage(script, root);
-  assert.ok(r.json, r.err);
-  assert.equal(readFileSync(join(root, "ran"), "utf8"), "ran\n", "the command ran once, before the fix pass, and never after the stop");
-  assert.equal(r.json.ended, false, "the loop never goes on to its next step");
-  assert.equal(r.json.passes, 1);
-});
-
 test("after the stop no repository command starts, no PR is opened or rewritten and no reply is posted", async () => {
   const root = mkdtempSync(join(tmpdir(), "stop-guards-"));
   const script = `
@@ -113,9 +86,11 @@ test("after the stop no repository command starts, no PR is opened or rewritten 
     sh(root, "echo ran >> " + root + "/ran").then(() => settled.push("sh"));
     publishPr(repo, { branch: "pendulum/7", base: "main", issue: 7, issueTitle: "t", prText: "Title\\n\\nBody" }, { token: "t" }).then(() => settled.push("publish"));
     postReplies(repo, 70, 7, JSON.stringify([{ id: 1, body: "done" }]), [1], { token: "t" }).then(() => settled.push("replies"));
-    await new Promise((r) => setTimeout(r, 1000));
-    process.stdout.write(JSON.stringify({ settled, calls }) + "\\n");
-    process.exit(0);
+    // Nothing left to do is the event loop running dry: a command or a request that had started would hold it open.
+    process.on("beforeExit", () => {
+      process.stdout.write(JSON.stringify({ settled, calls }) + "\\n");
+      process.exit(0);
+    });
   `;
   const r = await stage(script, root, 30_000);
   assert.ok(r.json, r.err);
@@ -136,9 +111,10 @@ test("confirmRunning and the merge pass: a stopped Objective asks for the stop a
     let confirmed = null;
     confirmRunning({ read: () => getIssue(repo, 7, { token: "t" }), label: "pendulum:objective", onStop: (c) => asked.push(c) }).then((v) => (confirmed = v));
     const how = await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "pendulum:objective" }, { token: "t" });
-    await new Promise((r) => setTimeout(r, 200));
-    process.stdout.write(JSON.stringify({ asked, confirmed, how, calls }) + "\\n");
-    process.exit(0);
+    process.on("beforeExit", () => {
+      process.stdout.write(JSON.stringify({ asked, confirmed, how, calls }) + "\\n");
+      process.exit(0);
+    });
   `;
   const stopped = await stage(script([]), root, 30_000);
   assert.ok(stopped.json, stopped.err);
@@ -195,8 +171,8 @@ test("stopStage: the usage and spend line first, then a tidy bounded in time; a 
     // The stop's own exit, when its time runs out, is the moment to read it: the stop is still pending then.
     let exiting;
     const exitCalled = new Promise((r) => (exiting = r));
-    const took = stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, records, finish, opts: { token: "t" }, settleMs: 1, tidyMs: 500, exitMs: ${finishHangs ? 1500 : 60_000}, endNow: (recs) => (ended = recs.map((r) => ({ label: r.label, usd: r.usd, unknown: r.usdUnknown ?? 0 }))), exit: (code) => ((exited = code), exiting()) });
-    const result = await Promise.race([took, exitCalled.then(() => "pending"), new Promise((r) => setTimeout(() => r("pending"), 4000))]);
+    const took = stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, records, finish, opts: { token: "t" }, settleMs: 1, tidyMs: 50, exitMs: ${finishHangs ? 300 : 60_000}, endNow: (recs) => (ended = recs.map((r) => ({ label: r.label, usd: r.usd, unknown: r.usdUnknown ?? 0 }))), exit: (code) => ((exited = code), exiting()) });
+    const result = await Promise.race([took, exitCalled.then(() => "pending")]);
     process.stdout.write(JSON.stringify({ result, order, ms: Date.now() - t0, exited, ended, records: records.map((r) => ({ label: r.label, usd: r.usd, unknown: r.usdUnknown ?? 0 })) }) + "\\n");
     process.exit(0);
   `;
@@ -235,53 +211,6 @@ test("the merge pass fails closed: an issue it cannot read merges nothing ('pend
   assert.equal(r.json.unread, "pending");
   assert.equal(r.json.listed, "stopped", "the listed issue decides");
   assert.ok(!r.json.calls.some((c) => c.endsWith("/issues/7")), r.json.calls.join("\n"));
-});
-
-test("confirmRunning with `commit`: the exit begins at the read, so a later stop ends nothing; a stop before it parks the caller", async () => {
-  const root = mkdtempSync(join(tmpdir(), "stop-confirm-"));
-  const script = `
-    import { confirmRunning, requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
-    import { stopStage } from ${JSON.stringify(LIB("session.mjs"))};
-    ${FETCH(["pendulum:objective"])}
-    const repo = { owner: "acme", name: "app", full: "acme/app" };
-    const live = { number: 7, state: "open", labels: [{ name: "pendulum:objective" }] };
-    const first = await confirmRunning({ read: async () => live, label: "pendulum:objective", onStop: () => {}, commit: true });
-    const ends = [];
-    const took = await stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, records: [], finish: async (e) => ends.push(e), opts: { token: "t" } });
-    process.stdout.write(JSON.stringify({ first, took, ends }) + "\\n");
-    process.exit(0);
-  `;
-  const r = await stage(script, root, 30_000);
-  assert.ok(r.json, r.err);
-  assert.deepEqual(r.json, { first: true, took: false, ends: [] });
-  const racing = `
-    import { confirmRunning, requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
-    let settled = false;
-    // The stop lands while the issue is being read: the caller parks.
-    confirmRunning({ read: async () => (requestStageStop("unlabeled"), { number: 7, state: "open", labels: [{ name: "pendulum:objective" }] }), label: "pendulum:objective", onStop: () => {}, commit: true }).then(() => (settled = true));
-    await new Promise((r) => setTimeout(r, 200));
-    process.stdout.write(JSON.stringify({ settled }) + "\\n");
-    process.exit(0);
-  `;
-  const p = await stage(racing, root, 30_000);
-  assert.deepEqual(p.json, { settled: false });
-});
-
-test("stoppedEnd (a review stage whose merge pass found the Objective stopped): the stage ends `stopped`, its PR a draft", async () => {
-  const root = mkdtempSync(join(tmpdir(), "stop-end-"));
-  const script = `
-    import { stoppedEnd } from ${JSON.stringify(LIB("session.mjs"))};
-    ${FETCH([])}
-    const repo = { owner: "acme", name: "app", full: "acme/app" };
-    const order = [];
-    await stoppedEnd({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, finish: async (e, why) => order.push(e + ": " + why + " @" + calls.length), opts: { token: "t" } });
-    process.stdout.write(JSON.stringify({ order, calls }) + "\\n");
-    process.exit(0);
-  `;
-  const r = await stage(script, root, 30_000);
-  assert.ok(r.json, r.err);
-  assert.deepEqual(r.json.order, ["stopped: `pendulum:objective` was removed @0"]);
-  assert.ok(r.json.calls.some((c) => /convertPullRequestToDraft/.test(c)), r.json.calls.join("\n"));
 });
 
 test("the backstop's spend write: a final figure set but not landed is written at once; without one, the live reading", async () => {

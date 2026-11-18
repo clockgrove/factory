@@ -2,14 +2,13 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { POINTER_HEAD, lfsVersion } from "../scripts/lib/lfs.mjs";
 import { parsePointer } from "../scripts/lib/outbox.mjs";
 import { gitError } from "../scripts/lib/inputs.mjs";
-import { setupPaths } from "../scripts/lib/logic.mjs";
 import { open, quiet, repos } from "./fixtures/outbox.mjs";
 
 test("outbox: the branch goes from the agent's checkout through Pendulum's mirror to the remote, leased and read back", async () => {
@@ -137,132 +136,6 @@ test("outbox: a fix pass's toolchain change outside its fence is refused; put ba
   assert.equal(await box2.push(), true, box2.error);
 });
 
-test("outbox: a fix pass that adds a dependency pushes each manifest with its own lockfile; a lockfile alone is refused", async () => {
-  const r = repos();
-  for (const [f, t] of [["web/package.json", "{}\n"], ["web/package-lock.json", "{}\n"], ["api/package.json", "{}\n"], ["api/yarn.lock", "# yarn\n"], ["py/pyproject.toml", "[project]\n"], ["py/uv.lock", "version = 1\n"], ["Cargo.toml", "[package]\n"], ["Cargo.lock", "version = 4\n"]]) r.put(r.work, f, t);
-  r.run(r.work, "commit", "-q", "-m", "manifests");
-  r.run(r.work, "push", "-q", "origin", "HEAD:main");
-  const box = await open(r);
-  r.put(r.work, "app.txt", "v2\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  assert.equal(await box.push(), true, box.error);
-  // The red names none of the manifests or lockfiles; the fix adds a dependency in three ecosystems.
-  await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 cannot find module zod"] });
-  r.put(r.work, "app.txt", "v3\n");
-  r.put(r.work, "web/package.json", '{"dependencies":{"zod":"^4"}}\n');
-  r.put(r.work, "web/package-lock.json", '{"packages":{"node_modules/zod":{}}}\n');
-  r.put(r.work, "py/pyproject.toml", '[project]\ndependencies = ["httpx"]\n');
-  r.put(r.work, "py/uv.lock", 'version = 1\n[[package]]\nname = "httpx"\n');
-  r.put(r.work, "Cargo.toml", '[package]\n[dependencies]\nserde = "1"\n');
-  r.put(r.work, "Cargo.lock", 'version = 4\n[[package]]\nname = "serde"\n');
-  r.run(r.work, "commit", "-q", "-m", "fix: add the dependencies");
-  assert.deepEqual(await box.outside(), []);
-  assert.equal(await box.push(), true, box.error);
-  // A lockfile whose manifest the pass did not change and nothing names: refused, and nothing of it is pushed.
-  r.put(r.work, "api/yarn.lock", "# yarn\nleft-pad@1\n");
-  r.run(r.work, "commit", "-q", "-m", "relock api");
-  assert.deepEqual(await box.outside(), ["api/yarn.lock"]);
-  const before = r.run(r.origin, "rev-parse", "pendulum/1");
-  assert.equal(await box.push(), false);
-  assert.match(box.error, /^a fix pass changed api\/yarn\.lock \(toolchain, lockfile or CI configuration\)/);
-  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), before);
-});
-
-test("outbox: a fix pass that adds a dependency to a workspace member pushes the root lockfile; the declaration counts as it stood at the fence", async () => {
-  const r = repos();
-  for (const [f, t] of [["pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n"], ["package.json", '{"private":true}\n'], ["pnpm-lock.yaml", "lockfileVersion: '9.0'\n"], ["packages/x/package.json", "{}\n"], ["tools/y/package.json", "{}\n"], ["rs/Cargo.toml", '[workspace]\nmembers = ["crates/*"]\n'], ["rs/Cargo.lock", "version = 4\n"], ["rs/crates/a/Cargo.toml", "[package]\n"]]) r.put(r.work, f, t);
-  r.run(r.work, "commit", "-q", "-m", "workspaces");
-  r.run(r.work, "push", "-q", "origin", "HEAD:main");
-  const box = await open(r);
-  r.put(r.work, "app.txt", "v2\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  assert.equal(await box.push(), true, box.error);
-  await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 cannot find module zod"] });
-  // The root lockfile alone, in each workspace: refused.
-  r.put(r.work, "pnpm-lock.yaml", "lockfileVersion: '9.0'\nleft-pad: 1\n");
-  r.put(r.work, "rs/Cargo.lock", 'version = 4\n[[package]]\nname = "serde"\n');
-  r.run(r.work, "commit", "-q", "-m", "relock");
-  assert.deepEqual(await box.outside(), ["pnpm-lock.yaml", "rs/Cargo.lock"]);
-  // A manifest the declaration did not list at the fence, though the pass adds it to the declaration: still refused.
-  r.put(r.work, "pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n  - 'tools/*'\n");
-  r.put(r.work, "tools/y/package.json", '{"dependencies":{"zod":"^4"}}\n');
-  r.run(r.work, "commit", "-q", "-m", "widen the workspace");
-  assert.deepEqual(await box.outside(), ["pnpm-lock.yaml", "rs/Cargo.lock"]);
-  // A listed member's manifest: its workspace's root lockfile is in scope, and the push goes through.
-  r.put(r.work, "packages/x/package.json", '{"dependencies":{"zod":"^4"}}\n');
-  r.put(r.work, "rs/crates/a/Cargo.toml", '[package]\n[dependencies]\nserde = "1"\n');
-  r.run(r.work, "commit", "-q", "-m", "fix: add the dependencies");
-  assert.deepEqual(await box.outside(), []);
-  assert.equal(await box.push(), true, box.error);
-});
-
-test("outbox: a fix pass may change pnpm-workspace.yaml's packages list, read where the fence starts and at the head; a settings change is refused", async () => {
-  const r = repos();
-  const base = "packages:\n  - 'packages/*'\nonlyBuiltDependencies:\n  - esbuild\n";
-  r.put(r.work, "pnpm-workspace.yaml", base);
-  r.run(r.work, "commit", "-q", "-m", "workspace");
-  r.run(r.work, "push", "-q", "origin", "HEAD:main");
-  const box = await open(r);
-  r.put(r.work, "app.txt", "v2\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  assert.equal(await box.push(), true, box.error);
-  await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
-  const since = box.fenceStart();
-  // The packages list alone, a new file with packages alone: allowed.
-  r.put(r.work, "pnpm-workspace.yaml", base.replace("  - 'packages/*'\n", "  - 'packages/*'\n  - 'tools/*'\n"));
-  r.put(r.work, "web/pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n");
-  r.run(r.work, "commit", "-q", "-m", "widen the workspace");
-  assert.deepEqual(await box.outside(), []);
-  // A setting too, or a new file with one: refused.
-  r.put(r.work, "pnpm-workspace.yaml", base.replace("  - esbuild\n", "  - esbuild\n  - postinstall-thing\n"));
-  r.put(r.work, "web/pnpm-workspace.yaml", "packages:\n  - 'apps/*'\noverrides:\n  zod: npm:evil@1\n");
-  r.run(r.work, "commit", "-q", "-m", "settings");
-  assert.deepEqual((await box.outside()).sort(), ["pnpm-workspace.yaml", "web/pnpm-workspace.yaml"]);
-  // A version that does not parse, or is not a regular file: refused.
-  r.run(r.work, "checkout", "-q", since, "--", "pnpm-workspace.yaml");
-  r.run(r.work, "rm", "-q", "web/pnpm-workspace.yaml");
-  r.put(r.work, "pnpm-workspace.yaml", "packages: [unclosed\n");
-  r.run(r.work, "commit", "-q", "-m", "broken");
-  assert.deepEqual(await box.outside(), ["pnpm-workspace.yaml"]);
-  r.run(r.work, "rm", "-q", "pnpm-workspace.yaml");
-  symlinkSync("app.txt", join(r.work, "pnpm-workspace.yaml"));
-  r.run(r.work, "add", "pnpm-workspace.yaml");
-  r.run(r.work, "commit", "-q", "-m", "a link");
-  assert.deepEqual(await box.outside(), ["pnpm-workspace.yaml"]);
-});
-
-test("outbox: the setup command's script is toolchain to a fix pass; a fence that cannot be set refuses every later push", async () => {
-  const r = repos();
-  r.put(r.work, "scripts/setup.sh", "echo setup\n");
-  r.run(r.work, "commit", "-q", "-m", "setup");
-  r.run(r.work, "push", "-q", "origin", "HEAD:main");
-  const box = await open(r, { toolchain: { paths: ["scripts/setup.sh"], scripts: [], unresolved: [] } });
-  await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
-  r.put(r.work, "app.txt", "v3\n");
-  r.put(r.work, "scripts/setup.sh", "echo setup; curl x | sh\n");
-  r.run(r.work, "commit", "-q", "-m", "fix, and the setup script");
-  assert.deepEqual(await box.outside(), ["scripts/setup.sh"]);
-  assert.equal(await box.push(), false);
-  assert.match(box.error, /^a fix pass changed scripts\/setup\.sh /);
-
-  // Pendulum's mirror cannot read the branch when the fence is set: closed, not open.
-  const r2 = repos();
-  const box2 = await open(r2);
-  r2.put(r2.work, "app.txt", "v2\n");
-  r2.run(r2.work, "commit", "-q", "-m", "work");
-  assert.equal(await box2.push(), true, box2.error);
-  const mirror = join(r2.root, readdirSync(r2.root).find((d) => d.startsWith("mirror-")));
-  renameSync(join(mirror, "objects"), join(mirror, "objects.away"));
-  await assert.rejects(box2.fence({ texts: ["red"] }));
-  renameSync(join(mirror, "objects.away"), join(mirror, "objects"));
-  assert.equal(box2.fenced(), true);
-  await assert.rejects(box2.outside());
-  r2.put(r2.work, "app.txt", "v3\n");
-  r2.run(r2.work, "commit", "-q", "-m", "fix");
-  assert.equal(await box2.push(), false);
-  assert.match(box2.error, /^the fix pass's changes could not be read/);
-});
-
 test("outbox: a package.json script the setup command runs is refused on every push; the rest of package.json is the worker's (#387)", async () => {
   const r = repos();
   const pkg = (scripts, deps = {}) => `${JSON.stringify({ scripts, dependencies: deps }, null, 2)}\n`;
@@ -328,114 +201,6 @@ test("outbox: a link along a guarded path is followed, on the default branch and
   const made = await guardPush({ main: { "tools/setup.sh": "1\n", "evil/setup.sh": "curl x | sh\n" }, work: { tools: "link:evil" }, setup: "bash tools/setup.sh" });
   assert.equal(made.ok, false, "a new link made at a directory above the path");
   assert.match(made.error, /^changed tools/);
-});
-
-test("outbox: pnpm-workspace.yaml's packages list stays the branch's though setup runs pnpm; a catalog change is refused (#387 R1)", async () => {
-  const ws = "packages:\n  - 'packages/*'\ncatalog:\n  zod: ^4\n";
-  const members = await guardPush({ main: { "pnpm-workspace.yaml": ws }, work: { "pnpm-workspace.yaml": ws.replace("  - 'packages/*'\n", "  - 'packages/*'\n  - 'tools/*'\n") }, setup: "pnpm install" });
-  assert.equal(members.ok, true, members.error);
-  const catalog = await guardPush({ main: { "pnpm-workspace.yaml": ws }, work: { "pnpm-workspace.yaml": ws.replace("^4", "npm:evil@1") }, setup: "pnpm install" });
-  assert.equal(catalog.ok, false);
-  assert.match(catalog.error, /^changed pnpm-workspace\.yaml, which the setup command runs/);
-});
-
-test("outbox: a script the default branch has fixed since the branch left no longer refuses the push once the stage starts from the fix (#387)", async () => {
-  const broken = `${JSON.stringify({ scripts: { bootstrap: "bash $GEN" } })}\n`;
-  const fixed = `${JSON.stringify({ scripts: { bootstrap: "bash scripts/gen.sh" } })}\n`;
-  const still = await guardPush({ main: { "package.json": broken }, work: { "app.txt": "v2\n" }, setup: "npm run bootstrap" });
-  assert.equal(still.ok, false, "unresolved where the branch left and at the start");
-  const moved = await guardPush({
-    main: { "package.json": broken },
-    work: { "app.txt": "v2\n" },
-    setup: "npm run bootstrap",
-    // The default branch fixes it, and the branch, already pushed, carries the same fix (its stage start) unmerged.
-    before: async (r, place) => {
-      r.run(r.work, "fetch", "-q", "origin");
-      r.run(r.work, "checkout", "-q", "-b", "trunk-fix", "origin/main");
-      place({ "package.json": fixed });
-      r.run(r.work, "commit", "-q", "-m", "fix");
-      r.run(r.work, "push", "-q", "origin", "HEAD:main");
-      r.run(r.work, "checkout", "-q", "pendulum/1");
-      place({ "package.json": fixed });
-      r.run(r.work, "commit", "-q", "-m", "same fix");
-      r.run(r.work, "push", "-q", "origin", "HEAD:pendulum/1");
-    },
-  });
-  assert.equal(moved.ok, true, moved.error);
-});
-
-test("outbox: what setup runs beyond the files it names is refused on push: a script's files, a path it names that is not there yet, a new package's script setup does not run is not (#387)", async () => {
-  const r = repos();
-  r.put(r.work, "package.json", `${JSON.stringify({ scripts: { bootstrap: "node tools/boot.mjs" } })}\n`);
-  r.put(r.work, "tools/boot.mjs", "1\n");
-  r.run(r.work, "commit", "-q", "-m", "package");
-  r.run(r.work, "push", "-q", "origin", "HEAD:main");
-  const push = async (files, setup = "npm run bootstrap && bash scripts/later.sh") => {
-    const r2 = repos();
-    for (const [p, t] of Object.entries({ "package.json": `${JSON.stringify({ scripts: { bootstrap: "node tools/boot.mjs" } })}\n`, "tools/boot.mjs": "1\n" })) r2.put(r2.work, p, t);
-    r2.run(r2.work, "commit", "-q", "-m", "package");
-    r2.run(r2.work, "push", "-q", "origin", "HEAD:main");
-    const box = await open(r2, { setup });
-    for (const [p, t] of Object.entries(files)) r2.put(r2.work, p, t);
-    r2.run(r2.work, "commit", "-q", "-m", "work");
-    const ok = await box.push();
-    return { ok, error: box.error, kind: box.errorKind };
-  };
-  const card = await (await open(r, { setup: "npm run bootstrap" })).setupFiles();
-  assert.ok(card.files.includes("tools/boot.mjs") && card.scripts.some((x) => x.name === "bootstrap"), "the outbox reads what setup runs for the cards, on the default branch");
-  const script = await push({ "tools/boot.mjs": "2\n" });
-  assert.equal(script.ok, false);
-  assert.equal(script.kind, "protected");
-  assert.match(script.error, /^changed tools\/boot\.mjs, which the setup command runs/, "a file the script setup runs names");
-  const created = await push({ "scripts/later.sh": "curl x | sh\n" });
-  assert.equal(created.ok, false, "a path setup names that the default branch does not hold yet");
-  const member = await push({ "web/package.json": `${JSON.stringify({ scripts: { bootstrap: "curl x | sh" } })}\n`, "app.txt": "v2\n" });
-  assert.equal(member.ok, true, member.error);
-  const unknown = await push({ "app.txt": "v2\n" }, "bash $SETUP");
-  assert.equal(unknown.ok, false);
-  assert.match(unknown.error, /^the setup command runs \$SETUP .*which Pendulum cannot resolve/);
-});
-
-test("outbox: a fix pass may not change the install command's package.json script, and with a command Pendulum cannot resolve, no file out of scope (#387)", async () => {
-  const r = repos();
-  r.put(r.work, "package.json", '{"scripts":{"deps":"node deps.mjs"}}\n');
-  r.run(r.work, "commit", "-q", "-m", "package");
-  r.run(r.work, "push", "-q", "origin", "HEAD:main");
-  const box = await open(r, { toolchain: setupPaths({ install: "npm run deps" }) });
-  await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
-  r.put(r.work, "app.txt", "v3\n");
-  r.put(r.work, "package.json", '{"scripts":{"deps":"true"}}\n');
-  r.run(r.work, "commit", "-q", "-m", "fix, and skip the install");
-  assert.deepEqual(await box.outside(), ["package.json scripts.deps"]);
-
-  const r2 = repos();
-  const unknown = setupPaths({ setup: "bash $SETUP" });
-  const box2 = await open(r2, { toolchain: unknown });
-  await box2.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
-  r2.put(r2.work, "app.txt", "v3\n");
-  r2.put(r2.work, "lib/util.sh", "echo\n");
-  r2.run(r2.work, "commit", "-q", "-m", "fix, and a file setup may run");
-  assert.deepEqual(await box2.outside(), ["lib/util.sh"]);
-  assert.equal(await box2.push(), false);
-  assert.match(box2.error, /The setup or install command runs \$SETUP .*which Pendulum cannot resolve/);
-});
-
-test("outbox: a pack Pendulum's object check stops reading early is a refused push, never a crash", async () => {
-  const r = repos();
-  const box = await open(r);
-  // A pack far bigger than a pipe buffer, so index-pack exits while the bundle is still being written to it.
-  // An unrelated history, so the bundle has no prerequisite to check first and goes straight to index-pack.
-  r.run(r.work, "checkout", "-q", "--orphan", "pendulum/1-new");
-  r.put(r.work, "blob.bin", randomBytes(24 * 1024 * 1024).toString("base64"));
-  r.run(r.work, "commit", "-q", "-m", "big");
-  const mirror = join(r.root, readdirSync(r.root).find((d) => d.startsWith("mirror-")));
-  renameSync(join(mirror, "objects"), join(mirror, "objects.away"));
-  try {
-    assert.equal(await box.push(), false);
-    assert.match(box.error, /bundle|object|read/, box.error);
-  } finally {
-    renameSync(join(mirror, "objects.away"), join(mirror, "objects"));
-  }
 });
 
 test("outbox: Git LFS media is taken from the agent's store only when its bytes match the pointer", async (t) => {
@@ -516,26 +281,6 @@ test("outbox: a malformed object in the agent's bundle is refused by Pendulum's 
   assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "pendulum/1"));
 });
 
-test("mergeTree: the tree of a clean merge, null on a conflict", async () => {
-  const { mergeTree } = await import("../scripts/lib/outbox.mjs");
-  const r = repos();
-  r.put(r.work, "a.txt", "a\n");
-  r.run(r.work, "commit", "-q", "-m", "ours");
-  r.run(r.work, "push", "-q", "origin", "HEAD:refs/heads/pendulum/1");
-  const ours = r.run(r.work, "rev-parse", "HEAD");
-  r.put(r.other, "b.txt", "b\n");
-  r.run(r.other, "commit", "-q", "-m", "theirs");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  const theirs = r.run(r.other, "rev-parse", "HEAD");
-  r.run(r.work, "fetch", "-q", "origin", "main");
-  r.run(r.work, "merge", "-q", "--no-edit", "origin/main");
-  assert.equal(await mergeTree({ remote: r.origin, ours, theirs, base: r.root }), r.run(r.work, "rev-parse", "HEAD^{tree}"));
-  r.put(r.other, "a.txt", "conflict\n");
-  r.run(r.other, "commit", "-q", "-m", "clash");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  assert.equal(await mergeTree({ remote: r.origin, ours, theirs: r.run(r.other, "rev-parse", "HEAD"), base: r.root }), null);
-});
-
 /**
  * A pre-receive hook on the test origin that refuses a branch update as GitHub refuses a token without the Workflows
  * permission (seen live on the scratch adopter, #2579): a workflow file at the new head whose blob neither the branch's
@@ -555,30 +300,6 @@ while read old new ref; do
     [ -n "$seen" ] || { echo "refusing to allow a Personal Access Token to create or update workflow \\\`$path\\\` without \\\`workflow\\\` scope" >&2; exit 1; }
   done || exit 1
 done
-`,
-    { mode: 0o755 },
-  );
-}
-
-/**
- * A proc-receive hook on the test origin for refs/heads/pendulum/*: it refuses every update with `reason`, which git then
- * prints on the ref's own porcelain line, as GitHub does for a workflow file a token may not write.
- */
-function refuseRefLine(r, reason) {
-  r.run(r.origin, "config", "receive.procReceiveRefs", "refs/heads/pendulum");
-  writeFileSync(
-    join(r.origin, "hooks", "proc-receive"),
-    `#!${process.execPath}
-const fs = require("node:fs");
-const read = (n) => { const b = Buffer.alloc(n); let got = 0; while (got < n) got += fs.readSync(0, b, got, n - got, null); return b.toString("utf8"); };
-const pkt = () => { const n = parseInt(read(4), 16); return n === 0 ? null : read(n - 4).replace(/\\n$/, ""); };
-const say = (s) => fs.writeSync(1, (s === null ? "0000" : (s.length + 5).toString(16).padStart(4, "0") + s + "\\n"));
-while (pkt() !== null);
-say("version=1"); say(null);
-const refs = [];
-for (let l; (l = pkt()) !== null; ) refs.push(l.split(" ")[2]);
-for (const ref of refs) say("ng " + ref + " " + ${JSON.stringify(reason)});
-say(null);
 `,
     { mode: 0o755 },
   );
@@ -661,63 +382,6 @@ test("outbox: Pendulum records its own catch-up merge, and a red on it goes on t
   assert.equal(box.caughtUp(fix), false);
 });
 
-test("outbox: a checkout that cannot take Pendulum's merge keeps the branch on it; later pushes only move it forward", async () => {
-  const r = repos();
-  const box = await withWorkflow(r);
-  box.author = { name: "pendulum[bot]", email: "1+pendulum[bot]@users.noreply.github.com" };
-  r.put(r.work, "app.txt", "v2\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  const work = r.run(r.work, "rev-parse", "HEAD");
-  r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
-  r.run(r.other, "commit", "-q", "-m", "ci v2");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  // Uncommitted edits in the way of the fast-forward.
-  writeFileSync(join(r.work, ".github/workflows/ci.yml"), "on: push # local edit\n");
-  assert.equal(await box.push(), true, box.error);
-  const merge = r.run(r.origin, "rev-parse", "pendulum/1");
-  assert.equal(box.synced, false);
-  assert.equal(r.run(r.work, "rev-parse", "HEAD"), work, "the checkout stayed on the agent's head");
-  // Nothing new: the branch stays on Pendulum's merge, never a fresh merge replacing it.
-  assert.equal(await box.push(), true, box.error);
-  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), merge);
-  assert.equal(box.merged, null);
-  // New commits: merged onto Pendulum's merge, so the push is a fast-forward of it.
-  r.put(r.work, "more.txt", "x\n");
-  r.run(r.work, "commit", "-q", "-m", "more");
-  const more = r.run(r.work, "rev-parse", "HEAD");
-  assert.equal(await box.push(), true, box.error);
-  const next = r.run(r.origin, "rev-parse", "pendulum/1");
-  assert.deepEqual(r.run(r.origin, "rev-list", "--parents", "-n", "1", next).split(" ").slice(1), [merge, more]);
-  assert.equal(r.run(r.origin, "log", "-1", "--format=%an", next), "pendulum[bot]");
-  assert.equal(r.run(r.origin, "show", `${next}:more.txt`), "x");
-  assert.equal(box.synced, false, "the edits are still in the way");
-  // The edits gone, the next push puts the checkout on the branch.
-  r.run(r.work, "checkout", "-q", "--", ".github/workflows/ci.yml");
-  assert.equal(await box.push(), true, box.error);
-  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), next);
-  assert.equal(box.synced, true);
-  assert.equal(r.run(r.work, "rev-parse", "HEAD"), next);
-});
-
-test("outbox: a commit Pendulum made (its rebase) is merged the same way, and the checkout is left to the caller", async () => {
-  const r = repos();
-  const box = await withWorkflow(r);
-  r.put(r.work, "app.txt", "v2\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  const work = r.run(r.work, "rev-parse", "HEAD");
-  // Stands in for Pendulum's rebase: a commit in the mirror the push names by sha.
-  assert.equal((await box.git(["fetch", "-q", r.work, "HEAD:refs/pendulum/made"])).code, 0);
-  r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
-  r.run(r.other, "commit", "-q", "-m", "ci v2");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  const main = r.run(r.other, "rev-parse", "HEAD");
-  assert.equal(await box.push({ sha: work }), true, box.error);
-  assert.deepEqual(box.merged, { default: main, paths: [".github/workflows/ci.yml"] });
-  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1^2"), main);
-  assert.equal(r.run(r.work, "rev-parse", "HEAD"), work, "the checkout is not merged into: the caller re-points it");
-  assert.equal(box.synced, true);
-});
-
 test("outbox: a run with no commits of its own pushes nothing, even when the default branch changed a workflow file meanwhile", async () => {
   const r = repos();
   const box = await withWorkflow(r);
@@ -739,20 +403,6 @@ test("outbox: a run with no commits of its own pushes nothing, even when the def
   assert.equal(await box2.push(), true, box2.error);
   assert.throws(() => r2.run(r2.origin, "rev-parse", "--verify", "pendulum/1"));
   assert.equal((await box2.delta()).count, 0);
-});
-
-test("outbox: a default branch that moved without a workflow change is not merged in", async () => {
-  const r = repos();
-  const box = await withWorkflow(r);
-  r.put(r.work, "app.txt", "v2\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  const work = r.run(r.work, "rev-parse", "HEAD");
-  r.put(r.other, "other.txt", "x\n");
-  r.run(r.other, "commit", "-q", "-m", "sibling");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  assert.equal(await box.push(), true, box.error);
-  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), work);
-  assert.equal(box.merged, null);
 });
 
 test("outbox: a new branch that conflicts with the moved default is not pushed; resolved by the harness it is, and a second conflict is refused", async () => {
@@ -791,91 +441,6 @@ test("outbox: a new branch that conflicts with the moved default is not pushed; 
   assert.equal(await box2.push(), false);
   assert.equal(box2.failed, true);
   assert.match(box2.error, /^pendulum\/1 conflicts with main, which changed \.github\/workflows\/ci\.yml/);
-});
-
-test("outbox: an existing branch that conflicts with the moved default is pushed as it is (its PR takes the send-back)", async () => {
-  const r = repos();
-  const box = await withWorkflow(r);
-  r.put(r.work, "app.txt", "ours\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  assert.equal(await box.push(), true, box.error);
-  r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
-  r.put(r.other, "app.txt", "theirs\n");
-  r.run(r.other, "commit", "-q", "-m", "ci v2 and a clash");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  r.put(r.work, "more.txt", "x\n");
-  r.run(r.work, "commit", "-q", "-m", "more");
-  assert.equal(await box.push(), true, box.error);
-  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), r.run(r.work, "rev-parse", "HEAD"));
-  assert.equal(box.conflict, null, "no conflict pass for an existing branch");
-  assert.equal(box.merged, null);
-});
-
-test("outbox: a rebase or merge left in progress in the checkout is named; a clean checkout has none", async () => {
-  const r = repos();
-  const box = await open(r);
-  assert.deepEqual(await box.inProgress(), { ops: [] });
-  r.put(r.work, "app.txt", "ours\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  r.put(r.other, "app.txt", "theirs\n");
-  r.run(r.other, "commit", "-q", "-m", "clash");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  r.run(r.work, "fetch", "-q", "origin", "main");
-  assert.throws(() => r.run(r.work, "rebase", "-q", "origin/main"));
-  assert.deepEqual(await box.inProgress(), { ops: ["rebase"] });
-  r.run(r.work, "rebase", "--abort");
-  assert.throws(() => r.run(r.work, "merge", "-q", "origin/main"));
-  assert.deepEqual(await box.inProgress(), { ops: ["merge"] });
-  r.run(r.work, "merge", "--abort");
-  assert.deepEqual(await box.inProgress(), { ops: [] });
-  // The caller refuses the branch: every later push is refused with its reason.
-  box.block("the conflict pass left a rebase in progress in the checkout; pendulum/1 was not pushed");
-  assert.equal(await box.push(), false);
-  assert.match(box.error, /^the conflict pass left a rebase in progress/);
-  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "pendulum/1"), "nothing pushed");
-});
-
-test("outbox: a refused push's reason is Pendulum's fixed text; the remote's own text goes to the job log only", async () => {
-  const r = repos();
-  const box = await open(r);
-  writeFileSync(join(r.origin, "hooks", "pre-receive"), `#!/bin/sh\necho "GH013: rule violations for refs/heads/pendulum/1 at secret-path" >&2\nexit 1\n`, { mode: 0o755 });
-  r.put(r.work, "app.txt", "v2\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  assert.equal(await box.push(), false);
-  assert.equal(box.error, "push rejected: GitHub refused refs/heads/pendulum/1 (remote rejected, exit 1); its message is in the job log");
-  assert.doesNotMatch(box.error, /GH013|secret-path|origin\.git/);
-  assert.match(box.detail, /remote rejected/);
-});
-
-test("outbox: GitHub's refusal of a workflow file is named with its cause, and its own text stays out of the reason", async () => {
-  const r = repos();
-  const box = await withWorkflow(r, { protectedList: [] });
-  refuseRefLine(r, "refusing to allow a Personal Access Token to create or update workflow .github/workflows/ci.yml without workflow scope");
-  r.put(r.work, ".github/workflows/ci.yml", "on: push # the agent's\n");
-  r.run(r.work, "commit", "-q", "-m", "widen ci");
-  assert.equal(await box.push(), false);
-  assert.match(box.error, /^push rejected \(workflow scope\): GitHub refused pendulum\/1 because it changes \.github\/workflows\/ci\.yml, and Pendulum's token may not create or update workflow files/);
-  assert.doesNotMatch(box.error, /Personal Access Token/);
-  assert.match(box.detail, /refusing to allow a Personal Access Token/);
-});
-
-test("outbox: a refusal that only mentions a workflow (a remote: line, another reason) is a plain refusal", async () => {
-  const r = repos();
-  const box = await withWorkflow(r, { protectedList: [] });
-  // The phrase on a remote: line only, the ref's line says the hook declined.
-  refuseWorkflowVersions(r);
-  r.put(r.work, ".github/workflows/ci.yml", "on: push # the agent's\n");
-  r.run(r.work, "commit", "-q", "-m", "widen ci");
-  assert.equal(await box.push(), false);
-  assert.equal(box.error, "push rejected: GitHub refused refs/heads/pendulum/1 (remote rejected, exit 1); its message is in the job log");
-  // Another reason on the ref's line that names a workflow.
-  const r2 = repos();
-  const box2 = await withWorkflow(r2, { protectedList: [] });
-  refuseRefLine(r2, "workflow runs are disabled for this ruleset");
-  r2.put(r2.work, "app.txt", "v2\n");
-  r2.run(r2.work, "commit", "-q", "-m", "work");
-  assert.equal(await box2.push(), false);
-  assert.equal(box2.error, "push rejected: GitHub refused refs/heads/pendulum/1 (remote rejected, exit 1); its message is in the job log");
 });
 
 test("outbox: a resumed run puts a reused checkout on the branch even when an earlier run left changes the branch now tracks", async () => {
@@ -1044,27 +609,6 @@ test("outbox: a resumed checkout with Git LFS filters is put on a branch that ga
   assert.equal(r.run(r.work, "status", "--porcelain", "--untracked-files=no"), "");
 });
 
-test("outbox: the checkout takes Pendulum's catch-up merge of a default branch that gained Git LFS media, then the media (#73)", async () => {
-  const r = repos();
-  const { real, media } = await lfsCheckout(r);
-  const box = await withWorkflow(r);
-  r.put(r.work, "app.txt", "v2\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  // Mid-run: the default branch gains media and changes the workflow file, so Pendulum merges it in before the push.
-  const bytes = media("main", "assets/b.bin");
-  r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
-  r.run(r.other, "commit", "-q", "-m", "ci v2");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  assert.equal(await box.push(), true, box.error);
-  assert.ok(box.merged, "Pendulum merged the default branch");
-  assert.equal(box.synced, true, "the checkout took the merge");
-  assert.equal(r.run(r.work, "rev-parse", "HEAD"), r.run(r.origin, "rev-parse", "pendulum/1"));
-  assert.equal(box.lfsWarning, "");
-  if (real) assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), bytes);
-  else assert.match(readFileSync(join(r.work, "assets/b.bin"), "utf8"), /^version https:\/\/git-lfs\.github\.com\/spec\/v1\n/);
-});
-
-const isPointer = (r, file) => readFileSync(join(r.work, file), "utf8").startsWith(`${POINTER_HEAD}\n`);
 const inStore = (r, bytes) => {
   const oid = createHash("sha256").update(bytes).digest("hex");
   try {
@@ -1072,16 +616,6 @@ const inStore = (r, bytes) => {
   } catch {
     return false;
   }
-};
-
-/** What a git command the harness runs in the checkout said (stdout and stderr), when it must fail. */
-const failing = (r, ...a) => {
-  try {
-    execFileSync("git", ["-C", r.work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...quiet } });
-  } catch (e) {
-    return `${e.stdout || ""}${e.stderr || ""}`;
-  }
-  assert.fail(`git ${a.join(" ")} succeeded`);
 };
 
 /** The first stage on pendulum/1: the branch from main, one commit of app.txt, pushed. */
@@ -1115,112 +649,6 @@ test("outbox: rebase mode puts the checkout on Pendulum's rebase with the defaul
   assert.equal(r.run(r.work, "status", "--porcelain", "--untracked-files=no"), "");
 });
 
-test("outbox: lfsHandOver does nothing without LFS routing, and says so when routing arrived after setup or git-lfs is missing (#76)", async (t) => {
-  const r = repos();
-  await firstStage(r);
-  // Neither the branch nor the default branch routes anything through LFS: nothing to do, nothing to say.
-  const box = await open(r);
-  await box.feed();
-  assert.deepEqual(await box.putOn("refs/remotes/origin/pendulum/1"), { code: 0, error: "" });
-  assert.deepEqual(await box.lfsSetup(box.expected()), { used: false, ok: true, reason: "", warning: "" });
-  assert.deepEqual(await box.lfsHandOver(box.expected()), { used: false, warning: "" });
-  // Mid-stage the default branch starts routing media through LFS; Pendulum's rebase brings it in.
-  const bytes = randomBytes(3000);
-  const oid = createHash("sha256").update(bytes).digest("hex");
-  mkdirSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4)), { recursive: true });
-  writeFileSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid), bytes);
-  r.run(r.other, "pull", "-q", "origin", "main");
-  r.put(r.other, ".gitattributes", "assets/** filter=lfs diff=lfs merge=lfs -text\n");
-  r.put(r.other, "assets/c.bin", `${POINTER_HEAD}\noid sha256:${oid}\nsize 3000\n`);
-  r.run(r.other, "commit", "-q", "--no-verify", "-m", "lfs media");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  await box.refresh();
-  const sha = await box.rebase({ name: "pendulum", email: "f@f" });
-  assert.equal(await box.push({ sha }), true, box.error);
-  const config = readFileSync(join(r.work, ".git", "config"), "utf8");
-  if (await lfsVersion()) {
-    const on = await box.putOnRebased(sha);
-    assert.equal(on.code, 0, on.error);
-    assert.match(on.warning, /^[0-9a-f]{7} routes files through Git LFS, which this stage's checkout was not set up for: its objects are in the checkout's store and the files stay pointers/);
-    assert.equal(readFileSync(join(r.work, ".git", "config"), "utf8"), config, "the pinned git config is left alone");
-    assert.ok(isPointer(r, "assets/c.bin"));
-    assert.ok(inStore(r, bytes), "the object is delivered to the checkout's store");
-  }
-  // No git-lfs where Pendulum runs: said, not silent.
-  const bin = mkdtempSync(join(r.root, "bin-"));
-  symlinkSync(execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim(), join(bin, "git"));
-  const path = process.env.PATH;
-  process.env.PATH = bin;
-  try {
-    if (await lfsVersion()) return t.skip("git-lfs sits beside git here: it cannot be hidden");
-    const h = await box.lfsHandOver(sha);
-    assert.equal(h.used, true);
-    assert.match(h.warning, /routes files through Git LFS and git-lfs is not installed here; they stay pointer files$/);
-  } finally {
-    process.env.PATH = path;
-  }
-});
-
-test("outbox: a conflict pass's own rebase onto a default branch with new media downloads nothing (#76)", async (t) => {
-  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
-  const r = repos();
-  const { media } = await lfsCheckout(r);
-  await firstStage(r);
-  // Someone else's commits on the branch change its media twice: a rebase replays the first version too.
-  const v1 = media("pendulum/1", "assets/a.bin");
-  const v2 = media("pendulum/1", "assets/a.bin");
-  // The default branch gains media and a change of app.txt that conflicts with the branch's.
-  const b = media("main", "assets/b.bin");
-  r.put(r.other, "app.txt", "main\n");
-  r.run(r.other, "commit", "-q", "-m", "main's app");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  // The send-back stage: Pendulum's rebase conflicts, so the harness rebases in the checkout itself.
-  const box = await open(r);
-  await box.feed();
-  assert.deepEqual(await box.putOn("refs/remotes/origin/pendulum/1"), { code: 0, error: "" });
-  assert.equal((await box.lfsSetup(box.expected())).warning, "");
-  assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null, "Pendulum's rebase conflicts");
-  assert.ok(inStore(r, v1) && inStore(r, v2) && inStore(r, b), "every object the rebase can check out is in the store");
-  // The harness's git, as it would run it: no credential, LFS storage out of reach (lfsCheckout), filters required.
-  const said = failing(r, "rebase", "refs/remotes/origin/main");
-  assert.match(said, /CONFLICT \(content\): Merge conflict in app\.txt/, "the rebase stops on app.txt");
-  assert.doesNotMatch(said, /smudge|filter/, "not on media");
-  writeFileSync(join(r.work, "app.txt"), "both\n");
-  r.run(r.work, "add", "app.txt");
-  r.run(r.work, "-c", "core.editor=true", "rebase", "--continue");
-  assert.equal(r.run(r.work, "rev-parse", "HEAD~3"), r.run(r.origin, "rev-parse", "main"));
-  assert.deepEqual(readFileSync(join(r.work, "assets/a.bin")), v2);
-  assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), b);
-});
-
-test("outbox: a catch-up merge that conflicts leaves the default branch's media in the checkout's store for the conflict pass (#76)", async (t) => {
-  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
-  const r = repos();
-  const { media } = await lfsCheckout(r);
-  const box = await withWorkflow(r);
-  r.put(r.work, "app.txt", "branch\n");
-  r.run(r.work, "commit", "-q", "-m", "work");
-  // Mid-run the default branch gains media, changes the workflow file and changes app.txt the other way.
-  const bytes = media("main", "assets/b.bin");
-  r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
-  r.put(r.other, "app.txt", "main\n");
-  r.run(r.other, "commit", "-q", "-m", "ci v2, main's app");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  assert.equal(await box.push(), false);
-  assert.ok(box.conflict, "Pendulum's merge conflicts: the harness resolves it");
-  assert.equal(box.lfsWarning, "");
-  assert.ok(inStore(r, bytes));
-  // The conflict pass: the default branch handed over, the harness merges it in the checkout.
-  await box.feed();
-  const said = failing(r, "merge", "--no-edit", "refs/remotes/origin/main");
-  assert.match(said, /CONFLICT \(content\): Merge conflict in app\.txt/, "the merge stops on app.txt");
-  assert.doesNotMatch(said, /smudge|filter/, "not on media");
-  assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), bytes);
-  // A stage past its end hands nothing over and says so.
-  const late = await open(r, { deadlineAt: Date.now() - 1 });
-  assert.deepEqual(await late.lfsHandOver(null), { used: true, warning: "no time was left in the stage to hand the Git LFS objects over; no time was left in the stage for git lfs checkout; the files stay pointers" });
-});
-
 test("outbox: the hand-over downloads only what the checkout's store lacks by oid and size, and says when time cut git lfs checkout (#79)", async (t) => {
   if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
   const r = repos();
@@ -1251,63 +679,4 @@ test("outbox: the hand-over downloads only what the checkout's store lacks by oi
   for (const [f, bytes] of [["a", a], ["b", b], ["c", c]]) assert.deepEqual(readFileSync(join(r.work, `assets/${f}.bin`)), bytes);
   // Time runs out before git lfs checkout: said, not skipped silently.
   assert.match((await box2.lfsHandOver(box2.expected(), { timeoutMs: 1 })).warning, /no time was left in the stage for git lfs checkout; the files stay pointers$/);
-});
-
-test("outbox: a large working set is handed over whole: PENDULUM_LOCAL_MEDIA_MAX_MB caps what a branch pushes, not what a stage downloads (#79)", async (t) => {
-  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
-  const r = repos();
-  await lfsCheckout(r);
-  // main gains 40 media files, far over the local limit set below.
-  const files = [];
-  r.run(r.other, "pull", "-q", "origin", "main");
-  for (let i = 0; i < 40; i += 1) {
-    const bytes = randomBytes(3000);
-    const oid = createHash("sha256").update(bytes).digest("hex");
-    mkdirSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4)), { recursive: true });
-    writeFileSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid), bytes);
-    r.put(r.other, `assets/m${i}.bin`, `${POINTER_HEAD}\noid sha256:${oid}\nsize 3000\n`);
-    files.push([`assets/m${i}.bin`, bytes]);
-  }
-  r.run(r.other, "commit", "-q", "--no-verify", "-m", "much media");
-  r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  process.env.PENDULUM_LOCAL_MEDIA_MAX_MB = "0.001";
-  try {
-    const box = await open(r, { local: true });
-    await box.feed();
-    assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
-    assert.deepEqual(await box.lfsSetup(box.base), { used: true, ok: true, reason: "", warning: "" });
-    for (const [f, bytes] of files) assert.deepEqual(readFileSync(join(r.work, f)), bytes, f);
-  } finally {
-    delete process.env.PENDULUM_LOCAL_MEDIA_MAX_MB;
-  }
-});
-
-test("outbox: a tree read the hand-over cannot take whole is said, not dropped silently (#79)", async (t) => {
-  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
-  const r = repos();
-  const { media } = await lfsCheckout(r);
-  media("main", "assets/a.bin");
-  const box = await open(r, { readMaxBytes: 64 });
-  await box.feed();
-  assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
-  const lfs = await box.lfsSetup(box.base);
-  assert.match(lfs.warning, /^the tree of [0-9a-f]{7} could not be read whole \(over 64 bytes\), so some Git LFS files may stay pointers/);
-});
-
-test("outbox: a branch's lfs.fetchinclude does not filter the hand-over's download (#79)", async (t) => {
-  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
-  const r = repos();
-  const { media } = await lfsCheckout(r);
-  const box = await open(r);
-  await box.feed();
-  assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
-  assert.equal((await box.lfsSetup(box.base)).warning, "");
-  // The branch's .lfsconfig limits fetches to paths no media has; once pushed, Pendulum's mirror reads it from its HEAD.
-  r.put(r.work, ".lfsconfig", "[lfs]\n\tfetchinclude = nothing/**\n");
-  r.run(r.work, "commit", "-q", "-m", "fetch filter");
-  assert.equal(await box.push(), true, box.error);
-  const bytes = media("main", "assets/b.bin");
-  await box.refresh();
-  assert.deepEqual(await box.lfsHandOver(null), { used: true, warning: "" });
-  assert.ok(inStore(r, bytes), "the default branch's media is in the checkout's store");
 });

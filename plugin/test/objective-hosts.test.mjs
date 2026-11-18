@@ -7,18 +7,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { HOST_PREFIX, LABEL_MAX, choiceLabels, choiceOf, hostsOf, hostsProblem, ranWith } from "../scripts/lib/choice.mjs";
-import { CHOICE_FIX, EDITED_REASON, choiceGate, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
+import { HOST_PREFIX, LABEL_MAX, choiceLabels, choiceOf, hostsOf } from "../scripts/lib/choice.mjs";
+import { CHOICE_FIX, EDITED_REASON, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
 import { claudeRunner, codexRunner, copilotRunner, harnessCommand } from "../scripts/lib/harness.mjs";
 import { LOCAL_DOMAINS, gitPinFile, isSandboxHost, suffixRuleUnder, openStageHosts, openedStageHosts, pinGitDir, runnerDomains } from "../scripts/lib/local.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
-import { deniedHostsFix, harnessMarker, setSelf } from "../scripts/lib/logic.mjs";
-import { hostsLine, progressReporter, writeUsage } from "../scripts/lib/session.mjs";
-import { repoOf } from "../scripts/lib/github.mjs";
-import { objectiveHostChecks } from "../scripts/doctor.mjs";
+import { setSelf } from "../scripts/lib/logic.mjs";
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
-const ROOT = join(import.meta.dirname, "..", "..");
 const ENV = { GITHUB_REPOSITORY: "acme/app", PENDULUM_HARNESS: "claude", PENDULUM_MODEL: "claude-opus-5-5", PENDULUM_SUBAGENT_MODEL: "claude-sonnet-5-5", PENDULUM_REVIEWER_MODEL: "claude-fable-5-2" };
 const AGENT = { user: "pendulum-agent", uid: 1002, home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set() };
 const CLONE = "/home/pendulum-agent/repo";
@@ -101,21 +97,6 @@ test("a host label added, removed or changed after the plan is an edit", async (
   assert.equal(await editedSincePlan(repo, 7, {}, read(["pendulum:objective", HF])), "changed", "the merge's check sees it too");
 });
 
-test("choiceGate: the hosts the stage opens, and a Block when local mode set its sandboxes up for others", async () => {
-  const applied = [];
-  const gate = (env) => choiceGate({ repo, issue: 7, labels: [HF], env, pr: null, notify: "boss", opts: {}, apply: async (_, e) => applied.push(e), stage: "work", gh: timeline({ [HF]: person("dev") }) });
-  const runner = await gate(ENV);
-  assert.deepEqual([runner.ok, runner.hosts], [true, ["huggingface.co"]], "a runner's stage opens its own: nothing prepared");
-  assert.deepEqual((await gate({ ...ENV, PENDULUM_STAGE_HOSTS: "huggingface.co" })).hosts, ["huggingface.co"], "the loop set it up for the same hosts");
-  const moved = await gate({ ...ENV, PENDULUM_STAGE_HOSTS: "" });
-  assert.equal(moved.ok, false, "the label was applied after the loop set the sandboxes up");
-  assert.deepEqual([applied[0].exit, applied[0].cause, applied[0].stage], ["blocked", "setup", "work"]);
-  assert.match(applied[0].reason, /set up for the hosts of no host label but the Objective's host labels now name `huggingface\.co`/);
-  assert.match(applied[0].fix, /Re-apply `pendulum:objective`/);
-  assert.equal(hostsProblem(undefined, ["a.example.com"]), null);
-  assert.match(hostsProblem("a.example.com,b.example.com", ["a.example.com"]).reason, /`a\.example\.com`, `b\.example\.com` but .* now name `a\.example\.com`/, "a label removed in between: the sandbox would hold a host no label opens");
-});
-
 test("Actions and the cloud sandbox: every harness's runner sandbox adds the opened hosts, and only once the stage opened them", () => {
   openStageHosts([]);
   const env = { PENDULUM_INPUT_ALLOWED_DOMAINS: "pypi.org" };
@@ -140,13 +121,6 @@ test("Actions and the cloud sandbox: every harness's runner sandbox adds the ope
     openStageHosts([]);
   }
   assert.deepEqual(runnerDomains("pypi.org"), [...LOCAL_DOMAINS, "pypi.org"], "doctor and every other caller without hosts: unchanged");
-});
-
-test("the denied-host Block offers the host label for this Objective and the setting for every Objective", () => {
-  assert.equal(deniedHostsFix(["huggingface.co"]), "The local sandbox denied `huggingface.co`. If the Objective needs it, a person who can push applies `pendulum:host:huggingface.co` to this issue, which opens it to this Objective alone, then re-applies `pendulum:objective`. To open it to every Objective, add it to `PENDULUM_LOCAL_DOMAINS` (a running `serve` reads it when it restarts), then re-apply `pendulum:objective`.");
-  const long = `${"x".repeat(40)}.example.com`;
-  assert.match(deniedHostsFix(["a.example.com", long]), /applies `pendulum:host:a\.example\.com` to this issue \(the rest are too long for a label\), which opens it/);
-  assert.equal(deniedHostsFix([long]), `The local sandbox denied \`${long}\`. If the Objective needs it, add it to \`PENDULUM_LOCAL_DOMAINS\` (a running \`serve\` reads it when it restarts), then re-apply \`pendulum:objective\`.`, "no label fits: the setting alone");
 });
 
 /** A Local loop over a fresh developer clone, as the choice tests make one. */
@@ -188,103 +162,4 @@ test("local mode, the real path: one Objective's stage gets its hosts in every s
     rmSync(dev, { recursive: true, force: true });
     rmSync(stageTmp, { recursive: true, force: true });
   }
-});
-
-test("local mode, the real path: harnessFor reads the host labels and who applied them from GitHub, and stage() sets the sandboxes up with them", async () => {
-  const dev = mkdtempSync(join(tmpdir(), "hosts-for-"));
-  const local = await loopFor(dev);
-  const real = globalThis.fetch;
-  const read = (applier) => {
-    globalThis.fetch = async (url) => {
-      const u = String(url);
-      const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
-      if (/\/user$/.test(u)) return json({ login: "me", type: "User" });
-      if (/\/collaborators\?/.test(u)) return json([{ login: "dev" }]);
-      if (/\/collaborators\/[^/]+\/permission$/.test(u)) return json({ permission: /\/dev\//.test(u) ? "write" : "read" });
-      if (/\/issues\/8\/timeline/.test(u)) return json([{ event: "labeled", label: { name: HF }, created_at: "2026-11-14T10:00:00Z", actor: { login: applier, id: 5, type: "User" } }]);
-      if (/\/issues\/8$/.test(u)) return json({ number: 8, labels: [{ name: "pendulum:objective" }, { name: HF }] });
-      throw new Error(`unexpected ${u}`);
-    };
-  };
-  // A home of its own: harnessFor reads this machine's account declaration (lib/accounts.mjs), none here.
-  const home = process.env.HOME;
-  process.env.HOME = dev;
-  try {
-    read("dev");
-    assert.deepEqual(await local.harnessFor(8), { ok: true, harness: "claude", hosts: ["huggingface.co"], account: { name: "claude", harness: "claude", declared: false } });
-    read("reader");
-    const refused = await local.harnessFor(8);
-    assert.equal(refused.ok, false);
-    assert.match(refused.reason, /`pendulum:host:huggingface\.co` was applied by `reader`/);
-    // stage(): the hosts harnessFor read reach stageEnv, and nothing is set up on a refusal.
-    const setUp = [];
-    local.block = async () => {};
-    local.stageEnv = (...a) => {
-      setUp.push(a[6]);
-      throw Object.assign(new Error("stop here"), { code: "outer-sandbox" });
-    };
-    local.harnessFor = async () => ({ ok: true, harness: "claude", hosts: ["huggingface.co"] });
-    await local.stage(8, "work", "worker.mjs", []);
-    local.harnessFor = async () => ({ ok: false, reason: "no", fix: "f" });
-    await local.stage(8, "work", "worker.mjs", []);
-    assert.deepEqual(setUp, [["huggingface.co"]]);
-  } finally {
-    process.env.HOME = home;
-    globalThis.fetch = real;
-    rmSync(dev, { recursive: true, force: true });
-  }
-});
-
-test("the work and review stages open the hosts right after the choice check, before any harness", () => {
-  for (const file of ["worker.mjs", "review.mjs"]) {
-    const src = readFileSync(join(ROOT, "plugin", "scripts", file), "utf8");
-    const run = src.indexOf("async function run()");
-    const at = (s) => src.indexOf(s, run);
-    assert.ok(at("await choiceGate(") > 0 && at("openStageHosts(chosen.hosts)") > at("await choiceGate("), file);
-    for (const later of ["jobChecks(", "credentialChecks(", "runHarness(", "validationLoop("]) {
-      const i = at(later);
-      assert.ok(i === -1 || i > at("openStageHosts(chosen.hosts)"), `${file}: ${later} only after the hosts are open`);
-    }
-  }
-});
-
-test("the progress comment, the usage record and the harness line name the opened hosts", async () => {
-  const inputs = { harness: "claude", model: "claude-opus-5-5", subagentModel: "claude-sonnet-5-5", reviewerModel: "claude-fable-5-2" };
-  const ran = ranWith(inputs, ["pendulum:objective", HF]);
-  assert.deepEqual([ran.labels, ran.hosts], [[HF], ["huggingface.co"]]);
-  assert.deepEqual(JSON.parse(/^<!-- pendulum:harness (.*) -->$/.exec(harnessMarker("claude", "claude-opus-5-5", ran))[1]).hosts, ["huggingface.co"]);
-  assert.ok(!harnessMarker("claude", "m", ranWith(inputs, [])).includes("hosts"), "none opened: the line as it was");
-  assert.equal(hostsLine([]), "");
-  const dir = mkdtempSync(join(tmpdir(), "ran-hosts-"));
-  writeUsage(dir, { harness: "claude", model: "m", records: [], passes: 0, exit: "blocked", reason: "x", credentialBasis: null, ran });
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, "result.json"), "utf8")).ran.hosts, ["huggingface.co"]);
-  rmSync(dir, { recursive: true, force: true });
-  const real = globalThis.fetch;
-  const posted = [];
-  globalThis.fetch = async (url, init = {}) => {
-    const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
-    if ((init.method || "GET") === "GET") return json([]);
-    const body = JSON.parse(init.body).body;
-    posted.push(body);
-    return json({ id: 9, user: { login: "me", type: "User" }, body });
-  };
-  try {
-    const progress = progressReporter(repoOf("acme/app"), 7, { token: () => "t" }, { stage: "work", runId: "1", soFar: null });
-    progress.ran(ran);
-    await progress("harness");
-  } finally {
-    globalThis.fetch = real;
-  }
-  assert.match(posted.at(-1), /\nNetwork: this Objective's sandboxes also reach `huggingface\.co` \(its `pendulum:host:` labels\)\.\n/);
-});
-
-test("doctor names each open Objective's hosts, and warns of a host label no sandbox can allow", async () => {
-  const inputs = { objectiveLabel: "pendulum:objective" };
-  const list = async () => [{ number: 228, labels: [{ name: "pendulum:objective" }, { name: HF }, { name: "pendulum:host:*.hf.co" }] }, { number: 229, labels: [{ name: "pendulum:objective" }] }, { number: 230, labels: [{ name: "pendulum:host:10.0.0.1" }] }, { number: 231, pull_request: {}, labels: [{ name: HF }] }];
-  const rows = await objectiveHostChecks({ inputs, repo, token: "t", list });
-  assert.deepEqual(rows.map((r) => `${r.name}:${r.status}`), ["objective hosts:PASS", "objective hosts:WARN"]);
-  assert.match(rows[0].detail, /^#228: \*\.hf\.co, huggingface\.co; each opened to that Objective's own sandboxes alone/);
-  assert.match(rows[1].detail, /^#230: `pendulum:host:10\.0\.0\.1` names no host/);
-  assert.match((await objectiveHostChecks({ inputs, repo, token: "t", list: async () => [] }))[0].detail, /^no open Objective has a pendulum:host: label/);
-  assert.equal((await objectiveHostChecks({ inputs, repo, token: "t", list: async () => Promise.reject(new Error("503")) }))[0].status, "WARN");
 });

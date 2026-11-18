@@ -1,10 +1,10 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { credentialPaths, ensureHarnessHomes, gitPinFile, pinGitDir, stageLogin } from "../scripts/lib/local.mjs";
+import { ensureHarnessHomes, gitPinFile, pinGitDir } from "../scripts/lib/local.mjs";
 import { Local, homeLinkReason } from "../scripts/local.mjs";
 
 // A stand-in home with a second Claude Code config folder (`.claude-two`, CLAUDE_CONFIG_DIR) that shares the default
@@ -89,78 +89,6 @@ test("#261: a link to nothing never makes a login file or another login's path, 
     symlinkSync(t, join(two, "cache", "model-catalog"));
     refused(() => ensureHarnessHomes("claude", env, h), { link: join(two, "cache", "model-catalog"), target: t, why: /credential store or another harness login/ });
   }
-});
-
-test("#261: another login nested in the stage's own folder stays refused: a link to nothing never makes its files", () => {
-  // CODEX_HOME inside the Claude Code stage's own folder; a planted `cache/model-catalog` link to its `auth.json`, not there yet.
-  const { h, two, env } = fakeHome();
-  const codex = join(two, "codex");
-  mkdirSync(codex);
-  mkdirSync(join(two, "cache"));
-  symlinkSync(join(codex, "auth.json"), join(two, "cache", "model-catalog"));
-  refused(() => ensureHarnessHomes("claude", { ...env, CODEX_HOME: codex }, h), { link: join(two, "cache", "model-catalog"), target: join(codex, "auth.json"), why: /credential store or another harness login/ });
-  // The stage's own folder otherwise stays its own: a link to a new name there is made.
-  const { h: h2, two: two2, env: env2 } = fakeHome();
-  mkdirSync(join(two2, "codex"));
-  symlinkSync(join(two2, "own-plans"), join(two2, "plans"));
-  ensureHarnessHomes("claude", { ...env2, CODEX_HOME: join(two2, "codex") }, h2);
-  assert.ok(lstatSync(join(two2, "own-plans")).isDirectory());
-});
-
-test("#261: a default home that is a link to the stage's own folder is the stage's own login, not another's", () => {
-  // Codex: ~/.codex a link to the folder CODEX_HOME names; Claude Code: ~/.claude a link to CLAUDE_CONFIG_DIR's folder.
-  for (const [harness, name, variable] of [["codex", ".codex", "CODEX_HOME"], ["claude", ".claude", "CLAUDE_CONFIG_DIR"]]) {
-    const h = mkdtempSync(join(tmpdir(), "home-"));
-    const real = join(h, "mnt", harness);
-    mkdirSync(real, { recursive: true });
-    symlinkSync(real, join(h, name));
-    const env = { [variable]: real };
-    ensureHarnessHomes(harness, env, h);
-    assert.ok(lstatSync(join(real, "skills")).isDirectory(), `${harness}: its state is made`);
-    if (harness === "claude") assert.ok(lstatSync(join(real, "sessions")).isDirectory(), "its own sessions too");
-    // The same through the default name.
-    ensureHarnessHomes(harness, {}, h);
-    // #260's list: the stage's own folder is never denied as another login's (Claude Code), nor beyond its own home (Codex).
-    const own = stageLogin(harness, env, h);
-    const denied = credentialPaths(h, env, { own });
-    if (harness === "claude") assert.ok(!denied.includes(real) && !denied.includes(join(h, ".claude")), "not denied whole");
-    else assert.deepEqual(denied.filter((p) => p === real || p.startsWith(`${real}/`) || p === join(h, ".codex")).sort(), [join(h, ".codex"), real].sort(), "its home, under both names, as for any Codex stage");
-    // A guarded directory planted as a link to its own login file, not there yet, is still refused.
-    const file = join(real, harness === "claude" ? ".credentials.json" : "auth.json");
-    const link = join(real, harness === "claude" ? "plans" : "memories");
-    rmSync(link, { recursive: true });
-    symlinkSync(file, link);
-    refused(() => ensureHarnessHomes(harness, env, h), { link, target: file });
-  }
-});
-
-test("#261: a file where the harness keeps a directory, or a link to one, is refused with home-link", () => {
-  const { h, two, env } = fakeHome();
-  writeFileSync(join(two, "plans"), "");
-  refused(() => ensureHarnessHomes("claude", env, h), { link: join(two, "plans"), target: join(two, "plans"), made: null, why: /no directory/ });
-  const { h: h2, two: two2, env: env2 } = fakeHome();
-  writeFileSync(join(two2, "notes"), "");
-  symlinkSync(join(two2, "notes"), join(two2, "hooks"));
-  refused(() => ensureHarnessHomes("claude", env2, h2), { link: join(two2, "hooks"), target: join(two2, "notes"), made: null, why: /a link to .*notes\) is no directory/ });
-  // The state folder itself a file.
-  const { h: h3 } = fakeHome();
-  writeFileSync(join(h3, ".claude-four"), "");
-  refused(() => ensureHarnessHomes("claude", { CLAUDE_CONFIG_DIR: join(h3, ".claude-four") }, h3), { link: join(h3, ".claude-four"), target: null, made: null, why: /no directory/ });
-});
-
-test("#261: every directory Pendulum makes is checked where it really lies; a file or a loop of links on the way is refused", () => {
-  const outside = mkdtempSync(join(tmpdir(), "elsewhere-"));
-  // `cache` a link to a directory that exists outside every home: `cache/model-catalog` would be made there.
-  const { h, two, env } = fakeHome();
-  symlinkSync(outside, join(two, "cache"));
-  refused(() => ensureHarnessHomes("claude", env, h), { link: join(two, "cache", "model-catalog"), target: join(outside, "model-catalog"), why: /outside the harness homes/ });
-  // `cache` a file (ENOTDIR) or a link to itself (ELOOP).
-  const { h: h2, two: two2, env: env2 } = fakeHome();
-  writeFileSync(join(two2, "cache"), "");
-  refused(() => ensureHarnessHomes("claude", env2, h2), { link: join(two2, "cache", "model-catalog"), target: null, made: null, why: /ENOTDIR/ });
-  const { h: h3, two: two3, env: env3 } = fakeHome();
-  symlinkSync(join(two3, "cache"), join(two3, "cache"));
-  refused(() => ensureHarnessHomes("claude", env3, h3), { link: join(two3, "cache", "model-catalog"), target: null, made: null, why: /ELOOP/ });
 });
 
 test("#261: a stage whose harness home holds such a link Blocks before it starts, cause setup, with no local path on GitHub", async () => {

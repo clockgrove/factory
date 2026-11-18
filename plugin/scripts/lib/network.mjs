@@ -575,6 +575,24 @@ const githubHost = (host) => host === "github.com" || host.endsWith(".github.com
 const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"];
 
 /**
+ * The proxy settings of Pendulum's own git (the outbox mirror's fetch and push, its scratch repositories'): exactly the
+ * ones the stage's Node fetch uses, read from the stage process's own environment, and nothing else. Node's fetch takes
+ * a proxy from it only when NODE_USE_ENV_PROXY is 1 (as local mode's stages run), each setting's lower-case name before
+ * its upper-case one; git reads http_proxy in lower case only. So each setting the fetch uses is given in both cases,
+ * and none when the fetch goes directly. An https remote goes through the proxy as a CONNECT tunnel carrying TLS (curl
+ * tunnels every https URL), so the mirror's GitHub credential reaches the proxy only encrypted.
+ */
+export function gitProxyEnv(env = process.env) {
+  if (env.NODE_USE_ENV_PROXY !== "1") return {};
+  const out = {};
+  for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"]) {
+    const value = env[name.toLowerCase()] ?? env[name];
+    if (value) Object.assign(out, { [name]: value, [name.toLowerCase()]: value });
+  }
+  return out;
+}
+
+/**
  * One reachability check on a fresh connection: a new agent with no kept-alive socket, so no pooled connection answers
  * for a network that is gone, and a HEAD to `origin`. It reaches the network as Pendulum's GitHub client does (Node's
  * fetch): through the proxy the stage process's own environment names (HTTPS_PROXY, HTTP_PROXY, NO_PROXY) when

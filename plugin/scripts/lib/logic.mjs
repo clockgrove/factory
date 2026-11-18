@@ -2801,7 +2801,7 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * reviewer models, as choice.mjs ranWith gives them and the usage record's `ran` keeps them); [] when it names none
  * (Copilot at its default), null when the record has no `ran` to say.
  */
-const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
+export const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
 /** The routes a stage records it ran on (backend.mjs stageRoute), on its usage record and spend line (#570). */
 export const ROUTES = Object.freeze(["actions", "local", "sandbox"]);
 /** A route a stage records (ROUTES), or null. */
@@ -2960,6 +2960,8 @@ export function findingsOf(body) {
 /**
  * The largest per-pass ledger line a progress comment carries (ledgerMarker), in characters. A stage whose ledger does
  * not fit gets a line saying so and a marker with its pass count alone (`cut`): its usage record stays the ledger's source.
+ * A pass's times in milliseconds (`ms`) take 7 characters more than the seconds of a line from before them (`t`), a few
+ * percent of a typical pass's entry, so a little fewer passes fit: a stage of 20 still does.
  */
 export const LEDGER_MAX = 6_000;
 const LEDGER = /^<!-- pendulum:ledger (\{[^\n]*\}) -->$/m;
@@ -2971,8 +2973,13 @@ const ledgerUsd = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 
 const ledgerCount = (v) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
 const ledgerWord = (re, v) => (typeof v === "string" && re.test(v) ? v : null);
 const ledgerBilling = (v) => (BILLING.includes(v) ? v : null);
-const ledgerSecs = (at) => (typeof at === "string" && Number.isFinite(Date.parse(at)) ? Math.floor(Date.parse(at) / 1000) : null);
-const ledgerIso = (s) => (ledgerCount(s) === null ? null : new Date(s * 1000).toISOString().replace(/\.\d{3}Z$/, "Z"));
+const ledgerMs = (at) => (typeof at === "string" && Number.isFinite(Date.parse(at)) ? Date.parse(at) : null);
+/** A pass time read from the line, as ISO: in Unix milliseconds (`unit` 1, `ms`), or seconds (`unit` 1000, `t`). */
+const ledgerIso = (n, unit) => {
+  if (ledgerCount(n) === null || n * unit > 8.64e15) return null;
+  const iso = new Date(n * unit).toISOString();
+  return unit === 1000 ? iso.replace(/\.\d{3}Z$/, "Z") : iso;
+};
 /** A pass's dollars by billing when nothing splits them (usage.mjs usdByBilling for one pass with no relayed key): its own kind's. */
 const plainByBilling = (billing, usd) => (billing ? { [billing]: usd ?? 0 } : {});
 const sameByBilling = (a, b) => Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([k, v]) => b[k] === v);
@@ -2982,7 +2989,7 @@ const sameByBilling = (a, b) => Object.keys(a).length === Object.keys(b).length 
  * (usage.mjs passLedger), the stage's `model` and the Pendulum `version` that ran it: numbers and labels only, short keys.
  * Top level: `v` (the release), `m` (the stage's model) and `b` (the first pass's billing), each left out when none; `p`,
  * one entry per pass: `l` its label, `d` its calls for a decision record, `m` and `b` where they differ from the top's,
- * `e` its effort, `t` [start, end] in Unix seconds, `u` its known dollars (to a millionth, as the spend line), `q` and `w`
+ * `e` its effort, `ms` [start, end] in Unix milliseconds, `u` its known dollars (to a millionth, as the spend line), `q` and `w`
  * its runs of unknown cost and their codes (usage.mjs UNKNOWN_WHY), `y` its dollars by billing where they are not all at
  * its own kind, `k` a relayed key's share, `n` its tokens [input, output, cached, written], `r` 1 when it resumed a
  * session and `c` its first request's cache [read, written]. A string that is no label of its kind is left out. A line
@@ -3013,8 +3020,8 @@ export function ledgerMarker(ledger, { model = null, version = null, published =
     if (b !== (top.b ?? null)) out.b = b;
     const effort = ledgerWord(LEDGER_EFFORT, e.effort);
     if (effort) out.e = effort;
-    const t = [ledgerSecs(e.started), ledgerSecs(e.ended)];
-    if (t.some((x) => x !== null)) out.t = t;
+    const t = [ledgerMs(e.started), ledgerMs(e.ended)];
+    if (t.some((x) => x !== null)) out.ms = t;
     const u = ledgerUsd(e.usd);
     if (u !== null) out.u = u;
     const q = ledgerCount(e.usdUnknown);
@@ -3048,7 +3055,8 @@ export function ledgerCut(passes, why) {
 
 /**
  * The per-pass ledger line in a progress comment's body (ledgerMarker), read back: `{ledger, model, version}`, each
- * entry in usage.mjs passLedger's shape (its `firstCache` as `{cached, written}`, its times to the second); `{cut}` (the
+ * entry in usage.mjs passLedger's shape (its `firstCache` as `{cached, written}`, its times to the millisecond from `ms`,
+ * or to the second from the `t` of a line written before it, in Unix seconds); `{cut}` (the
  * pass count) when the ledger did not fit; null with no line or a broken one. Only labels and numbers are taken, each
  * checked as its kind; anything else reads as none. The caller decides whose comment it trusts (finish-card.mjs
  * pendulumOwn, report.mjs ownPredicate): this reads a body alone.
@@ -3070,7 +3078,8 @@ export function ledgerOfComment(body) {
   const ledger = v.p.map((e) => {
     const b = Object.hasOwn(e, "b") ? ledgerBilling(e.b) : billing;
     const usd = ledgerUsd(e.u);
-    const t = Array.isArray(e.t) ? e.t : [];
+    // Its times: `ms` in Unix milliseconds; a line written before them carries `t`, in Unix seconds.
+    const [t, unit] = Array.isArray(e.ms) ? [e.ms, 1] : Array.isArray(e.t) ? [e.t, 1000] : [[], 1];
     const n = Array.isArray(e.n) ? e.n : [];
     const c = Array.isArray(e.c) ? e.c : null;
     const y = e.y && typeof e.y === "object" && !Array.isArray(e.y) ? Object.fromEntries(Object.entries(billingRead(e.y)).map(([kind, x]) => [kind, ledgerUsd(x)])) : null;
@@ -3079,8 +3088,8 @@ export function ledgerOfComment(body) {
       ...(Object.hasOwn(e, "d") ? { decision: true, calls: ledgerCount(e.d) || 1 } : {}),
       model: Object.hasOwn(e, "m") ? ledgerWord(LEDGER_MODEL, e.m) : model,
       effort: ledgerWord(LEDGER_EFFORT, e.e),
-      started: ledgerIso(t[0]),
-      ended: ledgerIso(t[1]),
+      started: ledgerIso(t[0], unit),
+      ended: ledgerIso(t[1], unit),
       usd,
       usdUnknown: ledgerCount(e.q) ?? 0,
       usdUnknownWhy: [...new Set((Array.isArray(e.w) ? e.w : []).filter((x) => typeof x === "string" && Object.hasOwn(UNKNOWN_WHY, x)))],

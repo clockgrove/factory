@@ -9,7 +9,7 @@ import { FINDINGS_MAX, decisionSpendMarker, findingsMarker, findingsOf, harnessM
 import { pendulumBuild } from "../scripts/lib/release.mjs";
 import { progressTail, writeUsage } from "../scripts/lib/session.mjs";
 import { costOf, loadPrices } from "../scripts/lib/cost-join.mjs";
-import { BILLING_WORDS } from "../scripts/lib/usage.mjs";
+import { BILLING_WORDS, parseClaude } from "../scripts/lib/usage.mjs";
 import { COST_KINDS, REPORT_SCHEMA, STOPPED_EXIT, buildReport, outcomeOf, readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
 import { passLedger } from "../scripts/lib/usage.mjs";
 import { keepDecision } from "../scripts/lib/harness.mjs";
@@ -21,6 +21,7 @@ import { collectObjective } from "../../bench/lib/collect.mjs";
 import { scoreObjective } from "../../bench/lib/objective.mjs";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
+import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
 
 /** The Pendulum build a stage of this checkout records (#565 W6): its release at its tag, else with its commit. */
 const PENDULUM_VERSION = pendulumBuild();
@@ -371,7 +372,7 @@ test("report: writeUsage records each pass in result.json (the ledger), with the
   assert.deepEqual(r.hotSpots.answerAndFixPasses.items, [{ issue: 3, answer: 1, fix: 1, passes: 2 }]);
   assert.deepEqual(r.hotSpots.cacheWriteShare.items.map((x) => [x.passLabel, x.written, x.input, x.share]), [["answer", 15000, 100000, 0.15], ["review", 15000, 100000, 0.15], ["validation-fix", 15000, 100000, 0.15], ["work", 15000, 100000, 0.15]]);
   // 0.519812 over 30 + 20 + 5 + 11 seconds of passes, billed per use.
-  assert.deepEqual(three.usdPerModelMinute, { api: { usd: 0.519812, modelMinutes: 1.1, passes: 4, usdPerModelMinute: Math.round((0.519812 / (66 / 60)) * 1e6) / 1e6 } });
+  assert.deepEqual(three.usdPerModelMinute, { api: { usd: 0.519812, pricedMinutes: 1.1, pricedPasses: 4, usdPerModelMinute: Math.round((0.519812 / (66 / 60)) * 1e6) / 1e6 } });
   assert.deepEqual(r.breakdowns.version.map((x) => [x.key, x.stages]), [[PENDULUM_VERSION, 2]]);
   // An older record, with no ledger: said, never a guess.
   const w = world();
@@ -398,20 +399,23 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.findings.totals), ["cost", "findings", "outcomes", "reviewStages", "unnamed"]);
   assert.deepEqual(keys(r.scope), ["by", "compare", "defaultPeriod", "issues", "label", "parent", "since", "until"]);
   assert.deepEqual(keys(r.words), ["api", "credits", "sandbox", "subscription", "unknown"]);
-  assert.deepEqual(keys(r.totals), ["asked", "churn", "cost", "objectives", "passes", "perMerged", "stages", "tokens"]);
+  assert.deepEqual(keys(r.totals), ["asked", "churn", "cost", "decisionRecords", "objectives", "passes", "perMerged", "stages", "tokens"]);
   assert.deepEqual(keys(r.totals.perMerged), ["fixPasses", "leftOut", "n", "reviewRounds", "usd", "wallMinutes"]);
   assert.deepEqual(keys(r.totals.perMerged.usd), ["api", "credits", "sandbox", "subscription", "unknown"]);
   assert.deepEqual(keys(r.totals.perMerged.wallMinutes), ["leftOut", "median", "n", "p25", "p75"]);
   assert.deepEqual(keys(r.totals.asked[0]), ["unknownRuns", "usd", "what"]);
-  const cost = [".unknownRuns:number", ".unknownWhy[]", ".usd.api:number", ".usd.credits:number", ".usd.sandbox:number", ".usd.subscription:number", ".usd.unknown:number"];
+  const cost = [".unknownDecisionCalls:number", ".unknownRuns:number", ".unknownUnsplitRuns:number", ".unknownWhy[]", ".usd.api:number", ".usd.credits:number", ".usd.sandbox:number", ".usd.subscription:number", ".usd.unknown:number"];
   assert.deepEqual(shape(r.objectives.find((o) => o.issue === 5).cost).map((s) => s.replace(/\[\]:string$/, "[]")), cost);
-  assert.deepEqual(keys(r.unknown), ["items", "reasons", "runs", "stages"]);
+  assert.deepEqual(keys(r.unknown), ["decisionCalls", "items", "reasons", "runs", "stages", "unsplitRuns"]);
   assert.deepEqual(keys(r.unknown.reasons[0]), ["code", "runs", "stages", "text"]);
-  assert.deepEqual(keys(r.unknown.items[0]), ["issue", "runs", "stage", "why"]);
+  assert.deepEqual(keys(r.unknown.items[0]), ["decisionCalls", "issue", "runs", "stage", "unsplitRuns", "why"]);
   assert.deepEqual(keys(r.breakdowns), ["account", "day", "harness", "model", "pass", "route", "stage", "version"]);
   assert.deepEqual(keys(r.breakdowns.stage[0]), ["cost", "key", "stages", "tokens"]);
-  assert.deepEqual(keys(r.breakdowns.pass[0]), ["cost", "key", "modelMinutes", "passes", "spendLineStages", "tokens"]);
-  assert.deepEqual(keys(r.objectives.find((o) => o.issue === 3)), ["asked", "blockedNotices", "churn", "clockWhy", "cost", "findings", "issue", "merged", "modelMinutes", "outcome", "passes", "route", "running", "stages", "started", "title", "tokens", "unpricedPasses", "url", "usdPerModelMinute", "wallMinutes"]);
+  assert.deepEqual(keys(r.breakdowns.pass[0]), ["cost", "decisionRecords", "key", "modelMinutes", "passes", "spendLineStages", "tokens"]);
+  assert.deepEqual(keys(r.breakdowns.model[0]), ["basis", "cost", "key", "stages", "tokens", "usdPerModelMinute"]);
+  assert.deepEqual(keys(r.objectives.find((o) => o.issue === 3)), ["asked", "blockedNotices", "churn", "clockWhy", "cost", "decisionRecords", "findings", "issue", "legacyStages", "merged", "modelMinutes", "outcome", "passes", "reviewRounds", "route", "running", "stages", "started", "title", "tokens", "unpricedPasses", "url", "usdPerModelMinute", "wallMinutes"]);
+  assert.deepEqual(keys(r.hotSpots.reviewLoops.items[0]), ["issue", "reviewerPasses", "reviews"]);
+  assert.deepEqual(keys(r.hotSpots.costPerModelMinute.items[0]), ["billing", "model", "pricedMinutes", "pricedPasses", "usd", "usdPerModelMinute"]);
   assert.deepEqual(keys(r.hotSpots), ["answerAndFixPasses", "blockedOrUnmergedSpend", "blockedStages", "cacheWriteShare", "costPerModelMinute", "reviewLoops"]);
   assert.ok(Array.isArray(r.hotSpots.blockedStages.unrecorded));
   for (const h of Object.values(r.hotSpots)) assert.ok(typeof h.rankBy === "string" && Array.isArray(h.items));
@@ -424,7 +428,8 @@ test("report: --json keeps its schema: every field the documented shape names, o
   // The documented schema names every top-level field and the version (docs/REPORT.md).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "docs", "REPORT.md"), "utf8");
   assert.ok(doc.includes(REPORT_SCHEMA));
-  for (const k of [...keys(r), ...keys(r.totals), ...keys(r.totals.perMerged), ...keys(r.breakdowns), ...keys(r.objectives[0]), ...keys(r.hotSpots), ...keys(r.source), ...keys(r.findings), ...keys(r.findings.totals), ...r.findings.outcomes]) assert.ok(doc.includes(`\`${k}\``), `docs/REPORT.md names ${k}`);
+  const named = ["decisionRecords", "unknownDecisionCalls", "unknownUnsplitRuns", "unsplitRuns", "decisionCalls", "reviewRounds", "reviewerPasses", "pricedMinutes", "pricedPasses", "usable"];
+  for (const k of [...keys(r), ...keys(r.totals), ...keys(r.totals.perMerged), ...keys(r.breakdowns), ...keys(r.objectives[0]), ...keys(r.hotSpots), ...keys(r.source), ...keys(r.findings), ...keys(r.findings.totals), ...r.findings.outcomes, ...named]) assert.ok(doc.includes(`\`${k}\``), `docs/REPORT.md names ${k}`);
 });
 
 test("report: privacy: no reason, Block text, task card, transcript or credential string reaches it", async () => {
@@ -819,7 +824,9 @@ test("report (#533): an Actions stage with a spend line gets its per-pass ledger
 function copilotLinedWorld() {
   const w = linedWorld();
   w.comments = w.comments.map((c) => (/^<!-- pendulum:3:progress:/.test(c.body || "") ? { ...c, body: c.body.replace(/^<!-- pendulum:harness \{[^\n]*\} -->$/m, harness("copilot", null)).replace("harness claude (claude-opus-5-5) attempt 1", "harness copilot attempt 1") } : c));
-  for (const list of Object.values(w.artifacts)) for (const a of list) a.record = { ...a.record, harness: "copilot", model: "claude-sonnet-5.5" };
+  // Each pass on that model too, as Copilot's records name it.
+  const onSonnet = (rec) => ({ ...rec, harness: "copilot", model: "claude-sonnet-5.5", ...(Array.isArray(rec?.ledger) ? { ledger: rec.ledger.map((e) => ({ ...e, model: "claude-sonnet-5.5" })) } : {}) });
+  for (const list of Object.values(w.artifacts)) for (const a of list) a.record = onSonnet(a.record);
   return w;
 }
 
@@ -914,7 +921,13 @@ test("report (#543): the ledger lines fill the pass breakdown from the comments 
   assert.deepEqual(usd(byIssue(r, 3)), { api: 0.519812, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, "once, from the spend lines");
   // The same figures the usage artifacts give (#533): passes, tokens, model minutes, models, release and dollars.
   const { json: fromArtifacts } = await report(linedWorld(), { issue: 3 });
-  assert.deepEqual(r.breakdowns, fromArtifacts.breakdowns);
+  const noBasis = (b) => ({ ...b, model: b.model.map(({ basis, ...x }) => x) });
+  assert.deepEqual(noBasis(r.breakdowns), noBasis(fromArtifacts.breakdowns));
+  // The ledger lines name each pass's model: the model rows are by pass. A ledger only the usage artifact holds books each
+  // stage whole under its model, as the finish card's path, which reads no artifact, has to (#568).
+  const bases = (x) => x.breakdowns.model.map((m) => [m.key, Object.keys(m.basis).filter((k) => m.basis[k])]);
+  assert.deepEqual(bases(r), [["claude-opus-5-5", ["pass"]], ["claude-fable-5-2", ["pass"]]]);
+  assert.deepEqual(bases(fromArtifacts), [["claude-opus-5-5", ["stage"]], ["claude-fable-5-2", ["stage"]]]);
   assert.deepEqual(r.objectives, fromArtifacts.objectives);
   assert.deepEqual(r.totals, fromArtifacts.totals);
   assert.deepEqual(r.hotSpots, fromArtifacts.hotSpots);
@@ -985,7 +998,7 @@ const reviewed = (extra = []) => ({
   pulls: [],
   artifacts: {},
 });
-const api = (n) => ({ usd: { api: n, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownWhy: [] });
+const api = (n) => ({ usd: { api: n, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownDecisionCalls: 0, unknownUnsplitRuns: 0, unknownWhy: [] });
 
 test("report (#546): each finding counts once, at the outcome its latest record says, against the stage and reviewer model that raised it, beside the review stages' dollars", async () => {
   const { json: r } = await report(reviewed(), { issue: 11 });
@@ -1420,8 +1433,8 @@ test("report (#566 S6): a vendor comment standing alone with no model dollars an
   w.issues.push(objectiveIssue(42, { state: "open", labels: ["pendulum:blocked"] }));
   w.comments.push(comment(42, ["<!-- pendulum:42:vendor:work:9001-abcdef012345 -->", "Pendulum's sandbox cost for this stage:", "- sandbox stopped", spendMarker(0.04, { vendorUsd: 0.04 })].join("\n")));
   const { json: r } = await report(w, { since: "2026-11-17" });
-  assert.deepEqual(byIssue(r, 42).cost, { usd: { api: 0, subscription: 0, credits: 0, unknown: 0, sandbox: 0.04 }, unknownRuns: 1, unknownWhy: ["unreported"] });
-  assert.deepEqual(r.unknown.items, [{ issue: 42, stage: "work", runs: 1, why: ["unreported"] }]);
+  assert.deepEqual(byIssue(r, 42).cost, { usd: { api: 0, subscription: 0, credits: 0, unknown: 0, sandbox: 0.04 }, unknownRuns: 1, unknownDecisionCalls: 0, unknownUnsplitRuns: 1, unknownWhy: ["unreported"] });
+  assert.deepEqual(r.unknown.items, [{ issue: 42, stage: "work", runs: 1, decisionCalls: 0, unsplitRuns: 1, why: ["unreported"] }]);
   const card = objectiveStages({ issue: 42, comments: w.comments, mine: pendulumOwn(APP.id) });
   assert.deepEqual(card.stages.map((s) => [s.usd, s.unknown, s.why]), [[null, 1, ["unreported"]]]);
 });
@@ -1442,7 +1455,7 @@ test("report (#566 S7): an artifact downloaded with no result.json leaves its st
 
 test("report (#566 S9): a stage with a ledger line takes its passes from it on the stage path, as its finish card does, when another stage's usage record is read", async () => {
   // The synthetic seed defect-card-vs-stage-minutes: #3's build has no spend line (its usage record is read, by the card
-  // too), and its review has a spend line and a ledger line (to the second) beside a usage record timed to the millisecond.
+  // too), and its review has a spend line and a ledger line beside a usage record, both timed to the millisecond (#569).
   const make = () => {
     const w = world();
     const review = w.artifacts["pendulum-usage-3-review"][0];
@@ -1454,7 +1467,7 @@ test("report (#566 S9): a stage with a ledger line takes its passes from it on t
   };
   const stages = await report(make(), { issue: 3 });
   assert.ok(stages.calls.includes("DOWNLOAD 302"), "the review stage's record is read, beside the build's");
-  assert.equal(stages.json.breakdowns.pass.find((x) => x.key === "review").modelMinutes, 0.18, "11 s, from the ledger line");
+  assert.equal(stages.json.breakdowns.pass.find((x) => x.key === "review").modelMinutes, 0.19, "11.5 s, from the ledger line");
   const w = make();
   w.comments.push(await finishCard3(w));
   const card = await report(w, { issue: 3 });
@@ -1482,7 +1495,7 @@ test("report (#566 R8, R9): each missing entry gives its Objectives and the stag
   const stagesWithUnknown = r.unknown.items.length - 1;
   assert.equal(r.unknown.stages, stagesWithUnknown);
   assert.equal(r.unknown.reasons.reduce((t, x) => t + x.stages, 0), r.unknown.items.length + 1, "a stage with two reasons is under each");
-  assert.match(md, new RegExp(`^- Runs of unknown cost: ${runs} in ${stagesWithUnknown} stage\\(s\\) and 1 record\\(s\\) outside a stage \\(decision calls, or a vendor comment with no stage\\)\\. By reason \\(a stage that names two is under each\\): `, "m"));
+  assert.match(md, new RegExp(`^- Runs of unknown cost: ${runs} \\(${r.unknown.unsplitRuns} not known to be passes or decision calls\\) in ${stagesWithUnknown} stage\\(s\\) and 1 record\\(s\\) outside a stage \\(decision calls, or a vendor comment with no stage\\)\\. By reason \\(a stage that names two is under each\\): `, "m"));
   assert.match(md, new RegExp(`^\\*\\*Answer and fix passes\\*\\*: [^\\n]*; not recorded \\(a stage with no per-pass ledger\\): ${r.hotSpots.answerAndFixPasses.unrecorded.map((n) => `#${n}`).join(", ")}$`, "m"));
   assert.match(md, /^- Missing: stages with no per-pass ledger[^\n]* \(3 Objective\(s\), 7 stage\(s\): #5, #7, #8\)$/m);
 });
@@ -1508,6 +1521,228 @@ test("report (#566): one name per model: a Claude model's Copilot catalog id is 
   stage(63, "codex", "gpt-6.1-sol", 0.4);
   const { json: r } = await report(w, { since: "2026-11-17" });
   assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [["claude-sonnet-5-5", 2, 0.3], ["gpt-6.1-sol", 2, 0.7]]);
+});
+
+// ------------------------------------------------------------------ #568: model dollars by the model each pass ran on
+
+/**
+ * #3 with spend and ledger lines (ledgeredWorld) whose review stage, as on assetgrove #404, ran its answer and fix passes
+ * on the worker's model after its review pass on the reviewer's: its usage record written by the real writer, its lines
+ * by the real stage end (logic.mjs stageSpendLine).
+ */
+function answeredWorld() {
+  const w = world();
+  const dir = mkdtempSync(join(tmpdir(), "usage-review-"));
+  const pass = (label, model, usd, started, ended) => ({ harness: "claude", model, label, effort: null, usd, tokens: { input: 100_000, output: 4_000, cached: 80_000, written: 15_000 }, started, ended, resumed: false, ok: true, billing: "api", basis: "harness-reported: total_cost_usd, modelUsage (sub-agents included)" });
+  writeUsage(dir, {
+    harness: "claude",
+    model: "claude-fable-5-2",
+    records: [pass("review", "claude-fable-5-2", 0.163442, "2026-11-17T02:26:27Z", "2026-11-17T02:26:38Z"), pass("answer", "claude-opus-5-5", 0.05, "2026-11-17T02:26:40Z", "2026-11-17T02:26:50Z"), pass("review-validation-fix-1", "claude-opus-5-5", 0.03, "2026-11-17T02:26:52Z", "2026-11-17T02:27:00Z")],
+    passes: 1,
+    exit: "delivered",
+    reason: "",
+    credentialBasis: "ANTHROPIC_API_KEY",
+    billing: "api",
+    progressRun: "44002920873",
+    ran: { worker: "claude-opus-5-5", subagent: "claude-sonnet-5-5", reviewer: "claude-fable-5-2", labels: [], hosts: [], effort: "medium", reviewerEffort: null },
+  });
+  w.recs.review = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
+  w.artifacts["pendulum-usage-3-review"][0].record = w.recs.review;
+  const recs = [w.recs.work, w.recs.review];
+  w.comments = w.comments.map((c) => {
+    const key = /^<!-- pendulum:3:progress:(?:work|review):(\d+) -->/.exec(c.body || "")?.[1];
+    const rec = c.user === BOT ? recs.find((x) => x.progressRun === key) : null;
+    if (!rec) return c;
+    const line = stageSpendLine(rec);
+    return { ...c, body: `${c.body}\n${spendMarker(line.usd, line.parts)}\n${line.ledger}` };
+  });
+  return w;
+}
+const modelRows = (r) => r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api, x.basis.pass?.cost.usd.api ?? null, x.basis.stage?.cost.usd.api ?? null]);
+
+test("report (#568): a review stage's answer and fix passes are booked under the worker's model they ran on, its review pass under the reviewer's; the totals are unchanged", async () => {
+  const { json: r, calls } = await report(answeredWorld(), { issue: 3 });
+  assert.deepEqual(artifactCalls(calls), [], "from the ledger lines alone");
+  // The review stage's $0.243442: $0.163442 under Fable (its review pass), $0.08 under Opus (its answer and fix passes).
+  // Each stage counts once, under its own model; every dollar here is booked by pass.
+  assert.deepEqual(modelRows(r), [
+    ["claude-opus-5-5", 1, 0.43637, 0.43637, null],
+    ["claude-fable-5-2", 1, 0.163442, 0.163442, null],
+  ]);
+  assert.deepEqual(usd(r.totals), { api: 0.599812, subscription: 0, credits: 0, unknown: 0, sandbox: 0 });
+  assert.equal(r.breakdowns.model.reduce((t, x) => t + x.stages, 0), r.totals.stages);
+  assert.deepEqual(r.breakdowns.model.map((x) => x.tokens.input), [500_000, 100_000]);
+  // The review stage's own figures and its findings rows stay the stage's: one stage on Fable.
+  assert.deepEqual(r.breakdowns.stage.find((x) => x.key === "review").cost.usd.api, 0.243442);
+  // The Markdown says each row's basis.
+  assert.match(renderReport(r), /^\| claude-fable-5-2 \| pass \| 1 \| \$0\.16 \|/m);
+  assert.match(renderReport(r), /^\| claude-opus-5-5 \| pass \| 1 \| \$0\.44 \|/m);
+});
+
+test("report (#568): the finish card's path books each pass under its model from the stage's ledger line, the same figures as the stage path", async () => {
+  const w = answeredWorld();
+  w.comments.push(await finishCard3(w));
+  const card = await report(w, { issue: 3 });
+  assert.equal(card.json.source.read.summaries, 1);
+  const stages = await report(w, { issue: 3, by: "account" });
+  assert.equal(stages.json.source.read.summaries, 0);
+  const noAccount = (f) => ({ ...f, breakdowns: { ...f.breakdowns, account: undefined } });
+  assert.deepEqual(noAccount(figures(card.json)), noAccount(figures(stages.json)));
+  assert.deepEqual(modelRows(card.json), [
+    ["claude-opus-5-5", 1, 0.43637, 0.43637, null],
+    ["claude-fable-5-2", 1, 0.163442, 0.163442, null],
+  ]);
+});
+
+/**
+ * A local Claude stage of Objective `n` (worker Opus, sub-agents on Sonnet) whose passes' results report Claude Code's
+ * per-model usage (`modelUsage`, read by the real parser): its usage record, and its progress comment with the spend and
+ * ledger lines the stage's end writes from it.
+ */
+function subAgentStage(n, { opusUsd = 0.5, sonnetUsd = 0.2, opusName = "claude-opus-5-5", sonnetName = "claude-sonnet-5-5" } = {}) {
+  const result = (opus, sonnet) => JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "s1", num_turns: 3, total_cost_usd: Math.round((opus + sonnet) * 1e6) / 1e6, modelUsage: { [opusName]: { inputTokens: 1000, outputTokens: 500, cacheReadInputTokens: 4000, cacheCreationInputTokens: 2000, costUSD: opus }, [sonnetName]: { inputTokens: 300, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 700, costUSD: sonnet } } });
+  const pass = (label, opus, sonnet, started, ended) => ({ ...parseClaude(result(opus, sonnet), "claude-opus-5-5"), label, effort: "medium", started, ended, billing: "subscription" });
+  const dir = mkdtempSync(join(tmpdir(), "usage-local-"));
+  writeUsage(dir, {
+    harness: "claude",
+    model: "claude-opus-5-5",
+    records: [pass("work-1", opusUsd, sonnetUsd, "2026-11-17T03:00:00Z", "2026-11-17T03:05:00Z"), pass("validation-fix-1", 0.1, 0, "2026-11-17T03:06:00Z", "2026-11-17T03:07:00Z")],
+    passes: 1,
+    exit: "delivered",
+    reason: "",
+    credentialBasis: "subscription",
+    billing: "subscription",
+    progressRun: `local-${n}`,
+    ran: { worker: "claude-opus-5-5", subagent: "claude-sonnet-5-5", reviewer: "claude-fable-5-2", labels: [], hosts: [], effort: "medium", reviewerEffort: null },
+  });
+  const rec = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
+  const line = stageSpendLine(rec);
+  const body = [`<!-- pendulum:${n}:progress:work:local-${n} -->`, "Pendulum work: started.", harnessMarker("claude", "claude-opus-5-5", { worker: "claude-opus-5-5", subagent: "claude-sonnet-5-5", reviewer: "claude-fable-5-2", labels: [] }), spendMarker(line.usd, line.parts), line.ledger].join("\n");
+  return { rec, comment: comment(n, body, { user: ME }) };
+}
+
+async function localReport(w, clone) {
+  const fake = fakeGitHub(w);
+  // Built while the token's login is known, as the command builds it: the local stage is the reader's own.
+  const r = await over(fake, async () => buildReport(await readReport(REPO, reportScope({ since: "2026-11-17" }, NOW), { token: "t", appId: APP.id, checkout: clone, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }), { now: new Date(NOW).toISOString() }));
+  return { r, calls: fake.calls };
+}
+
+test("report (#568): Claude Code's per-model usage in local mode's own record gives the sub-agents' model its own row; with no record, the stage's passes are under the model each ran on", async () => {
+  const w = blank();
+  w.issues.push(objectiveIssue(40));
+  const { rec, comment: c } = subAgentStage(40);
+  w.comments.push(c);
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  mkdirSync(join(clone, ".pendulum", "40", "usage-work-1"), { recursive: true });
+  writeFileSync(join(clone, ".pendulum", "40", "usage-work-1", "result.json"), JSON.stringify(rec));
+  const sub = (r) => r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.subscription, x.tokens.input, Object.keys(x.basis).filter((k) => x.basis[k])]);
+  // In the clone: $0.6 under Opus and $0.2 under Sonnet, its sub-agents, as Claude Code reported them; the stage on Opus.
+  const { r, calls } = await localReport(w, clone);
+  assert.deepEqual(artifactCalls(calls), []);
+  assert.deepEqual(sub(r), [
+    ["claude-opus-5-5", 1, 0.6, 14_000, ["pass"]],
+    ["claude-sonnet-5-5", 0, 0.2, 2_000, ["pass"]],
+  ]);
+  assert.deepEqual(usd(r.totals), { api: 0, subscription: 0.8, credits: 0, unknown: 0, sandbox: 0 });
+  assert.deepEqual(r.totals.tokens, { input: 16_000, output: 1_400, cached: 8_000, written: 5_400 });
+  // Elsewhere, from the comment alone: no harness report of per-model usage, so no Sonnet row; each pass under its model.
+  const { r: away } = await localReport(w, mkdtempSync(join(tmpdir(), "elsewhere-")));
+  assert.deepEqual(sub(away), [["claude-opus-5-5", 1, 0.8, 16_000, ["pass"]]]);
+  // A record whose per-model dollars do not add up to its passes' gives no split by it: never a guess.
+  const off = { ...rec, models: { ...rec.models, "claude-sonnet-5-5": { ...rec.models["claude-sonnet-5-5"], usd: 0.25 } } };
+  writeFileSync(join(clone, ".pendulum", "40", "usage-work-1", "result.json"), JSON.stringify(off));
+  assert.deepEqual(sub((await localReport(w, clone)).r), [["claude-opus-5-5", 1, 0.8, 16_000, ["pass"]]]);
+});
+
+test("report (#568): what no pass names stays under the stage's model by stage, and a stage whose passes do not fit inside its figures is booked whole", async () => {
+  const { modelParts } = await import("../scripts/lib/report.mjs");
+  const prices = loadPrices();
+  const entry = (model, usd, extra = {}) => ({ label: "answer", model, started: null, ended: null, usd, usdUnknown: 0, usdUnknownWhy: [], billing: "api", usdByBilling: { api: usd }, tokens: { input: 10, output: 1, cached: null, written: null }, ...extra });
+  const cost = (n, extra = {}) => ({ ...api(n), ...extra });
+  const tokens = { input: 30, output: 3, cached: null, written: null };
+  const parts = (ledger, c = cost(0.3), t = tokens) => modelParts({ model: "claude-fable-5-2", cost: c, tokens: t, stages: 1, ledger, prices }).map((x) => [x.key, x.basis, x.stages, x.cost.usd.api, x.cost.usd.sandbox, x.cost.unknownRuns, x.tokens.input]);
+  // A pass the ledger names no model of, and the sandbox vendor's cost: under the stage's model, by stage.
+  assert.deepEqual(parts([entry("claude-fable-5-2", 0.1), entry("claude-opus-5-5", 0.1), entry(null, 0.1)], { ...cost(0.3), usd: { ...cost(0.3).usd, sandbox: 0.04 } }), [
+    ["claude-fable-5-2", "pass", 1, 0.1, 0, 0, 10],
+    ["claude-opus-5-5", "pass", 0, 0.1, 0, 0, 10],
+    ["claude-fable-5-2", "stage", 0, 0.1, 0.04, 0, 10],
+  ]);
+  // A pass of unknown cost is its model's run.
+  assert.deepEqual(parts([entry("claude-fable-5-2", 0.3), entry("claude-opus-5-5", null, { usdUnknown: 1, usdUnknownWhy: ["unreported"] })], cost(0.3, { unknownRuns: 1, unknownWhy: ["unreported"] })), [
+    ["claude-fable-5-2", "pass", 1, 0.3, 0, 0, 10],
+    ["claude-opus-5-5", "pass", 0, 0, 0, 1, 10],
+    ["claude-fable-5-2", "stage", 0, 0, 0, 0, 10],
+  ]);
+  // Passes over the stage's dollars, its runs of unknown cost or its tokens: the stage is booked whole, by stage.
+  const whole = [["claude-fable-5-2", "stage", 1, 0.3, 0, 0, 30]];
+  assert.deepEqual(parts([entry("claude-fable-5-2", 0.2), entry("claude-opus-5-5", 0.2)]), whole);
+  assert.deepEqual(parts([entry("claude-opus-5-5", 0.3, { usdUnknown: 1 })]), whole);
+  assert.deepEqual(parts([entry("claude-opus-5-5", 0.3, { tokens: { input: 31, output: 1, cached: null, written: null } })]), whole);
+  // With no ledger, or one that names no model: whole.
+  assert.deepEqual(parts(null), whole);
+  assert.deepEqual(parts([entry(null, 0.3)]), whole);
+  // Booked exactly, in millionths: a millionth the passes fall short of is left under the stage's model, by stage; one
+  // they pass it by (each pass's dollars rounded on its own) comes off the own model's part; none is lost or added.
+  const two = { input: 20, output: 2, cached: null, written: null };
+  assert.deepEqual(parts([entry("claude-opus-5-5", 0.1), entry("claude-opus-5-5", 0.2)], cost(0.300001), two), [
+    ["claude-fable-5-2", "pass", 1, 0, 0, 0, null],
+    ["claude-opus-5-5", "pass", 0, 0.3, 0, 0, 20],
+    ["claude-fable-5-2", "stage", 0, 0.000001, 0, 0, 0],
+  ]);
+  assert.deepEqual(parts([entry("claude-fable-5-2", 0.1000006), entry("claude-opus-5-5", 0.2000006)], cost(0.300001), two), [
+    ["claude-fable-5-2", "pass", 1, 0.1, 0, 0, 10],
+    ["claude-opus-5-5", "pass", 0, 0.200001, 0, 0, 10],
+  ]);
+  // An own-model part at $0 has nothing to give: the stage is booked whole.
+  assert.deepEqual(parts([entry("claude-opus-5-5", 0.1000006), entry("claude-opus-5-5", 0.2000006)], cost(0.300001), two), [["claude-fable-5-2", "stage", 1, 0.300001, 0, 0, 20]]);
+  // The left runs of unknown cost name the stage's reasons no pass names.
+  const why = modelParts({ model: "claude-fable-5-2", cost: cost(0.3, { unknownRuns: 2, unknownWhy: ["sandbox", "unreported"] }), tokens, stages: 1, ledger: [entry("claude-fable-5-2", 0.3), entry("claude-opus-5-5", null, { usdUnknown: 1, usdUnknownWhy: ["unreported"] })], prices });
+  assert.deepEqual(why.map((x) => [x.key, x.basis, x.cost.unknownRuns, x.cost.unknownWhy]), [
+    ["claude-fable-5-2", "pass", 0, []],
+    ["claude-opus-5-5", "pass", 1, ["unreported"]],
+    ["claude-fable-5-2", "stage", 1, ["sandbox"]],
+  ]);
+  // A reason a named pass shares with one no part took stays on the left runs: three runs, `sandbox` and `unreported`,
+  // an unreported pass on Opus, an unreported pass with no model and the sandbox's run.
+  const shared = modelParts({ model: "claude-fable-5-2", cost: cost(0.3, { unknownRuns: 3, unknownWhy: ["sandbox", "unreported"] }), tokens, stages: 1, ledger: [entry("claude-fable-5-2", 0.3), entry("claude-opus-5-5", null, { usdUnknown: 1, usdUnknownWhy: ["unreported"] }), entry(null, null, { usdUnknown: 1, usdUnknownWhy: ["unreported"] })], prices });
+  assert.deepEqual(shared.map((x) => [x.key, x.basis, x.cost.unknownRuns, x.cost.unknownWhy]), [
+    ["claude-fable-5-2", "pass", 0, []],
+    ["claude-opus-5-5", "pass", 1, ["unreported"]],
+    ["claude-fable-5-2", "stage", 2, ["sandbox", "unreported"]],
+  ]);
+  // Claude Code's per-model usage holds the stage's harness passes alone, never its decision calls: it is checked against
+  // them, and the decision record keeps its own booking (a model the ledger does not name: under the stage's, by stage).
+  const OPUS = "claude-opus-5-5";
+  const SONNET = "claude-sonnet-5-5";
+  const t = (input, output) => ({ input, output, cached: null, written: null });
+  const withDecision = modelParts({
+    model: OPUS,
+    recorded: OPUS,
+    cost: cost(1.01),
+    tokens: t(30, 3),
+    stages: 1,
+    ledger: [entry(OPUS, 0.7, { label: "work-1" }), entry(null, 0.01, { label: "decision", decision: true, calls: 2 }), entry(OPUS, 0.3, { label: "work-2" })],
+    published: [OPUS, SONNET, "claude-fable-5-2"],
+    usage: { models: { [OPUS]: { input: 15, cached: null, written: null, output: 1, usd: 0.9 }, [SONNET]: { input: 5, cached: null, written: null, output: 1, usd: 0.1 } } },
+    harness: "claude",
+    prices,
+  });
+  assert.deepEqual(withDecision.map((x) => [x.key, x.basis, x.stages, x.cost.usd.api, x.tokens.input]), [
+    [OPUS, "pass", 1, 0.9, 15],
+    [SONNET, "pass", 0, 0.1, 5],
+    [OPUS, "stage", 0, 0.01, 10],
+  ]);
+  assert.equal(Math.round(withDecision.reduce((n, x) => n + x.cost.usd.api, 0) * 1e6), 1_010_000, "the stage's dollars, exactly");
+  // From local mode's own record, a pass's model counts only where the stage publishes it, as its ledger line would: a
+  // Bedrock inference profile ARN (it names an AWS account) is no row; its pass stays under the stage's model.
+  const ARN = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";
+  const local = modelParts({ model: "claude-fable-5-2", recorded: "claude-fable-5-2", cost: cost(0.3), tokens, stages: 1, ledger: [entry("claude-fable-5-2", 0.1), entry("claude-opus-5-5", 0.1), entry(ARN, 0.1)], local: true, published: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2"], prices });
+  assert.deepEqual(local.map((x) => [x.key, x.basis, x.cost.usd.api]), [
+    ["claude-fable-5-2", "pass", 0.1],
+    ["claude-opus-5-5", "pass", 0.1],
+    ["claude-fable-5-2", "stage", 0.1],
+  ]);
 });
 
 // ------------------------------------------------------------------ #563: whole threads in a period; planned == made
@@ -1631,6 +1866,156 @@ test("report (#563): a full first page with no Link header ends the read, and so
   // With GitHub's Link headers, no note.
   const { json: linked } = await report({ ...w, noLink: false }, { since: "2026-11-17" });
   assert.ok(!linked.source.missing.some((m) => m.code === "no-link"));
+});
+
+/** Each cost kind summed over a breakdown's rows, to a millionth: what the totals must equal exactly. */
+const rowSums = (rows) => Object.fromEntries(["api", "subscription", "credits", "unknown", "sandbox"].map((k) => [k, Math.round(rows.reduce((t, x) => t + x.cost.usd[k], 0) * 1e6) / 1e6]));
+
+test("report (#568): the model rows add up to the totals exactly, by pass and by Claude Code's per-model usage, each model's dollars rounded on its own", async () => {
+  // The pass path: #3's review stage split between Fable and Opus.
+  const { json: passes } = await report(answeredWorld(), { issue: 3 });
+  assert.deepEqual(rowSums(passes.breakdowns.model), usd(passes.totals));
+  // Claude Code's per-model usage at a tenth of a millionth: Opus $0.1000006 and Sonnet $0.2000006 in a pass the harness
+  // reports at $0.300001. Each model's dollars to a millionth are $0.100001 and $0.200001, a millionth over the stage's:
+  // it comes off the stage's own model, and the rows add up to the stage's dollars.
+  const w = blank();
+  w.issues.push(objectiveIssue(41));
+  const { rec, comment: c } = subAgentStage(41, { opusUsd: 0.1000006, sonnetUsd: 0.2000006 });
+  w.comments.push(c);
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  mkdirSync(join(clone, ".pendulum", "41", "usage-work-1"), { recursive: true });
+  writeFileSync(join(clone, ".pendulum", "41", "usage-work-1", "result.json"), JSON.stringify(rec));
+  const { r } = await localReport(w, clone);
+  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.cost.usd.subscription]), [["claude-opus-5-5", 0.2], ["claude-sonnet-5-5", 0.200001]]);
+  assert.deepEqual(usd(r.totals), { api: 0, subscription: 0.400001, credits: 0, unknown: 0, sandbox: 0 });
+  assert.deepEqual(rowSums(r.breakdowns.model), usd(r.totals));
+});
+
+test("report (#568): Claude Code's per-model usage counts only where every model is one the stage publishes: an ARN or an alias gives no row of its own", async () => {
+  const ARN = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";
+  for (const [name, names] of [["a Bedrock inference profile ARN", { sonnetName: ARN }], ["an alias", { opusName: "opus" }]]) {
+    const w = blank();
+    w.issues.push(objectiveIssue(42));
+    const { rec, comment: c } = subAgentStage(42, names);
+    w.comments.push(c);
+    const clone = mkdtempSync(join(tmpdir(), "clone-"));
+    mkdirSync(join(clone, ".pendulum", "42", "usage-work-1"), { recursive: true });
+    writeFileSync(join(clone, ".pendulum", "42", "usage-work-1", "result.json"), JSON.stringify(rec));
+    const { r } = await localReport(w, clone);
+    // By its passes instead, from its ledger line: all on Opus.
+    assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.subscription]), [["claude-opus-5-5", 1, 0.8]], name);
+    assert.ok(!JSON.stringify(r).includes("arn:") && !JSON.stringify(r).includes('"opus"'), `${name}: never in the report`);
+    assert.ok(!renderReport(r).includes("arn:"), name);
+  }
+});
+
+test("report (#568): the finish card's path books a Claude stage by Claude Code's per-model usage in the clone, as the stage path does", async () => {
+  // #3's work stage on Opus with Sonnet sub-agents, its local record in the clone: $0.30637 on Opus, $0.05 on Sonnet.
+  const w = answeredWorld();
+  const work = { ...w.recs.work, models: { "claude-opus-5-5": { input: 10_000, cached: 200_000, written: 40_000, output: 10_000, usd: 0.30637 }, "claude-sonnet-5-5": { input: 5_000, cached: 40_000, written: 5_000, output: 2_000, usd: 0.05 } } };
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  mkdirSync(join(clone, ".pendulum", "3", "usage-work-1"), { recursive: true });
+  writeFileSync(join(clone, ".pendulum", "3", "usage-work-1", "result.json"), JSON.stringify(work));
+  w.comments.push(await finishCard3(w));
+  // Read in the clone, as the command reads there, from the card and (`--by account`) from the stages.
+  const inClone = async (by) => {
+    const fake = fakeGitHub(w);
+    return over(fake, async () => buildReport(await readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", appId: APP.id, checkout: clone, by, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }), { by, now: new Date(NOW).toISOString() }));
+  };
+  const card = { json: await inClone([]) };
+  const stages = { json: await inClone(["account"]) };
+  assert.deepEqual([card.json.source.read.summaries, stages.json.source.read.summaries], [1, 0]);
+  const noAccount = (f) => ({ ...f, breakdowns: { ...f.breakdowns, account: undefined } });
+  assert.deepEqual(noAccount(figures(card.json)), noAccount(figures(stages.json)));
+  assert.deepEqual(modelRows(card.json), [
+    ["claude-opus-5-5", 1, 0.38637, 0.38637, null],
+    ["claude-sonnet-5-5", 0, 0.05, 0.05, null],
+    ["claude-fable-5-2", 1, 0.163442, 0.163442, null],
+  ]);
+  assert.deepEqual(rowSums(card.json.breakdowns.model), usd(card.json.totals));
+});
+
+/**
+ * A stage's progress comment as written before the rename to Pendulum (#567): the same head with the previous name, its
+ * own spend line under that name too. `head` overrides the marker line.
+ */
+const before = (n, stage, key, { usd = 999, head = null, ...rest } = {}) =>
+  comment(n, [head ?? `<!-- ${PREVIOUS_NAME}:${n}:progress:${stage}:${key} -->`, `${stage}: started.`, `<!-- ${PREVIOUS_NAME}:spend ${JSON.stringify({ usd })} -->`].join("\n"), rest);
+
+test("report (#567): stages recorded before the rename to Pendulum are named, never read: legacy-records lists them, the report is partial, and an Objective with both is marked", async () => {
+  const { json: plain } = await report(world(), { since: "2026-11-17" });
+  assert.equal(plain.source.complete, true);
+  assert.ok(!plain.source.missing.some((m) => m.code === "legacy-records"));
+  assert.ok(plain.objectives.every((o) => o.legacyStages === 0));
+  const w = world();
+  w.comments.push(
+    // #7 straddles the rename: a build under the previous marker by the App, in the period, beside its Pendulum stages.
+    before(7, "work", "40001", { at: "2026-11-17T03:30:00Z" }),
+    // #20: only stages from before the rename, by the local login (a work and a review stage) and by a member.
+    before(20, "work", "local-a1", { user: ME, at: "2026-11-17T02:00:00Z" }),
+    before(20, "review", "local-a2", { user: ME, at: "2026-11-17T02:30:00Z" }),
+    before(20, "work", "local-a3", { user: { login: "teammate", type: "User" }, association: "MEMBER", at: "2026-11-17T02:40:00Z" }),
+    // #26: through another GitHub App (the stage of unknown cost a Pendulum marker there would be): counts.
+    before(26, "work", "1", { user: { login: "otherapp[bot]", type: "Bot" }, association: "NONE", app: { id: 99, slug: "otherapp" }, at: "2026-11-17T02:00:00Z" }),
+    // None of these: a stranger's paste, one before the period, one on another issue than its marker names, and heads
+    // that are not the progress marker's exact grammar.
+    before(21, "work", "1", { user: { login: "stranger", type: "User" }, association: "NONE", at: "2026-11-17T02:00:00Z" }),
+    before(27, "work", "1", { user: { login: "github-actions[bot]", type: "Bot" }, association: "NONE", app: { id: 15368, slug: "github-actions" }, at: "2026-11-17T02:00:00Z" }),
+    before(22, "work", "1", { at: "2026-11-16T23:00:00Z", updated: "2026-11-17T01:00:00Z" }),
+    before(23, "work", "1", { head: `<!-- ${PREVIOUS_NAME}:24:progress:work:1 -->` }),
+    before(25, "work", "1", { head: `<!-- ${PREVIOUS_NAME}:25:progress:build:1 -->` }),
+    before(25, "work", "1", { head: `<!-- ${PREVIOUS_NAME}:25:progress:work -->` }),
+    before(25, "work", "1", { head: `x <!-- ${PREVIOUS_NAME}:25:progress:work:1 -->` }),
+    before(25, "work", "1", { head: `<!-- ${PREVIOUS_NAME}:25:progress:work:1 --> x` }),
+  );
+  const { code, json: r, err } = await report(w, { since: "2026-11-17" });
+  // Not a budget stop: exit 0, but not complete.
+  assert.equal(code, 0);
+  assert.equal(r.source.complete, false);
+  assert.equal(r.source.stoppedAt, null);
+  const entry = r.source.missing.find((m) => m.code === "legacy-records");
+  assert.deepEqual([entry?.issues, entry?.count, entry?.counts], [[7, 20, 26], 3, { objectives: 3, stages: 5 }], JSON.stringify(r.source.missing));
+  assert.match(err, /stages recorded before the rename to Pendulum/);
+  // No figure of theirs is read: every figure is the same as without them, and #20 has no row.
+  // Per merged Objective (#570), #7's figures are a lower bound: left out of every measure, `legacy-records`.
+  const figures = (x) => ({ totals: { ...x.totals, perMerged: undefined }, unknown: x.unknown, breakdowns: x.breakdowns, findings: x.findings, hotSpots: x.hotSpots, rows: x.objectives.map(({ legacyStages, ...o }) => o) });
+  assert.deepEqual(figures(r), figures(plain));
+  assert.deepEqual(r.totals.perMerged.leftOut.find((x) => x.issue === 7), { issue: 7, why: ["legacy-records"] });
+  assert.deepEqual([r.totals.perMerged.n, r.totals.perMerged.reviewRounds.n, plain.totals.perMerged.reviewRounds.n], [2, 1, 2]);
+  assert.equal(byIssue(r, 7).legacyStages, 1);
+  assert.equal(byIssue(r, 20), undefined);
+  assert.ok(r.objectives.filter((o) => o.issue !== 7).every((o) => o.legacyStages === 0));
+  const md = renderReport(r);
+  assert.match(md, /^\*\*Partial:\*\* stages recorded before the rename to Pendulum[^\n]* \(#7, #20, #26\)\.$/m);
+  assert.match(md, /^- Partial, stages recorded before the rename to Pendulum not read: #7 \(1 stage\(s\)\)\.$/m);
+  // A set reads only its own: --issue 7 names #7 alone; a period that ends before them names none.
+  const { code: one, json: seven } = await report(w, { issue: 7 });
+  assert.equal(one, 0);
+  assert.deepEqual([seven.source.complete, seven.source.missing.find((m) => m.code === "legacy-records")?.issues, byIssue(seven, 7).legacyStages], [false, [7], 1]);
+  const { json: early } = await report(w, { since: "2026-11-17", until: "2026-11-17T01:30:00Z" });
+  assert.equal(early.source.complete, true);
+  // A budget stop still exits STOPPED_EXIT, with both codes and both lines on stderr.
+  const { code: stopped, json: cut, err: why } = await report(w, { since: "2026-11-17", "max-calls": 2 });
+  assert.equal(stopped, STOPPED_EXIT);
+  assert.equal(cut.source.complete, false);
+  assert.deepEqual(cut.source.missing.filter((m) => ["stopped", "legacy-records"].includes(m.code)).map((m) => m.code), ["stopped", "legacy-records"]);
+  assert.match(why, /^pendulum report: the reads stopped at --max-calls 2 /m);
+  assert.match(why, /^pendulum report: stages recorded before the rename to Pendulum/m);
+});
+
+test("report (#568, #567): an Objective that straddles the rename books its read stages by pass model, its model rows adding up to its totals", async () => {
+  const w = answeredWorld();
+  w.comments.push(before(3, "work", "40002", { at: "2026-11-17T02:20:00Z" }));
+  const { json: r } = await report(w, { issue: 3 });
+  const { json: plain } = await report(answeredWorld(), { issue: 3 });
+  assert.equal(byIssue(r, 3).legacyStages, 1);
+  assert.deepEqual(r.breakdowns.model, plain.breakdowns.model, "the stage from before the rename is in no row");
+  assert.deepEqual(modelRows(r), [
+    ["claude-opus-5-5", 1, 0.43637, 0.43637, null],
+    ["claude-fable-5-2", 1, 0.163442, 0.163442, null],
+  ]);
+  assert.deepEqual(rowSums(r.breakdowns.model), usd(r.totals));
+  assert.deepEqual(rowSums(r.breakdowns.model), usd(byIssue(r, 3)));
 });
 
 // ------------------------------------------------------------------ #570: the owner's first questions
@@ -1828,7 +2213,7 @@ test("report (#570): the route a stage ran on is recorded in its usage record an
 
 test("report (#570 V8): the stages whose spend line records they ended Blocked, with their cost; a stage whose records do not say is named", async () => {
   const blocked = await report(churnedWorld(), { issue: 3 });
-  assert.deepEqual(blocked.json.hotSpots.blockedStages, { rankBy: "stages", items: [{ issue: 3, stages: 1, keys: [{ stage: "work", key: "44002648279" }], cost: { usd: { api: 0.35637, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownWhy: [] } }], unrecorded: [] });
+  assert.deepEqual(blocked.json.hotSpots.blockedStages, { rankBy: "stages", items: [{ issue: 3, stages: 1, keys: [{ stage: "work", key: "44002648279" }], cost: { usd: { api: 0.35637, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownDecisionCalls: 0, unknownUnsplitRuns: 0, unknownWhy: [] } }], unrecorded: [] });
   // The same from its finish card.
   const w = churnedWorld();
   w.comments.push(await finishCard3(w));

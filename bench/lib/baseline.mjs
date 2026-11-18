@@ -44,7 +44,9 @@ export function selectRows(rows, { repo = null, last = null, since = null } = {}
 
 export function baselineOf(rows, opts = {}) {
   const picked = selectRows(rows, opts);
-  const line = { label: opts.label ?? null, repo: opts.repo ?? null, rows: picked.length, issues: picked.map((r) => r.issue), from: picked.at(-1)?.mergedAt ?? null, to: picked[0]?.mergedAt ?? null, walkAway: picked.length ? Math.round((100 * picked.filter((r) => r.walkAway?.value).length) / picked.length) : null, walkAwayAskedOnly: picked.length && picked.every((r) => r.walkAway?.askedOnly) ? Math.round((100 * picked.filter((r) => r.walkAway.askedOnly.value).length) / picked.length) : null, measures: {} };
+  // A row labelled before the rename to Pendulum (walkAway.bucket `unknown`) is in no walk-away rate.
+  const known = picked.filter((r) => r.walkAway?.bucket !== "unknown");
+  const line = { label: opts.label ?? null, repo: opts.repo ?? null, rows: picked.length, issues: picked.map((r) => r.issue), from: picked.at(-1)?.mergedAt ?? null, to: picked[0]?.mergedAt ?? null, walkAway: known.length ? Math.round((100 * known.filter((r) => r.walkAway?.value).length) / known.length) : null, walkAwayAskedOnly: known.length && known.every((r) => r.walkAway?.askedOnly) ? Math.round((100 * known.filter((r) => r.walkAway.askedOnly.value).length) / known.length) : null, measures: {} };
   for (const [key, pick, , digits] of MEASURES) {
     const rows = DOLLARS.has(key) ? picked.filter((r) => !unknownCost(r)) : picked;
     line.measures[key] = spread(rows.map(pick), digits, picked.length - rows.length);

@@ -28,7 +28,7 @@ import { ACCOUNT, accountUse, costOf, decisionSpendRecords, stageHarnessOf, stag
 import { BLOCK_CAUSES, blockCauseOf, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
 import { billingText, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
-import { labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
+import { clockRenamed, labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
 
 export const ROW_VERSION = 1;
 
@@ -799,6 +799,11 @@ export function runnerMinutes(collected) {
  * of extra machine logins), label (the Objective label), app (Pendulum's App
  * login, else read from the timeline: lib/phases.mjs pendulumLogin).
  */
+/** Why a row labelled before the rename to Pendulum has no walk-away, operator minutes, waiting or wall clock (#567). */
+export const RENAMED_WHY = "not known: labelled before the rename to Pendulum, so the clock's start, and any input, Block, Question or stall before the later label, are not read";
+/** The note on a renamed row's miss: what was seen after the later label stands, from a window that starts late. */
+export const RENAMED_NOTE = "the window starts late: labelled before the rename to Pendulum";
+
 export function scoreObjective(collected, opts = {}) {
   const { prices, minutes: given, ownerMinutes = undefined, handover = HANDOVER_DEFAULT, baseline = null, bots = new Set(), label = OBJECTIVE_LABEL, clockAfter = null, checks = [], app = null, stallMinutes = STALL_MINUTES } = opts;
   if (!HANDOVER_SCORING.includes(handover)) throw new Error(`handover: ${handover} is not one of ${HANDOVER_SCORING.join(", ")}`);
@@ -812,6 +817,13 @@ export function scoreObjective(collected, opts = {}) {
     sinceBasis = clockAfter && since === clockAfter ? `--clock-after (no "${label}" label event at or after it)` : `issue created (no "${label}" label event found)`;
     missing.push("label event");
   }
+  // Labelled before the rename to Pendulum (finish-card.mjs clockRenamed): GitHub keeps the old label name on those
+  // events, so the clock above starts at a later label. Everything seen after it is a fact and is scored as read (a miss
+  // stays a miss and an External result External, their Blocks, Question and human actions kept, with a note that the
+  // window starts late); only what the unread start could change is not known: a walk-away (bucket `unknown`, in no
+  // walk-away count; lib/streak.mjs skips it), an asked-only yes, the operator minutes, the waiting and the wall clock.
+  const renamed = clockRenamed(collected.issueTimeline);
+  if (renamed) missing.push("clock start (labelled before the rename to Pendulum)");
   const pulls = branchPulls(collected);
   const merged = pulls.find((pr) => pr.merged_at) ?? null;
   const open = pulls.find((pr) => !pr.merged_at && pr.state === "open") ?? null;
@@ -908,6 +920,15 @@ export function scoreObjective(collected, opts = {}) {
             ? `merged; ${unprompted.length} unprompted human action(s), none asked for`
             : `merged with no human action after the label${ownerNote}`,
   };
+  // Labelled before the rename (`renamed`): a walk-away with every input source read, and an asked-only yes, are not
+  // known; anything else stays as read, noted (a walk-away with an input source unread still breaks the streak).
+  if (renamed) {
+    walkAway.clockRenamed = true;
+    if (walkAway.value && walkAway.unseen.length === 0) Object.assign(walkAway, { value: null, bucket: "unknown", reason: RENAMED_WHY });
+    else walkAway.reason = `${walkAway.reason} (${RENAMED_NOTE})`;
+    if (walkAway.askedOnly.value) walkAway.askedOnly = { value: null, reason: RENAMED_WHY };
+    else walkAway.askedOnly.reason = `${walkAway.askedOnly.reason} (${RENAMED_NOTE})`;
+  }
 
   // Every stage on every route, once: the usage artifacts (GitHub Actions, the cloud sandbox) and the spend lines in
   // Pendulum's own progress comments (local mode uploads no artifact), a line a record names left out (withLines). Beside
@@ -932,10 +953,11 @@ export function scoreObjective(collected, opts = {}) {
   phases.setupBasis = setup.basis;
   const dispatch = dispatchLatency(collected, issue.number, { app });
   if (collected.jobs === null || collected.jobs === undefined) missing.push("job log");
-  const wall = merged ? minutes(since, merged.merged_at) : null;
+  const wall = merged && !renamed ? minutes(since, merged.merged_at) : null;
 
   let operator;
   if (typeof given === "number" && Number.isFinite(given)) operator = { minutes: given, basis: "--minutes (stopwatch)" };
+  else if (renamed) operator = { minutes: "unknown", basis: `${RENAMED_WHY}; give --minutes <issue>=<n> from a stopwatch` };
   else if (walkAway.value) operator = { minutes: 0, basis: ownerStep ? "clean merge; the owner step's minutes are apart (ownerStep)" : "clean merge" };
   else if (merged && !blocked && !actions.length) operator = { minutes: 0, basis: "no human action (stalled)" };
   else operator = { minutes: "unknown", basis: actions.some((a) => a.kind === "workflow hand-over") ? "a workflow hand-over is a person's step: give --minutes <issue>=<n> from a stopwatch" : "give --minutes <issue>=<n> from a stopwatch" };
@@ -992,9 +1014,9 @@ export function scoreObjective(collected, opts = {}) {
     runnerMinutes: runner.minutes,
     runnerBasis: runner.basis,
     wallMinutes: wall,
-    wallBasis: merged ? `${sinceBasis} to merged` : "not merged",
-    waitingMinutes: waiting.minutes,
-    waitingBasis: waiting.basis,
+    wallBasis: !merged ? "not merged" : renamed ? "unknown: labelled before the rename to Pendulum" : `${sinceBasis} to merged`,
+    waitingMinutes: renamed ? null : waiting.minutes,
+    waitingBasis: renamed ? RENAMED_WHY : waiting.basis,
     workingMinutes: wall === null || waiting.minutes === null ? null : Math.max(0, Math.round((wall - waiting.minutes) * 10) / 10),
     decisions: decisionsOf(actions),
     skills: opts.skills ?? null,
@@ -1029,7 +1051,7 @@ export function markdownTable(rows) {
   const head = ["Issue", "Exit", "Walk-away", "Walk-away (asked only)", "Asked / unprompted", "Quality", "Operator min", "Owner step min", "Cost", "Unit", "Basis", "Runner min", "Wall min (filed→merged)", "Dispatch s (max)", "Slot wait s", "Setup s (max)", "Model min", "CI wait min", "Review beside CI min", "Turns", "Runs", "Sessions", "Rebases", "Harness"];
   const lines = [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`];
   for (const r of [...rows].sort((a, b) => a.issue - b.issue)) {
-    const walk = r.walkAway.value ? (r.ownerStep ? "yes, owner step: workflow hand-over" : "yes") : r.walkAway.bucket === "external" ? `external: ${externalWhy(r)}` : `no: ${r.walkAway.reason}`;
+    const walk = r.walkAway.value ? (r.ownerStep ? "yes, owner step: workflow hand-over" : "yes") : r.walkAway.bucket === "unknown" ? `unknown: ${r.walkAway.reason}` : r.walkAway.bucket === "external" ? `external: ${externalWhy(r)}` : `no: ${r.walkAway.reason}`;
     const q = r.quality.read && r.quality.read !== "unread" ? `read: ${r.quality.read}` : r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
     // The known dollars, and the runs of unknown cost beside them: never a figure for what was not reported.
     // How the dollars are billed (plugin usage.mjs BILLING): billed per use bare, any other kind said, each part of a mix.
@@ -1039,7 +1061,7 @@ export function markdownTable(rows) {
     const keyNote = r.cost.workerKeyUsd > 0 ? ` incl. ${fmtUsd(r.cost.workerKeyUsd)} worker key` : "";
     // A sandbox's vendor cost beside the model's, and the total: dollars per merged Objective counts both.
     const cost = r.cost.vendorUsd === null || r.cost.vendorUsd === undefined ? `${model}${keyNote}` : `${model}${keyNote} + ${fmtUsd4(r.cost.vendorUsd)} sandbox${unknownText(r.cost.vendor?.usdUnknown)} = ${fmtUsd(r.cost.totalUsd)}${unknownText(r.cost.totalUnknown)}`;
-    const askedOnly = r.walkAway.askedOnly ? (r.walkAway.askedOnly.value ? "yes" : `no: ${r.walkAway.askedOnly.reason}`) : "?";
+    const askedOnly = r.walkAway.askedOnly ? (r.walkAway.askedOnly.value ? "yes" : r.walkAway.askedOnly.value === null ? "unknown" : `no: ${r.walkAway.askedOnly.reason}`) : "?";
     const split = r.walkAway.interventions ? `${r.walkAway.interventions.asked} / ${r.walkAway.interventions.unprompted}` : "?";
     const cells = [`#${r.issue}`, r.parked ? `${r.exit} (parked)` : r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), ownerCell(r), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.phases?.overlapMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), rebaseCell(r.rebases), harnessCell(r)];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);
@@ -1063,8 +1085,10 @@ export const ownerCell = (r) => (r.ownerStep ? `${fmtMin(r.ownerStep.minutes)} (
 
 /** The summary under the table: walk-away both ways, the interventions split and the owner steps, over every row. */
 export function summaryLine(rows) {
-  const n = rows.length;
-  const merged = rows.filter((r) => r.exit === "merged").length;
+  // A row labelled before the rename (bucket `unknown`) is in no walk-away count.
+  const unknown = rows.filter((r) => r.walkAway.bucket === "unknown");
+  const n = rows.length - unknown.length;
+  const merged = rows.filter((r) => r.exit === "merged" && r.walkAway.bucket !== "unknown").length;
   const strict = rows.filter((r) => r.walkAway.value).length;
   const askedOnly = rows.filter((r) => r.walkAway.askedOnly?.value).length;
   const stalled = rows.filter((r) => r.walkAway.stall);
@@ -1074,5 +1098,6 @@ export function summaryLine(rows) {
   const owners = rows.filter((r) => r.ownerStep);
   const inputs = rows.filter((r) => !r.ownerStep && (r.walkAway.interventions?.requests || []).some((q) => q.kind === "workflow hand-over"));
   const handovers = `${owners.length ? ` Owner steps (a workflow hand-over, scored as normal work, its minutes apart): ${owners.map((r) => `#${r.issue} ${ownerCell(r)}`).join(", ")}.` : ""}${inputs.length ? ` Workflow hand-overs scored as input: ${inputs.map((r) => `#${r.issue}`).join(", ")}.` : ""}`;
-  return `Walk-away: ${strict} of ${n} Objective(s) (${merged} merged) with no human input; ${askedOnly} of ${n} counting only input Pendulum asked for. Interventions: ${sum("asked")} asked for (Question, Blocked notice, review request), ${sum("unprompted")} unprompted.${stalls}${handovers}`;
+  const notKnown = unknown.length ? ` Not known (labelled before the rename to Pendulum), in no count: ${unknown.map((r) => `#${r.issue}`).join(", ")}.` : "";
+  return `Walk-away: ${strict} of ${n} Objective(s) (${merged} merged) with no human input; ${askedOnly} of ${n} counting only input Pendulum asked for. Interventions: ${sum("asked")} asked for (Question, Blocked notice, review request), ${sum("unprompted")} unprompted.${stalls}${handovers}${notKnown}`;
 }

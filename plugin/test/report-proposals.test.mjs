@@ -121,6 +121,7 @@ test("report --rates: each ratio is exact against the published table, within on
   const { code, json: r, md } = await report(world(), ["--issue", "41,42", "--rates", "gpt-6.1-terra,claude-fable-5-2", "--rates", "gpt-6-luna,gpt-6-sol"]);
   assert.equal(code, 0);
   assert.equal(r.rates.words, RATIO_WORDS);
+  assert.equal(r.rates.usable, true, "#569 V11: a ratio was weighed");
   assert.match(RATIO_WORDS, /^ratio of published rates on the recorded token mix \(no dollar unit\)$/);
   assert.deepEqual(r.rates.candidates, ["gpt-6.1-terra", "claude-fable-5-2", "gpt-6-luna", "gpt-6-sol"]);
   // The recorded mix is the model's tokens; each ratio is the candidate's rates over the model's own, on that mix.
@@ -296,8 +297,8 @@ test("report --rates: a review stage's passes on two models are split by its led
   assert.deepEqual(mixOf(r, WORKER), partsOf(ANSWER_T));
   priceRatio(r, REVIEWER, "gpt-6.1-terra", REVIEW_T);
   priceRatio(r, WORKER, "gpt-6.1-terra", ANSWER_T);
-  // The stage stays one stage under the reviewer's model in the model breakdown, all its tokens there.
-  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.tokens]), [[REVIEWER, 1, plus(REVIEW_T, ANSWER_T)]]);
+  // The model breakdown books each pass's dollars and tokens under its own model (#568); the stage counts once, under its own.
+  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api, x.tokens]), [[REVIEWER, 1, 0.1, REVIEW_T], [WORKER, 0, 0.1, ANSWER_T]]);
   // With a sub-agent model and no record to split its threads out, the answer pass's tokens may hold them: the worker's
   // model and the sub-agent model get no ratio; the review pass's model keeps its own.
   const subbed = empty();
@@ -336,6 +337,9 @@ test("report --rates: a review stage whose passes' models no ledger names gives 
   for (const n of ["48", "49"]) {
     const { json: r } = await report(w, ["--issue", n, "--rates", "gpt-6.1-terra"]);
     assert.deepEqual(r.rates.items, [], n);
+    // #569 V11: nothing could be weighed, and the report says so in a field of its own, and in the Markdown.
+    assert.equal(r.rates.usable, false, n);
+    assert.match(renderReport(r), /^No ratio could be weighed: each model and candidate below says why\.$/m, n);
     assert.deepEqual(r.rates.skipped.map((x) => [x.model, x.why]).sort(), [[WORKER, "pass-models"], [REVIEWER, "pass-models"]].sort(), n);
   }
 });

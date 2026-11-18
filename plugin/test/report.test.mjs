@@ -708,6 +708,7 @@ test("report (S2): --self trusts an exact login only on a comment by someone who
   const { json: s } = await report(world(), { issue: 3, self: "stranger" });
   assert.equal(usd(byIssue(s, 3)).api, 0.519812);
   assert.equal(s.source.read.ignoredComments, 2);
+  assert.deepEqual([s.source.trusted.logins, s.source.trusted.refused], [["kirkmarple-clockgrove"], [{ login: "stranger", why: "cannot-push" }]]);
 });
 
 test("report (#607): a read-only member's forged spend comment changes no figure, on the stage path and on the card's; a writer's record still counts", async () => {
@@ -781,6 +782,15 @@ test("report (#607): the call budget stops during the permission reads: those au
   const early = await report(w(), { issue: 7, "max-calls": 3 });
   assert.equal(early.calls.filter((c) => c.includes("/permission")).length, 0);
   assert.deepEqual(early.json.source.missing.find((m) => m.code === "author-unchecked")?.issues, [7]);
+  // A stop before any comment is read: nothing has decided a --self login, so it is not listed as trusted.
+  const first = await report(w(), { issue: 7, self: "teammate", "max-calls": 2 });
+  assert.equal(first.code, STOPPED_EXIT);
+  assert.ok(!first.calls.some((c) => c.includes("/comments") || c.includes("/permission")));
+  assert.deepEqual([first.json.source.trusted.logins, first.json.source.trusted.refused], [["kirkmarple-clockgrove"], [{ login: "teammate", why: "unchecked" }]]);
+  // A complete report that read no comment of a --self login's: nothing says it can push, and that is the reason given.
+  const absent = await report(w(), { issue: 7, self: ["teammate", "nobody-607"] });
+  assert.equal(absent.code, 0);
+  assert.deepEqual([absent.json.source.trusted.logins, absent.json.source.trusted.refused], [["kirkmarple-clockgrove", "teammate"], [{ login: "nobody-607", why: "no-record" }]]);
   // A token that may not read a permission (403): that author is never trusted either, and said so.
   const refused = w();
   refused.permissions.teammate = 403;
@@ -788,6 +798,7 @@ test("report (#607): the call budget stops during the permission reads: those au
   assert.equal(ok, 0);
   assert.equal(usd(byIssue(f, 7)).unknown, 0);
   assert.deepEqual(f.source.missing.find((m) => m.code === "author-unverifiable")?.issues, [7]);
+  assert.deepEqual([f.source.trusted.logins, f.source.trusted.refused], [["kirkmarple-clockgrove"], [{ login: "teammate", why: "unverifiable" }]]);
   assert.equal(f.source.calls.planned, f.source.calls.made);
 });
 

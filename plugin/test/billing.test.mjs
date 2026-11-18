@@ -524,3 +524,28 @@ test("a figure that names no billing (a record from before it) reads as it is; a
     assert.ok(!/not a charge|included-credits|API-equivalent \(included credits\)/.test(text), f);
   }
 });
+
+test("#617: a stage's dollars are the sum of its passes' to the millionth: its usd, its dollars by billing and by pass, its ledger and its rebase line agree", async () => {
+  // pendulum-scratch #38's rebase stage: Copilot reports AI credits finer than a millionth of a dollar. The two passes
+  // are $0.085139 and $0.143467 to the millionth ($0.228606), and $0.2286052 unrounded, which alone rounds to $0.228605.
+  const at = (s) => new Date(Date.parse("2026-11-18T19:31:00Z") + s * 1000).toISOString();
+  const records = [
+    { label: "work-1", harness: "copilot", model: "claude-sonnet-5.5", ok: true, usd: 0.0851386, tokens: { input: 217841, output: 1470, cached: 197482, written: 20345 }, basis: "Copilot AI credits", started: at(0), ended: at(16) },
+    { label: "decision", decision: true, calls: 3, harness: "copilot", model: "claude-sonnet-5.5", ok: true, usd: 0.1434666, tokens: { input: null, output: null, cached: null, written: null }, basis: "Copilot AI credits", started: at(18), ended: at(23) },
+  ];
+  const s = await stage({ harness: "copilot", model: "claude-sonnet-5.5", cred: { billing: "credits", basis: "Copilot seat" }, run: async () => records });
+  const passes = s.usage.ledger.map((e) => e.usd);
+  assert.deepEqual(passes, [0.085139, 0.143467]);
+  assert.deepEqual([s.usage.usd, s.usage.usdByBilling, s.usage.usdByPass.work.usd, s.usage.usdByPass.decision.usd], [0.228606, { credits: 0.228606 }, 0.085139, 0.143467]);
+  assert.deepEqual(s.stored, JSON.parse(JSON.stringify(s.usage)), "result.json holds the same figures");
+  // The comment: the spend line, the ledger line beside it and a rebase stage's rebase line, all from that record.
+  const line = stageSpendLine(s.usage);
+  const spend = spendParts(`x\n${spendMarker(line.usd, line.parts)}`);
+  const sum = (list) => Math.round(list.reduce((t, n) => t + n, 0) * 1e6) / 1e6;
+  assert.equal(spend.usd, sum(Object.values(spend.usdByBilling)));
+  assert.equal(spend.usd, sum(Object.values(spend.usdByPass).map((p) => p.usd)));
+  assert.equal(spend.usd, sum(JSON.parse(/^<!-- pendulum:ledger (\{.*\}) -->$/.exec(line.ledger)[1]).p.map((p) => p.u)));
+  assert.deepEqual(rebaseCost(s.usage, { records }), { usd: 0.228606, usdByBilling: { credits: 0.228606 }, billing: "credits" });
+  // The caller's records are left as the harness reported them.
+  assert.deepEqual(records.map((r) => r.usd), [0.0851386, 0.1434666]);
+});

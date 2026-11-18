@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { endStep, progressReporter } from "../scripts/lib/session.mjs";
+import { GITHUB_COMMENT_MAX, endStep, progressReporter } from "../scripts/lib/session.mjs";
 import { repoOf } from "../scripts/lib/github.mjs";
 import { decisionsReadOf, findingsOf, ledgerOfComment, rebaseCostOf, setSelf, spendOf, spendParts } from "../scripts/lib/logic.mjs";
 import { stageHarnessOf } from "../scripts/lib/cost-join.mjs";
@@ -272,6 +272,72 @@ test("harness and person text is sanitised and on one line: no live mention, no 
   const comment = (x) => ({ body: x, created_at: "2026-11-18T04:41:10Z", updated_at: "2026-11-18T05:07:31Z" });
   assert.deepEqual(phaseMinutes([comment(`${KEY}\n${q.card}`)], 433).runs, 1);
   assert.equal(phaseMinutes([comment(`${KEY}\n${q.card}`)], 433).modelMinutes, 0);
+});
+
+test("#617: one CI wait is one row: the Now row while it runs, its finished row after, never both", () => {
+  // pendulum-scratch #38's rebase stage: the round's first line, then its wait.
+  const t0 = at("2026-11-18T19:31:36Z");
+  const wait = { step: "ci", sha: "21ae7e1", wait: true };
+  const lines = [
+    [t0 + 4_000, "re-entry: fresh (resume policy is fresh)", { step: "setup", session: "fresh (resume policy is fresh)" }],
+    [t0 + 5_000, "harness copilot attempt 1", { step: "work", model: "claude-sonnet-5.5", attempt: 1, rebase: true }],
+    [t0 + 44_000, "validation pass 1 (required checks)", { step: "ci", begin: true }],
+    [t0 + 44_000, "waiting for required checks (test) on 21ae7e1", wait],
+  ];
+  const passes = [{ label: "work-1", model: "claude-sonnet-5.5", usd: 0.085139, started: iso(t0 + 5_000), ended: iso(t0 + 21_000) }];
+  const ci = (c) => c.card.split("\n").filter((l) => /\bCI\b/.test(l));
+  const args = { stage: "work", issue: 38, started: t0, lines, passes, spend: 0.085139, parts: { usdByBilling: { credits: 0.085139 }, running: true } };
+  assert.deepEqual(ci(render({ ...args, now: t0 + 104_000 })), ["| 11:32 AM | **Now:** waiting for CI on `21ae7e1` · 1 min | running | — |"]);
+  // The wait over (its step's end and outcome set, as the stage sets them), the stage still running: its finished row alone.
+  Object.assign(wait, { end: t0 + 106_000, outcome: "passed" });
+  assert.deepEqual(ci(render({ ...args, now: t0 + 107_000 })), ["| 11:32 AM | Waited for CI · passed on `21ae7e1` | 1 min 2 s | — |"]);
+
+  // A second round is a second wait: the first one's finished row, and the Now row for the one in progress, whose own
+  // first line is not counted into the finished row.
+  const again = { step: "ci", sha: "0c0ffee", wait: true };
+  Object.assign(wait, { outcome: "failed" });
+  const two = [...lines, [t0 + 108_000, "validation pass 1 red: test; fix run", { step: "fix", check: "test" }], [t0 + 200_000, "validation pass 2 (required checks)", { step: "ci", begin: true }], [t0 + 260_000, "waiting for required checks (test) on 0c0ffee", again]];
+  const fixed = [...passes, { label: "validation-fix-1", model: "claude-sonnet-5.5", usd: 0.05, started: iso(t0 + 109_000), ended: iso(t0 + 199_000) }];
+  const second = render({ ...args, lines: two, passes: fixed, now: t0 + 300_000 });
+  assert.deepEqual(ci(second), ["| 11:32 AM | Waited for CI · failed: `test` | 1 min 2 s | — |", "| 11:33 AM | Fixed CI · last failure: `test` | 1 min 30 s | $0.05 |", "| 11:34 AM | **Now:** waiting for CI on `0c0ffee` · 40 s | running | — |"]);
+  // Both over: one row for the kind, its two waits counted.
+  Object.assign(again, { end: t0 + 290_000, outcome: "passed" });
+  assert.match(render({ ...args, lines: two, passes: fixed, now: t0 + 300_000 }).card, /^\| 11:32 AM \| Waited for CI ×2 · passed, last on `0c0ffee` \| 1 min 32 s \| — \|$/m);
+  // A cross-OS round's first line is its own wait's too.
+  const cross = [[t0, "cross-os-validation pass 1 (cross-OS legs)", { step: "ci", begin: true, crossOs: true }], [t0 + 1_000, "waiting for cross-OS legs", { step: "ci", sha: "21ae7e1", wait: true, crossOs: true }]];
+  assert.deepEqual(ci(render({ stage: "work", issue: 38, started: t0, now: t0 + 61_000, lines: cross })), ["| 11:31 AM | **Now:** waiting for cross-OS CI on `21ae7e1` · 1 min | running | — |"]);
+});
+
+test("#617: a send-back's rebase stage names itself from its first write; a line a stage notes before it knows goes out with that write", async () => {
+  const head = (body) => body.split("\n")[1];
+  const posted = await reporter("work", async (p, clock) => {
+    // What the stage says before it has read its PR: no write of its own.
+    p.note("`pendulum:account:beta` does nothing on this route", { step: "setup", account: "`pendulum:account:beta` does nothing on this route" });
+    clock("2026-11-18T04:41:20Z");
+    // worker.mjs, once its own rebase says the branch is behind: before the stage's first progress write.
+    p.rebaseStage();
+    await p("re-entry: fresh (resume policy is fresh)", { step: "setup", session: "fresh (resume policy is fresh)" });
+    clock("2026-11-18T04:41:30Z");
+    await p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1, rebase: true });
+  });
+  assert.equal(posted.length, 2, "the note made no write");
+  assert.deepEqual(posted.map((b) => /^\*\*⏳ (\w+) running\*\*/.exec(head(b))?.[1]), ["Rebase", "Rebase"]);
+  // The first write carries the noted line, in the Full log and in Run details, in the order written.
+  assert.match(posted[0], /\n- 8:41 PM PST<!-- 04:41Z --> `pendulum:account:beta` does nothing on this route\n- 8:41 PM PST<!-- 04:41Z --> re-entry: fresh \(resume policy is fresh\)\n/);
+  assert.match(posted[0], /^- \*\*Account:\*\* /m);
+  // A work stage that is no rebase is Work, as before.
+  const work = await reporter("work", async (p) => p("re-entry: fresh (resume policy is fresh)", { step: "setup", session: "fresh (resume policy is fresh)" }));
+  assert.match(head(work[0]), /^\*\*⏳ Work running\*\*/);
+
+  // worker.mjs says so where it learns it is a send-back's rebase, before any progress write of the stage, and notes the
+  // account line it writes before it can know.
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
+  const [before, after] = src.split("\n      rebaseStage = { conflict: rebaseConflict };\n");
+  assert.match(after, /^ {6}\/\/[^\n]*\n {6}progress\.rebaseStage\(\);\n/);
+  assert.doesNotMatch(before.slice(before.indexOf("\n  async function run() {\n")), /await progress\(/, "no progress write before the stage knows");
+  assert.ok(before.includes("\n  async function run() {\n"));
+  assert.match(before, /\n {2}if \(acct\.note\) progress\.note\(acct\.note, \{ step: "setup", account: acct\.note \}\);\n/);
+  assert.match(before, /\n {2}const planned = await planGate\(\{[^\n]*, check: editCheck, progress: progress\.note \}\);\n/);
 });
 
 test("every write goes through one queue: the exit write lands last, after the forced writes queued before it, however slow the write ahead of them", async () => {

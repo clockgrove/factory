@@ -38,7 +38,7 @@ import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { TRIAGE_MODEL, triageKey } from "./lib/triage.mjs";
 import { DRIFT_MODEL } from "./lib/drift.mjs";
 import { deciderKind } from "./lib/decider.mjs";
-import { MERGE_BASE_GIT, gitAtLeast, gitVersion } from "./lib/outbox.mjs";
+import { GENERATED_ATTR, MERGE_BASE_GIT, gitAtLeast, gitVersion } from "./lib/outbox.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
 import { publishOn, sealKey, sealKeyProblem, transcriptPolicy } from "./lib/seal.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
@@ -1587,6 +1587,28 @@ export async function commandCheck(row, command, { checkout, env = process.env, 
   return PASS(row, `${command}${pass}`);
 }
 
+/**
+ * Generated files (docs/INSTALL.md): the `regenerate` command and the paths the default branch gives the
+ * `pendulum-generated` attribute go together. The paths are the default branch's commit's as the checkout has it
+ * (`origin/HEAD`, else HEAD), its tree listed and its attributes read by git (`git ls-tree`, `git check-attr --source`)
+ * in the agent's sandbox with no secret, as Pendulum's other git on a checkout runs (checkout.mjs runValidation). The
+ * command gets a command's row, never run; one without the other is a WARN, since then no conflict on a generated file
+ * is regenerated. Neither: no row.
+ */
+export async function regenerateChecks({ inputs, checkout, env = process.env }) {
+  const gitEnv = scrubbedEnv(env);
+  const script = 'r="$(git -C "$1" rev-parse -q --verify "refs/remotes/origin/HEAD^{commit}" || git -C "$1" rev-parse -q --verify "HEAD^{commit}")" || exit 3; git -C "$1" ls-tree -r -z --name-only "$r" | git -C "$1" check-attr --source="$r" -z --stdin "$2"';
+  const attrs = await exec(...backend(gitEnv).sandbox.git(["sh", "-c", script, "sh", checkout, GENERATED_ATTR], gitEnv), { env: gitEnv, maxBytes: 64 * 1024 * 1024 }).catch(() => ({ code: null, stdout: "" }));
+  const f = String(attrs.stdout || "").split("\0");
+  let declared = 0;
+  for (let i = 0; i + 2 < f.length; i += 3) if (f[i + 2] !== "unspecified" && f[i + 2] !== "unset") declared += 1;
+  const command = inputs.regenerate || "";
+  if (!command) return declared ? [WARN("regenerate", `${declared} path(s) of the default branch carry the \`${GENERATED_ATTR}\` attribute and no regeneration command is set, so a conflict on one is judged like any file`, "set PENDULUM_REGENERATE in the workflow's env block to the command that writes them (docs/INSTALL.md, Generated files)")] : [];
+  if (attrs.code !== 0) return [WARN("regenerate", `${command}: the default branch's attributes could not be read (git check-attr --source, git 2.40 or later)`, "run doctor from a clone of the repository")];
+  if (!declared) return [WARN("regenerate", `${command}: no path of the default branch carries the \`${GENERATED_ATTR}\` attribute, so the command never runs`, `declare the generated paths in .gitattributes on the default branch (\`<pattern> ${GENERATED_ATTR}\`; docs/INSTALL.md, Generated files)`)];
+  return [await commandCheck("regenerate", command, { checkout, env, missing: "setup may install it", pass: ` (${declared} declared generated path(s); doctor did not run it)` })];
+}
+
 export async function repositoryChecks({ inputs, checkout, env = process.env, runSetup = false, local = false, wf = readWorkflowEnv(checkout) }) {
   const out = [];
   if (!checkout || !existsSync(join(checkout, ".git"))) return [WARN("repository", "no checkout to inspect", "run from a clone or pass --checkout")];
@@ -1609,6 +1631,7 @@ export async function repositoryChecks({ inputs, checkout, env = process.env, ru
       out.push(await commandCheck("setup", inputs.setup, { checkout, env, missing: "the runner may have it", pass: " (parsed and looked up; doctor did not run it: --run-setup does)" }));
     }
   }
+  out.push(...(await regenerateChecks({ inputs, checkout, env })));
   // `local`: the developer's own checkout in local mode (doctor --local). A worker job's checkout in local mode is the
   // agent's clone, which local.mjs init() has already covered from the developer's checkout.
   if (local) out.push(...localDatabaseChecks({ checkout, env, wf }));

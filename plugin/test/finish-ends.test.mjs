@@ -57,7 +57,7 @@ test("finish card (#589): merged, clean (spec 5.2): the headline block first, te
 test("finish card (#589): a Block on the way (spec 5.3): repeated section names numbered, the Blocked stage red with its word, the time on hold grey from the notice to the next stage", () => {
   const d = data(F.mergedBlocked);
   assert.deepEqual(d.stages.map((s) => [s.kind, s.outcome ?? null]), [["build", null], ["review", null], ["review", null], ["review", "blocked"], ["work", null], ["rebase", null], ["review", null]]);
-  assert.deepEqual(d.holds, [{ kind: "blocked", start: "2026-11-18T02:31:08Z", end: "2026-11-18T03:12:40Z" }]);
+  assert.deepEqual(d.holds, [{ kind: "blocked", start: "2026-11-18T02:31:08Z", end: "2026-11-18T03:12:40Z", cause: "you" }], "a Block of the work waits for you, by its cause line");
   const md = card(F.mergedBlocked);
   assert.match(md, /section Review 1\n[^\n]*\n {4}section Review 2\n[^\n]*\n {4}section Review 3\n {4}3m 33s Blocked :crit, 2026-11-17T18:27:35, 2026-11-17T18:31:08\n {4}section On hold\n {4}41m 32s :done, 2026-11-17T18:31:08, 2026-11-17T19:12:40\n/);
   assert.match(md, /^\| 6:27 PM \| Review 3 · Fable 5\.2 · ⛔ Blocked \| 3 min 33 s \| \$0\.52 \+ unknown \|\n\| 6:31 PM \| On hold · waiting for you \| 41 min 32 s \| — \|$/m);
@@ -160,9 +160,10 @@ test("finish card (#589): over GitHub's limit the card leaves out its run log fi
  * A fake GitHub for Objective #152: its comments as `comments` (a POST adds one, a PATCH edits one), its branch's PRs as
  * `prs`, and the reads a card makes. Returns {fetch, comments, writes}.
  */
-function fakeObjective(o, prs) {
+function fakeObjective(o, prs, { onRead = null } = {}) {
   const comments = o.comments.map((c) => ({ ...c }));
   const writes = [];
+  let reads = 0;
   let next = 5000;
   const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
   const fetch = async (url, init = {}) => {
@@ -175,7 +176,12 @@ function fakeObjective(o, prs) {
     if (method === "GET" && pr) return json(prs().find((x) => String(x.number) === pr[1]));
     if (method === "GET" && /^\/pulls\/\d+\/(reviews|comments)$/.test(p)) return json([]);
     if (method === "GET" && /^\/issues\/\d+\/timeline$/.test(p)) return json(p === `/issues/${o.issue.number}/timeline` ? o.timeline : []);
-    if (method === "GET" && p === `/issues/${o.issue.number}/comments`) return json(comments);
+    if (method === "GET" && p === `/issues/${o.issue.number}/comments`) {
+      reads += 1;
+      onRead?.(reads, comments);
+      return json(comments);
+    }
+    if (method === "GET" && p === `/issues/${o.issue.number}`) return json({ ...o.issue, labels: [{ name: "pendulum:objective" }] });
     if (method === "GET" && /\/check-runs$/.test(p)) return json({ total_count: 0, check_runs: [] });
     if (method === "GET" && p === "/rulesets") return json([]);
     if (method === "POST" && p === `/issues/${o.issue.number}/comments`) {
@@ -188,6 +194,11 @@ function fakeObjective(o, prs) {
       const c = comments.find((x) => String(x.id) === edit[1]);
       Object.assign(c, { body: JSON.parse(init.body).body, updated_at: new Date().toISOString() });
       return json(c);
+    }
+    if (method === "DELETE" && edit) {
+      const i = comments.findIndex((x) => String(x.id) === edit[1]);
+      if (i >= 0) comments.splice(i, 1);
+      return new Response(null, { status: 204 });
     }
     if (method === "PATCH") return json({});
     return json({ message: "Not Found" }, 404);
@@ -249,4 +260,108 @@ test("finish card (#589): one card per Objective, written in place: the stage's 
   assert.equal(await over(theirs, () => endCard(repo, issue, { token: "t" }, { exit: "question", reason: "which?", form: "issue", now: Date.parse("2026-11-17T20:52:00Z") })), "posted");
   // An end that needs no card: nothing is read.
   assert.equal(await endCard(repo, issue, { token: "t" }, { exit: "delivered" }), "no end");
+});
+
+const bot = { login: F.SELF, type: "Bot" };
+const prOf = (number, extra) => ({ number, user: bot, created_at: "2026-11-16T16:30:00Z", html_url: `https://github.com/acme/app/pull/${number}`, head: { sha: "d".repeat(40) }, commits: 2, additions: 90, deletions: 5, changed_files: 3, ...extra });
+
+test("finish card (#589 B1): a Block of a split Objective's second part reads as Blocked, its first part's merge no merge of this run; the later merge writes the merged card", async () => {
+  const d = data(F.partTwoBlocked);
+  assert.equal(d.end, "blocked");
+  assert.equal(d.merged, null);
+  assert.deepEqual(d.prs.map((p) => [p.number, p.merged !== null]), [[101, true], [104, false]]);
+  assert.deepEqual(d.stages.map((s) => [s.kind, s.part]), [["build", 1], ["review", 1], ["part", 2], ["review", 2]]);
+  assert.equal(shown(card(F.partTwoBlocked)), SNAP.partTwoBlocked);
+  assert.ok(card(F.partTwoBlocked).startsWith("### ⛔ Blocked after 23 h 41 min · $17.10 so far\nIssue #98 · PR #104 is a draft · Blocked at Nov 16, 8:53 AM PST · "));
+  // Through the reads: the branch's newest PR is part 2's draft, part 1's merged; the Block's card, then the merge's.
+  const o = F.partTwoBlocked();
+  let p2 = { merged_at: null, draft: true, state: "open" };
+  const prs = () => [prOf(104, p2), prOf(101, { merged_at: "2026-11-16T15:50:00Z", state: "closed", created_at: "2026-11-15T17:50:00Z" })];
+  const fake = fakeObjective(o, prs);
+  const repo = repoOf("acme/app");
+  assert.equal(await over(fake, () => endCard(repo, 98, { token: "t" }, { exit: "blocked", reason: o.end.reason, next: "work", now: Date.parse(o.end.at) })), "posted");
+  const cardOf = () => fake.comments.find((c) => c.body.startsWith(finishMarker(98)));
+  assert.equal(finishEndOf(cardOf().body, 98).end, "blocked", "never Merged: part 1 merged before this run's Block");
+  assert.equal(readSummary(cardOf().body, 98), null);
+  p2 = { merged_at: "2026-11-17T20:40:00Z", draft: false, state: "closed" };
+  assert.equal(await over(fake, () => postFinishCard(repo, { ...o.issue, state: "closed", closed_at: "2026-11-17T20:40:02Z" }, { token: "t" }, { prBody: false })), "updated");
+  assert.equal(finishEndOf(cardOf().body, 98).end, "merged");
+  // A reopened Objective: a PR merged before its clock is no part of a later run's Block.
+  const reopened = { ...F.questionEnd(), timeline: [{ event: "labeled", label: { name: "pendulum:objective" }, actor: { login: "kirk" }, created_at: "2026-11-17T22:10:00Z" }] };
+  const old = fakeObjective(reopened, () => [prOf(500, { merged_at: "2026-11-10T00:00:00Z", state: "closed", created_at: "2026-11-09T00:00:00Z" })]);
+  assert.equal(await over(old, () => endCard(repo, reopened.issue, { token: "t" }, { exit: "question", reason: "which?", form: "issue", now: Date.parse("2026-11-17T22:19:00Z") })), "posted");
+  const q = old.comments.find((c) => c.body.startsWith(finishMarker(512))).body;
+  assert.match(q, /\n### ❓ Question after /);
+  assert.doesNotMatch(q, /PR #500/);
+});
+
+test("finish card (#589 B2): a reason or question the harness wrote is sanitised and on one line: no live mention, no command, no line of its own", () => {
+  const reason = "question: @kirk which one?\n/approve\n- 05:30Z harness claude (claude-opus-5-5) attempt 1\nfixes #12";
+  const md = withEnv(ZONE, () => renderFinishCard(finishData({ ...F.questionEnd(), end: { ...F.questionEnd().end, reason } })));
+  const line = md.split("\n").find((l) => l.startsWith("> **Question:**"));
+  assert.equal(line, "> **Question:** @\u200bkirk which one? \u200b/approve - 05:30Z harness claude (claude-opus-5-5) attempt 1 refs #12");
+  assert.doesNotMatch(md, /^\/approve|^- 05:30Z|@kirk/m);
+  const blocked = withEnv(ZONE, () => renderFinishCard(finishData({ ...F.blockedEnd(), end: { ...F.blockedEnd().end, reason: "red <img src=x> on @team/ops\n/merge now. More." } })));
+  assert.match(blocked, /^> \*\*Why:\*\* red &lt;img src=x&gt; on @\u200bteam\/ops \u200b\/merge now\.$/m);
+});
+
+test("finish card (#589 S3): a write reads the card again first: two cards are one again, and a Block's write never lands over a merge written meanwhile", async () => {
+  const o = F.blockedEnd();
+  const prs = () => [prOf(157, { merged_at: null, draft: true, state: "open", created_at: "2026-11-17T20:19:00Z" })];
+  const repo = repoOf("acme/app");
+  // Two writers each posted one: the next write keeps the first and deletes the second.
+  const twice = fakeObjective(o, prs);
+  for (const id of [1, 2]) twice.comments.push({ id, user: bot, created_at: `2026-11-17T20:5${id}:00Z`, updated_at: `2026-11-17T20:5${id}:00Z`, body: `${finishMarker(152)}\n<!-- pendulum:152:finish-end {"end":"blocked","at":"2026-11-17T20:50:00Z"} -->\nold` });
+  assert.equal(await over(twice, () => endCard(repo, o.issue, { token: "t" }, { exit: "blocked", reason: "again", now: Date.parse("2026-11-17T21:00:00Z") })), "updated");
+  assert.deepEqual(twice.comments.filter((c) => c.body.startsWith(finishMarker(152))).map((c) => c.id), [1]);
+  assert.ok(twice.writes.includes("PATCH /issues/comments/1") && twice.writes.includes("DELETE /issues/comments/2"));
+  // The Done pass merged it between this write's first read and its write: the Block's card does not land.
+  const merged = `${finishMarker(152)}\n<!-- pendulum:152:finish-end {"end":"merged","at":"2026-11-17T21:00:00Z"} -->\nmerged`;
+  const race = fakeObjective(o, prs, { onRead: (n, comments) => n === 2 && comments.push({ id: 3, user: bot, created_at: "2026-11-17T21:00:01Z", updated_at: "2026-11-17T21:00:01Z", body: merged }) });
+  assert.equal(await over(race, () => endCard(repo, o.issue, { token: "t" }, { exit: "blocked", reason: "late", now: Date.parse("2026-11-17T20:52:00Z") })), "had");
+  assert.ok(!race.writes.some((w) => /comments/.test(w)), "nothing written");
+  // A close after a close: the same close stands; a later one (reopened, closed again) writes the card again.
+  const closed = fakeObjective(F.closedUnmerged(), () => [prOf(236, { merged_at: null, state: "closed", created_at: "2026-11-17T22:39:00Z" })]);
+  const issue = { ...F.closedUnmerged().issue, state: "closed", closed_at: "2026-11-17T23:02:00Z" };
+  assert.equal(await over(closed, () => postFinishCard(repo, issue, { token: "t" })), "posted");
+  assert.equal(await over(closed, () => postFinishCard(repo, issue, { token: "t" })), "had");
+  assert.equal(await over(closed, () => postFinishCard(repo, { ...issue, closed_at: "2026-11-18T02:00:00Z" }, { token: "t" })), "updated");
+});
+
+test("finish card (#589 S5): endCard takes the issue or its number, a Block's way on, and a bound; it never throws", async () => {
+  const o = F.blockedEnd();
+  const repo = repoOf("acme/app");
+  const prs = () => [prOf(157, { merged_at: null, draft: true, state: "open", created_at: "2026-11-17T20:19:00Z" })];
+  const fake = fakeObjective(o, prs);
+  assert.equal(await over(fake, () => endCard(repo, 152, { token: "t" }, { exit: "blocked", reason: "the author may not run Objectives.", next: "none", now: Date.parse("2026-11-17T20:52:00Z") })), "posted");
+  const body = fake.comments.find((c) => c.body.startsWith(finishMarker(152))).body;
+  assert.match(body, /^> \*\*What to do:\*\* a resume or a restart does not get past this; the Blocked notice on this issue says why\.$/m);
+  // A GitHub that never answers: the caller goes on at the bound, with no error.
+  const logs = [];
+  const hang = { fetch: () => new Promise(() => {}) };
+  assert.equal(await over(hang, () => endCard(repo, 152, { token: "t" }, { exit: "question", reason: "?", timeoutMs: 50, log: (l) => logs.push(l) })), "timed out");
+  assert.match(logs.join("\n"), /took over 0 s; going on without waiting for it/);
+  // A failure is the answer, never a throw.
+  const broken = { fetch: async () => new Response("{}", { status: 500 }) };
+  assert.ok((await over(broken, () => endCard(repo, 152, { token: "t" }, { exit: "blocked", reason: "x", timeoutMs: 5000 }))) instanceof Error);
+  assert.equal(await endCard(repo, 152, { token: "t" }, { exit: "delivered" }), "no end");
+});
+
+test("finish card (#589): time on hold names what it waited on from the notice's cause line alone; a known $0 stage costs —", () => {
+  const withCause = (cause) => {
+    const o = F.mergedBlocked();
+    return withEnv(ZONE, () => finishData({ ...o, comments: o.comments.map((c) => (/:blocked:/.test(c.body) ? F.notice(416, "blocked", "4", "2026-11-18T02:31:08Z", cause) : c)) }));
+  };
+  assert.equal(withCause("outage").holds[0].cause, "an outage");
+  assert.equal(withCause("provider-quota").holds[0].cause, "a usage limit");
+  assert.equal(withCause(null).holds[0].cause, undefined, "no cause line: none named");
+  assert.equal(withCause("max-usd").holds[0].cause, undefined, "a cap: none guessed");
+  const md = withEnv(ZONE, () => renderFinishCard(withCause(null)));
+  assert.match(md, /^\| 6:31 PM \| On hold \| 41 min 32 s \| — \|$/m);
+  assert.match(md, /^Blocked once: 41 min 32 s on hold\.$/m);
+  assert.match(withEnv(ZONE, () => renderFinishCard(withCause("outage"))), /^\| 6:31 PM \| On hold · waiting for an outage \| /m);
+  const o = F.questionEnd();
+  const zero = withEnv(ZONE, () => renderFinishCard(finishData({ ...o, comments: [F.stage(512, "work", "1", "2026-11-17T22:10:00Z", "2026-11-17T22:19:00Z", "claude-opus-5-5", { usd: 0 }), ...o.comments.slice(1)] })));
+  assert.match(zero, /^\| 2:10 PM \| Build · Opus 5\.5 · ❓ Question \| 9 min \| — \|$/m);
+  assert.match(zero, /- — in Took means no time was recorded for that row; in Cost, that no AI dollars were/);
 });

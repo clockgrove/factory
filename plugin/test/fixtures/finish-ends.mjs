@@ -13,11 +13,11 @@ export function stage(n, kind, key, from, to, model, spend, more = "") {
   return { id: (id += 1), user: bot, created_at: from, updated_at: to, body: `<!-- pendulum:${n}:progress:${kind}:${key} -->\nPendulum ${kind} run ${key}\n<!-- pendulum:harness ${JSON.stringify({ harness: "claude", model })} -->\n<!-- pendulum:spend ${JSON.stringify(spend)} -->${more}` };
 }
 /** Pendulum's Blocked notice, or its Question notice asked on the issue, at `when`. */
-export const notice = (n, kind, key, when) => ({ id: (id += 1), user: bot, created_at: when, updated_at: when, body: kind === "blocked" ? `<!-- pendulum:${n}:blocked:review:${key} -->\nBlocked (review): findings still open.` : `<!-- pendulum:${n}:question:work:${key}:issue -->\nQuestion (work): which order?` });
+export const notice = (n, kind, key, when, cause = "work") => ({ id: (id += 1), user: bot, created_at: when, updated_at: when, body: kind === "blocked" ? `<!-- pendulum:${n}:blocked:review:${key} -->\nBlocked (review): findings still open.${cause ? `\n<!-- pendulum:block {"cause":"${cause}"} -->` : ""}` : `<!-- pendulum:${n}:question:work:${key}:issue -->\nQuestion (work): which order?` });
 const plan = (n, when) => ({ id: (id += 1), user: bot, created_at: when, updated_at: when, body: `<!-- pendulum:${n}:plan -->\n## Plan` });
 const pr = (n, number, created, { merged = null, draft = false, state = merged ? "closed" : "open", commits = 4, additions = 355, deletions = 25, files = 10 } = {}) => ({ number, user: bot, created_at: created, merged_at: merged, draft, state, html_url: `https://github.com/acme/app/pull/${number}`, commits, additions, deletions, changed_files: files });
 const queued = (from, to) => [{ event: "added_to_merge_queue", created_at: from }, { event: "removed_from_merge_queue", created_at: to }];
-const review = (n) => ({ id: 77, user: bot, submitted_at: at(17, "18:10"), body: `<!-- pendulum:${n}:review -->\nOne finding.` });
+const review = (n, when) => ({ id: 77, user: bot, submitted_at: when, body: `<!-- pendulum:${n}:review -->\nOne finding.` });
 const finding = { id: 1, pull_request_review_id: 77, user: bot, body: "a finding" };
 const issue = (n) => ({ number: n, user: kirk, body: "" });
 const labelled = (when) => ({ event: "labeled", label: { name: "pendulum:objective" }, actor: kirk, created_at: when });
@@ -29,7 +29,7 @@ export function mergedClean() {
   const n = 402;
   const comments = [plan(n, at(17, "17:55")), stage(n, "work", "1", at(17, "17:54", 33), at(17, "18:05", 34), "claude-opus-5-5", { usd: 1.78, usdByBilling: sub(1.78), usdUnknown: 1, usdUnknownWhy: ["decision"] }), stage(n, "review", "2", at(17, "18:05", 50), at(17, "18:20", 42), "claude-fable-5-2", { usd: 1.89, usdByBilling: sub(1.89), usdUnknown: 6, usdUnknownWhy: ["decision"], usdByPass: { review: { usd: 1.29, usdByBilling: sub(1.29) }, answer: { usd: 0.6, usdByBilling: sub(0.6) } } })];
   const p = pr(n, 409, at(17, "18:04"), { merged: at(17, "18:31", 14) });
-  return { repo: "acme/app", issue: issue(n), timeline: [labelled(at(17, "17:53", 41))], comments, pulls: [{ pr: p, timeline: queued(at(17, "18:20", 35), at(17, "18:31", 14)), reviews: [review(n)], reviewComments: [finding] }], checks: [check(at(17, "18:30"))], required };
+  return { repo: "acme/app", issue: issue(n), timeline: [labelled(at(17, "17:53", 41))], comments, pulls: [{ pr: p, timeline: queued(at(17, "18:20", 35), at(17, "18:31", 14)), reviews: [review(n, at(17, "18:10"))], reviewComments: [finding] }], checks: [check(at(17, "18:30"))], required };
 }
 
 /** 5.3: merged with overhead and a Block: three reviews, the third Blocked, on hold until a work stage runs again, a rebase. */
@@ -47,7 +47,7 @@ export function mergedBlocked() {
     stage(n, "review", "7", at(18, "03:23", 39), at(18, "03:29", 41), "claude-fable-5-2", { usd: 0.48, usdByBilling: sub(0.48), usdByPass: { review: { usd: 0.48, usdByBilling: sub(0.48) } } }),
   ];
   const p = pr(n, 428, at(18, "01:34"), { merged: at(18, "03:40", 14), commits: 7, additions: 812, deletions: 96, files: 14 });
-  return { repo: "acme/app", issue: issue(n), timeline: [labelled(at(18, "01:16", 30))], comments, pulls: [{ pr: p, timeline: queued(at(18, "03:29", 35), at(18, "03:40", 14)), reviews: [{ ...review(n), body: `<!-- pendulum:${n}:review -->\nFindings.` }], reviewComments: Array.from({ length: 6 }, (_, i) => ({ ...finding, id: 10 + i })) }], checks: [check(at(18, "03:40"))], required };
+  return { repo: "acme/app", issue: issue(n), timeline: [labelled(at(18, "01:16", 30))], comments, pulls: [{ pr: p, timeline: queued(at(18, "03:29", 35), at(18, "03:40", 14)), reviews: [{ ...review(n, at(18, "02:00")), body: `<!-- pendulum:${n}:review -->\nFindings.` }], reviewComments: Array.from({ length: 6 }, (_, i) => ({ ...finding, id: 10 + i })) }], checks: [check(at(18, "03:40"))], required };
 }
 
 /** 5.4: closed without merging: a build, its PR closed unmerged, the issue closed by the person who filed it. */
@@ -63,7 +63,7 @@ export function blockedEnd() {
   const n = 152;
   const comments = [plan(n, at(17, "19:48")), stage(n, "work", "1", at(17, "19:47"), at(17, "20:20"), "claude-opus-5-5", { usd: 1.9, usdByBilling: sub(1.9), usdUnknown: 2, usdUnknownWhy: ["decision"] }), stage(n, "review", "2", at(17, "20:21"), at(17, "20:52"), "claude-fable-5-2", { usd: 0.93, usdByBilling: sub(0.93), usdUnknown: 3, usdUnknownWhy: ["decision"] }), notice(n, "blocked", "2", at(17, "20:51", 50))];
   const p = pr(n, 157, at(17, "20:19"), { draft: true, commits: 2, additions: 40, deletions: 3, files: 2 });
-  return { repo: "acme/app", issue: issue(n), timeline: [labelled(at(17, "19:47"))], comments, pulls: [{ pr: p, timeline: [], reviews: [review(n)], reviewComments: [finding, { ...finding, id: 2 }] }], end: { kind: "blocked", at: at(17, "20:52"), reason: "2 review findings are still open after the answers. The answers named no test." } };
+  return { repo: "acme/app", issue: issue(n), timeline: [labelled(at(17, "19:47"))], comments, pulls: [{ pr: p, timeline: [], reviews: [review(n, at(17, "20:40"))], reviewComments: [finding, { ...finding, id: 2 }] }], end: { kind: "blocked", at: at(17, "20:52"), reason: "2 review findings are still open after the answers. The answers named no test." } };
 }
 
 /** 5.4: a Question asked on the issue by the work stage, before any PR. */
@@ -90,4 +90,13 @@ export function multiDay() {
   const p1 = pr(n, 101, at(15, "17:50"), { merged: at(16, "15:50"), commits: 3, additions: 200, deletions: 10, files: 6 });
   const p2 = pr(n, 104, at(16, "16:30"), { merged: at(17, "20:40"), commits: 2, additions: 90, deletions: 5, files: 3 });
   return { repo: "acme/app", issue: issue(n), timeline: [labelled(at(15, "17:12"))], comments, pulls: [{ pr: p1, timeline: [], reviews: [], reviewComments: [] }, { pr: p2, timeline: queued(at(17, "20:28", 48), at(17, "20:40")), reviews: [], reviewComments: [] }], checks: [check(at(17, "20:39"))], required };
+}
+
+/** 5.5 cut short: the split Objective's first part merged, then its second part's review Blocked (no merge of this run). */
+export function partTwoBlocked() {
+  const o = multiDay();
+  const n = 98;
+  const comments = o.comments.filter((c) => !/:progress:review:5 -->/.test(c.body));
+  const p2 = { ...o.pulls[1].pr, merged_at: null, state: "open", draft: true };
+  return { ...o, comments, pulls: [o.pulls[0], { pr: p2, timeline: [], reviews: [], reviewComments: [] }], checks: [], end: { kind: "blocked", at: at(16, "16:53"), reason: `2 findings stay open on PR #${p2.number}.`, next: "work" } };
 }

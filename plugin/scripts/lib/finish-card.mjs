@@ -20,12 +20,13 @@ import { clockText, objectiveZone, timeZone, zoneDay, zoneOffsetMs } from "./clo
 import { stageHarnessOf } from "./cost-join.mjs";
 import { addTokens, isAnswer, isFix, stagePassFigures, zeroTokens } from "./pass-figures.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
-import { RUNNING_LABEL, STATE_LABELS, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
+import { RUNNING_LABEL, STATE_LABELS, blockCauseOf, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
-import { BASIS, BASIS_NOTE, COLORS, MARK_URL, badge, basisText, billingBasis, billingWords, causeSentences, cellCost, centsOf, costChart, costText, durationText, ganttChart, kindsOf, many, modelId, modelName, plainText, tableCell } from "./card-kit.mjs";
+import { sanitize } from "./handoff.mjs";
+import { BASIS, BASIS_NOTE, COLORS, basisText, billingBasis, billingWords, causeSentences, cellCost, centsOf, costChart, costText, durationText, ganttChart, kindsOf, many, modelId, modelName, plainText, tableCell } from "./card-kit.mjs";
 
 // The shared look's helpers this module has always exported (card-kit.mjs holds them now).
-export { COLORS, MARK_URL, badge, billingBasis, billingWords, centsOf, costText, durationText, modelName };
+export { COLORS, billingBasis, billingWords, centsOf, costText, durationText, modelName };
 import { PREVIOUS_NAME } from "./local.mjs";
 import { BILLING, BILLING_WORDS, PASS_KEYS, UNKNOWN_WHY, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
 
@@ -352,9 +353,19 @@ const noticeAt = (c) => (c.updated_at && ms(c.updated_at) >= ms(c.created_at) ? 
  * notice to the next stage's start. A notice no later stage follows has no recorded end: no hold. Notices inside a hold
  * already counted add none. Returns [{kind, start, end}], oldest first.
  */
+/**
+ * What a hold waited on, from its notice's structure alone: a Question waits for you; a Block by its cause line (logic.mjs
+ * blockMarker): an outage, a provider's usage limit or quota, or you for a cause a person fixes (the work, a setup gap,
+ * Pendulum itself). A notice with no cause line, or one of a cap or budget, names none.
+ */
+function holdCause(x) {
+  if (x.kind === "question") return "you";
+  return { outage: "an outage", "provider-quota": "a usage limit", work: "you", setup: "you", pendulum: "you" }[x.cause] ?? null;
+}
+
 function holdsOf(n, own, stages) {
   const kindOf = (body) => (new RegExp(`^<!-- pendulum:${n}:blocked:[^\\n]* -->`).test(body) ? "blocked" : new RegExp(`^<!-- pendulum:${n}:question:\\S*:(issue|pr) -->`).test(body) ? "question" : null);
-  const notices = own.map((c) => ({ kind: kindOf(c.body || ""), at: noticeAt(c) })).filter((x) => x.kind).sort((a, b) => ms(a.at) - ms(b.at));
+  const notices = own.map((c) => ({ kind: kindOf(c.body || ""), at: noticeAt(c), cause: blockCauseOf(c.body) })).filter((x) => x.kind).sort((a, b) => ms(a.at) - ms(b.at));
   const timed = stages.filter((s) => s.start);
   const holds = [];
   for (const x of notices) {
@@ -362,7 +373,7 @@ function holdsOf(n, own, stages) {
     if (stage) stage.outcome = x.kind;
     if (holds.some((h) => ms(h.start) <= ms(x.at) && ms(x.at) < ms(h.end))) continue;
     const next = timed.find((s) => ms(s.start) > ms(x.at));
-    if (next) holds.push({ kind: x.kind, start: x.at, end: next.start });
+    if (next) holds.push({ kind: x.kind, start: x.at, end: next.start, ...(holdCause(x) ? { cause: holdCause(x) } : {}) });
   }
   return holds;
 }
@@ -390,15 +401,17 @@ function holdsOf(n, own, stages) {
  */
 export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf, pushed = (c) => pushAuthor(c) || throughApp(c), end = null }) {
   const n = issue.number;
-  const merged = pulls.filter((p) => p?.pr?.merged_at).sort((a, b) => ms(a.pr.merged_at) - ms(b.pr.merged_at));
-  // An end other than a merge (#589: Blocked, a Question, closed without merging) is the caller's, at its recorded time.
-  const other = !merged.length && end && ENDS.includes(end.kind) && Number.isFinite(ms(end.at)) ? end : null;
+  // An end other than a merge (#589: Blocked, a Question, closed without merging) is the caller's, at its recorded time,
+  // and wins: a split Objective's earlier part, merged before this run's Block, is no merge of this run.
+  const other = end && ENDS.includes(end.kind) && Number.isFinite(ms(end.at)) ? end : null;
+  const merged = pulls.filter((p) => p?.pr?.merged_at && (!other || ms(p.pr.merged_at) <= ms(other.at))).sort((a, b) => ms(a.pr.merged_at) - ms(b.pr.merged_at));
   if (!merged.length && !other) return null;
-  const mergedAt = merged.at(-1)?.pr.merged_at ?? null;
+  const mergedAt = other ? null : merged.at(-1).pr.merged_at;
   const endAt = mergedAt ?? new Date(ms(other.at)).toISOString();
-  // The PRs the card names: the merged ones, else the newest the caller read on the Objective's branch (open, a draft, or
-  // closed unmerged).
-  const shown = merged.length ? merged : pulls.filter((p) => p?.pr?.number).slice(-1);
+  // The PRs the card names: the merged ones, then, at another end, the newest unmerged one the caller read on the
+  // Objective's branch (open, a draft, or closed unmerged).
+  const open = other ? pulls.filter((p) => p?.pr?.number && !p.pr.merged_at).slice(-1) : [];
+  const shown = [...merged, ...open];
   // The clock: the first label at or after the run's last start over (a restart or a reopen), max_objective_usd's window too.
   const started = labelTime(issue, timeline, label, objectiveWindow(comments.filter((c) => mine(c)), timeline)) ?? shown[0]?.pr.created_at ?? endAt;
   const inRun = (at) => ms(at) >= ms(started) && ms(at) <= ms(endAt);
@@ -463,7 +476,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     issue: n,
     author: login(issue.user?.login),
     labeller: login(labelled?.actor?.login),
-    prs: shown.map((p) => ({ number: p.pr.number, url: p.pr.html_url ?? `https://github.com/${repo}/pull/${p.pr.number}`, opened: p.pr.created_at, merged: p.pr.merged_at ?? null, ours: mine(p.pr), draft: p.pr.draft === true, open: p.pr.state === "open" })),
+    prs: shown.map((p) => ({ number: p.pr.number, url: p.pr.html_url ?? `https://github.com/${repo}/pull/${p.pr.number}`, opened: p.pr.created_at, merged: p.pr.merged_at ?? null, ours: mine(p.pr), draft: p.pr.draft === true, open: p.pr.state === "open" && !p.pr.merged_at })),
     started,
     merged: mergedAt,
     // How the run ended (ENDS, `merged` for a merge) and when; a Blocked or Question end's reason, and a Question's form
@@ -472,6 +485,8 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     ended: endAt,
     reason: other?.reason ? String(other.reason) : null,
     form: other?.form === "pr" || other?.form === "issue" ? other.form : null,
+    // A Block's way on (session.mjs nextStep's code: resume, work, restart, none), when the caller knows it.
+    next: ["resume", "work", "restart", "none"].includes(other?.next) ? other.next : null,
     closer: login(closer),
     // Pendulum's Blocked and Question notices in the run, and the time on hold after each until the next stage started.
     holds,
@@ -557,7 +572,8 @@ export function subline(d) {
     const how = d.queue.some((q) => q.merged) ? "merged through your merge queue" : "merged";
     parts.push(spansDays(d) ? `${atOf(d, d.started)} – ${atOf(d, d.ended, { abbr: true })}` : `${how} at ${atOf(d, d.ended, { abbr: true })}`);
   } else {
-    const pr = d.prs[0];
+    // The run's own PR: the newest unmerged one (a split Objective's earlier parts merged before it).
+    const pr = d.prs.findLast((p) => !p.merged) ?? null;
     parts.push(`Issue #${d.issue}`);
     if (pr) parts.push(d.end === "closed" ? (pr.open ? `PR #${pr.number} still open` : `PR #${pr.number} closed, not merged`) : pr.draft ? `PR #${pr.number} is a draft` : `PR #${pr.number} is open`);
     const at = atOf(d, d.ended, { abbr: true });
@@ -577,20 +593,34 @@ function holdLine(d) {
   const held = holds.reduce((n, h) => n + (ms(h.end) - ms(h.start)), 0);
   const blocked = holds.filter((h) => h.kind === "blocked").length;
   const questions = holds.filter((h) => h.kind === "question").length;
-  if (holds.length === 1) return `${blocked ? "Blocked once" : "Asked a Question once"}: ${durationText(held)} on hold, waiting for you.`;
+  if (holds.length === 1) return `${blocked ? "Blocked once" : "Asked a Question once"}: ${durationText(held)} on hold${holds[0].cause ? `, waiting for ${holds[0].cause}` : ""}.`;
   const ran = d.stages.filter((s) => s.start).reduce((n, s) => n + (ms(s.end) - ms(s.start)), 0);
   const why = [...(blocked ? [once(blocked, "Blocked")] : []), ...(questions ? [many(questions, "Question")] : [])].join(", ");
   return `Stages ran for ${durationText(ran)} in all; ${durationText(held)} on hold (${why}).`;
 }
 
+/**
+ * Text the harness may have written, on one line of a card: sanitised as every harness text Pendulum publishes (handoff.mjs
+ * sanitize: no live mention, no closing keyword, no bot command), its line breaks folded to spaces, so nothing it holds
+ * starts a line of the card; at most `max` characters.
+ */
+const oneLine = (text, max = 300) => {
+  const one = plainText(sanitize(String(text ?? ""), { max: max * 2 })).replace(/\s+/g, " ").trim();
+  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+};
+
 /** The action lines of a Blocked or a Question card: what to do, then why. */
 function actionLines(d) {
-  const first = (r) => plainText(String(r ?? "").replace(/^question:\s*/i, "").split(/(?<=[.!?])\s/)[0].slice(0, 300));
-  if (d.end === "blocked") return ["> **What to do:** fix the cause below, then re-apply the `pendulum:objective` label. The Blocked notice on this issue has the full steps.", ">", `> **Why:** ${first(d.reason)}`];
+  const reason = String(d.reason ?? "").replace(/^question:\s*/i, "");
+  if (d.end === "blocked") {
+    // Its way on (session.mjs nextStep): one that no resume or restart gets past is said so; any other is fixed, then resumed.
+    const todo = d.next === "none" ? "a resume or a restart does not get past this; the Blocked notice on this issue says why." : "fix the cause below, then re-apply the `pendulum:objective` label. The Blocked notice on this issue has the full steps.";
+    return [`> **What to do:** ${todo}`, ">", `> **Why:** ${oneLine(reason.split(/(?<=[.!?])\s/)[0])}`];
+  }
   if (d.end === "question") {
-    const pr = d.prs[0];
+    const pr = d.prs.findLast((p) => !p.merged);
     const todo = d.form === "pr" && pr ? `answer in a comment on this issue or PR #${pr.number}, then mark PR #${pr.number} ready. Pendulum goes on from where it stopped.` : "answer the question in a comment on this issue. Pendulum goes on from where it stopped.";
-    return [`> **What to do:** ${todo}`, ">", `> **Question:** ${plainText(String(d.reason ?? "").replace(/^question:\s*/i, "").slice(0, 300))}`];
+    return [`> **What to do:** ${todo}`, ">", `> **Question:** ${oneLine(reason)}`];
   }
   return [];
 }
@@ -655,7 +685,7 @@ export const TABLE_ROWS = 20;
 function gantt(d, rows) {
   const drawn = rows.filter((r) => r.start);
   if (!drawn.length) return null;
-  if (drawn.length > TABLE_ROWS) return `Timeline chart left out: ${many(drawn.length, "row")}; the table has every figure.`;
+  if (drawn.length > TABLE_ROWS) return `Timeline chart left out: ${many(drawn.filter((r) => r.kind === "stage").length, "stage")}; the table has every figure.`;
   return ganttChart(
     drawn.map((r) => ({ section: r.short, bars: [{ start: ms(r.start), end: ms(r.end), tag: r.kind === "hold" ? "done" : r.stage?.outcome ? "crit" : "active", label: r.stage?.outcome ? { blocked: "Blocked", question: "Question" }[r.stage.outcome] : "" }] })),
     { zone: zoneOf(d), days: spansDays(d) },
@@ -663,7 +693,7 @@ function gantt(d, rows) {
 }
 
 /** A stage row's cost cell: its cents and runs of unknown cost, "unknown" with no known figure. */
-const stageCost = (r) => (r.usd === null ? "unknown" : cellCost(r.usd > 0 && !r.cents ? r.usd : (r.cents ?? 0) / 100, r.unknown));
+const stageCost = (r) => (r.usd === null ? "unknown" : r.usd === 0 && !r.unknown ? "—" : cellCost(r.usd > 0 && !r.cents ? r.usd : (r.cents ?? 0) / 100, r.unknown));
 
 /**
  * The stage table (`| Time | Stage | Took | Cost |`), the timeline's figures: each stage, each time on hold, the merge
@@ -679,7 +709,7 @@ function stageTable(d, t, rows, costs) {
   for (const r of rows) {
     if (r.kind === "queue") continue;
     if (r.kind === "hold") {
-      lines.push({ at: r.start, name: `${r.name} · waiting for you`, took: ms(r.end) - ms(r.start), cost: "—" });
+      lines.push({ at: r.start, name: r.hold.cause ? `${r.name} · waiting for ${r.hold.cause}` : r.name, took: ms(r.end) - ms(r.start), cost: "—" });
       continue;
     }
     const s = r.stage;
@@ -920,6 +950,7 @@ export function renderFinishCard(d, { log = true, list = true, chart = true } = 
   const unknown = unknownSentence(d, t);
   if (unknown) details.push(`- **Unknown cost:** ${unknown}`);
   details.push("- **Where figures come from:** times from the issue, the PR and each stage's own record; dollars from each stage's own record. Nothing is estimated.");
+  details.push("- — in Took means no time was recorded for that row; in Cost, that no AI dollars were (a stage that ran no AI, the merge queue, time on hold).");
   if (where.churn.length) details.push(`- **How overhead is counted:** ${OVERHEAD_NOTE}`);
   const version = d.stages.find((s) => s.version)?.version;
   if (version) details.push(`- **Pendulum** ${version}`);
@@ -1228,25 +1259,20 @@ export async function objectiveRecords(repo, n, { token, download, want = [] }) 
 }
 
 /**
- * Whether the newest PR on Objective `n`'s branch (`pendulum/<n>`) merged: when a finish card is due (postFinishCard's
- * test, wait.mjs closedAs). One read. A failed read throws.
- */
-export async function newestPrMerged(repo, n, opts) {
-  const branch = (await rest(`repos/${repo.full}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${n}`)}&sort=created&direction=desc&per_page=1`, opts)) || [];
-  return !!branch[0]?.merged_at;
-}
-
-/**
  * Post or update the finish card of Objective `issue` ({number, labels, user, state, closed_at}): one card per Objective
  * (its `finish` marker, by Pendulum itself, pendulumOwn), written in place as the run ends again (#589).
  * - A closed Objective (the dispatcher's Done pass, `end` null): merged when the newest PR on its branch merged
  *   (wait.mjs closedAs), else closed without merging, at its close.
- * - `end` ({kind: blocked or question, at, reason, form}): the stage that ended so, after its last progress write.
- * A card that shows a merge, or a close when the end is a close again, stays as it is ("had"): a merge is final, and a
- * reopened Objective merged again gets no second card. Any other card (Blocked, a Question) is rewritten with the new
- * end. A Blocked or Question card is not written over a card of a later end. With `prBody` (not when Pendulum acts under
- * a person's login), a merged card's PR gets the headline block at the top of its body first, read just before it is
- * written; a refusal of that write (not a passing failure) leaves the PR as it is and the card is still written.
+ * - `end` ({kind: blocked or question, at, reason, form, next}): a Block or a Question applied (session.mjs applyExit).
+ *   Its PRs are the run's own: those merged since its clock (a split Objective's earlier parts) and the newest unmerged
+ *   one; a PR merged before the clock (a reopened Objective's) is no part of it.
+ * A card that shows a merge stays as it is ("had"): a merge is final, and a reopened Objective merged again gets no second
+ * card. A card of a close stays for the same close, and is written again for a later one. A Blocked or Question card is
+ * written again with the new end, never over a card of a later end. The card is read again just before the write, so a
+ * write that raced another (two routes, a stage and the Done pass) never puts an older end over a newer one; when it
+ * finds more than one card of Pendulum's, it writes the first and deletes the rest. With `prBody` (not when Pendulum acts
+ * under a person's login), a merged card's PR gets the headline block at the top of its body first, read just before it
+ * is written; a refusal of that write (not a passing failure) leaves the PR as it is and the card is still written.
  * Returns "posted", "updated", "had", "nothing ran" (no stage and no PR: nothing to show), or "no self" (Pendulum's own
  * login unknown, so no marker can be trusted). `records(n, want)`: the usage records (objectiveRecords) of its stages
  * with no spend line, for their dollars, and of its stages whose harness line names no model, for their model; read
@@ -1257,23 +1283,28 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
   if (!selfLogin()) await primeSelf(opts);
   if (!selfLogin()) return "no self";
   const branch = (await rest(`repos/${repo.full}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${n}`)}&sort=created&direction=desc&per_page=20`, opts)) || [];
-  // How the run ended: a stage's Blocked or Question; else, closed, merged when the newest PR on its branch merged.
+  // How the run ended: a Block or a Question applied; else, closed, merged when the newest PR on its branch merged.
   const merged = !end && !!branch[0]?.merged_at;
   const ending = end ? end : merged ? null : { kind: "closed", at: issue.closed_at };
   const comments = await listComments(repo, n, opts);
   const timeline = (await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
   // Pendulum's own comments only (pendulumOwn): its login here, or its App by id.
   const mine = pendulumOwn(appId);
-  const card = comments.find((c) => mine(c) && (c.body || "").startsWith(finishMarker(n)));
-  const had = card ? finishEndOf(card.body, n) : null;
-  if (had && (had.end === "merged" || (had.end === "closed" && ending?.kind === "closed"))) return "had";
+  const cardsOf = (list) => list.filter((c) => mine(c) && (c.body || "").startsWith(finishMarker(n))).sort((a, b) => ms(a.created_at) - ms(b.created_at) || a.id - b.id);
+  // Whether a card already there stands: a merge is final; a close stays for the same close or a later one; a Block or
+  // Question card stands over an older end of this kind.
+  const stands = (had) => !!had && (had.end === "merged" || (had.end === "closed" && ending?.kind === "closed" && (!had.at || ms(had.at) >= ms(ending.at))) || (ending && had.end !== "closed" && !!had.at && ms(had.at) > ms(ending.at)));
+  if (stands(cardsOf(comments)[0] && finishEndOf(cardsOf(comments)[0].body, n))) return "had";
   const started = labelTime(issue, timeline, label, objectiveWindow(comments.filter((c) => mine(c)), timeline));
-  // The PRs to read whole: the Objective's merged PRs since its clock (a split Objective's parts), oldest first; unmerged,
-  // the newest on its branch.
+  // The PRs to read whole: the Objective's merged PRs since its clock (a split Objective's parts), oldest first; at another
+  // end, then, the newest unmerged one on its branch.
+  const sinceClock = (p) => !started || ms(p.merged_at) >= ms(started);
   const prs = branch.filter((p) => p.merged_at);
-  const parts = merged ? prs.filter((p) => !started || ms(p.merged_at) >= ms(started)).sort((a, b) => ms(a.merged_at) - ms(b.merged_at)) : [];
+  const parts = prs.filter(sinceClock).sort((a, b) => ms(a.merged_at) - ms(b.merged_at));
+  const unmerged = branch.find((p) => !p.merged_at);
+  const reads = merged ? (parts.length ? parts : prs.slice(0, 1)) : [...parts, ...(unmerged ? [unmerged] : [])];
   const pulls = [];
-  for (const p of merged ? (parts.length ? parts : prs.slice(0, 1)) : branch.slice(0, 1)) {
+  for (const p of reads) {
     const [pr, t, reviews, reviewComments] = await Promise.all([getPr(repo, p.number, opts), rest(`repos/${repo.full}/issues/${p.number}/timeline?per_page=100`, { ...opts, paginate: true }), rest(`repos/${repo.full}/pulls/${p.number}/reviews?per_page=100`, { ...opts, paginate: true }), listReviewComments(repo, p.number, opts)]);
     pulls.push({ pr, timeline: t || [], reviews: reviews || [], reviewComments });
   }
@@ -1296,38 +1327,63 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
   const since = comments.filter((c) => ms(c.created_at) >= ms(started));
   const unlined = unlinedStages(since, n, mine);
   const want = [...unlined, ...modellessStages(since, n, mine).filter((w) => !unlined.some((u) => u.stage === w.stage && u.key === w.key))];
-  // A stage's own card: its comments (its progress comment's last write) are as they stand now, after its exit.
   const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: want.length ? await records(n, want) : [], label, mine, end: ending });
   if (!d) return "nothing ran";
   if (!merged && !d.stages.length && !d.prs.length) return "nothing ran";
-  // A stage's Blocked or Question card is never written over a card of a later end.
-  if (end && had?.at && ms(had.at) > ms(d.ended)) return "had";
+  const body = finishCardBody(d);
+  // Read again just before the write: a card another writer wrote meanwhile decides as one there from the start.
+  const now = cardsOf(await listComments(repo, n, opts));
+  if (stands(now[0] && finishEndOf(now[0].body, n))) return "had";
   if (merged && prBody) {
-    const now = await getPr(repo, last.pr.number, opts);
-    await updatePr(repo, last.pr.number, { body: withFinishBlock(now.body, d) }, opts).catch((e) => {
+    const pr = await getPr(repo, last.pr.number, opts);
+    await updatePr(repo, last.pr.number, { body: withFinishBlock(pr.body, d) }, opts).catch((e) => {
       if (transientError(e)) throw e;
       log(`  #${n}: PR #${last.pr.number}'s body was not updated (${Number.isInteger(e?.status) ? `HTTP ${e.status}` : "error"}); the card is posted without it`);
     });
   }
-  const body = finishCardBody(d);
-  if (card) {
-    await rest(`repos/${repo.full}/issues/comments/${card.id}`, { ...opts, method: "PATCH", body: { body } });
-    return "updated";
+  if (!now.length) {
+    await rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body } });
+    return "posted";
   }
-  await rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body } });
-  return "posted";
+  await rest(`repos/${repo.full}/issues/comments/${now[0].id}`, { ...opts, method: "PATCH", body: { body } });
+  // Two writers that both found none posted one each: the first stays, the rest go.
+  for (const extra of now.slice(1)) await rest(`repos/${repo.full}/issues/comments/${extra.id}`, { ...opts, method: "DELETE" }).catch((e) => log(`  #${n}: a second finish card (${extra.id}) was not deleted (${Number.isInteger(e?.status) ? `HTTP ${e.status}` : "error"})`));
+  return "updated";
 }
 
+/** How long a Block's or a Question's card may take before its caller goes on without it (endCard). */
+export const END_CARD_MS = 20_000;
+
 /**
- * A stage's own finish card on its Blocked or Question end (#589), written after its exit line (its last progress write):
- * `exit` (blocked or question), its `reason`, a Question's `form` (logic.mjs questionForm), `issueData` the issue as the
- * stage read it. Never throws: a card that cannot be written is logged, and the Blocked or Question notice stands alone.
- * Returns postFinishCard's answer, or the error.
+ * The finish card of a Block or a Question applied (#589; session.mjs applyExit, in a stage or outside one): `exit`
+ * (blocked or question), its `reason`, a Question's `form` (logic.mjs questionForm), a Block's way on (`next`: session.mjs
+ * nextStep's code). `issue`: the issue object, or its number (then read here, one call). Bounded by `timeoutMs`: past it
+ * the caller goes on and the card's own writes finish or fail by themselves. Never throws: a card that cannot be written
+ * is logged, and the Blocked or Question notice stands alone. Returns postFinishCard's answer, "timed out", "no end" (an
+ * exit that gets no card here), or the error.
  */
-export async function endCard(repo, issueData, opts, { exit, reason = "", form = null, appId = null, log = () => {}, now = Date.now() } = {}) {
-  if (!ENDS.includes(exit) || exit === "closed") return "no end";
-  return postFinishCard(repo, issueData, opts, { prBody: false, appId, log, end: { kind: exit, at: new Date(now).toISOString(), reason, form } }).catch((e) => {
-    log(`  #${issueData?.number}: its ${exit === "blocked" ? "Blocked" : "Question"} card was not written (${String(e?.message || e).slice(0, 120)})`);
+export async function endCard(repo, issue, opts, { exit, reason = "", form = null, next = null, appId = null, log = () => {}, timeoutMs = END_CARD_MS, now = Date.now() } = {}) {
+  if (exit !== "blocked" && exit !== "question") return "no end";
+  const number = typeof issue === "object" && issue ? issue.number : Number(issue);
+  const fail = (e) => {
+    log(`  #${number}: its ${exit === "blocked" ? "Blocked" : "Question"} card was not written (${String(e?.message || e).slice(0, 120)})`);
     return e;
+  };
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      log(`  #${number}: its ${exit === "blocked" ? "Blocked" : "Question"} card took over ${Math.round(timeoutMs / 1000)} s; going on without waiting for it`);
+      resolve("timed out");
+    }, timeoutMs);
+    timer.unref?.();
   });
+  const work = (async () => {
+    const data = typeof issue === "object" && issue ? issue : await rest(`repos/${repo.full}/issues/${number}`, opts);
+    return postFinishCard(repo, data, opts, { prBody: false, appId, log, end: { kind: exit, at: new Date(now).toISOString(), reason, form, next } });
+  })().catch(fail);
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

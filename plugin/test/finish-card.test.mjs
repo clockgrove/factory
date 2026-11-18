@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { setSelf, setWriters } from "../scripts/lib/logic.mjs";
 import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
-import { badge, centsOf, finishData, finishMarker, gateChecks, objectiveRecords, renderFinishCard, withFinishBlock } from "../scripts/lib/finish-card.mjs";
+import { centsOf, finishData, finishMarker, gateChecks, objectiveRecords, renderFinishCard, withFinishBlock } from "../scripts/lib/finish-card.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -390,11 +390,11 @@ test("finish card: an Actions stage's dollars come from its usage artifact, its 
  * comments; `labels3` its labels), #7 Blocked with a PR a person merged, #8 closed with its PR still open. Comments posted
  * are there on the next read. `failCard`: the status the card's POST answers with; `failBody`: the PR body PATCH's.
  */
-function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"], labels8 = ["pendulum:objective", "pendulum:in-review"], dropLabels = false } = {}) {
+function fakeRepo({ failCard = 0, failOn = 3, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"], labels8 = ["pendulum:objective", "pendulum:in-review"], dropLabels = false, pr80 = {} } = {}) {
   const issue = (number, labels) => ({ number, state: "closed", state_reason: "completed", closed_at: real.issue.closed_at, labels: labels.map((name) => ({ name })), body: "", user: { login: "kirkmarple-clockgrove", type: "User" } });
   const closed = [issue(3, labels3), issue(7, ["pendulum:objective", "pendulum:blocked"]), issue(8, labels8)];
   const comments = { 3: withSpend({ work: { usd: 0.35637 }, review: { usd: 0.163442 } }), 7: [], 8: [] };
-  const prs = { 3: [{ ...real.pr, user: bot }], 7: [{ number: 70, merged_at: "2026-11-17T02:27:36Z", created_at: "2026-11-17T02:20:00Z" }], 8: [{ number: 80, node_id: "PR_80", state: "open", draft: false, merged_at: null, created_at: "2026-11-17T02:20:00Z" }] };
+  const prs = { 3: [{ ...real.pr, user: bot }], 7: [{ number: 70, merged_at: "2026-11-17T02:27:36Z", created_at: "2026-11-17T02:20:00Z" }], 8: [{ number: 80, node_id: "PR_80", state: "open", draft: false, merged_at: null, created_at: "2026-11-17T02:20:00Z", ...pr80 }] };
   const writes = [];
   const reads = [];
   let nextId = 100;
@@ -434,7 +434,7 @@ function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective",
       if (i) i.labels = i.labels.filter((l) => l.name !== decodeURIComponent(dl[2]));
       return json({}, 200);
     }
-    if (c && method === "POST" && failCard && JSON.parse(init.body).body?.startsWith(finishMarker(3))) return json({ message: "failed" }, failCard);
+    if (c && method === "POST" && failCard && JSON.parse(init.body).body?.startsWith(finishMarker(failOn))) return json({ message: "failed" }, failCard);
     if (c && method === "POST") {
       const posted = { id: (nextId += 1), user: bot, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: JSON.parse(init.body).body };
       (comments[c[1]] ??= []).push(posted);
@@ -651,7 +651,7 @@ test("finish card (#544): the summary marker carries the card's own figures, fro
   assert.equal(crowdedBody, `${finishMarker(3)}\n${card.finishEndMarker(crowded)}\n${renderFinishCard(crowded)}`);
   // 200 stages: like stages fold into one row each, the per-stage list in Run details; the timeline is left out.
   assert.match(crowdedBody, /\| Work ×200 · Opus 5\.5 \| [^|]+ \| \$2\.00 \|/);
-  assert.match(crowdedBody, /^Timeline chart left out: 203 rows; the table has every figure\.$/m);
+  assert.match(crowdedBody, /^Timeline chart left out: 202 stages; the table has every figure\.$/m);
   assert.match(crowdedBody, /\*\*Each stage\*\*\n- 2:24 AM Plan \+ build · Opus 5\.5: 1 min 21 s, /);
   assert.equal(card.readSummary(crowdedBody, 3), null);
   // A marker anywhere but the line under the finish marker reads as none.
@@ -714,4 +714,19 @@ test("finish card (#567): an issue labelled before the rename to Pendulum has no
   const other = withSelf(() => data({ timeline: [{ event: "labeled", label: { name: `${PREVIOUS_NAME}:objectives` }, created_at: "2026-11-16T02:00:00Z" }, ...real.timeline] }));
   assert.equal(finishSummary(other).wallMs, finishSummary(plain).wallMs);
   assert.ok(finishSummary(plain).wallMs > 0 && finishSummary(plain).labelledWallMs > 0);
+});
+
+test("finish card (#589 S4): a closed Objective's open PR is stopped while its label waits for the card, on either route, and a stopped one is left alone", async () => {
+  const local = ["pendulum:objective", "pendulum:local", "pendulum:in-review"];
+  // The Action holds a pendulum:local Objective's label for the loop: its PR already a draft with no review label, no write.
+  const quiet = fakeRepo({ labels8: local, pr80: { draft: true, labels: [] } });
+  const tick = await tickOver(quiet);
+  assert.ok(!tick.done.includes(8));
+  assert.ok(!quiet.writes.some((w) => /\/(pulls|issues)\/80\b/.test(w) || w.startsWith("DELETE /issues/8/labels/")), JSON.stringify(quiet.writes));
+  // Its own route: the card meets a passing failure, the label waits for a later tick, and the open PR is stopped now.
+  const retry = fakeRepo({ failCard: 502, failOn: 8 });
+  const t = await tickOver(retry);
+  assert.ok(!t.done.includes(8) && !t.finished.includes(8));
+  assert.ok(!retry.writes.some((w) => w.startsWith("DELETE /issues/8/labels/")), "its label waits");
+  assert.ok(retry.writes.some((w) => w.startsWith("DELETE /issues/80/labels/")), "its PR stopped: the review label off");
 });

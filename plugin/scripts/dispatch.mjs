@@ -115,6 +115,18 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.PENDULUM_ACCOUNTS).declared && !!accountPin(issue.labels).two;
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, unknownToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], finished: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
 
+/**
+ * A closed Objective's PR still open, stopped while its state label waits for its finish card (#589): out of the merge
+ * queue, back to a draft, its review label off (stop.mjs applyStop, the label left). Only when there is something to stop
+ * (the PR out of draft, or still carrying the review label), so a tick that finds it stopped writes nothing. A failed read
+ * stops nothing this tick; the next one tries again.
+ */
+async function stopClosedPr(repo, number, project, opts) {
+  const pr = await findPr(repo, `pendulum/${number}`, opts).catch(() => null);
+  if (!pr || (pr.draft === true && !(pr.labels || []).some((l) => l.name === REVIEW_LABEL))) return;
+  await applyStop(repo, number, { pr, closed: true, project }, opts);
+}
+
 export async function dispatch(inputs, { token, decisionRole = "dispatcher", notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (PENDULUM_SANDBOX) and a backend whose Objectives
@@ -1581,7 +1593,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       const closed = recent.find((i) => i.number === number);
       const ours = !!closed && hasLocalLabel(closed) === (backend().name === "local");
       if (labels.length && closed && !ours && cardable(labels) && +now - Date.parse(closed.closed_at) < FINISH_RETRY_MS) {
-        await applyStop(repo, number, { closed: true, project }, opts);
+        await stopClosedPr(repo, number, project, opts);
         continue;
       }
       if (labels.length && closed && ours) {
@@ -1594,7 +1606,11 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
         else if (card instanceof Error) {
           const again = transientError(card) && +now - Date.parse(closed.closed_at) < FINISH_RETRY_MS;
           log(`  #${number}: finish card: ${String(card.message).slice(0, 120)}; ${again ? "its state label waits for a later tick" : "the tidy goes on without it"}`);
-          if (again) continue;
+          // Waiting for its card, a PR it left open is stopped now all the same, never left queued for a later tick.
+          if (again) {
+            await stopClosedPr(repo, number, project, opts);
+            continue;
+          }
         }
       }
       // Under a person's login, the removal is recorded as Pendulum's before it is made, or waits for the next tick.

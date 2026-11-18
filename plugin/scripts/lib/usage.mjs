@@ -963,6 +963,8 @@ export function providerError(harness, events) {
  */
 const MODEL_WINDOWS = { seven_day_opus: "opus", seven_day_sonnet: "sonnet" };
 const NO_LIMIT_WINDOWS = new Set(["overage"]);
+/** The model family a per-model window limits (`seven_day_opus`: opus); null for a window of every model, or none. */
+export const windowFamily = (name) => (Object.hasOwn(MODEL_WINDOWS, name) ? MODEL_WINDOWS[name] : null);
 /**
  * A Claude model id's family, the word after `claude-` (`claude-opus-5-5`: opus); null for any other name: an alias
  * (`opus`, `opusplan`, which runs more than one), another harness's model, or none.

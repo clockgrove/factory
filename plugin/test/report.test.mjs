@@ -1864,6 +1864,18 @@ test("report (#570 V5): an Objective merged in the period counts with every stag
   const { json: stopped } = await report(w, { label: "exp", since: "2026-11-17", "max-calls": r.source.calls.made - 1 });
   assert.deepEqual([stopped.totals.perMerged.n, stopped.totals.perMerged.usd.api.n, stopped.totals.perMerged.leftOut], [1, 0, [{ issue: 20, why: ["comments-stopped"] }]]);
 
+  // A merged Objective whose only comment of Pendulum's is its plan (its work stage died before its progress comment
+  // landed): no record of cost, so left out, never $0; beside a $5 one, the median is that one's.
+  const plan = blank();
+  plan.issues.push(objectiveIssue(21, { labels: ["exp"] }), objectiveIssue(22, { labels: ["exp"] }));
+  plan.pulls.push(ownPull(21, { created: "2026-11-17T04:00:00Z", merged: "2026-11-17T05:00:00Z" }), ownPull(22, { created: "2026-11-17T04:00:00Z", merged: "2026-11-17T05:00:00Z" }));
+  plan.comments.push(comment(21, "<!-- pendulum:21:plan -->\nThe plan.", { user: ME, at: "2026-11-17T02:00:00Z" }), progress(22, "work", "local-q1", { user: ME, at: "2026-11-17T02:00:00Z", spend: { usd: 5, parts: { usdByBilling: { api: 5 }, billing: "api", route: "local" } } }));
+  const { json: one } = await report(plan, { issue: 21 });
+  assert.deepEqual([one.totals.perMerged.n, one.totals.perMerged.usd.api.n, one.totals.perMerged.reviewRounds.n, one.totals.perMerged.leftOut], [1, 0, 0, [{ issue: 21, why: ["no-records"] }]]);
+  const { json: both } = await report(plan, { label: "exp", since: "2026-11-17" });
+  const pb = both.totals.perMerged;
+  assert.deepEqual([pb.usd.api.n, pb.usd.api.median, pb.reviewRounds.n, pb.leftOut], [1, 5, 1, [{ issue: 21, why: ["no-records"] }, { issue: 22, why: ["no-passes", "no-clock"] }]]);
+
   // The boundary: #3's stages all before the period, its merge and its finish card in it; its card and thread are read.
   const carded = churnedWorld();
   carded.comments.push(await finishCard3(carded));

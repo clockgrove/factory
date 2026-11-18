@@ -1460,6 +1460,9 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       modelMinutes: summary ? (summary.modelMinutes === null ? null : round2(summary.modelMinutes)) : whole && !minutes.untimed ? round2(minutes.all) : null,
       fixPasses: summary ? (summary.passes?.fix ?? null) : whole ? row.passes.fix : null,
       wallMinutes: row.wallMinutes,
+      // Its decision records outside a stage (decision-spend lines, its own and those it cannot attribute), for the
+      // per-merged figures' check that a row with no stage still has a record of cost (perMergedOf).
+      decisionRecords: decisions.length + theirCalls.length,
     });
   }
   // The whole-Objective pass perMergedOf makes: its rows and measures, nothing else.
@@ -1602,8 +1605,16 @@ function perMergedOf(read, objectives, opts) {
   const rowOf = new Map(objectives.map((o) => [o.issue, o]));
   const merged = (n) => (rowOf.has(n) ? rowOf.get(n).outcome : issues?.get(n) ? outcomeOf(issues.get(n), pulls, { pullsRead: source.pullsRead !== false && !source.pullsUnread?.has(n) }) : null) === "merged";
   const ns = [...new Set([...rowOf.keys(), ...(issues?.keys() ?? [])])].filter((n) => merged(n) && inWindow(mergedAt(n, comments, pulls, mine), scope)).sort((a, b) => a - b);
+  // The Objectives with a record of cost among the comments read, Pendulum's own or one it counts as unknown cost: a
+  // stage's progress or vendor comment, a decision-spend line, or a finish card with a summary. Any other marker (a
+  // plan, a notice) is no record of cost: a merged Objective with only that is `no-records`, never $0.
   const pushed = (c) => mine(c) || pushAuthor(c) || throughApp(c);
-  const recorded = new Set((comments || []).filter(pushed).map(markerIssue).filter((n) => n !== null));
+  const costed = (c) => {
+    const n = markerIssue(c);
+    const body = c.body || "";
+    return n !== null && (new RegExp(`^<!-- pendulum:${n}:(?:progress|vendor):(?:work|review):`).test(body) || decisionSpendEntries(body).length > 0 || (mine(c) && body.startsWith(finishMarker(n)) && !!readSummary(body, n)));
+  };
+  const recorded = new Set((comments || []).filter((c) => pushed(c) && costed(c)).map(markerIssue));
   const whyNot = (n) => (source.cut?.has(n) || (!source.threadsWhole?.has(n) && source.stopped) ? "comments-stopped" : !source.threadsWhole?.has(n) ? "records-unread" : !recorded.has(n) ? "no-records" : null);
   const whole = ns.filter((n) => !whyNot(n));
   // The same reads, the Objectives whole: no period, and their finish card summaries for that scope.
@@ -1616,12 +1627,15 @@ function perMergedOf(read, objectives, opts) {
   const inner = whole.length ? buildReport({ ...read, issues: new Map([...(issues ?? new Map())].filter(([n]) => whole.includes(n))), scope: wholeScope, summaries, arms: undefined }, { ...opts, wholePass: true }) : { objectives: [], measures: new Map() };
   const byN = new Map(inner.objectives.map((o) => [o.issue, o]));
   const m = (n) => inner.measures.get(n) ?? {};
+  // A row with no stage, no dollars, no run of unknown cost and no decision record holds no record of cost either.
+  const empty = (o) => o.stages.work + o.stages.rebase + o.stages.review === 0 && COST_KINDS.every((k) => o.cost.usd[k] === 0) && !o.cost.unknownRuns && !m(o.issue).decisionRecords;
   const why = (n) => {
     if (whyNot(n) || !byN.has(n)) return [whyNot(n) ?? "records-unread"];
     const o = byN.get(n);
+    if (empty(o)) return ["no-records"];
     return [...(o.cost.unknownRuns ? ["unknown-runs"] : []), ...((m(n).fixPasses ?? null) === null ? ["no-passes"] : []), ...(o.wallMinutes === null ? ["no-clock"] : [])];
   };
-  const counted = whole.filter((n) => byN.has(n)).map((n) => byN.get(n));
+  const counted = whole.filter((n) => byN.has(n) && !empty(byN.get(n))).map((n) => byN.get(n));
   const known = counted.filter((o) => !o.cost.unknownRuns);
   const measured = (list, pick, digits) => {
     const s = spread(list.map(pick), digits);

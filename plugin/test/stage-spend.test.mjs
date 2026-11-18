@@ -184,7 +184,9 @@ async function stages(plan) {
     import { stageSpendLine } from ${JSON.stringify(LIB("logic.mjs"))};
     import { existsSync as there } from "node:fs";
     import { mergeUsage } from ${JSON.stringify(LIB("usage.mjs"))};
-    import { repoOf } from ${JSON.stringify(LIB("github.mjs"))};
+    import { RETRY, repoOf } from ${JSON.stringify(LIB("github.mjs"))};
+    // A write GitHub answers 502 is retried at once, not after the gateway's 10 s waits: the tries are what count.
+    RETRY.sleep = async () => {};
     const how = ${JSON.stringify(how)};
     const root = process.env.FAKE_STATE;
     const usageDir = join(root, "ws", "usage-work-" + ${JSON.stringify(name)});

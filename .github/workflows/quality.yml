@@ -1,12 +1,16 @@
 name: Quality
+# On a PR and on the merge queue's commit: the queue's run is the one main's commit had, so a push to main runs none.
 on:
   pull_request:
   merge_group:
-  push:
-    branches: [main]
 permissions: { contents: read }
+# A new push to a PR cancels its run still going; a merge queue run is never cancelled.
+concurrency:
+  group: quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  quality:
+  checks:
+    name: lint, skills and bench
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,15 +53,8 @@ jobs:
           if "$RUNNER_TEMP/skills-ref/bin/python" -I tools/deps/skills-validate.py bench/test/fixtures/skills/bad-name/; then echo "::error::skills-ref accepted a skill that breaks the rules"; exit 1; fi
       # The tests run with an empty temp folder of their own, and must leave it empty: a developer's box runs them many
       # times a day, and what they left behind once filled /tmp's inodes (#2565).
-      # Local mode needs ripgrep (the sandboxes' scan for protected paths), so tests of its real stage setup do too.
-      - name: ripgrep, as local mode needs it
-        run: sudo apt-get install -y --no-install-recommends ripgrep
       - name: An empty temp folder for the tests
         run: mkdir "$RUNNER_TEMP/tests"
-      - name: Plugin tests
-        run: node --test plugin/test/*.test.mjs
-        env:
-          TMPDIR: ${{ runner.temp }}/tests
       - name: Bench tests
         run: node --test bench/test/*.test.mjs
         env:
@@ -68,3 +65,50 @@ jobs:
           if [ -n "$left" ]; then echo "::error::the tests left these in their temp folder: $(echo $left)"; exit 1; fi
       - name: Skills within the one-page cap and recorded in bench/skills.json
         run: node bench/skills.mjs --check
+
+  # The plugin tests, in four slices on runners of their own (Node's --test-shard: every fourth file, in name order), so
+  # each slice keeps the runner's own concurrency and none is raised.
+  plugin-tests:
+    name: plugin tests (${{ matrix.slice }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      # Every slice runs to its end, so a red names all its failing tests at once.
+      fail-fast: false
+      matrix:
+        slice: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # Local mode needs ripgrep (the sandboxes' scan for protected paths), so tests of its real stage setup do too.
+      - name: ripgrep, as local mode needs it
+        run: sudo apt-get install -y --no-install-recommends ripgrep
+      # Each slice's own empty temp folder, which it must leave empty, as the bench tests' (above).
+      - name: An empty temp folder for the tests
+        run: mkdir "$RUNNER_TEMP/tests"
+      - name: Plugin tests, slice ${{ matrix.slice }} of 4
+        run: node --test --test-shard=${{ matrix.slice }}/4 plugin/test/*.test.mjs
+        env:
+          TMPDIR: ${{ runner.temp }}/tests
+      - name: The tests left the temp folder empty
+        run: |
+          left="$(ls -A "$RUNNER_TEMP/tests")"
+          if [ -n "$left" ]; then echo "::error::the tests left these in their temp folder: $(echo $left)"; exit 1; fi
+
+  # The one required check the ruleset and the merge queue name: green only when the checks above and every slice
+  # passed. It runs whatever they ended as, so a slice that failed, was cancelled or was skipped turns it red, never
+  # leaves it skipped (which a required check would read as passing).
+  quality:
+    name: quality
+    needs: [checks, plugin-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lint, skills, bench and every plugin test slice passed
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          PLUGIN_TESTS: ${{ needs.plugin-tests.result }}
+        run: |
+          echo "lint, skills and bench: $CHECKS; plugin tests: $PLUGIN_TESTS"
+          if [ "$CHECKS" != success ] || [ "$PLUGIN_TESTS" != success ]; then echo "::error::lint, skills and bench $CHECKS, plugin tests $PLUGIN_TESTS"; exit 1; fi

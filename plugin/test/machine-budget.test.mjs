@@ -115,22 +115,35 @@ test("slots: processes share the budget, and a holder killed with SIGKILL frees 
 });
 
 /**
- * `n` processes that wait for one shared moment, then each take a slot of `budget` with the real takeSlot and hold what
- * they got: {child, taken} for each.
+ * `n` processes that each load takeSlot, say so and spin until all have, then each take a slot of `budget` with the real
+ * takeSlot and hold what they got: {child, taken} for each.
  */
-function racers(dir, budget, n) {
+async function racers(dir, budget, n) {
   const lib = pathToFileURL(join(here, "..", "scripts", "lib", "machine.mjs")).href;
-  const at = Date.now() + 700;
-  return Promise.all(
-    Array.from({ length: n }, () => {
-      const child = spawn(process.execPath, ["--input-type=module", "-e", `import { takeSlot } from ${JSON.stringify(lib)}; while (Date.now() < ${at}); const s = takeSlot({ dir: ${JSON.stringify(dir)}, budget: ${budget} }); process.stdout.write(s ? "taken\\n" : "full\\n"); setInterval(() => {}, 60000);`], { stdio: ["ignore", "pipe", "inherit"] });
-      return new Promise((ok, fail) => {
-        let out = "";
-        child.stdout.on("data", (c) => ((out += c), out.includes("\n") && ok({ child, taken: out.startsWith("taken") })));
-        child.on("exit", (code) => fail(new Error(`racer exited ${code}`)));
+  // The start line: a file made once every racer is ready, so they take at once however long each took to start.
+  const go = join(mkdtempSync(join(tmpdir(), "racers-")), "go");
+  const racing = Array.from({ length: n }, () => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", `import { existsSync } from "node:fs"; import { takeSlot } from ${JSON.stringify(lib)}; process.stdout.write("ready\\n"); while (!existsSync(${JSON.stringify(go)})); const s = takeSlot({ dir: ${JSON.stringify(dir)}, budget: ${budget} }); process.stdout.write(s ? "taken\\n" : "full\\n"); setInterval(() => {}, 60000);`], { stdio: ["ignore", "pipe", "inherit"] });
+    let ready;
+    const started = new Promise((r) => (ready = r));
+    const answer = new Promise((ok, fail) => {
+      let out = "";
+      child.stdout.on("data", (c) => {
+        out += c;
+        if (out.startsWith("ready\n")) ready();
+        const m = /^ready\n(taken|full)\n/.exec(out);
+        if (m) ok({ child, taken: m[1] === "taken" });
       });
-    }),
-  );
+      child.on("exit", (code) => fail(new Error(`racer exited ${code}`)));
+    });
+    return { started, answer };
+  });
+  try {
+    await Promise.all(racing.map((r) => Promise.race([r.started, r.answer])));
+  } finally {
+    writeFileSync(go, "");
+  }
+  return Promise.all(racing.map((r) => r.answer));
 }
 
 test("slots: loops taking the last slot at once leave exactly one of them holding it (#309, #323)", async () => {

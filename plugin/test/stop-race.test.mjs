@@ -192,8 +192,11 @@ test("stopStage: the usage and spend line first, then a tidy bounded in time; a 
     };
     let exited = null;
     let ended = null;
-    const took = stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, records, finish, opts: { token: "t" }, settleMs: 1, tidyMs: 500, exitMs: ${finishHangs ? 1500 : 60_000}, endNow: (recs) => (ended = recs.map((r) => ({ label: r.label, usd: r.usd, unknown: r.usdUnknown ?? 0 }))), exit: (code) => (exited = code) });
-    const result = await Promise.race([took, new Promise((r) => setTimeout(() => r("pending"), 4000))]);
+    // The stop's own exit, when its time runs out, is the moment to read it: the stop is still pending then.
+    let exiting;
+    const exitCalled = new Promise((r) => (exiting = r));
+    const took = stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, records, finish, opts: { token: "t" }, settleMs: 1, tidyMs: 500, exitMs: ${finishHangs ? 1500 : 60_000}, endNow: (recs) => (ended = recs.map((r) => ({ label: r.label, usd: r.usd, unknown: r.usdUnknown ?? 0 }))), exit: (code) => ((exited = code), exiting()) });
+    const result = await Promise.race([took, exitCalled.then(() => "pending"), new Promise((r) => setTimeout(() => r("pending"), 4000))]);
     process.stdout.write(JSON.stringify({ result, order, ms: Date.now() - t0, exited, ended, records: records.map((r) => ({ label: r.label, usd: r.usd, unknown: r.usdUnknown ?? 0 })) }) + "\\n");
     process.exit(0);
   `;

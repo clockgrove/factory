@@ -63,7 +63,7 @@ test("exec: with no item open, a harness that streams its answer is hung once th
   assert.deepEqual([r.idle, r.idleOpen, !!r.signal], [true, 0, true]);
   assert.deepEqual([seen.length, r.stdout], [1, `${seen[0]}\n`], "the deltas count as output and go no further");
   // A harness that streams no answer (Codex: it ends a stalled stream itself): the silence decides nothing.
-  const codex = await exec(process.execPath, ["-e", waiting(0, WINDOW * 8)], { idleMs: WINDOW, fileStdio: true });
+  const codex = await exec(process.execPath, ["-e", waiting(0, WINDOW * 4)], { idleMs: WINDOW, fileStdio: true });
   assert.deepEqual([codex.code, codex.idle], [0, false]);
 });
 

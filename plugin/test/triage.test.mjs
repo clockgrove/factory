@@ -1562,9 +1562,10 @@ test("validation loop: another job failing counts as progress only when the jobs
     const codex = recordingCodex();
     const phases = [];
     try {
-      // First quality fails; after the fix pass the build fails, and quality `passed` or was skipped behind it.
+      // First quality fails and the build passes; after the fix pass the build fails, and quality `passed` or was skipped
+      // behind it.
       const heads = { [next]: [run(id + 1, "build"), run(id + 2, "quality", quality)], [last]: [run(id + 3, "build"), run(id + 4, "quality", quality)] };
-      const result = await withHead({ runs: [run(id, "quality")], heads, jobs: Object.fromEntries([id, id + 1, id + 3].map((j) => [j, { ...testFailed, id: j }])), logs: { [id]: failingLog, [id + 1]: buildLog, [id + 3]: buildLog } }, () =>
+      const result = await withHead({ runs: [run(id, "quality"), run(id + 5, "build", "success")], heads, jobs: Object.fromEntries([id, id + 1, id + 3].map((j) => [j, { ...testFailed, id: j }])), logs: { [id]: failingLog, [id + 1]: buildLog, [id + 3]: buildLog } }, () =>
         validationLoop({
           checkout: codex.work,
           commands: [],

@@ -375,12 +375,28 @@ test("#613: a hold kept for a per-model window is probed on a model of that fami
     assert.equal(call.args[call.args.indexOf("--model") + 1], "claude-sonnet-5", "probed on the window's family");
     assert.equal(releases(h), 0);
     assert.deepEqual([probeFile(h).outcome, probeFile(h).usd], ["failed", 0.002]);
-    assert.ok(lines.some((l) => /claude account alpha: probed .*: it was answered by claude-opus-5-5, which its seven_day_sonnet window does not limit; the hold stands/.test(l)), lines.join(""));
+    assert.ok(lines.some((l) => /claude account alpha: probed .*: it was answered by claude-opus-5-5, and by none its seven_day_sonnet window limits; the hold stands/.test(l)), lines.join(""));
+    // An answer that names no model's use: the model asked for (Sonnet) is no evidence of who answered.
+    sonnet.says(answered());
+    t += PROBE_EVERY_MS;
+    await tick(sonnet);
+    assert.equal(sonnet.calls().length, 2);
+    assert.equal(sonnet.calls()[1].args[sonnet.calls()[1].args.indexOf("--model") + 1], "claude-sonnet-5");
+    assert.equal(releases(h), 0, "no modelUsage: not answered for a per-model window");
+    assert.equal(probeFile(h).outcome, "failed");
+    assert.ok(lines.some((l) => /claude account alpha: probed .*: it was answered by no model its harness named, and by none its seven_day_sonnet window limits; the hold stands/.test(l)), lines.join(""));
+    // A Sonnet model listed with no output beside the Opus model that answered: named, but it answered nothing.
+    sonnet.says(jsonl([INIT, { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "ok", session_id: INIT.session_id, total_cost_usd: 0.002, modelUsage: { "claude-sonnet-5": { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 }, "claude-opus-5-5": { inputTokens: 900, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.002 } } }]));
+    t += PROBE_EVERY_MS;
+    await tick(sonnet);
+    assert.equal(sonnet.calls().length, 3);
+    assert.equal(releases(h), 0, "a family model with no output answered nothing");
+    assert.equal(probeFile(h).outcome, "failed");
     // Answered by a Sonnet model: the window is lifted.
     sonnet.says(answeredBy("claude-sonnet-5"));
     t += PROBE_EVERY_MS;
     await tick(sonnet);
-    assert.equal(sonnet.calls().length, 2);
+    assert.equal(sonnet.calls().length, 4);
     assert.equal(releases(h), 1);
     assert.equal(loop.limitUntil({ key: "alpha", shared: true }), null);
     assert.deepEqual([probeFile(h).outcome, probeFile(h).model, probeFile(h).released], ["answered", "claude-sonnet-5", t]);
@@ -392,7 +408,8 @@ test("#613: a hold kept for a per-model window is probed on a model of that fami
     loop.wf = { PENDULUM_SUBAGENT_MODEL: "claude-sonnet-5" };
     loop.result = limited(t + 6 * DAY, t, "seven_day");
     await work(loop);
-    loop.says(answeredBy("claude-opus-5-5"));
+    // No modelUsage in the answer: a window of every model needs none.
+    loop.says(answered());
     t += MIN;
     await tick(loop);
     assert.equal(loop.calls()[0].args[loop.calls()[0].args.indexOf("--model") + 1], "claude-opus-5-5");
@@ -510,5 +527,56 @@ test("#613: a refusal that is no usage limit keeps the hold; a probe under way i
     assert.deepEqual(await loop.probeHolds(), []);
     assert.equal(loop.holds.probe(key, t), null, "no turn taken");
     assert.equal(loop.calls().length, 0);
+  });
+});
+
+test("#613: a stop signal to serve ends a probe under way, so the loop's exit never waits on it", async () => {
+  await scene(async (h, lines) => {
+    let t = Date.now();
+    const loop = serveOn(h, () => t);
+    loop.result = limited(t + 6 * DAY, t);
+    await work(loop);
+    loop.says(answered(), 0, { gated: true });
+    t += MIN;
+    await loop.pausedHere(new Map());
+    const probing = loop.probeHolds();
+    await until(() => loop.calls().length === 1);
+    // serve's real signal handler (stopOnSignals), with this process's own handlers and exit stood in for: the handler
+    // it registers is called as a SIGTERM would call it, and its exit is recorded instead of ending the test run.
+    const handlers = [];
+    const exits = [];
+    const real = { on: process.on, exit: process.exit };
+    const bound = [];
+    process.on = (sig, fn) => (handlers.push({ sig, fn }), process);
+    process.exit = (code) => void exits.push(code);
+    try {
+      loop.stopOnSignals(() => probing);
+      // The handler's own 30 s bound on that wait is cleared at the end, so this file's process does not wait it out.
+      const timers = [];
+      const setT = globalThis.setTimeout;
+      globalThis.setTimeout = (fn, ms, ...rest) => {
+        const timer = setT(fn, ms, ...rest);
+        if (ms === 30_000) timers.push(timer);
+        return timer;
+      };
+      try {
+        handlers.find((x) => x.sig === "SIGTERM").fn();
+      } finally {
+        globalThis.setTimeout = setT;
+      }
+      bound.push(...timers);
+      // The probe's fake never answers by itself: only the handler's abort ends it, and with it the wait for the exit.
+      await until(() => exits.length === 1);
+    } finally {
+      Object.assign(process, real);
+      for (const timer of bound) clearTimeout(timer);
+      // A run in which nothing ended the probe lets it answer now, so a failure here ends at once.
+      loop.go();
+    }
+    assert.equal(bound.length, 1);
+    assert.deepEqual(exits, [143]);
+    assert.deepEqual(await probing, ["failed"]);
+    assert.equal(releases(h), 0);
+    assert.ok(lines.some((l) => /claude account alpha: probed .*: it got no answer \(stopped by Pendulum\); the hold stands/.test(l)), lines.join(""));
   });
 });

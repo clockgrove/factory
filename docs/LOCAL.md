@@ -440,7 +440,7 @@ A hold lasts at most eight days.
   A `serve` that runs no model of that family does not probe it at all, since no answer it could get would lift that window: it says so once in its log, and the hold stands until its reset or a release.
   It runs beside the tick, which never waits for it, and it is no stage: it starts none, takes no slot and writes nothing to GitHub.
 - **Answered:** the hold is released exactly as `pendulum hold release` does it (below), for every `serve` on the machine, and the log says so (and says when the answer ran on paid extra usage past the plan's limit).
-  Only a served answer counts: a result of the harness's own, a clean exit and output tokens; and for a per-model window, an answer by a model of that family.
+  Only a served answer counts: a result of the harness's own, a clean exit and output tokens; and for a per-model window, a model of that family that the harness itself reports output tokens for (the model asked for is no evidence, and a harness that names no model's use lifts no such window).
   At the next tick the Objectives paused on the account resume and new stages start on it.
 - **Refused for the usage limit or quota:** the hold stands, and the account is probed again 30 minutes on at the soonest.
 - **Anything else** (no answer, a result with no output, an answer by a model the window does not limit, another refusal, a harness that did not start, the time cap, `serve` stopping): the hold stands, the same.

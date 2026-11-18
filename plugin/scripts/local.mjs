@@ -2467,7 +2467,7 @@ export class Local {
    * - Its model is one the hold's window limits (probeModel): a hold kept for a per-model window (`seven_day_opus`) is
    *   probed on a model of that family, since another model's answer says nothing of that window.
    * - Answered (probeServed: a real result the provider served, with output; and, for a per-model window, by a model of
-   *   its family): the hold is released as `pendulum hold release` does (holds.mjs release: one release record, for
+   *   its family that the harness itself reports output for): the hold is released as `pendulum hold release` does (holds.mjs release: one release record, for
    *   every serve here), so the Objectives paused on it resume at the next tick and new stages start on it.
    * - Refused for the usage limit or quota: the hold stands, and the next probe is PROBE_EVERY_MS on.
    * - Anything else (no answer, another refusal, a harness that did not start, the time cap): the hold stands, the same.
@@ -2489,8 +2489,10 @@ export class Local {
     // serve never reads or writes anywhere (a stage's spend is its worker process's), and it ends on stageStopSignal,
     // which nothing in serve raises; serve's own stop ends it through `probeStop`.
     const rec = await runDecision({ harness, model, prompt: "Reply with the single word ok.", env, label: "limit probe", signal: (this.probeStop ??= new AbortController()).signal });
-    // The models that answered, as the harness reported them; a per-model window is lifted only by one of its family.
-    const answeredBy = rec.models && Object.keys(rec.models).length ? Object.keys(rec.models) : [rec.model ?? model];
+    // The models that answered: only those the harness itself reported with output (Claude Code's `modelUsage`, as
+    // `rec.models`), never `rec.model`, which is the model Pendulum asked for when the harness names none. A per-model
+    // window is lifted only by one of its family among them; a record with no such report lifts none.
+    const answeredBy = Object.entries(rec.models ?? {}).filter(([, m]) => Number(m?.output) > 0).map(([name]) => name);
     const onWindow = !family || answeredBy.some((m) => modelFamily(m) === family);
     const outcome = rec.refusal ? (refusalCause(rec.refusal) === "provider-quota" ? "limited" : "failed") : probeServed(rec) && onWindow ? "answered" : "failed";
     const now = (this.clock ?? Date.now)();
@@ -2500,7 +2502,7 @@ export class Local {
     const until = store.until(hold.key, now);
     if (outcome !== "answered") {
       store.probed(record);
-      const why = outcome === "limited" ? "its usage limit still refuses it" : rec.refusal ? `the provider refused it (${refusalFields(rec.refusal) || "no status"})` : probeServed(rec) ? `it was answered by ${answeredBy.filter(Boolean).join(", ") || "a model it did not name"}, which its ${window} window does not limit` : `it got no answer (${String(rec.error || "no result the provider served").slice(0, 120)})`;
+      const why = outcome === "limited" ? "its usage limit still refuses it" : rec.refusal ? `the provider refused it (${refusalFields(rec.refusal) || "no status"})` : probeServed(rec) ? `it was answered by ${answeredBy.join(", ") || "no model its harness named"}, and by none its ${window} window limits` : `it got no answer (${String(rec.error || "no result the provider served").slice(0, 120)})`;
       log(`${who}: probed before its usage limit's reset${until !== null ? ` (${logTime(until)})` : ""}: ${why}; the hold stands, and it is probed again in ${minutesText(PROBE_EVERY_MS)} at the soonest (the probe: ${spent})`);
       return outcome;
     }

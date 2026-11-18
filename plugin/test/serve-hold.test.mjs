@@ -1,5 +1,6 @@
 import "./temp.mjs";
 import { test } from "node:test";
+import { whenText } from "../scripts/lib/clock.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -1115,7 +1116,7 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
     t = since + OUTAGE.blockMs;
     assert.equal((await loop.resume(7)).exit, "blocked");
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-14T08:47:00\.000Z for 12 h, past Pendulum's 12 h bound for an outage\. The network is back: re-apply the label/);
+    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from Nov 14, 8:47 AM UTC for 12 h, past Pendulum's 12 h bound for an outage\. The network is back: re-apply the label/);
     assert.match(notice, /<!-- pendulum:block \{"cause":"outage"\} -->/);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     // A later pause long after a resume is a new outage: its own since.
@@ -1182,7 +1183,7 @@ test("#575: run --wait waits in place for a stage paused on this machine's netwo
     assert.equal(probes, 3, "one probe a poll until the host answers");
     assert.equal(r.exit, "delivered");
     assert.equal(code, 0);
-    assert.match(log, /#7: waiting here for api\.anthropic\.test to answer, as serve would, up to 12 h from 2026-11-17T08:47:00\.000Z/);
+    assert.match(log, /#7: waiting here for api\.anthropic\.test to answer, as serve would, up to 12 h from Nov 17, 8:47 AM UTC/);
     assert.match(log, /#7: resuming \(api\.anthropic\.test answers again\)/);
     assert.ok(!/#7: paused, resumable/.test(log));
     assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
@@ -1204,7 +1205,7 @@ test("#575: run --wait on a stage paused on this machine's network stops at serv
     assert.equal(code, 75);
     assert.deepEqual(started, ["work"], "never resumed while its host does not answer");
     assert.equal(probes, 3);
-    assert.match(log, /#7: still paused on this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-17T08:47:00\.000Z, past Pendulum's 12 h bound for an outage; this run stops waiting/);
+    assert.match(log, /#7: still paused on this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from Nov 17, 8:47 AM UTC, past Pendulum's 12 h bound for an outage; this run stops waiting/);
     assert.match(log, /#7: paused, resumable \(exit 75\): its claim stays on this machine; `pendulum run 7 --wait --repo acme\/app` resumes it here/);
     assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
@@ -1494,7 +1495,7 @@ test("#389: a stage paused on GitHub's 5xx waits on while GitHub's status page r
     assert.equal((await loop.resume(7)).exit, "blocked");
     assert.equal(tries(), 12);
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 13 pauses over 12 h, past Pendulum's 12 h bound for github\.test failing/);
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from Nov 14, 8:47 AM UTC, through 13 pauses over 12 h, past Pendulum's 12 h bound for github\.test failing/);
     assert.match(notice, /<!-- pendulum:block \{"cause":"outage"\} -->/);
     assert.ok(!loop.offline.has(7));
   } finally {
@@ -1523,7 +1524,7 @@ test("#389: a stage paused on GitHub's 5xx while GitHub's status page reports it
     assert.equal(page.asked(), 4);
     assert.ok(page.paths.every((u) => u === "/api/v2/summary.json"), page.paths.join(" "));
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z; GitHub's status page reported API Requests operational, Issues operational, Pull Requests operational, before and after one more try, so the failure is this request's/);
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from Nov 14, 8:47 AM UTC; GitHub's status page reported API Requests operational, Issues operational, Pull Requests operational, before and after one more try, so the failure is this request's/);
     assert.match(notice, /<!-- pendulum:block \{"cause":"pendulum"\} -->/);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     assert.ok(!loop.offline.has(7));
@@ -1608,8 +1609,8 @@ test("#389: the one more try belongs to the request that failed: a 5xx on anothe
     assert.equal((await next()).exit, "blocked");
     assert.equal(tries(), 3);
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.ok(notice.includes(`github.test answered HTTP 500 to every try of GET repos/acme/app/pulls from ${new Date(fresh).toISOString()};`), notice);
-    assert.doesNotMatch(notice, /from 2026-11-14T08:47:00\.000Z/, "not the first pause's request time");
+    assert.ok(notice.includes(`github.test answered HTTP 500 to every try of GET repos/acme/app/pulls from ${whenText(fresh)};`), notice);
+    assert.doesNotMatch(notice, /from Nov 14, 8:47 AM UTC/, "not the first pause's request time");
   } finally {
     await page.close();
     gh.restore();

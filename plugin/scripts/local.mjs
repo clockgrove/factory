@@ -39,7 +39,8 @@ const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, PARTIAL_CODES, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportModels, reportScope } from "./lib/report.mjs";
 import { ghLoginToken, activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, timeZoneName, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { machineZone, whenText, zoneMarker } from "./lib/clock.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -126,9 +127,9 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
       : `No other ${h} account on this machine is free now.`;
   const head = guessed
     ? free.length
-      ? `Pendulum: the ${stage} stage paused on a usage limit. ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate.`
-      : `Pendulum: the ${stage} stage paused on a usage limit. Every ${h} account on this machine is held; ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate. Pendulum resumes this Objective on this machine then, or sooner on an account that comes free.`
-    : `Pendulum: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Pendulum resumes this Objective on this machine after then.`;
+      ? `Pendulum: the ${stage} stage paused on a usage limit. ${who} reached its limit with no reset reported, and is passed over until about ${whenText(reset)}, an estimate.`
+      : `Pendulum: the ${stage} stage paused on a usage limit. Every ${h} account on this machine is held; ${who} reached its limit with no reset reported, and is passed over until about ${whenText(reset)}, an estimate. Pendulum resumes this Objective on this machine then, or sooner on an account that comes free.`
+    : `Pendulum: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${whenText(reset)}; Pendulum resumes this Objective on this machine after then.`;
   return [head, "", moves, ...(note ? ["", note] : [])].join("\n");
 }
 
@@ -275,6 +276,7 @@ export const COMMANDS = {
     check: reportCheck,
     about: `cost and token use of a period (--since, --until; the ${DEFAULT_DAYS} days before --until or now, from UTC midnight, by default) or a set of Objectives (--issue, --label, --parent), or two experiment arms side by side (--compare A,B: the pendulum:experiment:<name> labels; --compare-label for any two labels), every figure precomputed (--rates: the ratio of each named model's published rates to each recorded model's of one vendor, on its recorded token mix, no dollar unit): --json for the documented schema (${REPORT_SCHEMA}), else Markdown; prints its planned GitHub calls first and stops at --max-calls (${DEFAULT_MAX_CALLS}), exiting ${STOPPED_EXIT} with what it read`,
   },
+  zone: { args: [], flags: {}, about: "this machine's time zone as the hidden line an Objective's body starts with (<!-- pendulum:tz NAME -->), so the times its stages write read in its filer's zone; pendulum-file adds it" },
   hold: {
     args: ["list|release"],
     more: "account",
@@ -386,11 +388,20 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
  * The repository's settings (the default branch's workflow and the repository's variables) a running serve takes at its
  * next tick (refreshSettings): how many run, on which models and effort (held with the harness when it changes), what
  * validation runs, how a session resumes and its cache, whether hand-offs wait for siblings, how many rebases a PR
- * gets and how long a usage limit with no reset passes its account over. One this shell sets (inputs.mjs
+ * gets, how long a usage limit with no reset passes its account over and the zone visible times are written in. One this shell sets (inputs.mjs
  * machineSettings) keeps the shell's value whatever the repository says. What a stage may reach or receive, spend, protect or be set up with, and
  * the harness, are taken only when serve starts.
  */
-export const HOT_SETTINGS = ["PENDULUM_MAX_CONCURRENT", "PENDULUM_LOCAL_MAX_CONCURRENT", "PENDULUM_MODEL", "PENDULUM_SUBAGENT_MODEL", "PENDULUM_REVIEWER_MODEL", "PENDULUM_EFFORT", "PENDULUM_REVIEWER_EFFORT", "PENDULUM_VALIDATION", "PENDULUM_LOCAL_VALIDATION", "PENDULUM_RESUME_POLICY", "PENDULUM_PROMPT_CACHE_TTL", "PENDULUM_SIBLING_HOLD", "PENDULUM_REBASE_LIMIT", "PENDULUM_GUESS_HOURS"];
+export const HOT_SETTINGS = ["PENDULUM_MAX_CONCURRENT", "PENDULUM_LOCAL_MAX_CONCURRENT", "PENDULUM_MODEL", "PENDULUM_SUBAGENT_MODEL", "PENDULUM_REVIEWER_MODEL", "PENDULUM_EFFORT", "PENDULUM_REVIEWER_EFFORT", "PENDULUM_VALIDATION", "PENDULUM_LOCAL_VALIDATION", "PENDULUM_RESUME_POLICY", "PENDULUM_PROMPT_CACHE_TTL", "PENDULUM_SIBLING_HOLD", "PENDULUM_REBASE_LIMIT", "PENDULUM_GUESS_HOURS", "PENDULUM_TIME_ZONE"];
+
+/**
+ * Serve's own visible times (its log, the notices it posts) in the repository's zone, as its stages write theirs
+ * (lib/clock.mjs timeZone reads PENDULUM_TIME_ZONE from this process's env): the settings `wf` in force name it, or none does.
+ */
+export function takeZone(wf, env = process.env) {
+  if (wf?.PENDULUM_TIME_ZONE) env.PENDULUM_TIME_ZONE = wf.PENDULUM_TIME_ZONE;
+  else delete env.PENDULUM_TIME_ZONE;
+}
 
 /**
  * What changed between two sets of the repository's settings (settingLayers's values), one `NAME: old → new` each, in
@@ -752,6 +763,7 @@ export class Local {
     if (wf.dropped.length) log(`.github/workflows/pendulum.yml: ${wf.dropped.join(", ")} ${wf.dropped.length === 1 ? "is" : "are"} no Pendulum setting; left out of every stage`);
     this.workflowWf = wf.kept;
     this.wf = wf.kept;
+    takeZone(this.wf);
     this.token = localToken(this.repoFull);
   }
 
@@ -874,6 +886,7 @@ export class Local {
   startSettings() {
     const layers = settingLayers({ workflow: this.workflowWf, variables: this.variables || {} });
     this.wf = layers.values;
+    takeZone(this.wf);
     this.from = layers.from;
     this.ignoredKey = ignoredLines(layers).join("\n");
   }
@@ -1743,7 +1756,7 @@ export class Local {
           // nothing else holds on it, and a serve with it off writes no guess.
           if (this.auto && runs.account && result?.exit === "blocked" && result.limitRefused) {
             const end = this.holdStore(hold).spent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), window: result.limitRefused.limitType ?? null, steps: this.guessSteps() });
-            log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
+            log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${whenText(end)}`);
           }
           // `served`: a harness pass the provider served in this stage (writeUsage's servedPasses, which leaves the stage's
           // decision calls out), the progress outagePaused reads between pauses.
@@ -2104,10 +2117,10 @@ export class Local {
     (this.offline ??= new Map()).set(issue, { since: serverDown(o.code) ? server.since : since, stage: result?.stage || "work", origin: o.origin ?? null, host: o.host || "the network", code: o.code || "no answer", ...(o.endpoint ? { endpoint: o.endpoint } : {}), ...(Number.isFinite(reset) ? { reset } : {}), ...(server ? { server } : {}) });
     this.lapsed?.delete(issue);
     const what = Number.isFinite(reset)
-      ? `GitHub's ${o.quota || "core"} API rate limit on ${o.host || "GitHub"} is spent until ${o.reset}; the claim stays and this loop resumes it after the reset`
+      ? `GitHub's ${o.quota || "core"} API rate limit on ${o.host || "GitHub"} is spent until ${whenText(reset)}; the claim stays and this loop resumes it after the reset`
       : serverDown(o.code)
-        ? `${lostText(o.host || "GitHub", o.code, o.endpoint)} since ${new Date(server.since).toISOString()}; the claim stays and this loop resumes it in ${minutesText(serverWait(server.pauses))} (pause ${server.pauses})${o.origin === githubOrigin() ? ", going by GitHub's status page" : ""}`
-        : `${lostText(o.host || "the network", o.code || "no answer")} since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`;
+        ? `${lostText(o.host || "GitHub", o.code, o.endpoint)} since ${whenText(server.since)}; the claim stays and this loop resumes it in ${minutesText(serverWait(server.pauses))} (pause ${server.pauses})${o.origin === githubOrigin() ? ", going by GitHub's status page" : ""}`
+        : `${lostText(o.host || "the network", o.code || "no answer")} since ${whenText(since)}; the claim stays and this loop resumes it once that host answers`;
     log(`#${issue}: the ${result?.stage || "work"} stage paused: ${what}`);
   }
 
@@ -2134,7 +2147,7 @@ export class Local {
     if (!l.held && l.harness) reset = this.holdStore(hold).limit({ harness: l.harness, account: hold.key, reset, now, window: l.limitType ?? null });
     (this.offline ??= new Map()).set(issue, { since: Number.isFinite(since) ? since : now, stage: result?.stage || "work", origin: null, host: l.harness, code: "usage limit", harness: l.harness, reset, hold: hold.key, account, pinned: !!result.pinned, pin: result.pin ?? null });
     this.lapsed?.delete(issue);
-    const until = l.guessed ? `is passed over until about ${new Date(reset).toISOString()} (no reset was reported)` : `is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}`;
+    const until = l.guessed ? `is passed over until about ${whenText(reset)} (no reset was reported)` : `is spent until ${whenText(reset)}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}`;
     log(`#${issue}: the ${result?.stage || "work"} stage paused: ${limitName(l.harness, account)}'s usage limit ${until}; the claim stays and this loop resumes it after then`);
     if (l.harness) await this.pauseNotice(issue, { stage: result?.stage || "work", harness: l.harness, account, hold: hold.key, reset, window: l.limitType ?? this.holdStore(hold).window(hold.key, now) ?? null, pinned: !!result.pinned, ...(l.guessed ? { guessed: true } : {}) });
   }
@@ -2156,7 +2169,7 @@ export class Local {
     // Only a serve with automatic choice on keeps a guess (a stage this serve did not pick for cannot end here: its env
     // never says so, accounts.mjs STAGE_AUTO_ENV); one with it off Blocks the stage as on any no-reset limit.
     const end = this.auto ? this.holdStore(hold).spent({ harness: l.harness, account: hold.key, now, window: l.limitType ?? null, steps: this.guessSteps() }) : null;
-    if (end !== null) log(`#${issue}: ${limitName(l.harness, account)} reached its usage limit or quota with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
+    if (end !== null) log(`#${issue}: ${limitName(l.harness, account)} reached its usage limit or quota with no reset reported; automatic account choice passes it over until ${whenText(end)}`);
     if (end !== null && !result.pinned && this.freeAccounts(l.harness, hold.key).length) return this.limitPaused(issue, { ...result, usageLimit: { ...l, noReset: false, reset: new Date(end).toISOString(), held: true, guessed: true } });
     const h = HARNESS_NAMES[l.harness] || l.harness;
     const states = this.accountStates(l.harness);
@@ -2184,8 +2197,8 @@ export class Local {
       const hold = this.holdOf(a);
       const hard = this.limitUntil(hold);
       const any = this.limitUntil(hold, { guess: true });
-      if (any !== null && any !== hard) return `\`${a.name}\` passed over until about ${new Date(any).toISOString()} (no reset reported)`;
-      if (hard !== null) return `\`${a.name}\` held until ${new Date(hard).toISOString()}`;
+      if (any !== null && any !== hard) return `\`${a.name}\` passed over until about ${whenText(any)} (no reset reported)`;
+      if (hard !== null) return `\`${a.name}\` held until ${whenText(hard)}`;
       return this.knownUnready(a) ? `\`${a.name}\` cannot run here` : `\`${a.name}\` free`;
     });
   }
@@ -2353,7 +2366,7 @@ export class Local {
     const stores = [this.holdStore(), this.ownHolds].filter(Boolean);
     if (stores.some((st) => st.avoidUntil(off.hold, now) !== null)) return false;
     const at = this.holdStore().releasedAt?.(off.hold, now) ?? null;
-    const how = at !== null && at > off.since ? `was released (pendulum hold release) at ${new Date(at).toISOString()}` : "is no longer held on this machine";
+    const how = at !== null && at > off.since ? `was released (pendulum hold release) at ${whenText(at)}` : "is no longer held on this machine";
     log(`#${issue}: ${limitName(off.harness, off.account)} ${how}; resuming it now, before the reset it paused for`);
     return true;
   }
@@ -2445,7 +2458,7 @@ export class Local {
       for (const e of held) this.saidLimit(harness, e.a.name, e.hold, e.until, e.until !== this.limitUntil(e.hold));
       const h = HARNESS_NAMES[harness] || harness;
       // The first to end may be a guess (no reset reported): an estimate, said as one.
-      const at = `${first.until !== this.limitUntil(first.hold) ? "about " : ""}${new Date(first.until).toISOString()}`;
+      const at = `${first.until !== this.limitUntil(first.hold) ? "about " : ""}${whenText(first.until)}`;
       if (every.length === 1) return `${limitName(harness, first.a.name)}'s usage limit is spent until ${at}`;
       return held.length === every.length ? `every ${h} account on this machine has its usage limit spent; the first, ${limitName(harness, first.a.name)}, resets at ${at}` : `every ${h} account on this machine has its usage limit spent or cannot run here; the first to reset, ${limitName(harness, first.a.name)}, resets at ${at}`;
     }
@@ -2453,7 +2466,7 @@ export class Local {
     const until = this.limitUntil(hold);
     if (until === null) return null;
     this.saidLimit(harness, account.name, hold, until);
-    return `${limitName(harness, account.name)}'s usage limit is spent until ${new Date(until).toISOString()}`;
+    return `${limitName(harness, account.name)}'s usage limit is spent until ${whenText(until)}`;
   }
 
   /** The log line that no stage starts on `account` until its usage limit's reset (`until`, ms): once per reset. */
@@ -2462,8 +2475,8 @@ export class Local {
     if ((this.limitSaid ??= new Set()).has(key)) return;
     this.limitSaid.add(key);
     const who = limitName(harness, account);
-    if (guessed) log(`${who} reached its usage limit with no reset reported; automatic account choice passes it over until about ${new Date(until).toISOString()}`);
-    else log(`${who}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${who} until then`);
+    if (guessed) log(`${who} reached its usage limit with no reset reported; automatic account choice passes it over until about ${whenText(until)}`);
+    else log(`${who}'s usage limit is spent until ${whenText(until)}; no stage starts on ${who} until then`);
   }
 
   /**
@@ -2588,7 +2601,7 @@ export class Local {
     if (s.state === "operational" && off.server.tried) return { block: said };
     off.server.tryGranted = false;
     if (s.state !== "operational") off.server.tried = false;
-    const line = `${said}; ${s.state === "operational" ? "the 5xx is this request's: one more try" : `waiting it out as an incident, up to ${minutesText(OUTAGE.blockMs)} from ${new Date(off.since).toISOString()}`}`;
+    const line = `${said}; ${s.state === "operational" ? "the 5xx is this request's: one more try" : `waiting it out as an incident, up to ${minutesText(OUTAGE.blockMs)} from ${whenText(off.since)}`}`;
     if (off.server.said !== `${off.server.pauses} ${line}`) log(`#${issue}: ${line}`);
     off.server.said = `${off.server.pauses} ${line}`;
     return s.state === "operational" ? { once: true } : null;
@@ -2623,10 +2636,10 @@ export class Local {
       // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
       const back = serverDown(off.code) || !off.origin || (await probeHost(off.origin)) === null;
       const reason = own
-        ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.server.requestSince ?? off.since).toISOString()}; ${own}, before and after one more try, so the failure is this request's, not a GitHub incident. Re-apply the label to run it again once that request is fixed.`
+        ? `${lostText(off.host, off.code, off.endpoint)} from ${whenText(off.server.requestSince ?? off.since)}; ${own}, before and after one more try, so the failure is this request's, not a GitHub incident. Re-apply the label to run it again once that request is fixed.`
         : serverDown(off.code)
-          ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, through ${pausesText(off.server?.pauses ?? 1)} over ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for ${off.host} failing. Re-apply the label to run it again once ${off.host} answers that request.`
-          : `${lostText(off.host, off.code)} from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
+          ? `${lostText(off.host, off.code, off.endpoint)} from ${whenText(off.since)}, through ${pausesText(off.server?.pauses ?? 1)} over ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for ${off.host} failing. Re-apply the label to run it again once ${off.host} answers that request.`
+          : `${lostText(off.host, off.code)} from ${whenText(off.since)} for ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
       log(`#${issue}: ${reason}`);
       try {
         await this.block(issue, off.stage || "work", reason, { cause: own ? "pendulum" : "outage" });
@@ -2765,7 +2778,7 @@ export class Local {
     const out = {};
     for (const [n, f] of this.startFailures ?? []) {
       if (now >= f.retryAt || (f.count === 0 && !f.recheck)) continue;
-      out[n] = f.count === 0 ? `its start here failed on a fault of this machine; its claim is read again after ${new Date(f.retryAt).toISOString()}` : `its last start here failed (${f.count} in a row); tried again after ${new Date(f.retryAt).toISOString()}`;
+      out[n] = f.count === 0 ? `its start here failed on a fault of this machine; its claim is read again after ${whenText(f.retryAt)}` : `its last start here failed (${f.count} in a row); tried again after ${whenText(f.retryAt)}`;
     }
     return out;
   }
@@ -2796,7 +2809,7 @@ export class Local {
     const backoff = (recheck = unknown) => {
       const retryAt = (this.clock ?? Date.now)() + Math.min(START_BACKOFF_MS * 2 ** (Math.max(count, 1) - 1), START_BACKOFF_MAX_MS);
       failures.set(issue, { count, retryAt, recheck });
-      return new Date(retryAt).toISOString();
+      return whenText(retryAt);
     };
     // Only serve reads its failed starts again (recheckStarts); `run --wait` waiting a pause out polls again (waitPaused).
     const readAgain = (at) => (this.serving ? `this loop reads its claim again after ${at}` : this.waitingOn === issue ? "this run reads it again at its next poll" : "a later `pendulum run` or serve on this machine reads it again");
@@ -2930,7 +2943,7 @@ export class Local {
       } else if (what === "sandbox") {
         const problems = await p.sandbox();
         if (problems.length) return problems[0];
-      } else if ((this.clock ?? Date.now)() < h.retryAt) return `one start is tried again after ${new Date(h.retryAt).toISOString()}`;
+      } else if ((this.clock ?? Date.now)() < h.retryAt) return `one start is tried again after ${whenText(h.retryAt)}`;
     }
     return null;
   }
@@ -3128,10 +3141,10 @@ export class Local {
         if (!off || off.harness || off.pinWait) return r;
         const now = clock();
         if (now - off.since >= OUTAGE.blockMs) {
-          log(`#${issue}: still paused on ${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage; this run stops waiting`);
+          log(`#${issue}: still paused on ${lostText(off.host, off.code, off.endpoint)} from ${whenText(off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage; this run stops waiting`);
           return r;
         }
-        if (!said) log(`#${issue}: waiting here for ${off.host} to answer, as serve would, up to ${minutesText(OUTAGE.blockMs)} from ${new Date(off.since).toISOString()}`);
+        if (!said) log(`#${issue}: waiting here for ${off.host} to answer, as serve would, up to ${minutesText(OUTAGE.blockMs)} from ${whenText(off.since)}`);
         said = true;
         const due = await this.outageDue(off, now);
         if (due || now - beatAt >= beatEvery) {
@@ -3614,6 +3627,7 @@ export class Local {
     if (!changes.length) return;
     log(`${hotLead.text}; each stage that starts from now on runs with them, and stages in flight keep theirs: ${changes.join("; ")}`);
     this.wf = hot;
+    takeZone(this.wf);
     this.from = hotFrom;
   }
 
@@ -3650,7 +3664,7 @@ export class Local {
     if (!this.pendulum.release) return note(`the workflow on ${where} pins clockgrove/pendulum@${ref}; this serve runs ${name} from ${this.pendulum.root}, which is not a release checkout, so it keeps running that: start serve from ${ref} to run it`);
     if (this.repin?.state === "failed" && Date.now() >= this.repin.retryAt) this.repin = null;
     // Counted from the last switch this process made (restartOn), never from a try that did not switch.
-    if (!this.repin && Date.now() - (this.switchedAt || 0) < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/pendulum@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
+    if (!this.repin && Date.now() - (this.switchedAt || 0) < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/pendulum@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${whenText(this.switchedAt + SWITCH_GAP_MS)} and runs ${name} until then`);
     if (!this.repin) {
       log(`the workflow on ${where} pins clockgrove/pendulum@${ref}; this serve runs ${name}. It fetches ${ref} from ${RELEASES_URL} and starts no new stage meanwhile; ${inFlight ? `once the ${inFlight} stage(s) in flight here end` : "once fetched"}, serve runs on ${ref}`);
       const r = (this.repin = { ref, state: "fetching" });
@@ -4032,10 +4046,9 @@ export class Local {
 
 /** One account's holds as `pendulum hold` says them (holds.mjs list's entry), at `now`: `state` alone, its state's words. */
 export function holdText(h, now, { state = false } = {}) {
-  const iso = (ms) => new Date(ms).toISOString();
   const parts = [];
-  if (h.until !== null) parts.push(`${h.until > now ? `held until ${iso(h.until)}${h.window ? ` (${h.window})` : ""}` : `hold ended ${iso(h.until)}`}, back-off count ${h.streak}`);
-  if (h.guess) parts.push(`${h.guess.until > now ? `passed over until about ${iso(h.guess.until)}` : `guess ended ${iso(h.guess.until)}`} (no reset reported), ${h.guess.streak} in a row`);
+  if (h.until !== null) parts.push(`${h.until > now ? `held until ${whenText(h.until)}${h.window ? ` (${h.window})` : ""}` : `hold ended ${whenText(h.until)}`}, back-off count ${h.streak}`);
+  if (h.guess) parts.push(`${h.guess.until > now ? `passed over until about ${whenText(h.guess.until)}` : `guess ended ${whenText(h.guess.until)}`} (no reset reported), ${h.guess.streak} in a row`);
   return state ? parts.join("; ") : `${h.account} (${HARNESS_NAMES[h.harness] || h.harness}): ${parts.join("; ")}`;
 }
 
@@ -4715,6 +4728,10 @@ async function main() {
   }
   if (cmd === "report") {
     process.exitCode = await reportCommand(flags);
+    return;
+  }
+  if (cmd === "zone") {
+    process.stdout.write(`${zoneMarker(timeZoneName(machineZone()) ?? "UTC")}\n`);
     return;
   }
   if (cmd === "hold") {

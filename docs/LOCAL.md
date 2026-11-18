@@ -505,7 +505,7 @@ A fetch that stalls ends after a minute without data, or at its timeout.
 - `PENDULUM_MAX_CONCURRENT`, `PENDULUM_LOCAL_MAX_CONCURRENT`;
 - the models and effort (`PENDULUM_MODEL`, `PENDULUM_SUBAGENT_MODEL`, `PENDULUM_REVIEWER_MODEL`, `PENDULUM_EFFORT`, `PENDULUM_REVIEWER_EFFORT`);
 - `PENDULUM_VALIDATION`, `PENDULUM_LOCAL_VALIDATION`;
-- `PENDULUM_RESUME_POLICY`, `PENDULUM_PROMPT_CACHE_TTL`, `PENDULUM_SIBLING_HOLD`, `PENDULUM_REBASE_LIMIT` and `PENDULUM_GUESS_HOURS`.
+- `PENDULUM_RESUME_POLICY`, `PENDULUM_PROMPT_CACHE_TTL`, `PENDULUM_SIBLING_HOLD`, `PENDULUM_REBASE_LIMIT`, `PENDULUM_GUESS_HOURS` and `PENDULUM_TIME_ZONE`.
 
 How a change applies:
 - A change to one applies from the tick after it is read, or the first one with no stage being set up: to this box's limit, the dispatcher's caps and every stage that starts from then on.

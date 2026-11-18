@@ -19,6 +19,7 @@ import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { useObjectiveZone } from "./lib/clock.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, workValidation, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
@@ -362,6 +363,8 @@ async function main() {
   }
   // 1. The issue.
   let issueData = await getIssue(repo, issue, token);
+  // Its visible times from here on in the zone its body names, if any (lib/clock.mjs); the progress comment's too.
+  useObjectiveZone(issueData?.body);
   const labels = (issueData.labels || []).map((l) => l.name);
   // A draft (pendulum:draft) never runs, its Objective label on or not (lib/stop.mjs stopCause): nothing is claimed or spent.
   if (stopCause(issueData, inputs.objectiveLabel) === "draft") {

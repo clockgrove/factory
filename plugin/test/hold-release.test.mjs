@@ -32,9 +32,9 @@ test("#376: hold list shows each held or passed-over account; hold release lifts
   assert.equal(list.status, 0, list.stderr);
   const lines = list.stdout.trim().split("\n");
   assert.equal(lines.length, 3);
-  assert.match(lines[0], /^alpha \(Claude Code\): held until \S+ \(seven_day\), back-off count 2; passed over until about \S+ \(no reset reported\), 1 in a row$/);
-  assert.match(lines[1], /^beta \(Claude Code\): held until \S+ \(five_hour\), back-off count 0$/);
-  assert.match(lines[2], /^codex@0123456789ab \(Codex\): passed over until about \S+ \(no reset reported\), 1 in a row$/);
+  assert.match(lines[0], /^alpha \(Claude Code\): held until \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+ \(seven_day\), back-off count 2; passed over until about \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+ \(no reset reported\), 1 in a row$/);
+  assert.match(lines[1], /^beta \(Claude Code\): held until \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+ \(five_hour\), back-off count 0$/);
+  assert.match(lines[2], /^codex@0123456789ab \(Codex\): passed over until about \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+ \(no reset reported\), 1 in a row$/);
 
   // A name nothing holds: refused, naming the ones that are; nothing written.
   const files = readdirSync(dir).sort();
@@ -45,7 +45,7 @@ test("#376: hold list shows each held or passed-over account; hold release lifts
 
   const rel = hold(home, "release", "alpha");
   assert.equal(rel.status, 0, rel.stderr);
-  assert.match(rel.stdout, /^released alpha \(Claude Code\), which was held until \S+ \(seven_day\), back-off count 2; passed over until about /);
+  assert.match(rel.stdout, /^released alpha \(Claude Code\), which was held until \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+ \(seven_day\), back-off count 2; passed over until about /);
   assert.match(rel.stdout, /\nevery serve on this Pendulum release or later on this machine may start on it at its next tick, .*; a serve on an earlier release still holds it until its reset: restart that serve on this release/);
   const after = readdirSync(dir).sort();
   assert.equal(after.length, files.length + 1, "one release record, and no file removed");
@@ -65,7 +65,7 @@ test("#376: hold list shows each held or passed-over account; hold release lifts
   assert.equal(other.until("alpha", t), t + LIMIT_BACKOFF_MS[0], "a limit after the release holds again");
 
   const again = hold(home, "list");
-  assert.match(again.stdout, /^alpha \(Claude Code\): held until \S+, back-off count 1\nbeta /);
+  assert.match(again.stdout, /^alpha \(Claude Code\): held until \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+, back-off count 1\nbeta /);
   // A login's key releases the same way, as the list shows it.
   assert.equal(hold(home, "release", "codex@0123456789ab").status, 0);
   assert.equal(accountHolds({ dir }).avoidUntil("codex@0123456789ab", Date.now()), null);

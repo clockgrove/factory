@@ -16,6 +16,7 @@ import http from "node:http";
 import https from "node:https";
 import { BlockList, isIP } from "node:net";
 import { log } from "./inputs.mjs";
+import { whenText } from "./clock.mjs";
 import { BARE_BUSY_TYPES } from "./usage.mjs";
 
 /** Node fetch's connect-level failures: no byte of the request left this machine, or its connect timed out. */
@@ -176,7 +177,6 @@ const hostOf = (origin) => {
     return String(origin);
   }
 };
-const iso = (ms) => new Date(ms).toISOString();
 /** "GitHub's core API rate limit on api.github.com": a quota as the log and the stage's reason name it. */
 const limitName = (origin, key) => `GitHub's ${quotaName(key)} API rate limit on ${hostOf(origin)}`;
 export const minutesText = (ms) => (ms >= 2 * 60 * 60_000 ? `${Math.round(ms / (60 * 60_000))} h` : ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.max(1, Math.round(ms / 1000))} s`);
@@ -209,7 +209,7 @@ export const originOf = (url) => {
 export class NetworkDown extends Error {
   constructor({ origin, code, since, resetAt = null, key = null }) {
     const spent = Number.isFinite(resetAt);
-    super(spent ? `${limitName(origin, key)} is spent until ${iso(resetAt)} (met at ${iso(since)})` : serverDown(code) ? `${hostOf(origin)} answered ${code} to every try since ${iso(since)}` : `${hostOf(origin)} unreachable from this machine since ${iso(since)} (${code || "no answer"})`);
+    super(spent ? `${limitName(origin, key)} is spent until ${whenText(resetAt)} (met at ${whenText(since)})` : serverDown(code) ? `${hostOf(origin)} answered ${code} to every try since ${whenText(since)}` : `${hostOf(origin)} unreachable from this machine since ${whenText(since)} (${code || "no answer"})`);
     this.name = "NetworkDown";
     Object.assign(this, { offline: true, transport: true, unsent: true, status: 0, origin, code: spent ? RATE_LIMIT_SPENT : code || "", since, ...(spent ? { resetAt, key } : {}) });
   }
@@ -379,17 +379,17 @@ function episode(origin, code, resetAt = null, key = origin, check = probe) {
       if (stop.signal.aborted) break;
       if ((await check(origin)) === null) {
         ep.back = OUTAGE.now();
-        if (!quiet) log(`network: ${host} answers again after ${minutesText(ep.back - lostAt)} (unreachable since ${iso(lostAt)}${flap ? `; on and off since ${iso(since)}` : ""})`);
+        if (!quiet) log(`network: ${host} answers again after ${minutesText(ep.back - lostAt)} (unreachable since ${whenText(lostAt)}${flap ? `; on and off since ${whenText(since)}` : ""})`);
         if (gen === GEN) RECENT.set(key, { since, end, code: ep.code, back: ep.back });
         return true;
       }
       if (quiet && OUTAGE.now() - lostAt >= OUTAGE.flapMs) {
         quiet = false;
-        log(`network: ${host} is unreachable from this machine again (${ep.code || "no answer"}) since ${iso(lostAt)}; on and off since ${iso(since)}; waiting for it to answer again${Number.isFinite(end) ? `, until ${iso(end)}` : ""}`);
+        log(`network: ${host} is unreachable from this machine again (${ep.code || "no answer"}) since ${whenText(lostAt)}; on and off since ${whenText(since)}; waiting for it to answer again${Number.isFinite(end) ? `, until ${whenText(end)}` : ""}`);
       }
     }
     if (!stop.signal.aborted) {
-      log(`network: ${host} still unreachable after ${minutesText(OUTAGE.now() - since)} (since ${iso(since)}); no longer waiting`);
+      log(`network: ${host} still unreachable after ${minutesText(OUTAGE.now() - since)} (since ${whenText(since)}); no longer waiting`);
       // Past the process's limit it waits no more for anything: a caller that swallowed this wait's NetworkDown and
       // goes on gets its next unreachable request's error at once, not a fresh wait of its own.
       stopWaiting();
@@ -433,11 +433,11 @@ function spentEpisode(origin, resetAt, key) {
   };
   ep.done = (async () => {
     if (end > limit) {
-      log(`network: ${name} is spent until ${iso(resetAt)}, past this process's wait (until ${iso(limit)}); no longer waiting for it`);
+      log(`network: ${name} is spent until ${whenText(resetAt)}, past this process's wait (until ${whenText(limit)}); no longer waiting for it`);
       givenUp();
       return false;
     }
-    if (!again) log(`network: ${name} is spent until ${iso(resetAt)}; no request goes against it until then (${minutesText(end - now)})`);
+    if (!again) log(`network: ${name} is spent until ${whenText(resetAt)}; no request goes against it until then (${minutesText(end - now)})`);
     await OUTAGE.sleep(end - OUTAGE.now(), stop.signal);
     if (stop.signal.aborted) {
       givenUp();
@@ -668,4 +668,4 @@ export function outageOf(e, now = OUTAGE.now()) {
 
 /** A paused or Blocked stage's reason for an outage (outageOf's fields, `since` and `resetAt` in ms). */
 export const outageReason = ({ host, code, since, resetAt, quota = "core", endpoint = null }, now = OUTAGE.now()) =>
-  Number.isFinite(resetAt) ? `GitHub's ${quota} API rate limit on ${host} is spent until ${iso(resetAt)} (met at ${iso(since)})` : `${lostText(host, code, endpoint)} from ${iso(since)}, ${minutesText(Math.max(0, now - since))} so far`;
+  Number.isFinite(resetAt) ? `GitHub's ${quota} API rate limit on ${host} is spent until ${whenText(resetAt)} (met at ${whenText(since)})` : `${lostText(host, code, endpoint)} from ${whenText(since)}, ${minutesText(Math.max(0, now - since))} so far`;

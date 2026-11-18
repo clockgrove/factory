@@ -19,7 +19,8 @@ import { preparePendulumHome, realRoots, runnerLaunch } from "./lib/claude-runne
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, ghLoginToken, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { APP_ID_VARIABLE, appIdVariable, PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { APP_ID_VARIABLE, appIdVariable, PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, timeZoneName, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { machineZone } from "./lib/clock.mjs";
 import { REVIEW_LABEL, commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -162,6 +163,21 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
 export function defaultsCheck(inputs) {
   const m = (v) => v || `${inputs.harness}'s own default`;
   return PASS("defaults", `harness ${inputs.harness}, worker ${m(inputs.model)}, sub-agents ${m(inputs.subagentModel)}, reviewer ${m(inputs.reviewerModel)}: the repository's defaults; an Objective overrides any of them for itself with a ${Object.values(CHOICE_PREFIXES).map((p) => `${p}<${p === CHOICE_PREFIXES.harness ? "name" : "id"}>`).join(", ")} label (docs/USAGE.md); one on another harness needs that harness's credential too, and Blocks naming it when it is missing`);
+}
+
+/**
+ * The zone visible times are written in (#586, lib/clock.mjs timeZone), from the repository's settings as a stage reads
+ * them (`settings`): a PASS naming it and where each route takes it when no Objective's own zone line names one; a WARN
+ * when PENDULUM_TIME_ZONE names no IANA zone, which every route then ignores.
+ */
+export function timeZoneCheck(settings = {}) {
+  const given = input("time_zone", { env: settings }).trim();
+  const named = given ? timeZoneName(given) : null;
+  const objective = "an Objective whose body starts with the zone line pendulum-file writes (`pendulum zone`) uses that zone instead";
+  const fallback = `this machine's zone (${machineZone()}) in local mode, UTC on Actions and in the cloud sandbox`;
+  if (named) return PASS("time zone", `visible times are written in ${named} (PENDULUM_TIME_ZONE); ${objective}`);
+  if (!given) return PASS("time zone", `PENDULUM_TIME_ZONE is not set: visible times are written in ${fallback}; ${objective}`);
+  return WARN("time zone", `PENDULUM_TIME_ZONE ${JSON.stringify(given.slice(0, 60))} is no IANA time zone name, so it is ignored: visible times are written in ${fallback}`, "set it to a zone name such as America/Los_Angeles (the tz database's), or remove it");
 }
 
 /**
@@ -2469,7 +2485,7 @@ async function main() {
   }
   const varsToken = ownToken || token;
   const { wf, committed, env, stage, inputs, layers, listed, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
-  const results = [defaultsCheck(inputs), ...(previous ? [FAIL("key folder", previous, `mv ${join(homedir(), ".config", PREVIOUS_NAME)} ${pendulumKeyDir(homedir())}`)] : []), ...(linked ? [linked] : []), ...source, ...settingsRows(layers, { verbose: !!args.verbose }), ...ownerLimitChecks({ inputs, local, stage })];
+  const results = [defaultsCheck(inputs), ...(previous ? [FAIL("key folder", previous, `mv ${join(homedir(), ".config", PREVIOUS_NAME)} ${pendulumKeyDir(homedir())}`)] : []), ...(linked ? [linked] : []), ...source, ...settingsRows(layers, { verbose: !!args.verbose }), timeZoneCheck(stage), ...ownerLimitChecks({ inputs, local, stage })];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));

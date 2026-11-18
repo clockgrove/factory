@@ -437,7 +437,7 @@ test("gateStarted: an empty gate counts any check run, any status, or any suite 
 
 test("requeueLine: the issue's one line at a re-enqueue, codes and times only", async () => {
   const { requeueLine } = await import("../scripts/lib/session.mjs");
-  assert.equal(requeueLine(300, { at: "2026-11-09T10:40:04Z", code: "checks_timed_out" }, 2), "Pendulum: the merge queue dropped PR #300 (checks_timed_out) at 2026-11-09T10:40:04Z; enqueued again (try 2).");
+  assert.equal(requeueLine(300, { at: "2026-11-09T10:40:04Z", code: "checks_timed_out" }, 2), "Pendulum: the merge queue dropped PR #300 (checks_timed_out) at Nov 9, 10:40 AM UTC; enqueued again (try 2).");
   assert.equal(requeueLine(300, { at: "<b>", code: "unknown" }, 2), "Pendulum: the merge queue dropped PR #300 (unknown) at an unknown time; enqueued again (try 2).");
   assert.equal(requeueLine(300, { at: "2026-11-09T10:40:04.123Z", code: "failed_checks" }, 2).includes("\n"), false);
 });

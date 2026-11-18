@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
+import { whenText } from "../scripts/lib/clock.mjs";
 import { RETRY, rest } from "../scripts/lib/github.mjs";
 import { NetworkDown, OUTAGE, networkBack, passCutOff, resetNetwork, unreachable, waitOutages } from "../scripts/lib/network.mjs";
 import { openOutbox } from "../scripts/lib/outbox.mjs";
@@ -82,7 +83,7 @@ test("rest: calls that cannot leave this machine wait for one probe loop, then g
       const net = netLines(lines);
       assert.equal(net.length, 2, net.join(""));
       assert.match(net[0], /network: api\.github\.test is unreachable from this machine \(EAI_AGAIN\); waiting for it to answer again, for up to 15 min/);
-      assert.match(net[1], /network: api\.github\.test answers again after 1 min \(unreachable since 2026-11-14T08:47:00\.000Z\)/);
+      assert.match(net[1], /network: api\.github\.test answers again after 1 min \(unreachable since Nov 14, 8:47 AM UTC\)/);
       assert.deepEqual(retryLines(lines), [], "no retry lines for a network that is down");
     },
   );
@@ -179,7 +180,7 @@ test("outageExit: locally the stage ends paused with the outage and writes nothi
     assert.equal(ends.length, 1);
     const [exit, reason, outage] = ends[0];
     assert.deepEqual(outage, { host: "api.github.test", code: "EAI_AGAIN", since: "2026-11-14T08:47:00.000Z", origin: "https://api.github.test" });
-    assert.match(reason, /^this machine could not reach api\.github\.test \(EAI_AGAIN\) from 2026-11-14T08:47:00\.000Z/);
+    assert.match(reason, /^this machine could not reach api\.github\.test \(EAI_AGAIN\) from Nov 14, 8:47 AM UTC/);
     assert.deepEqual(records, [{ usd: 1.5 }], "no pass ran here: the caller's records stand");
     if (local) {
       assert.equal(exit, "paused");
@@ -187,7 +188,7 @@ test("outageExit: locally the stage ends paused with the outage and writes nothi
     } else {
       assert.equal(exit, "blocked");
       assert.equal(blocks.length, 1);
-      assert.match(blocks[0], /could not reach api\.github\.test \(EAI_AGAIN\) from 2026-11-14T08:47:00\.000Z.*the stage waited for the network until its time ran out/);
+      assert.match(blocks[0], /could not reach api\.github\.test \(EAI_AGAIN\) from Nov 14, 8:47 AM UTC.*the stage waited for the network until its time ran out/);
     }
   }
 });
@@ -467,7 +468,7 @@ async function stageAgainstNothing(script, args, extraEnv = {}) {
   // Run as its own process while this one keeps the port's server answering (so an unrefused request would get an answer).
   const r = await new Promise((done) => {
     const child = spawn(process.execPath, ["--import", pathToFileURL(pre).href, join(import.meta.dirname, "..", "scripts", script), "--repo", "o/r", ...args, "--checkout", join(root, "co"), "--usage-dir", join(root, "u")], {
-      env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, PENDULUM_LOCAL: "1", GITHUB_API_URL: origin, ...extraEnv },
+      env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, TZ: process.env.TZ, PENDULUM_LOCAL: "1", GITHUB_API_URL: origin, ...extraEnv },
     });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
@@ -485,8 +486,9 @@ test("worker.mjs, run for real: a stage whose first reads swallow the outage sti
   assert.equal(result?.exit, "paused", out);
   const first = /network: \S+ is unreachable from this machine \(ECONNREFUSED\)/.exec(out);
   assert.ok(first, out);
-  const lostAt = /still unreachable after .* \(since (\S+)\)/.exec(out)[1];
-  assert.deepEqual(result.outage, { host: new URL(origin).host, code: "ECONNREFUSED", since: lostAt, origin }, "the first loss, not the moment the stage ended");
+  const lostAt = /still unreachable after .* \(since ([^)]+)\)/.exec(out)[1];
+  assert.deepEqual({ ...result.outage, since: whenText(result.outage.since) }, { host: new URL(origin).host, code: "ECONNREFUSED", since: lostAt, origin }, "the first loss, not the moment the stage ended");
+  assert.match(result.outage.since, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/, "the record keeps its ISO time");
   assert.ok(!/crashed/.test(out), out);
 });
 
@@ -600,8 +602,8 @@ test("rest: a flap that then stays down past a minute is logged as its own loss,
       const net = netLines(lines);
       assert.equal(net.length, 4, net.join(""));
       assert.match(net[1], /answers again after 35 s/);
-      assert.match(net[2], /api\.github\.test is unreachable from this machine again \(EAI_AGAIN\) since 2026-11-14T08:48:05\.000Z; on and off since 2026-11-14T08:47:00\.000Z/);
-      assert.match(net[3], /api\.github\.test answers again after 6 h \(unreachable since 2026-11-14T08:48:05\.000Z; on and off since 2026-11-14T08:47:00\.000Z\)/);
+      assert.match(net[2], /api\.github\.test is unreachable from this machine again \(EAI_AGAIN\) since Nov 14, 8:48 AM UTC; on and off since Nov 14, 8:47 AM UTC/);
+      assert.match(net[3], /api\.github\.test answers again after 6 h \(unreachable since Nov 14, 8:48 AM UTC; on and off since Nov 14, 8:47 AM UTC\)/);
     },
   );
 });
@@ -773,7 +775,7 @@ test("#353: a label write GitHub answers 500 on every try ends the stage on GitH
       const blocks = [];
       await outageExit(end, { local: true, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a) });
       assert.equal(ends[0][0], "paused");
-      assert.match(ends[0][1], /^api\.github\.test answered HTTP 500 to every try of POST repos\/o\/r\/issues\/70\/labels from 2026-11-14T08:47:00\.000Z/);
+      assert.match(ends[0][1], /^api\.github\.test answered HTTP 500 to every try of POST repos\/o\/r\/issues\/70\/labels from Nov 14, 8:47 AM UTC/);
       assert.deepEqual(ends[0][2], { host: "api.github.test", code: "HTTP 500", since: new Date(first).toISOString(), origin: "https://api.github.test", endpoint: "POST repos/o/r/issues/70/labels" });
       assert.deepEqual(blocks, [], "nothing written to GitHub");
       await outageExit(end, { local: false, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a) });

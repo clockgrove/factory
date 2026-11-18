@@ -25,6 +25,7 @@ import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, g
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
 import { harnessActivity } from "./logic.mjs";
+import { whenText } from "./clock.mjs";
 import { AGENT_SHELL_TELEMETRY_OFF, GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
@@ -1087,7 +1088,7 @@ async function runLimited(opts) {
     // Another account of the harness is free (automatic account choice on GitHub Actions and the cloud sandbox, #268): a
     // wait longer than LIMIT.movePastMs ends the stage instead, and the Objective goes on there, starting afresh.
     if (end - now > LIMIT.movePastMs && LIMIT.elsewhere && (await LIMIT.elsewhere(r))) throw new UsageLimitReached(r, { since: now, label: opts.label || "run" });
-    log(`${opts.label || "run"}: ${r.harness} reached its subscription's usage limit (${refusalFields(r)}), which resets at ${new Date(r.resetAt).toISOString()}; waiting for it in place (${minutesText(end - now)}), then running the pass again on the same model`);
+    log(`${opts.label || "run"}: ${r.harness} reached its subscription's usage limit (${refusalFields(r)}), which resets at ${whenText(r.resetAt)}; waiting for it in place (${minutesText(end - now)}), then running the pass again on the same model`);
     while (OUTAGE.now() < end) {
       await OUTAGE.sleep(Math.min(60_000, end - OUTAGE.now()));
       // A stop meanwhile: the stop writes the stage's end (session.mjs stopStage), and nothing more runs.
@@ -1143,7 +1144,7 @@ export const USAGE_LIMIT = "USAGE_LIMIT";
 export class UsageLimitReached extends Error {
   constructor(refusal, { since, label }) {
     const reset = Number.isFinite(refusal.resetAt) ? refusal.resetAt : null;
-    super(`${label}: ${refusal.harness} reached its ${reset === null ? "usage limit or quota" : "subscription's usage limit"} (${refusalFields(refusal)}), ${reset === null ? "with no reset reported" : `which resets at ${new Date(reset).toISOString()}`}`);
+    super(`${label}: ${refusal.harness} reached its ${reset === null ? "usage limit or quota" : "subscription's usage limit"} (${refusalFields(refusal)}), ${reset === null ? "with no reset reported" : `which resets at ${whenText(reset)}`}`);
     Object.assign(this, { code: USAGE_LIMIT, refusal, resetAt: reset, since });
   }
 }
@@ -1197,7 +1198,7 @@ async function runBusy(opts) {
     }
     if (limit && waitMs > LIMIT.movePastMs) {
       if (LIMIT.elsewhere && (await LIMIT.elsewhere(limit))) throw new UsageLimitReached(limit, { since: now, label });
-      if (LIMIT.hold) await LIMIT.hold(limit).catch((e) => log(`${label}: the account's hold until ${new Date(limit.resetAt).toISOString()} could not be written (${String(e?.message || e).slice(0, 120)}); waiting anyway`));
+      if (LIMIT.hold) await LIMIT.hold(limit).catch((e) => log(`${label}: the account's hold until ${whenText(limit.resetAt)} could not be written (${String(e?.message || e).slice(0, 120)}); waiting anyway`));
     }
     log(`${label}: ${r.harness}'s provider was busy (${refusalFields(r)}); ${given !== null ? "waiting for the time it gave" : "waiting"} (${minutesText(waitMs)}), then running the pass again`);
     const end = now + waitMs;

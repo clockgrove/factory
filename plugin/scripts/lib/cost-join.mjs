@@ -25,6 +25,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { decisionSpendEntries } from "./logic.mjs";
+import { LINE_CLOCK } from "./clock.mjs";
 import { BILLING_WORDS, CODEX_NO_TOKENS, UNKNOWN_WHY, addBilling, billingCode, billingRead, priceStage, priceTokens, streamSessions, unknownOf, unknownRuns, unknownText } from "./usage.mjs";
 
 /** The one Codex price table, the worker's own (codex-prices.json beside this file). */
@@ -344,8 +345,9 @@ export function stageHarnessOf(body) {
       // a malformed line: read the progress line instead
     }
   }
-  const ran = /^- \d\d:\d\dZ harness (claude|codex|copilot)(?: \(([^)\s]+)\))? attempt \d+/m.exec(body || "");
-  return ran ? { harness: ran[1], model: ran[2] ?? null } : null;
+  const ran = new RegExp(`^- ${LINE_CLOCK} harness (claude|codex|copilot)(?: \\(([^)\\s]+)\\))? attempt \\d+`, "m").exec(body || "");
+  // LINE_CLOCK captures the line's UTC hour and minute first.
+  return ran ? { harness: ran[3], model: ran[4] ?? null } : null;
 }
 
 /**

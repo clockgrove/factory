@@ -17,6 +17,7 @@ import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
 import { activePendulumJobs, addLabels, blockedByRelations, checksOn, downloadArtifactResult, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { clockText, whenText } from "./lib/clock.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
 import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, restartedAt, vendorEvidence, stateOf, spendText, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
@@ -104,7 +105,7 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
 }
 
 /** Why a tick starts nothing while GitHub's primary rate limit is spent (reset at `resetAt`, ms). */
-const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new Date(resetAt).toISOString()}; no new stage starts until then`;
+const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${whenText(resetAt)}; no new stage starts until then`;
 
 /** Whether a dispatcher run on this event may build an owed image: never a pull request's or a review's (pull_request*), whose run reads the workflow from the PR. */
 export const imageTickEvent = (eventName) => !String(eventName || "").startsWith("pull_request");
@@ -1439,7 +1440,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       if (!read) deferred[issue.number] = "its sandbox record could not be read; read again next tick";
       const record = read?.record ?? null;
       if (quotaWaiting(record, now.getTime())) {
-        deferred[issue.number] = `the sandbox vendor's quota refused its last start; next try after ${new Date(Date.parse(record.quota.retryAt)).toISOString().slice(11, 16)}Z`;
+        deferred[issue.number] = `the sandbox vendor's quota refused its last start; next try after ${clockText(record.quota.retryAt)}`;
         due(issue.number, "quota", Date.parse(record.quota.retryAt));
       }
     });

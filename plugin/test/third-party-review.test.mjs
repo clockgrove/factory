@@ -153,7 +153,7 @@ test("#303: a third-party review still to come is recorded on the PR and the sta
   assert.equal(clock.t, T0, "no time passed in the stage");
   // The record: Pendulum's own comment on the PR, by structure (head, logins), its bound from GitHub's time of it.
   assert.equal(gh.comments.length, 1);
-  assert.match(said.at(-1), /^third-party review: waiting until 08:20 UTC for greptile-apps\[bot\] to review [0-9a-f]{7}; this stage ends here/);
+  assert.match(said.at(-1), /^third-party review: waiting until 8:20 AM UTC for greptile-apps\[bot\] to review [0-9a-f]{7}; this stage ends here/);
   await withGitHub(gh, async () => {
     const rec = waitOf(gh.comments, 7);
     assert.deepEqual({ sha: rec.sha, logins: rec.logins, since: rec.since }, { sha: HEAD, logins: [GREPTILE], since: T0 });

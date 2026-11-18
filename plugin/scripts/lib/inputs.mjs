@@ -123,6 +123,7 @@ export const DEFAULTS = {
   step_stall_factor: "3", // a queue check's step is hung past this many times its normal duration (logic.mjs stepStallMs)
   step_stall_floor_minutes: "15", // ... and never before its normal duration plus this
   queue_stall_minutes: "10", // a merge queue commit with no CI begun this long is stalled (logic.mjs queueStall)
+  time_zone: "", // the IANA zone visible times are written in (lib/clock.mjs); empty: the machine's own in local mode, UTC on Actions and in the cloud sandbox
 };
 
 export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "codex_gateway_key", "copilot_github_token", "ai_gateway_api_key", "worker_secret_values", "github_token", "app_token", "vercel_token"]);
@@ -364,6 +365,7 @@ const VALUE_RULES = (() => {
     PENDULUM_DECISION_ROUTE: oneOf("auto", "gateway", "off"),
     PENDULUM_PROMPT_CACHE_TTL: oneOf("off", "auto", "1h", "5m"),
     PENDULUM_IMAGE_REFRESH: oneOf("merge", "nightly"),
+    PENDULUM_TIME_ZONE: [(v) => timeZoneName(v) !== null, "an IANA time zone name (America/Los_Angeles)"],
     ...Object.fromEntries(Object.entries(OWNER_LIMITS).map(([k, rule]) => [k, [(v) => limitOk(rule, v), limitText(rule)]])),
   };
 })();
@@ -374,6 +376,20 @@ const VALUE_RULES = (() => {
 export function guessHoursMs(value) {
   const hours = String(value ?? "").split(/[\s,]+/).filter(Boolean).map(Number);
   return guessHoursValid(hours) ? hours.map((h) => h * 3600_000) : null;
+}
+
+/**
+ * A `time_zone` value as the platform's Intl names that IANA zone (`america/los_angeles` reads as `America/Los_Angeles`),
+ * or null when it is none: empty, a name Intl does not know, or a bare offset (`+05:30`), which follows no zone's rules.
+ */
+export function timeZoneName(value) {
+  const v = String(value ?? "").trim();
+  if (!/^[A-Za-z]/.test(v)) return null;
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: v }).resolvedOptions().timeZone;
+  } catch {
+    return null;
+  }
 }
 
 /** A `triage_min_confidence` value as a number from 0 to 1, or null when it is none (empty, not a number, out of range). */
@@ -668,6 +684,8 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     // The Objective-wide dollar cap (objective-cap.mjs capGate): a number above 0, else none.
     maxObjectiveUsd: ((n) => (n > 0 ? n : null))(num(String(get("max_objective_usd")).trim() || "x", 0)),
     timeoutMinutes: num(get("timeout_minutes"), 240),
+    // The zone visible times are written in, as set (lib/clock.mjs timeZone resolves it and its default).
+    timeZone: get("time_zone").trim(),
     autoMerge: bool(get("auto_merge")),
     // The handle Blocked comments @mention; `login#id` pins it (below), and the mention uses the login.
     notify: get("notify").trim().replace(/^@/, "").replace(/#\d+$/, ""),

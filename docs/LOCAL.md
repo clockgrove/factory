@@ -110,6 +110,7 @@ Flags and exits:
 - Every command but `hold` takes `--repo OWNER/NAME` and `--checkout CLONE` too, as `doctor.mjs` does (`--dir` is read as `--checkout` on each); `hold` takes `--repo` alone, which switches it to GitHub's holds.
 - `--help` or `-h` prints its usage and exits 0.
 - These exit 64 with the usage, before anything starts: an unknown flag, a flag without its value, anything but a positive number for `--interval`, `--timeout` or `handover`'s `--app`, a missing or non-numeric `<issue>` or `<pr>`, a `hold` that is neither `list` nor `release <account>`, or `wait`'s `--since` or `--on` it cannot read.
+- `run` exits 0 when its Objective is delivered (with `--wait`, merged), 75 when it ends paused and resumable (This machine's network, below), and 1 on any other end.
 - `pendulum-db --help` prints its own usage.
 
 ### Routing
@@ -371,7 +372,16 @@ It resumes a paused Objective once the host it could not reach answers a probe, 
   So an outage between the two bounds ends in the `outage` Block, and one that keeps this machine off GitHub for longer ends in the dispatcher's instead (doctor warns when the outage bound is not under the claim pause).
 - The count lives in that `serve`'s memory: another `serve` on the machine resumes the Objective with the twelve hours counted afresh.
 
-**`run` and `review`.** A stage that `pendulum run` or `pendulum review` started ends `paused` the same way, but those commands do not wait or resume: the Objective keeps its claim and waits for a `serve` (or another `run`) on this machine to take it up, as after any pause.
+**`run --wait`** waits in place as `serve` does: it asks every 30 seconds (`serve`'s tick) whether the stage may resume, by the same rules (a probe of the host, the reset, the doubling wait), and once it may, resumes it here and follows it on to the merge.
+- It resumes nothing once a person stopped the Objective, or once its claim is no longer this run's.
+- It waits up to the same twelve hours (`PENDULUM_LOCAL_OUTAGE_HOURS`) from the first loss.
+  Past them it Blocks nothing, unlike `serve`: it exits 75, paused and resumable, with its claim kept.
+
+**`run` ending paused.** `run` exits 75 whenever its Objective ends paused: past those twelve hours with `--wait`, on a usage limit, or on any pause without `--wait`.
+- Its last line names the command that resumes it, `pendulum run <issue> --wait` with the `--repo` and `--checkout` it was given.
+- A `serve` of the repository on this machine takes the Objective up too.
+
+**`review`.** A stage that `pendulum review` started ends `paused` the same way, but `review` does not wait or resume: the Objective keeps its claim and waits for a `serve` (or a `run`) on this machine to take it up, as after any pause.
 
 A person who stops the Objective meanwhile ends the pause: it is not resumed.
 

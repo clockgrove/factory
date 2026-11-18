@@ -1134,6 +1134,76 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
 });
 
 /**
+ * `pendulum run 7 --wait` (runToEnd) against claimGitHub, its work stage `ends` in turn (stage() stubbed: the rest of the
+ * run is real), on a clock `at()` that reads it; the provider's host api.anthropic.test answers once `up(probe)` says so
+ * for that probe (1, 2, …). Returns the run's end, its exit status, its log, the stages started and the probes made.
+ */
+async function runPaused({ ends, up, at, gh }) {
+  const { runExit } = await import("../scripts/local.mjs");
+  const inner = globalThis.fetch;
+  let probes = 0;
+  globalThis.fetch = async (url, init) => (new URL(url).origin === "https://api.anthropic.test" && !up((probes += 1)) ? Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } })) : inner(url, init));
+  try {
+    const loop = await claimLoop();
+    loop.clock = at;
+    loop.resumePollMs = 1;
+    const started = [];
+    loop.stage = async (n, name) => (started.push(name), ends[started.length - 1]);
+    let r;
+    const lines = await logged(async () => {
+      r = await loop.runToEnd(7, { wait: true, resumeWith: " --repo acme/app" });
+    });
+    return { r, code: runExit(r), log: lines.join(""), started, probes, loop };
+  } finally {
+    globalThis.fetch = inner;
+  }
+}
+
+const lostSince = Date.parse("2026-11-17T08:47:00Z");
+const pausedOnDns = { exit: "paused", stage: "work", code: 0, outage: { host: "api.anthropic.test", origin: "https://api.anthropic.test", code: "EAI_AGAIN", since: new Date(lostSince).toISOString() } };
+
+test("#575: run --wait waits in place for a stage paused on this machine's network, resumes it once its host answers, and exits 0 on the resumed stage's delivery", async () => {
+  const gh = claimGitHub();
+  try {
+    const t = lostSince + 20 * 60_000;
+    const { r, code, log, started, probes } = await runPaused({ ends: [pausedOnDns, { exit: "delivered", stage: "work", code: 0 }], up: (n) => n >= 3, at: () => t, gh });
+    assert.deepEqual(started, ["work", "work"], "the paused stage is resumed in place");
+    assert.equal(probes, 3, "one probe a poll until the host answers");
+    assert.equal(r.exit, "delivered");
+    assert.equal(code, 0);
+    assert.match(log, /#7: waiting here for api\.anthropic\.test to answer, as serve would, up to 12 h from 2026-11-17T08:47:00\.000Z/);
+    assert.match(log, /#7: resuming \(api\.anthropic\.test answers again\)/);
+    assert.ok(!/#7: paused, resumable/.test(log));
+    assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
+    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped at the end");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#575: run --wait on a stage paused on this machine's network stops at serve's 12-hour bound with exit 75 (paused, resumable), its claim kept, nothing Blocked, naming the command that resumes it", async () => {
+  const { PAUSED_EXIT } = await import("../scripts/local.mjs");
+  const gh = claimGitHub();
+  try {
+    let t = lostSince + 20 * 60_000;
+    // Each probe that finds the host still down is five hours later.
+    const { r, code, log, started, probes, loop } = await runPaused({ ends: [pausedOnDns], up: () => ((t += 5 * 60 * 60_000), false), at: () => t, gh });
+    assert.equal(PAUSED_EXIT, 75);
+    assert.equal(r.exit, "paused");
+    assert.equal(code, 75);
+    assert.deepEqual(started, ["work"], "never resumed while its host does not answer");
+    assert.equal(probes, 3);
+    assert.match(log, /#7: still paused on this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-17T08:47:00\.000Z, past Pendulum's 12 h bound for an outage; this run stops waiting/);
+    assert.match(log, /#7: paused, resumable \(exit 75\): its claim stays on this machine; `pendulum run 7 --wait --repo acme\/app` resumes it here/);
+    assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
+    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
+    assert.ok(loop.offline.has(7));
+  } finally {
+    gh.restore();
+  }
+});
+
+/**
  * GitHub's status page served on this machine (GITHUB_STATUS_URL): `answer()` is {status, components, incidents,
  * maintenances} per request, the components as {name: status}, the others as Statuspage's summary.json lists them;
  * `close` stops it and clears the variable. Each request is counted in `asked()`, its paths in `paths`.

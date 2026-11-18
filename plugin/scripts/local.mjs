@@ -50,7 +50,7 @@ import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, spendText, queueHungMs, acceptan
 import { HANDOVER_WRITERS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueState, queueTimeoutMin, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
-import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handoverOf, workflowName } from "./lib/handover.mjs";
+import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handoverOf, shellQuote, workflowName } from "./lib/handover.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { git as gitIn } from "./lib/proc.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
@@ -137,6 +137,21 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
  * bound for a claim gone quiet (claim_pause_hours, at least two hours), at one write an hour (the API quota is shared).
  */
 export const PAUSED_BEAT_MS = 60 * 60_000;
+
+/** How often `run --wait` asks whether a stage paused on an outage may resume (waitPaused): serve's default tick. */
+export const RESUME_POLL_MS = 30_000;
+
+/**
+ * `pendulum run`'s exit status when its Objective is left paused, resumable (runToEnd): EX_TEMPFAIL of sysexits.h, a
+ * temporary failure to retry. 0 is delivered (merged, with --wait), 1 any other end.
+ */
+export const PAUSED_EXIT = 75;
+
+/** A word of a command line as a shell reads it back: as it is, or quoted when it holds anything else. */
+const shellWord = (w) => (/^[\w./:@%+=,-]+$/.test(String(w)) ? String(w) : shellQuote(w));
+
+/** `pendulum run`'s exit status for the end `r` (runToEnd). */
+export const runExit = (r) => (r?.exit === "delivered" ? 0 : r?.exit === "paused" ? PAUSED_EXIT : 1);
 
 /** The line for an Objective with more than one account label (#265): it moves nowhere and waits. */
 const twoPinsLine = (labels) => `${labels.map(pinLabelText).join(", ")}: more than one account label moves nothing, so the Objective waits, on no account, until one is left`;
@@ -229,7 +244,7 @@ const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
  */
 const WHERE = { repo: { value: "OWNER/NAME" }, checkout: { value: "CLONE" } };
 export const COMMANDS = {
-  run: { args: ["issue"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: "one Objective, from the stage its state calls for (with --wait, to merged)" },
+  run: { args: ["issue"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: `one Objective, from the stage its state calls for (with --wait, to merged, waiting out a network pause as serve does); exits 0 delivered, ${PAUSED_EXIT} paused and resumable (its last line names the command), 1 otherwise` },
   serve: { args: [], flags: { ...WHERE, once: "bool", all: "bool", interval: { value: "SECONDS", number: true }, verbose: "bool" }, about: "a loop: the dispatcher's rules every --interval seconds (30); --verbose also names every setting left at Pendulum's defaults" },
   review: { args: ["pr"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: "a review re-run" },
   doctor: { args: [], flags: { ...WHERE, json: "bool", probe: "bool", "run-setup": "bool", verbose: "bool" }, about: "whether this clone, its repository and this machine are ready for local mode, each check PASS, WARN or FAIL with its fix (doctor.mjs --local); exits 1 on a FAIL" },
@@ -2470,10 +2485,7 @@ export class Local {
       if (!c || !sameMachineHolder(c.holder)) continue;
       // A claim this loop stepped aside from (cede): another loop's under its name until that loop's next heartbeat.
       if (c.holder === this.holder && this.ceded?.has(issue.number)) continue;
-      // Paused on the network: resumed once the host it could not reach answers a probe (GitHub answered these reads),
-      // and taken up past OUTAGE.blockMs whatever the probe says, so resume Blocks it (a provider unreachable while GitHub
-      // answers would otherwise leave it Running with no notice). Paused on GitHub's spent rate limit: resumed once its
-      // reset has passed, with no probe (GitHub answers while the limit is spent).
+      // Paused on an outage: resumed once outageDue says so (GitHub answered these reads).
       const off = c.holder === this.holder ? this.offline?.get(issue.number) : null;
       if (off) {
         // Paused on a usage limit (limitPaused: its hold, the backoff floor included) or GitHub's spent rate limit:
@@ -2490,18 +2502,30 @@ export class Local {
           continue;
         }
         await this.twoCleared(issue.number);
-        // Paused on GitHub's 5xx: resumed after its doubling wait (serverWait), not on a probe, which answers while one
-        // endpoint fails; taken up at once past OUTAGE.blockMs, so resume Blocks it.
-        const server = serverDown(off.code) && off.server ? now - off.since >= OUTAGE.blockMs || now >= off.server.at + serverWait(off.server.pauses) : null;
-        const due = off.pinWait || (Number.isFinite(off.reset) ? now >= off.reset || (!!off.harness && !!off.hold && (this.heldNoMore(issue.number, off, now) || (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null)))) : server !== null ? server : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null);
+        const due = off.pinWait || (off.harness && Number.isFinite(off.reset) ? now >= off.reset || (!!off.hold && (this.heldNoMore(issue.number, off, now) || (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null)))) : await this.outageDue(off, now));
         if (due) out.push(issue.number);
         // Waiting on a usage limit's reset, on its account labels or on GitHub's 5xx: its claim kept alive while this loop is.
-        else if (off.harness || server !== null) await this.beatPaused(issue.number, c);
+        else if (off.harness || (serverDown(off.code) && off.server)) await this.beatPaused(issue.number, c);
         continue;
       }
       if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder, { own: this.holder })) out.push(issue.number);
     }
     return out;
+  }
+
+  /**
+   * Whether an Objective this loop holds paused on an outage (`off`, its outagePaused record) is due to resume at `now`,
+   * as serve's tick decides it (pausedHere) and `run --wait` in place (waitPaused). Paused on GitHub's spent rate limit:
+   * once its reset has passed, with no probe (GitHub answers while the limit is spent). Paused on GitHub's 5xx or a
+   * provider's busy answer: after its doubling wait (serverWait), not on a probe, which answers while one endpoint fails.
+   * Paused on this machine's network: once the host it could not reach answers a probe. Either of the last two at once
+   * past OUTAGE.blockMs, so resume Blocks it (a provider unreachable while GitHub answers would otherwise stay Running
+   * with no notice).
+   */
+  async outageDue(off, now) {
+    if (Number.isFinite(off.reset)) return now >= off.reset;
+    if (serverDown(off.code) && off.server) return now - off.since >= OUTAGE.blockMs || now >= off.server.at + serverWait(off.server.pauses);
+    return !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null;
   }
 
   /**
@@ -2581,9 +2605,9 @@ export class Local {
    * `outage`, naming the host and since when; so is one paused on GitHub's 5xx for as long, naming the request and the
    * status. One paused on GitHub's 5xx while GitHub's status page reports its parts operational is Blocked naming the
    * request after one more try (serverVerdict), with the cause `pendulum`: GitHub has no incident, so the request fails
-   * on its own.
+   * on its own. `wait` (`run --wait`): the stage resumed follows its PR to the merge, as the run would have.
    */
-  async resume(issue) {
+  async resume(issue, { wait = false } = {}) {
     const off = this.offline?.get(issue);
     const now = (this.clock ?? Date.now)();
     const paused = !!off && !off.harness && !off.pinWait;
@@ -2635,11 +2659,11 @@ export class Local {
     // The one more try a 5xx got (serverVerdict) is only granted here: it is made when the stage's process starts
     // (tryStarted), so a resume skipped above, a claim that cannot be read or written, or a start that fails makes none.
     if (verdict?.once) off.server.tryGranted = true;
-    if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number));
-    if (next === "work") return this.runObjective(issue);
+    if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number, { wait }));
+    if (next === "work") return this.runObjective(issue, { wait });
     // A review this loop holds paused after its label came off (an outage met on its merge path: session.mjs outageFirst)
     // ends nothing by the label: the review runs again, and its exit or merge follows.
-    if (next === "merge" && off?.stage === "review") return this.withClaim(issue, () => this.review(issue, pr.number));
+    if (next === "merge" && off?.stage === "review") return this.withClaim(issue, () => this.review(issue, pr.number, { wait }));
     log(`#${issue}: nothing left to run here (its PR is reviewed or gone); releasing the claim`);
     const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
     if (held?.commentId && sameMachineHolder(held.holder)) await rest(`repos/${this.repo.full}/issues/comments/${held.commentId}`, { ...this.opts, method: "DELETE" }).catch(() => {});
@@ -3010,6 +3034,77 @@ export class Local {
       });
     }
     return this.runObjective(issue, { wait, named: true });
+  }
+
+  /**
+   * `pendulum run <issue>` to its end: runIssue, then with `wait` each part of a split Objective once the one before it
+   * merged, and each stage that ends paused on an outage waited out in place and resumed as serve resumes it
+   * (waitPaused). A run that ends paused (an outage past the bound, a usage limit, a stage without --wait) logs the
+   * command that resumes it; runExit gives it PAUSED_EXIT. `resumeWith`: that command's flags after `--wait`.
+   */
+  async runToEnd(issue, { wait = false, resumeWith = "", ...given } = {}) {
+    let r = await this.runIssue(issue, { wait, ...given });
+    for (;;) {
+      if (wait && r?.exit === "paused") r = await this.waitPaused(issue, r);
+      if (!r?.next) break;
+      r = await this.runObjective(issue, { wait: true });
+    }
+    if (r?.exit === "paused" && !this.stopping) log(`#${issue}: paused, resumable (exit ${PAUSED_EXIT}): its claim stays on this machine; \`pendulum run ${issue} --wait${resumeWith}\` resumes it here, as does a \`pendulum serve\` of this repository on this machine`);
+    return r;
+  }
+
+  /**
+   * `run --wait`, a stage that ended paused on an outage (`r`; outagePaused keeps its record): what serve's tick does for
+   * it, in place. Every RESUME_POLL_MS (serve's tick) it asks outageDue, under the same bound as serve (OUTAGE.blockMs,
+   * PENDULUM_LOCAL_OUTAGE_HOURS, from the first loss), and once due reads the issue and its claim as serve's tick does:
+   * a stopped Objective, or a claim no longer this run's, is not resumed; one still this run's is resumed (resume), and
+   * a stage that pauses again is waited out the same way. Past the bound it stops waiting and returns the paused end:
+   * where serve Blocks it with the cause `outage`, a run leaves its claim for the command that resumes it (runToEnd).
+   * A pause on a usage limit or on account labels is returned as it is.
+   */
+  async waitPaused(issue, r) {
+    const clock = this.clock ?? Date.now;
+    let said = false;
+    while (r?.exit === "paused" && !this.stopping) {
+      this.applyLocalLimits();
+      const off = this.offline?.get(issue);
+      if (!off || off.harness || off.pinWait) return r;
+      const now = clock();
+      if (now - off.since >= OUTAGE.blockMs) {
+        log(`#${issue}: still paused on ${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage; this run stops waiting`);
+        return r;
+      }
+      if (!said) log(`#${issue}: waiting here for ${off.host} to answer, as serve would, up to ${minutesText(OUTAGE.blockMs)} from ${new Date(off.since).toISOString()}`);
+      said = true;
+      if (await this.outageDue(off, now)) {
+        const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
+        const c = data ? await localClaim(this.repo, issue, this.opts).catch(() => undefined) : undefined;
+        if (data && stopCause(data, this.objectiveLabel())) {
+          this.offline.delete(issue);
+          log(`#${issue}: stopped while paused; not resuming it`);
+          return { exit: "stopped" };
+        }
+        if (c !== undefined && c?.holder !== this.holder) {
+          this.offline.delete(issue);
+          log(`#${issue}: its claim is no longer this run's (${c?.holder ?? "none"}); not resuming it`);
+          return { exit: "skipped" };
+        }
+        if (c !== undefined) {
+          log(`#${issue}: resuming (${off.host} answers again)`);
+          const was = r;
+          r = await this.resume(issue, { wait: true });
+          // Nothing started (a read that failed, a stage of it still running here): the pause stands, and the next poll
+          // tries again, as serve's next tick does.
+          if (r?.exit !== "skipped" || !this.offline?.has(issue)) {
+            said = false;
+            continue;
+          }
+          r = was;
+        }
+      }
+      await this.pause(this.resumePollMs ?? RESUME_POLL_MS);
+    }
+    return r;
   }
 
   /**
@@ -3655,7 +3750,7 @@ export class Local {
    * The dispatcher's own rules (caps, order, blocking, send-backs, Done), every interval; picks run here, as many as the
    * machine's room allows (machineBox), each holding one slot of the machine's budget while it runs.
    */
-  async serve({ once = false, intervalMs = 30_000 } = {}) {
+  async serve({ once = false, intervalMs = RESUME_POLL_MS } = {}) {
     // A review that ends waiting for a third-party reviewer is resumed by this loop's dispatcher ticks, not in its slot.
     this.serving = true;
     const running = new Map();
@@ -4500,19 +4595,15 @@ async function main() {
     local.solo = "run";
     let task = null;
     local.stopOnSignals(() => task);
-    task = (async () => {
-      let r = await local.runIssue(issue, { wait: !!flags.wait });
-      // --wait on a split Objective: each part runs once the one before it merged.
-      while (r.next) r = await local.runObjective(issue, { wait: true });
-      return r;
-    })();
+    const resumeWith = [flags.repo ? ` --repo ${shellWord(flags.repo)}` : "", flags.checkout ? ` --checkout ${shellWord(local.dev)}` : ""].join("");
+    task = local.runToEnd(issue, { wait: !!flags.wait, resumeWith });
     const r = await task;
     // Delivered, not followed to its merge: the last line says who tends it now.
     if (r.exit === "delivered" && !flags.wait) {
       const line = await local.pendingMergeLine(issue);
       if (line) log(line);
     }
-    process.exitCode = r.exit === "delivered" ? 0 : 1;
+    process.exitCode = runExit(r);
     return;
   }
   if (cmd === "issue") {

@@ -3951,7 +3951,10 @@ const writeAnswerRecord = (repo, { issue, prNumber }, rec, opts) =>
  */
 export async function takeAnswerRound(repo, ctx, opts, { check = null, rec = null } = {}) {
   const now = rec ?? (await readAnswerRounds(repo, ctx, opts));
-  const at = new Date().toISOString();
+  // Each round's time is later than the last one recorded: the record is read back as a set of times (records two routes
+  // wrote may repeat one), so two rounds taken in one millisecond would count as one.
+  const last = Math.max(...now.rounds.map(Date.parse).filter(Number.isFinite), -Infinity);
+  const at = new Date(Math.max(Date.now(), last + 1)).toISOString();
   const checks = check ? [...now.checks, { at, ids: check.ids, ...(check.error ? { error: check.error } : {}), ...(check.limit ? { limit: true } : {}) }] : now.checks;
   if (now.rounds.length >= ANSWER_ROUNDS) return { taken: false, rounds: now.rounds.length };
   // The round and the check it follows share their time: that stage answers (checkState judgeOnly).

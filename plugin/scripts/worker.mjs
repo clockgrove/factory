@@ -6,8 +6,9 @@
 // setup and the lockfile's install; render the task card and $PENDULUM_IN, and launch the
 // harness headless under a wall clock; read what it left in $PENDULUM_OUT (lib/handoff.mjs),
 // push its commits and open or update the PR from pr.md, the plan comment from plan.md;
-// run the repository's validation as Pendulum's own pass (two at most, failures sent
-// back to the same harness); decide the exit (delivered, question, blocked); move the
+// run the repository's validation as Pendulum's own pass (the listed commands in order, up
+// to the first red; each red goes back to the same harness while its fix passes make
+// progress, no fixed count of passes); decide the exit (delivered, question, blocked); move the
 // card, set the label, draft/comment/request as the exit says; write usage/events.jsonl
 // and usage/result.json for the artifact. The harness writes nothing to GitHub.
 import { agentServicePorts, noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";

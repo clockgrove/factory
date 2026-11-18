@@ -376,7 +376,7 @@ It resumes a paused Objective once the host it could not reach answers a probe, 
 **`run --wait` and `review --wait`** wait in place as `serve` does, for any stage they run, the review and rebase on the way to the merge included: every 30 seconds (`serve`'s tick) they ask whether the stage may resume, by the same rules (a probe of the host, the reset, the doubling wait), and once it may, resume it here and follow it on to the merge.
 - While GitHub answers, they write the claim's heartbeat every two minutes, as a running stage does, so no `serve` takes it for a loop gone away.
 - They resume nothing once a person stopped the Objective (its claim goes, as a stopped stage's does), or once its claim is another loop's.
-- A resume that starts nothing (a read that fails, a claim that cannot be read) leaves the pause as it stands, and the next poll tries again.
+- A resume that starts nothing (a read that fails, a claim that cannot be read) leaves the pause as it stands, and the next poll tries again; after a failed start of its work, not before that start's backoff (5 minutes, doubling), as `serve` waits it, so the third failed start in a row Blocks only after it (Claims and deadlines, A start that fails, below).
 - They wait up to the same twelve hours (`PENDULUM_LOCAL_OUTAGE_HOURS`) from the first loss.
   Past them they Block nothing, unlike `serve`: they exit 75, paused and resumable, with the claim kept.
 - Within them, a pause on GitHub's 5xx is judged by GitHub's status page as `serve` judges it, so its one more try failing the same way still Blocks it with the cause `pendulum` (GitHub's status page, above).

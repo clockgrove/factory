@@ -46,6 +46,7 @@ import {
   listComments,
   objectiveLabeledAt,
   listReviewComments,
+  listReviews,
   moveCard,
   branchState,
   prComment,
@@ -687,7 +688,7 @@ export async function objectiveDecisions(repo, { issue, prNumber = null }, opts,
   const all = (await read(`issue #${issue} comments`, listComments(repo, issue, opts))).map((c) => ({ ...c, on: "issue" }));
   if (prNumber) {
     all.push(...(await read(`PR #${prNumber} comments`, listComments(repo, prNumber, opts))).map((c) => ({ ...c, on: "pr" })));
-    for (const r of (await read(`PR #${prNumber} reviews`, rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true }))) || []) all.push({ ...r, kind: "review", created_at: r.submitted_at, on: "pr" });
+    for (const r of (await read(`PR #${prNumber} reviews`, listReviews(repo, prNumber, opts))) || []) all.push({ ...r, kind: "review", created_at: r.submitted_at, on: "pr" });
     for (const c of await read(`PR #${prNumber} review comments`, listReviewComments(repo, prNumber, opts))) all.push({ ...c, kind: "line", body: `${c.path}:${c.line ?? c.original_line ?? "?"}: ${c.body || ""}`, on: "pr" });
   }
   const candidates = maintainerDecisions(all);
@@ -792,7 +793,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)), ...(PR_BODY_REPLY.test(answer.get(c.id)) ? { earlierPrBody: true } : {}) } : {}) });
   const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, namedReviewer(c, thirdParty)), ...earlier(c) }));
   // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push), and the findings in their bodies.
-  const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
+  const reviews = await listReviews(repo, prNumber, { token });
   const own = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r) && (reviewIds ? reviewIds.has(r.id) : !reviewerLogin || r.user?.login === reviewerLogin));
   const inBody = own.flatMap((r) => bodyFindings(r.body).map((f) => ({ id: bodyFindingId(r.id, f.n), path: f.path, line: f.line, body: f.body, inBody: true, ...(r.commit_id ? { raisedOn: r.commit_id } : {}), ...(r.submitted_at ? { raisedAt: r.submitted_at } : {}) })));
   if (!inBody.length) return open;
@@ -1515,7 +1516,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const noProgress = (x, s) => (x.hung?.length && s.kind === "running" ? { ...s, noProgress: true, reason: `no progress: ${hungChecks(x.hung)}; ${s.reason}; when this change makes that step slower, re-apply the Objective's label: ${sha.slice(0, 7)} is then waited for up to the stage's wall clock` } : s);
     const history = async () => {
       // Older commits that ran the checks: the PR's last green head, then the default branch's newest.
-      const green = lastGreenHead(await rest(`repos/${checks.repo.full}/issues/${checks.prNumber}/comments?per_page=100`, { token: checks.token, paginate: true }).catch(() => []), checks.issue);
+      const green = lastGreenHead(await listComments(checks.repo, checks.prNumber, { token: checks.token }).catch(() => []), checks.issue);
       const branch = (await getRepo(checks.repo, { token: checks.token }).catch(() => null))?.default_branch;
       const base = branch ? ((await rest(`repos/${checks.repo.full}/commits?sha=${encodeURIComponent(branch)}&per_page=3`, { token: checks.token }).catch(() => [])) || []).map((c) => c.sha) : [];
       return [...(green ? [green] : []), ...base];
@@ -3093,7 +3094,7 @@ export async function postNoProgress(repo, prNumber, issue, sha, { token }) {
  * records on it (coveredHead).
  */
 export async function headMarks(repo, prNumber, issue, sha, { token }) {
-  const comments = (await rest(`repos/${repo.full}/issues/${prNumber}/comments?per_page=100`, { token, paginate: true }).catch(() => [])) || [];
+  const comments = (await listComments(repo, prNumber, { token }).catch(() => [])) || [];
   const has = (m) => comments.some((c) => trustedAuthor(c) && (c.body || "").includes(m));
   return { validated: has(validatedMarker(issue, sha)), handedOff: has(handedOffMarker(issue, sha)), noProgress: has(noProgressMarker(issue, sha)), comments };
 }
@@ -4231,7 +4232,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     report.watch = true;
     log(`#${issue}: PR #${prNumber}'s queue commit ${st.head.slice(0, 7)} ${what}; taken out of the merge queue`);
   }
-  const reviews = ((await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true })) || []).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
+  const reviews = (await listReviews(repo, prNumber, opts)).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
   const reviewed = reviews.length > 0;
   // The review the merge rests on: queue drops before it belong to an earlier head or an earlier review.
   const reviewedAt = reviews.map((r) => r.submitted_at).filter((t) => Number.isFinite(Date.parse(t))).sort().at(-1) ?? null;

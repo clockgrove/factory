@@ -2,7 +2,7 @@
 // CI job's whole log (a file, not a tail), the diff since the PR's last green head, and, per job, whether the default
 // branch fails the same job with the same failure, steadily (a base failure, not this change's). "The same failure" is
 // equal failure signatures, else, where the signatures cannot tell, a decision call (triage.mjs openTriage `same`).
-import { checkRuns, getRepo, jobLog, logWindow, rest } from "./github.mjs";
+import { checkRuns, getRepo, jobLog, listComments, logWindow, rest } from "./github.mjs";
 import { filesDiff, trustedAuthor } from "./logic.mjs";
 import { MAX_JOBS, cachedJob, checkCancel, failedStep, failureSignature, failureWindow, isAggregate, sameFailure, workflowJobs } from "./triage.mjs";
 
@@ -182,7 +182,7 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
   }
   // Not for a commit that is no head of the PR (the merge queue's: `sinceGreen` false): no diff from the PR's green head.
   if (!sinceGreen) return { jobs, truncated, branch, green: null, diff: null, diffError: "" };
-  const comments = await rest(`repos/${repo.full}/issues/${prNumber}/comments?per_page=100`, { ...opts, paginate: true }).catch(() => []);
+  const comments = await listComments(repo, prNumber, opts).catch(() => []);
   const green = lastGreenHead(comments, issue);
   let diff = null;
   let diffError = "";

@@ -30,7 +30,7 @@ import { workflowTokenChecks } from "./doctor.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { harnessBudgetUsd, openSandbox, sessionCeilingUsd, stageVendorCost, storedUsd } from "./lib/adapters/sandbox.mjs";
 import { PLUGIN_ROOT, pluginDigest } from "./lib/checkout.mjs";
-import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, objectiveLabeledAt, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
+import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, objectiveLabeledAt, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment, verifyAuthors } from "./lib/github.mjs";
 import { CLI, CODEX_LOGIN_REFUSED } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
 import { clockText, whenText } from "./lib/clock.mjs";
@@ -268,7 +268,8 @@ export async function readContext({ repo, n, ev, inputs, opts, readEventTime, ru
         : null,
     ev.kind === "checks" ? rest(`repos/${repo.full}/git/ref/heads/pendulum/${n}`, opts).then((r) => r?.object?.sha ?? null, () => null) : null,
     readEventTime ? ev.at || eventAt || (runId ? rest(`repos/${repo.full}/actions/runs/${runId}`, { token: inputs.githubToken || opts.token }).then((r) => r?.created_at ?? null, () => null) : null) : null,
-    ev.kind === "comment" ? primeWriters(repo, opts, { maintainers: inputs.maintainers }) : null,
+    // A comment by someone who can push may wake a stage: its author's push access is verified once the writer list is in.
+    ev.kind === "comment" ? primeWriters(repo, opts, { maintainers: inputs.maintainers }).then(() => verifyAuthors(repo, [ev.author], opts)) : null,
   ]);
   // Handled here too, so reads still in flight after an early return below are no unhandled rejection; the await rethrows.
   reads.catch(() => {});

@@ -747,7 +747,8 @@ test("#423: claim_pause_hours is the dispatcher's bound for a quiet local claim:
 test("local claim read: unread for over a day since the Objective began waiting Blocks naming the read (cause pendulum); younger, or a marked comment updated within the day, waits (#167)", async () => {
   const { claimBody } = await import("../scripts/lib/local.mjs");
   const open = [localIssue(7, "pendulum:running")];
-  const tick = (runningFor, comments, repo = "acme/app", writers) => localTick({ repo, open, writers, timeline: () => labelled("pendulum:running", ago(runningFor)), comments: (n) => (n === 7 ? comments : []) });
+  // `perm`: what dev's own permission read answers (#605: a COLLABORATOR counts only once it reads as write).
+  const tick = (runningFor, comments, repo = "acme/app", writers, perm = "write") => localTick({ repo, open, writers, timeline: () => labelled("pendulum:running", ago(runningFor)), comments: (n) => (n === 7 ? comments : []), extra: (u, method) => (method === "GET" && u.pathname.endsWith("/collaborators/dev/permission") ? { permission: perm } : null) });
   const young = await tick(2 * HOUR, 502);
   assert.deepEqual(young.r.vanished, [], "a failed read inside the day only waits");
   // Past the day with the comments still failing: the Block is due, and a tick whose Block cannot be written goes on.
@@ -757,6 +758,9 @@ test("local claim read: unread for over a day since the Objective began waiting 
   const marked = (at, association = "COLLABORATOR") => [{ id: 5, user: { login: "dev", type: "User" }, author_association: association, body: `<!-- pendulum:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date())}`, updated_at: at }];
   const live = await tick(25 * HOUR, marked(ago(60_000)), "acme/nowriters", 502);
   assert.deepEqual(live.r.vanished, []);
+  // A read-only collaborator's look-alike delays nothing either.
+  const readOnly = await tick(25 * HOUR, marked(ago(60_000)), "acme/nowriters4", 502, "read");
+  assert.deepEqual(readOnly.r.vanished, [7]);
   // An outsider's look-alike, edited a minute ago, delays nothing.
   const outsider = await tick(25 * HOUR, marked(ago(60_000), "NONE"), "acme/nowriters3", 502);
   assert.deepEqual(outsider.r.vanished, [7]);
@@ -809,7 +813,7 @@ test("local claim read: an unread claim Blocks only when Pendulum wrote nothing 
   const tick = (timeline) => {
     let reads = 0;
     // The claim read fails through every one of the client's tries; the Block's own read of the comments then answers.
-    return localTick({ open: [localIssue(7, "pendulum:running")], timeline: () => timeline, comments: (n) => (n === 7 && ++reads <= RETRY.tries ? 502 : []) });
+    return localTick({ open: [localIssue(7, "pendulum:running")], timeline: () => timeline, comments: (n) => (n === 7 && ++reads <= RETRY.tries ? 502 : []), extra: (u, method) => (method === "GET" && /\/collaborators\/(dev|viewer)\/permission$/.test(u.pathname) ? { permission: u.pathname.includes("/dev/") ? "write" : "read" } : null) });
   };
   const running = labelled("pendulum:running", ago(30 * HOUR));
   // Its progress comment, by Pendulum's login, was updated 5 minutes ago: a live stage, so it waits.
@@ -817,8 +821,12 @@ test("local claim read: an unread claim Blocks only when Pendulum wrote nothing 
   assert.deepEqual(live.r.vanished, []);
   assert.equal(live.blocked(7), undefined);
   // On the Action, a local loop writes as its developer: a Pendulum marker comment by a person with push access counts.
-  const developer = await tick([...running, { event: "commented", user: { login: "dev" }, author_association: "MEMBER", body: "<!-- pendulum:7:progress -->\nworking", created_at: ago(29 * HOUR), updated_at: ago(5 * 60_000) }]);
+  const devComment = { event: "commented", user: { login: "dev" }, author_association: "MEMBER", body: "<!-- pendulum:7:progress -->\nworking", created_at: ago(29 * HOUR), updated_at: ago(5 * 60_000) };
+  const developer = await tick([...running, devComment]);
   assert.deepEqual(developer.r.vanished, []);
+  // #605: a read-only MEMBER's look-alike is no sign of a live stage.
+  const readOnly = await tick([...running, { ...devComment, user: { login: "viewer" } }]);
+  assert.deepEqual(readOnly.r.vanished, [7]);
   // A label event by Pendulum within the day counts too.
   const labelledLately = await tick([...running, { event: "labeled", label: { name: "pendulum:in-review" }, actor: { login: "maintainer" }, created_at: ago(3 * HOUR) }]);
   assert.deepEqual(labelledLately.r.vanished, []);

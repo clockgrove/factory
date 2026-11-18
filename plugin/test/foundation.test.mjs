@@ -220,7 +220,7 @@ test("post-review reads the session file once, whatever the order of its keys", 
 test("a PR reviewed before the foundation label gets the foundation pass alone at its next review stage, as its own review", () => {
   const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
   const entries = [{ id: "A", text: "a" }];
-  const bot = (body) => ({ body, author_association: "MEMBER", user: { login: "kirk" } });
+  const bot = (body) => ({ body, author_association: "OWNER", user: { login: "kirk" } });
   // The first review stage ran before the label: one pass, no foundation marker.
   const plain = reviewPost({ issue: 7, review: { comments: [], acceptance: [{ entry: "A", met: true, evidence: "ok" }] }, diff, entries });
   assert.doesNotMatch(plain.body, /pendulum:7:foundation/);

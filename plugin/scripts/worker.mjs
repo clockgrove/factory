@@ -18,7 +18,7 @@ import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
-import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
+import { addLabels, findPr, getIssue, getRepo, listComments, listReviews, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { useObjectiveZone } from "./lib/clock.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
@@ -1184,7 +1184,7 @@ async function main() {
     // label goes back to the review job, which runs that pass alone.
     // And only a rebase of the head that review covers (#350): commits written after it (a Question's answer the work
     // stage wrote before this send-back) go to the review job, whose reviewer reads them.
-    const prReviews = rebaseMode && rebasedTo && outbox.expected() === rebasedTo ? await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }).catch(() => []) : null;
+    const prReviews = rebaseMode && rebasedTo && outbox.expected() === rebasedTo ? await listReviews(repo, pr.number, token).catch(() => []) : null;
     const cover = prReviews ? reviewsCover(prReviews, issue) : null;
     let reviewed = !!cover?.reviewed && (!foundation || cover.foundation);
     if (reviewed) {

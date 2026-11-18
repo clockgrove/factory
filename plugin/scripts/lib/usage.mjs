@@ -1384,6 +1384,8 @@ export function parseCodex(stdout, model, { rollout = null, since = null, reques
  */
 export const COPILOT_CREDIT_USD = 0.01;
 
+/** The Copilot events whose `isByok` says a model call went through a bring-your-own-key provider. */
+const BYOK_EVENTS = new Set(["assistant.usage", "model.call_final_result", "model.call_failure"]);
 /** An agent definition's name as Copilot's sub-agent events carry it (`agentName`); any other is not read. */
 const AGENT_NAME = /^[A-Za-z0-9._:-]{1,64}$/;
 /** The name of Pendulum's implementer agent definition (plugin/agents/<harness>/implementer*), which `ran.subagent` pins. */
@@ -1393,9 +1395,10 @@ export const IMPLEMENTER_AGENT = "implementer";
  * The models a Copilot stage ran, as Copilot's own event stream names them (parseCopilot `agentModels`), for the usage
  * record's `ran` (#600): `worker`, the main agent's on the stage's work, conflict, answer and fix passes (passKind);
  * `reviewer`, the main agent's on its review passes; `subagent`, the implementer sub-agents' (IMPLEMENTER_AGENT, the
- * definition the sub-agent model pins). Each is the one model those name, else null: none of them ran, the stream named
- * none (a run killed before its first message), or it named more than one, which no single id records. A decision
- * call is none of the three.
+ * definition the sub-agent model pins). A role the stream names one model for has it; one it names more than one for is
+ * null, as no single id records what ran; one it names none for is left out (none of its passes ran, a run killed
+ * before its first message, a sub-agent that never sent a request, a pass on a bring-your-own-key provider), so the
+ * model Pendulum asked for stands (choice.mjs ranModels). A decision call is none of the three.
  */
 export function copilotRan(records) {
   const seen = { worker: new Set(), subagent: new Set(), reviewer: new Set() };
@@ -1406,7 +1409,7 @@ export function copilotRan(records) {
     if (role) for (const m of r.agentModels.main ?? []) seen[role].add(m);
     for (const m of r.agentModels.agents?.[IMPLEMENTER_AGENT] ?? []) seen.subagent.add(m);
   }
-  return Object.fromEntries(Object.entries(seen).map(([k, v]) => [k, v.size === 1 ? [...v][0] : null]));
+  return Object.fromEntries(Object.entries(seen).filter(([, v]) => v.size).map(([k, v]) => [k, v.size === 1 ? [...v][0] : null]));
 }
 
 /** The AI-credit states Copilot writes; anything else reads as `unknown` and is not priced. */
@@ -1517,16 +1520,24 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   let streamRequests = null;
   let ttlSeconds = null;
   // The models this run's own stream names (copilotRan): its main agent's on each of its messages (a sub-agent's carry
-  // its `agentId`), and each sub-agent's on its end event, under the agent definition's name.
+  // its `agentId` or `parentToolCallId`), and each sub-agent that sent a request on its end event (its
+  // `firstDispatchedModel`, and the model it ended on), under the agent definition's name.
   const main = new Set();
   const agents = Object.create(null);
+  // A model call through a bring-your-own-key provider (`isByok`), whose model id is the provider's own (an ARN can
+  // name an account): no model of the run is published (BYOK_EVENTS).
+  let byok = false;
   const events = jsonLines(stdout);
   for (const e of events) {
     if (e.type === "assistant.turn_end") turns += 1;
     if (e.type === "assistant.message" && e.data?.model && !rec.model) rec.model = cleanModel(e.data.model);
+    if (BYOK_EVENTS.has(e.type) && e.data?.isByok === true) byok = true;
     if (e.type === "assistant.message" && !e.agentId && !e.data?.parentToolCallId && cleanModel(e.data?.model)) main.add(cleanModel(e.data.model));
-    if ((e.type === "subagent.completed" || e.type === "subagent.failed") && AGENT_NAME.test(e.data?.agentName ?? "") && cleanModel(e.data?.model)) (agents[e.data.agentName] ??= new Set()).add(cleanModel(e.data.model));
-
+    if ((e.type === "subagent.completed" || e.type === "subagent.failed") && AGENT_NAME.test(e.data?.agentName ?? "") && cleanModel(e.data?.firstDispatchedModel)) {
+      const seen = (agents[e.data.agentName] ??= new Set());
+      seen.add(cleanModel(e.data.firstDispatchedModel));
+      if (e.type === "subagent.completed" && cleanModel(e.data.model)) seen.add(cleanModel(e.data.model));
+    }
     if (e.type === "session.usage_checkpoint") {
       const n = nonNegative(e.data?.totalNanoAiu);
       const r = nonNegative(e.data?.totalPremiumRequests);
@@ -1559,7 +1570,8 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   const requests = Math.max(a.premiumRequests ?? -1, streamRequests ?? -1);
   if (requests >= 0) rec.premiumRequests = requests;
   if (!rec.model) rec.model = a.model;
-  if (main.size || Object.keys(agents).length) rec.agentModels = { main: [...main], agents: Object.fromEntries(Object.entries(agents).map(([k, v]) => [k, [...v]])) };
+  if (byok) rec.byok = true;
+  else if (main.size || Object.keys(agents).length) rec.agentModels = { main: [...main], agents: Object.fromEntries(Object.entries(agents).map(([k, v]) => [k, [...v]])) };
   const p = priceCredits(a, creditUsd);
   const refusal = rec.ok ? null : providerRefusal("copilot", events);
   if (refusal) rec.refusal = refusal;

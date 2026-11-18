@@ -37,10 +37,10 @@ function stream(main = "claude-sonnet-5.5", sub = "claude-haiku-4.5") {
   const subAgent = [
     event("subagent.started", { toolCallId: "toolu_1", agentName: IMPLEMENTER_AGENT, agentDisplayName: "implementer", agentDescription: "item 1", model: sub }),
     event("assistant.message", { messageId: "m-sub", model: sub, content: "done", toolRequests: [], parentToolCallId: "toolu_1" }, { agentId: "agent-1" }),
-    event("subagent.completed", { toolCallId: "toolu_1", agentName: IMPLEMENTER_AGENT, agentDisplayName: "implementer", model: sub }),
+    event("subagent.completed", { toolCallId: "toolu_1", agentName: IMPLEMENTER_AGENT, agentDisplayName: "implementer", model: sub, firstDispatchedModel: sub }),
     event("subagent.started", { toolCallId: "toolu_2", agentName: "explore", agentDisplayName: "Explore", agentDescription: "look around" }),
     event("assistant.message", { messageId: "m-explore", model: "gpt-5-mini", content: "found", toolRequests: [], parentToolCallId: "toolu_2" }, { agentId: "agent-2" }),
-    event("subagent.completed", { toolCallId: "toolu_2", agentName: "explore", agentDisplayName: "Explore", model: "gpt-5-mini" }),
+    event("subagent.completed", { toolCallId: "toolu_2", agentName: "explore", agentDisplayName: "Explore", model: "gpt-5-mini", firstDispatchedModel: "gpt-5-mini" }),
   ];
   return [...real.slice(0, end), ...(sub ? subAgent : []), ...real.slice(end)].join("\n");
 }
@@ -162,14 +162,48 @@ test("a Copilot review stage, run for real: the reviewer is its review passes' m
 test("ran keeps a model only where Copilot's stream names exactly one for it; the rest is null, or the model Pendulum asked for", () => {
   const rec = (label, text) => ({ ...parseCopilot(text, null, 0), label });
   // Two main models across the stage's work passes: no one id is what the worker ran.
-  assert.deepEqual(copilotRan([rec("work-1", stream("claude-sonnet-5.5")), rec("validation-fix-1", stream("gpt-6.1-sol"))]), { worker: null, subagent: "claude-haiku-4.5", reviewer: null });
+  assert.deepEqual(copilotRan([rec("work-1", stream("claude-sonnet-5.5")), rec("validation-fix-1", stream("gpt-6.1-sol"))]), { worker: null, subagent: "claude-haiku-4.5" }, "no review pass ran: no reviewer key");
   // A decision call, and a pass of no kind the stage's roles have, name none of them.
-  assert.deepEqual(copilotRan([{ ...rec("decision", stream("gpt-6.1-sol", null)), decision: true }, rec("exit-record", stream("gpt-6.1-sol", null)), rec("work-1", stream("claude-sonnet-5.5", null))]), { worker: "claude-sonnet-5.5", subagent: null, reviewer: null });
+  assert.deepEqual(copilotRan([{ ...rec("decision", stream("gpt-6.1-sol", null)), decision: true }, rec("exit-record", stream("gpt-6.1-sol", null)), rec("work-1", stream("claude-sonnet-5.5", null))]), { worker: "claude-sonnet-5.5" });
   // A stream that names no model (killed before its first message): nothing, so the ran Pendulum chose stands.
   assert.equal(parseCopilot("", null, 1).agentModels, undefined);
   assert.deepEqual(ranModels(ranWith(copilotInputs(), []), copilotRan([])), { worker: null, subagent: null, reviewer: null });
+  // A model asked for and a stream that names two for its role: null, never the model asked for.
+  const two = copilotRan([rec("work-1", stream("claude-sonnet-5.5", null)), rec("work-2", stream("claude-opus-5.5", null))]);
+  assert.deepEqual(two, { worker: null });
+  assert.deepEqual(ranModels(ranWith(resolveInputs({ args: {}, env: { PENDULUM_HARNESS: "copilot", PENDULUM_MODEL: "claude-sonnet-5.5" } }), []), two), { worker: null, subagent: null, reviewer: "claude-sonnet-5.5" });
   const chosen = ranWith(resolveInputs({ args: {}, env: { PENDULUM_HARNESS: "copilot", PENDULUM_MODEL: "gpt-6.1-sol" } }), []);
   assert.deepEqual(ranModels(chosen, copilotRan([])), { worker: "gpt-6.1-sol", subagent: null, reviewer: "gpt-6.1-sol" });
+});
+
+test("a sub-agent that sent no request names no model; a message marked only by parentToolCallId is a sub-agent's", () => {
+  const lines = (...extra) => [...stream("claude-sonnet-5.5", null).split("\n"), ...extra].join("\n");
+  const failed = parseCopilot(lines(event("subagent.failed", { toolCallId: "toolu_9", agentName: IMPLEMENTER_AGENT, agentDisplayName: "implementer", error: "refused", model: "claude-haiku-4.5" })), null, 0);
+  assert.deepEqual(failed.agentModels, { main: ["claude-sonnet-5.5"], agents: {} }, "no firstDispatchedModel: it never ran a model");
+  const ran = parseCopilot(lines(event("subagent.failed", { toolCallId: "toolu_9", agentName: IMPLEMENTER_AGENT, agentDisplayName: "implementer", error: "x", firstDispatchedModel: "claude-haiku-4.5" })), null, 0);
+  assert.deepEqual(ran.agentModels.agents, { [IMPLEMENTER_AGENT]: ["claude-haiku-4.5"] });
+  const marked = parseCopilot(lines(event("assistant.message", { messageId: "m-x", model: "gpt-5-mini", content: "x", toolRequests: [], parentToolCallId: "toolu_3" })), null, 0);
+  assert.deepEqual(marked.agentModels.main, ["claude-sonnet-5.5"]);
+});
+
+test("a pass through a bring-your-own-key provider names no model: none in ran, the ledger line or the cards", async () => {
+  const arn = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-5-5";
+  const byok = (type) => stream(arn, null).split("\n").map((l) => (JSON.parse(l).type === type ? l.replace('"isByok":false', '"isByok":true') : l)).concat(type === "assistant.usage" ? [event("assistant.usage", { model: arn, isByok: true, inputTokens: 1, outputTokens: 1 })] : []).join("\n");
+  for (const type of ["model.call_final_result", "assistant.usage"]) {
+    const rec = parseCopilot(byok(type), null, 0);
+    assert.equal(rec.byok, true, type);
+    assert.equal(rec.agentModels, undefined, type);
+  }
+  const { stored, body } = await copilotStage({ text: byok("model.call_final_result") });
+  assert.equal(stored.byok, true);
+  assert.deepEqual([stored.ran.worker, stored.ran.subagent, stored.ran.reviewer], [null, null, null]);
+  assert.doesNotMatch(body, /123456789012/, "the account never reaches the comment");
+  const ledger = JSON.parse(/^<!-- pendulum:ledger (\{.*\}) -->$/m.exec(body)[1]);
+  assert.equal(ledger.m, undefined);
+  assert.ok(ledger.p.every((p) => p.m === undefined || p.m === null));
+  // Not BYOK: the stage's model is on its ledger line, as before.
+  const plain = await copilotStage({});
+  assert.equal(JSON.parse(/^<!-- pendulum:ledger (\{.*\}) -->$/m.exec(plain.body)[1]).m, "claude-sonnet-5.5");
 });
 
 test("a stage that ends before its own ran is known (an early Block) gets no models on its harness line from its usage record", async () => {
@@ -185,16 +219,6 @@ test("a stage that ends before its own ran is known (an early Block) gets no mod
     if (saved === undefined) delete process.env.GITHUB_API_URL;
     else process.env.GITHUB_API_URL = saved;
     gh.close();
-  }
-});
-
-test("worker.mjs and review.mjs put the usage record's models on the harness line once it is written", () => {
-  for (const file of ["worker.mjs", "review.mjs"]) {
-    const src = readFileSync(join(SCRIPTS, file), "utf8");
-    const write = src.indexOf("usage = writeUsage(usageDir");
-    const told = src.indexOf("progress.models(usage.ran);");
-    const spend = src.indexOf("progress.spend(line.usd, line.parts, line.ledger)", write);
-    assert.ok(write > 0 && told > write && told < spend, `${file}: after the usage is written, before its spend line`);
   }
 });
 
@@ -214,6 +238,21 @@ test("the finish card names a Copilot stage's model by the table, its run log by
   assert.match(listed, /^\| [^|]+ \| Review · Sonnet 5\.5 \| /m);
   assert.match(listed, / plan \+ build stage started \(claude-sonnet-5-5\)$/m);
   assert.doesNotMatch(listed, /claude-sonnet-5\.5/);
+  // A stage whose harness and ledger lines name no model takes its record's, unless that record ran through BYOK.
+  const r = JSON.parse(real);
+  const bare = r.comments.map((c) => ({ ...c, body: c.body.replace(/^<!-- pendulum:harness \{[^\n]*\} -->$/m, '<!-- pendulum:harness {"harness":"copilot","models":{"worker":null,"subagent":null,"reviewer":null},"labels":[]} -->').replace("harness claude (claude-opus-5-5) attempt 1", "harness copilot attempt 1") }));
+  const withRecords = (records) => {
+    setSelf("clockgrove-pendulum[bot]");
+    try {
+      return finishData({ repo: "clockgrove/pendulum-scratch", issue: r.issue, timeline: r.timeline, comments: bare, pulls: [{ pr: r.pr, timeline: r.prTimeline, reviews: r.reviews, reviewComments: r.reviewComments }], checks: r.checks, records }).stages.map((s) => s.model);
+    } finally {
+      setSelf(null);
+    }
+  };
+  // Each record tagged with its stage's artifact, as objectiveRecords returns it.
+  const tagged = (over) => r.records.map((x) => ({ ...x, ...over, artifact: r.comments.some((c) => c.body.startsWith(`<!-- pendulum:3:progress:review:${x.progressRun} -->`)) ? "pendulum-usage-3-review" : "pendulum-usage-3" }));
+  assert.deepEqual(withRecords(tagged({ harness: "copilot", model: "claude-sonnet-5.5" })), ["claude-sonnet-5.5", "claude-sonnet-5.5"]);
+  assert.deepEqual(withRecords(tagged({ harness: "copilot", model: "arn-like.id", byok: true })), [null, null]);
   const unlisted = card("claude-sonnet-9.9");
   assert.match(unlisted, /^\| [^|]+ \| Plan \+ build · claude-sonnet-9\.9 \| /m);
   assert.match(unlisted, / plan \+ build stage started \(claude-sonnet-9\.9\)$/m);

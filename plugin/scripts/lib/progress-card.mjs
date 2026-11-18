@@ -214,7 +214,8 @@ export function progressData({ stage, subject = null, issue, started, now, lines
     const priced = r.passes.filter((p) => typeof p.usd === "number");
     r.usd = r.passes.length ? priced.reduce((s, p) => s + p.usd, 0) : null;
     r.unknown = r.passes.reduce((n, p) => n + (count(p.usdUnknown) || (typeof p.usd === "number" ? 0 : 1)), 0);
-    r.model = modelId(r.passes.find((p) => p.model && !p.decision)?.model) ?? r.events.findLast((e) => e.model)?.model ?? null;
+    // A pass through a bring-your-own-key provider (`byok`) names a model id the provider owns: never shown.
+    r.model = modelId(r.passes.find((p) => p.model && !p.decision && p.byok !== true)?.model) ?? r.events.findLast((e) => e.model)?.model ?? null;
   }
   const cents = centsOf(all.map((r) => r.usd));
   all.forEach((r, i) => (r.cents = cents[i]));

@@ -1189,7 +1189,9 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   };
   /**
    * The models the stage's usage record names (writeUsage's `ran`: on Copilot, those its own stream named), on the
-   * harness line from then on; nothing before the stage's own `ran` (progress.ran) is known.
+   * harness line from then on: the worker's and the reviewer's usual end call it once the record is written. Nothing
+   * before the stage's own `ran` (progress.ran) is known. A stopped or cancelled stage's end (stopStage, onCancel)
+   * writes its record without calling it, so its harness line keeps the models the stage started with.
    */
   progress.models = (recorded) => {
     if (ran && recorded) progress.ran({ ...ran, ...ranModels(recorded) });
@@ -2385,6 +2387,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The account the stage ran on, by name only: a local account (accounts.mjs), or on GitHub Actions and the cloud
     // sandbox the account step's pick (PENDULUM_STAGE_ACCOUNT) when the workflow declares accounts; none otherwise.
     ...((stageAccountName(account) ?? stageAccountName(ran?.account ?? null)) ? { account: stageAccountName(account) ?? ran.account } : {}),
+    // A pass through a bring-your-own-key provider (usage.mjs parseCopilot `byok`): its model ids are the provider's own
+    // (an ARN can name an account), so no comment or card publishes the stage's model (logic.mjs stageSpendLine).
+    ...(runs.some((r) => r.byok === true) ? { byok: true } : {}),
     usd: merged.usd === null && !kb.extra ? null : Math.round(((merged.usd ?? 0) + kb.extra) * 1e6) / 1e6,
     tokens: merged.tokens,
     models: merged.models ?? null,

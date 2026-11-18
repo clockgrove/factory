@@ -100,3 +100,38 @@ export function partTwoBlocked() {
   const p2 = { ...o.pulls[1].pr, merged_at: null, state: "open", draft: true };
   return { ...o, comments, pulls: [o.pulls[0], { pr: p2, timeline: [], reviews: [], reviewComments: [] }], checks: [], end: { kind: "blocked", at: at(16, "16:53"), reason: `2 findings stay open on PR #${p2.number}.`, next: "work" } };
 }
+
+/**
+ * #614: an Objective blocked by another issue from its label, then paused on a usage limit by its first review. The
+ * times, the stages' spend and ledger lines, the label and blocked-by events and the blocker's close are a real run's, as
+ * GitHub answered for it (a local run of 2026-11-17: its card said "Merged in 21 h 45 min"); the names are this file's.
+ * `blockers`: the blocking issue as GitHub answers for it at the card's write.
+ */
+export function blockedThenPaused() {
+  const n = 421;
+  const lines = (harnessModel, spend, ledger) => (c) => ({ ...c, body: `${c.body.split("\n").slice(0, 2).join("\n")}\n<!-- pendulum:harness ${JSON.stringify({ harness: "claude", model: harnessModel, account: "claude" })} -->\n<!-- pendulum:spend ${JSON.stringify(spend)} -->\n<!-- pendulum:ledger ${JSON.stringify(ledger)} -->` });
+  const local = (usd, byBilling, byPass, more = {}) => ({ usd, usdByBilling: byBilling, billing: "subscription", usdByPass: byPass, ...more, route: "local" });
+  const comments = [
+    lines("claude-opus-5-5", local(7.804606, { api: 0.000567, subscription: 7.804039 }, { work: { usd: 7.804039, usdByBilling: sub(7.804039) }, decision: { usd: 0.000567, usdByBilling: { api: 0.000567 } } }, { exit: "delivered" }), { v: "0.10.3", m: "claude-opus-5-5", b: "api", p: [{ l: "decision", d: 16, m: null, ms: [1794993260208, 1794995820790], u: 0.000567 }, { l: "work-1", b: "subscription", e: "medium", ms: [1794993142410, 1794995826523], u: 7.804039, k: 0, n: [20318066, 98640, 20005832, 311958], c: [12220, 16245] }] })(stage(n, "work", "1794993097243", at(18, "09:12", 3), at(18, "10:12", 42), "", {})),
+    plan(n, at(18, "09:18", 18)),
+    // The review the usage limit paused: its spend line says so (`limitPaused`), and its last write is the pause's start.
+    lines("claude-fable-5-2", local(0, sub(0), { review: { usd: 0, usdByBilling: sub(0) } }, { limitPaused: true, exit: "paused" }), { v: "0.10.3", m: "claude-fable-5-2", b: "subscription", p: [{ l: "review", ms: [1794996793219, 1794996798010], u: 0, n: [0, 0, 0, 0], c: [0, 0] }] })(stage(n, "review", "1794996765735", at(18, "10:12", 59), at(18, "10:13", 20), "", {})),
+    // The pause notice: words only, updated in place. The card reads nothing from it.
+    { id: (id += 1), user: bot, created_at: at(18, "10:13", 21), updated_at: at(18, "10:13", 21), body: `<!-- pendulum:${n}:account-limit -->\nPendulum: the review stage paused on a usage limit.` },
+    lines("claude-fable-5-2", local(5.372139, { subscription: 5.371215, api: 0.000924 }, { review: { usd: 2.045223, usdByBilling: sub(2.045223) }, answer: { usd: 3.325992, usdByBilling: sub(3.325992) }, decision: { usd: 0.000924, usdByBilling: { api: 0.000924 } } }, { exit: "delivered" }), { v: "0.10.3", m: "claude-fable-5-2", b: "subscription", p: [{ l: "review", ms: [1795021725253, 1795022159205], u: 2.045223, n: [614309, 11994, 522997, 91296], c: [0, 59590] }, { l: "decision", d: 10, m: null, b: "api", ms: [1795022291039, 1795023584836], u: 0.000924 }, { l: "answer", m: "claude-opus-5-5", e: "medium", ms: [1795022169981, 1795022845824], u: 3.325992, k: 0, n: [6170257, 48378, 6026042, 144091], c: [0, 29797] }] })(stage(n, "review", "1795021703531", at(18, "17:08", 37), at(18, "17:39", 58), "", {})),
+    lines("claude-fable-5-2", local(2.152865, { subscription: 2.152704, api: 0.000161 }, { review: { usd: 1.381141, usdByBilling: sub(1.381141) }, answer: { usd: 0.771563, usdByBilling: sub(0.771563) }, decision: { usd: 0.000161, usdByBilling: { api: 0.000161 } } }, { exit: "delivered" }), { v: "0.10.4", m: "claude-fable-5-2", b: "subscription", p: [{ l: "review", ms: [1795023962282, 1795024333014], u: 1.381141, n: [318574, 7393, 253903, 64659], c: [2946, 33105] }, { l: "decision", d: 2, m: null, b: "api", ms: [1795024464431, 1795025259189], u: 0.000161 }, { l: "answer", m: "claude-opus-5-5", e: "medium", ms: [1795024343603, 1795024508279], u: 0.771563, k: 0, n: [1007630, 10167, 960596, 46992], c: [12220, 16843] }] })(stage(n, "review", "1795023645301", at(18, "17:40", 58), at(18, "18:08", 2), "", {})),
+  ];
+  const blocker = { number: 420, state: "closed", repository: { full_name: "acme/app" } };
+  const timeline = [
+    labelled(at(17, "20:34", 21)),
+    { event: "blocked_by_added", created_at: at(17, "20:34", 26), actor: kirk, blocked_by: blocker },
+    { event: "labeled", label: { name: "pendulum:running" }, actor: bot, created_at: at(18, "09:11", 28) },
+    // The label taken off and put back while the Objective was paused: the clock stays at the first label.
+    { event: "unlabeled", label: { name: "pendulum:objective" }, actor: kirk, created_at: at(18, "17:04", 50) },
+    labelled(at(18, "17:04", 52)),
+  ];
+  const p = pr(n, 443, at(18, "09:57", 14), { merged: at(18, "18:20", 10), commits: 5, additions: 1749, deletions: 287, files: 31 });
+  const reviews = [{ ...review(n, at(18, "17:15", 59)), id: 77 }, { ...review(n, at(18, "17:52", 16)), id: 78 }];
+  const reviewComments = Array.from({ length: 8 }, (_, i) => ({ ...finding, id: i + 1 }));
+  return { repo: "acme/app", issue: issue(n), timeline, comments, pulls: [{ pr: p, timeline: queued(at(18, "18:07", 56), at(18, "18:20", 10)), reviews, reviewComments }], checks: [check(at(18, "18:19"))], required, blockers: [{ repo: "acme/app", number: 420, state: "closed", closed_at: at(18, "09:10", 43) }] };
+}

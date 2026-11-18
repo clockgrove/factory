@@ -28,7 +28,7 @@ import { ACCOUNT, accountUse, costOf, decisionSpendRecords, stageHarnessOf, stag
 import { BLOCK_CAUSES, blockCauseOf, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
 import { billingText, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
-import { labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
+import { clockRenamed, labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
 
 export const ROW_VERSION = 1;
 
@@ -812,6 +812,10 @@ export function scoreObjective(collected, opts = {}) {
     sinceBasis = clockAfter && since === clockAfter ? `--clock-after (no "${label}" label event at or after it)` : `issue created (no "${label}" label event found)`;
     missing.push("label event");
   }
+  // Labelled before the rename to Pendulum (finish-card.mjs clockRenamed): GitHub keeps the old label name on those
+  // events, so the clock above starts at a later label; the wall clock is not known, never a short figure.
+  const renamed = clockRenamed(collected.issueTimeline);
+  if (renamed) missing.push("clock start (labelled before the rename to Pendulum)");
   const pulls = branchPulls(collected);
   const merged = pulls.find((pr) => pr.merged_at) ?? null;
   const open = pulls.find((pr) => !pr.merged_at && pr.state === "open") ?? null;
@@ -932,7 +936,7 @@ export function scoreObjective(collected, opts = {}) {
   phases.setupBasis = setup.basis;
   const dispatch = dispatchLatency(collected, issue.number, { app });
   if (collected.jobs === null || collected.jobs === undefined) missing.push("job log");
-  const wall = merged ? minutes(since, merged.merged_at) : null;
+  const wall = merged && !renamed ? minutes(since, merged.merged_at) : null;
 
   let operator;
   if (typeof given === "number" && Number.isFinite(given)) operator = { minutes: given, basis: "--minutes (stopwatch)" };
@@ -992,7 +996,7 @@ export function scoreObjective(collected, opts = {}) {
     runnerMinutes: runner.minutes,
     runnerBasis: runner.basis,
     wallMinutes: wall,
-    wallBasis: merged ? `${sinceBasis} to merged` : "not merged",
+    wallBasis: !merged ? "not merged" : renamed ? "unknown: labelled before the rename to Pendulum" : `${sinceBasis} to merged`,
     waitingMinutes: waiting.minutes,
     waitingBasis: waiting.basis,
     workingMinutes: wall === null || waiting.minutes === null ? null : Math.max(0, Math.round((wall - waiting.minutes) * 10) / 10),

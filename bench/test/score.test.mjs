@@ -16,6 +16,7 @@ import { blocked, cleanMerge, humanPush, localMerge, OPERATOR, questionAnswered,
 import { CODEX_NO_TOKENS, mergeUsage, parseUsage } from "../../plugin/scripts/lib/usage.mjs";
 import { harnessMarker, usdText } from "../../plugin/scripts/lib/logic.mjs";
 import { handoverLine } from "../../plugin/scripts/lib/handover.mjs";
+import { PREVIOUS_NAME } from "../../plugin/scripts/lib/local.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
 const USAGE = join(import.meta.dirname, "fixtures", "usage");
@@ -1459,4 +1460,21 @@ test("#566 S6: a vendor comment standing alone with no model dollars and no mode
   // With the model's dollars, they are known; with its run of unknown cost, that one run, not a second.
   assert.deepEqual(alone({ usd: 0.34, modelUsd: 0.3, vendorUsd: 0.04 }), [[0.3, 0, [], { usd: 0.04 }]]);
   assert.deepEqual(alone({ usd: 0.04, vendorUsd: 0.04, usdUnknown: 1, usdUnknownWhy: ["unreported"] }), [[null, 1, ["unreported"], { usd: 0.04 }]]);
+});
+
+test("an Objective labelled before the rename to Pendulum (#567): its wall clock is unknown, never a figure that starts at its later label", () => {
+  const plain = scoreObjective(cleanMerge(42, usage("claude")), { prices, now: NOW });
+  assert.equal(plain.wallMinutes, 150);
+  for (const name of [`${PREVIOUS_NAME}:objective`, `${PREVIOUS_NAME}:running`]) {
+    // GitHub keeps a renamed label's old name on its events: the first label, a day before the current one.
+    const c = cleanMerge(42, usage("claude"));
+    c.issueTimeline = [{ event: "labeled", label: { name }, actor: OPERATOR, created_at: "2031-03-01T01:00:00Z" }, ...c.issueTimeline];
+    const row = scoreObjective(c, { prices, now: NOW });
+    assert.deepEqual([row.wallMinutes, row.workingMinutes, row.wallBasis], [null, null, "unknown: labelled before the rename to Pendulum"], name);
+    assert.ok(row.missing.includes("clock start (labelled before the rename to Pendulum)"));
+    // Nothing else is read from that event: the rest of the row is as without it.
+    const rest = ({ wallMinutes, workingMinutes, wallBasis, missing, ...r }) => r;
+    assert.deepEqual(rest(row), rest(plain));
+    assert.match(markdownTable([row]), new RegExp(`\\| ${plain.runnerMinutes} \\| unknown \\|`));
+  }
 });

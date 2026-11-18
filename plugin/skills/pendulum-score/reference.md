@@ -24,7 +24,7 @@ Minutes a human spent on this Objective after the label: reading and acting on a
 
 Per harness, from the usage artifact the worker job uploads, plus the reviewer call: Dollars by harness, below, for the fields, unit and basis.
 
-Beside the dollars, report runner minutes from the job log and wall time from label to merge. Wall time is never reported alone: the same Objective on a busy queue takes longer for no more dollars.
+Beside the dollars, report runner minutes from the job log and wall time from label to merge. Wall time is never reported alone: the same Objective on a busy queue takes longer for no more dollars. An issue labelled before the rename to Pendulum has unknown wall time: GitHub keeps the old label name on those events, so the clock would start at a later label.
 
 Name the harness and models that ran beside the dollars, so rows compare model to model: Harness and models, below. Each input's source: Reading the artifacts, below; a row names a missing input, never guesses.
 

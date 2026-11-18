@@ -476,3 +476,11 @@ test("#538 review: a second ask on a head reuses its run with no second dispatch
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("#518 B1: a needs: failure that skips a leg is no green: the stage Blocks as the work's, with no fix pass", async () => {
+  const skipped = { status: "completed", conclusion: "skipped" };
+  const r = await stage({ settings: ON, github: { legs: () => ({ build: red, [MAC]: green, [WIN]: skipped }) } });
+  assert.equal(r.result.green, false);
+  assert.equal(r.prompts.length, 0, "no fix pass");
+  assert.equal(r.result.stuck.cause, "work");
+});

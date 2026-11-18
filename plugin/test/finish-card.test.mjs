@@ -552,6 +552,29 @@ test("finish card (#567): an issue labelled before the rename to Pendulum has no
   assert.ok(finishSummary(plain).wallMs > 0 && finishSummary(plain).labelledWallMs > 0);
 });
 
+test("finish card (#565 W3): the Action's tick on a pendulum:local Objective's close, before the loop's, leaves its label, so the loop's Done pass still posts its card", async () => {
+  const local = ["pendulum:objective", "pendulum:local", "pendulum:in-review"];
+  // assetgrove #402 and #408: the Action's run on the close came first and took the label, so the loop had none to act on.
+  const fake = fakeRepo({ labels3: local, dropLabels: true });
+  const action = await tickOver(fake);
+  assert.deepEqual(action.finished, [7, 8]);
+  assert.ok(!fake.writes.some((w) => w.startsWith("DELETE /issues/3/labels/")), "the label stays for the loop");
+  assert.ok(action.done.includes(7) && action.done.includes(8), "an Objective with no card to wait for is tidied as before");
+  const loop = await tickOver(fake, { env: { PENDULUM_LOCAL: "1" } });
+  assert.deepEqual(loop.finished, [3], "the loop's later tick posts the card");
+  assert.ok(fake.writes.some((w) => w.startsWith(`POST /issues/3/comments ${finishMarker(3)}`)));
+  assert.ok(fake.writes.some((w) => w.startsWith("POST /issues/3/comments <!-- pendulum:3:done -->")), "and its Done record");
+  // A person closed a pendulum:local Objective by hand with its PR still open (#80): the Action leaves its label for the
+  // loop, but stops its PR at once; the loop's tick posts the card.
+  const open = fakeRepo({ labels8: local, dropLabels: true });
+  const openTick = await tickOver(open);
+  assert.ok(!openTick.done.includes(8));
+  assert.ok(!open.writes.some((w) => w.startsWith("DELETE /issues/8/labels/")), "its state label stays for the loop");
+  assert.ok(open.writes.some((w) => w.startsWith("DELETE /issues/80/labels/")), "its PR stopped: the review label off");
+  const openLoop = await tickOver(open, { env: { PENDULUM_LOCAL: "1" } });
+  assert.ok(openLoop.finished.includes(8) && openLoop.done.includes(8), "the loop posts its closed card, then tidies it");
+});
+
 test("finish card (#589 S4): a closed Objective's open PR is stopped while its label waits for the card, on either route, and a stopped one is left alone", async () => {
   const local = ["pendulum:objective", "pendulum:local", "pendulum:in-review"];
   // The Action holds a pendulum:local Objective's label for the loop: its PR already a draft with no review label, no write.

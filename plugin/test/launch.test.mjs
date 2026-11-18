@@ -5,6 +5,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { renderWorkflow } from "../scripts/setup.mjs";
+import { parseYaml } from "../scripts/lib/yaml.mjs";
 import { dispatchLatency, launchDecision, launchEvent, launchedSince, marker, pickSandbox, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, stageHolds, stateOf } from "../scripts/lib/logic.mjs";
 import { START, launchCue } from "../scripts/launch.mjs";
 
@@ -262,4 +264,36 @@ test("a sandbox stage's start: apt, npm and the CLI's version check get no crede
   for (const r of runs.filter((x) => !x.head.startsWith("node "))) assert.ok(!r.text.includes("sekrit-"), `${r.head}: no credential`);
   const stage = runs.find((x) => x.head.startsWith("node "));
   for (const v of Object.values(secrets)) assert.ok(stage.text.includes(v), "the stage keeps its tokens and the harness's credential");
+});
+
+test("namespace launcher: the agent's variables travel by name, never by value on the command line", async () => {
+  const { asAgent, setAgent } = await import("../scripts/lib/proc.mjs");
+  setAgent({ user: "pendulum-agent", home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set(), launcher: "namespace" });
+  try {
+    const [cmd, args, env] = asAgent("claude", ["-p"], { PATH: "/usr/bin", CODEX_API_KEY: "sekret", LANG: "C" }, ["CODEX_API_KEY"], "/home/pendulum-agent/repo");
+    assert.equal(cmd, "/usr/bin/sudo");
+    assert.equal(args.join(" ").includes("sekret"), false, "no value on the command line");
+    assert.ok(args.includes("--preserve-env=CODEX_API_KEY,LANG") || args.includes("--preserve-env=LANG,CODEX_API_KEY"));
+    assert.deepEqual(args.slice(args.indexOf("pendulum-agent-wrap") + 1, args.indexOf("pendulum-agent-wrap") + 4), ["/home/pendulum-agent", "/home/pendulum-agent/tmp", "/home/pendulum-agent/repo"]);
+    assert.equal(env.CODEX_API_KEY, "sekret");
+    for (const want of ["--pid", "--mount", "--kill-child"]) assert.ok(args.includes(want), want);
+  } finally {
+    setAgent(null);
+  }
+});
+
+test("workflow template: only a person's ready_for_review is a cue (#47), every Action output a job reads exists, and the launch job's token only reads and ticks", () => {
+  const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
+  const runner = parseYaml(renderWorkflow(template, values));
+  const rendered = renderWorkflow(template, { ...values, sandbox: "vercel", maintainer_ids: "123,456", default_branch: "main" });
+  const doc = parseYaml(rendered);
+  for (const [route, job] of [["runner", runner.jobs.review], ["sandbox", doc.jobs["launch-gate"]]]) {
+    const cues = job.if.match(/github\.event\.action == 'ready_for_review'[^)]*/g);
+    assert.deepEqual(cues, ["github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'"], `${route}: only a person's ready_for_review is a cue`);
+  }
+  // An output the Action does not have reads empty, and an empty issue put every launch-event job in one group.
+  const outputs = Object.keys(parseYaml(readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8")).outputs);
+  for (const [, name] of rendered.matchAll(/steps\.[fw]\.outputs\.([a-z_0-9]+)/g)) assert.ok(outputs.includes(name), `the Action has an output ${name}`);
+  assert.deepEqual(doc.jobs.launch.permissions, { contents: "read", actions: "write" });
 });

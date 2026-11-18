@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFile, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setMaintainers } from "../scripts/lib/logic.mjs";
@@ -227,6 +227,34 @@ test("session route: `pendulum deliver` delivers nothing when the Objective chan
     assert.match(r.stderr, /nothing was delivered: the Objective's title or body changed after this session read it; run `pendulum issue 7` again/);
     assert.deepEqual(writes(fake.calls), [], "nothing written to GitHub");
     assert.doesNotMatch(c.refs(), /pendulum\/7/, "nothing pushed");
+  } finally {
+    await fake.close();
+  }
+});
+
+test("session route: `pendulum issue` hands a session no body whose author cannot push", async () => {
+  const c = clone();
+  const out = join(c.root, "issue.md");
+  const fake = await fakeGitHub({ author: user("stranger") });
+  try {
+    const r = await run(["issue", "7", "--out", out], envFor(fake.url, c.root), c.work);
+    assert.equal(r.code, 1);
+    assert.equal(existsSync(out), false, "no body reaches the session");
+    assert.deepEqual(writes(fake.calls), [], "nothing written to GitHub");
+  } finally {
+    await fake.close();
+  }
+});
+
+test("session route: `pendulum post-review` posts nothing on an issue a stranger last edited", async () => {
+  const c = clone();
+  const file = join(c.root, "findings.json");
+  writeFileSync(file, JSON.stringify({ acceptance: [{ entry: "A1", met: true }], comments: [] }));
+  const fake = await fakeGitHub({ author: user("kirk"), editor: user("stranger") });
+  try {
+    const r = await run(["post-review", "9", file], envFor(fake.url, c.root), c.work);
+    assert.equal(r.code, 1);
+    assert.deepEqual(writes(fake.calls), [], "no review posted");
   } finally {
     await fake.close();
   }

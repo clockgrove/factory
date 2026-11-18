@@ -178,3 +178,26 @@ test("#260: the outer sandbox denies the list serve built, so a login only serve
   assert.ok(outer.includes(dev), "serve's COPILOT_HOME, not the stage's");
   assert.ok(!outer.includes(join(h, "pendulum-copilot")));
 });
+
+test("#260: a second Claude Code account sharing the default folder's state through links keeps it, and reads none of the default login", () => {
+  const h = mkdtempSync(join(tmpdir(), "home-"));
+  const def = join(h, ".claude");
+  const mine = join(h, ".claude-unstruk");
+  for (const d of [def, join(def, "skills"), join(def, "projects"), join(def, "backups"), join(def, "sessions"), mine, join(mine, "sessions"), join(h, ".codex-2")]) mkdirSync(d, { recursive: true });
+  for (const f of [join(def, ".credentials.json"), join(def, "settings.json"), join(h, ".claude.json"), join(h, ".claude.json.backup.1"), join(mine, ".credentials.json"), join(mine, ".claude.json"), join(h, ".codex-2", "auth.json")]) writeFileSync(f, "{}");
+  // The shared state, linked into the default folder; and two links that would reach the default login.
+  for (const n of ["skills", "projects", "settings.json"]) symlinkSync(join(def, n), join(mine, n));
+  symlinkSync(def, join(mine, "peek"));
+  symlinkSync(join(def, ".credentials.json"), join(mine, "cred"));
+  const env = { CLAUDE_CONFIG_DIR: mine };
+  const denied = [join(def, ".credentials.json"), join(h, ".claude.json"), join(h, ".claude.json.backup.1"), join(def, "backups"), join(def, "sessions"), join(mine, "peek", ".credentials.json"), join(mine, "peek", "sessions"), join(mine, "cred"), join(h, ".codex-2")];
+  const shared = [def, join(def, "skills"), join(def, "projects"), join(def, "settings.json"), join(mine, "skills"), join(mine, "projects")];
+  const outer = harnessOuterSettings({ harness: "claude", writable: ["/c"], home: h, env }).filesystem.denyRead;
+  for (const p of denied) assert.ok(outer.includes(p), `outer denies ${p}`);
+  for (const p of [...shared, join(mine, ".credentials.json"), join(mine, ".claude.json")]) assert.ok(!outer.includes(p), `outer keeps ${p}`);
+  const credentials = credentialPaths(h, env, { own: stageLogin("claude", env, h) });
+  const inner = claudeLocalSettings({ home: h, env, credentials }).sandbox.filesystem.denyRead;
+  for (const p of [...denied, join(mine, ".credentials.json"), join(mine, ".claude.json")]) assert.ok(inner.includes(p), `inner denies ${p}`);
+  for (const p of shared) assert.ok(!inner.includes(p), `inner keeps ${p}`);
+  assert.ok(srtSettings({ home: h, env, credentials }).filesystem.denyRead.includes(join(mine, "cred")));
+});

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { HOST_PREFIX, LABEL_MAX, choiceLabels, choiceOf, hostsOf } from "../scripts/lib/choice.mjs";
-import { CHOICE_FIX, EDITED_REASON, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
+import { CHOICE_FIX, EDITED_REASON, choiceGate, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
 import { claudeRunner, codexRunner, copilotRunner, harnessCommand } from "../scripts/lib/harness.mjs";
 import { LOCAL_DOMAINS, gitPinFile, isSandboxHost, suffixRuleUnder, openStageHosts, openedStageHosts, pinGitDir, runnerDomains } from "../scripts/lib/local.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
@@ -162,4 +162,15 @@ test("local mode, the real path: one Objective's stage gets its hosts in every s
     rmSync(dev, { recursive: true, force: true });
     rmSync(stageTmp, { recursive: true, force: true });
   }
+});
+
+test("choiceGate: the hosts the stage opens, and a Block when local mode set its sandboxes up for others", async () => {
+  const applied = [];
+  const gate = (env) => choiceGate({ repo, issue: 7, labels: [HF], env, pr: null, notify: "boss", opts: {}, apply: async (_, e) => applied.push(e), stage: "work", gh: timeline({ [HF]: person("dev") }) });
+  const runner = await gate(ENV);
+  assert.deepEqual([runner.ok, runner.hosts], [true, ["huggingface.co"]], "a runner's stage opens its own: nothing prepared");
+  assert.deepEqual((await gate({ ...ENV, PENDULUM_STAGE_HOSTS: "huggingface.co" })).hosts, ["huggingface.co"], "the loop set it up for the same hosts");
+  const moved = await gate({ ...ENV, PENDULUM_STAGE_HOSTS: "" });
+  assert.equal(moved.ok, false, "the label was applied after the loop set the sandboxes up");
+  assert.deepEqual([applied[0].exit, applied[0].cause, applied[0].stage], ["blocked", "setup", "work"]);
 });

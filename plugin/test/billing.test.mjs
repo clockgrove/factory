@@ -8,11 +8,13 @@
 // log, the rebase line, the vendor comment, and the scorecard from the artifact and from the spend line.
 import "./temp.mjs";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { childBilling, codexKeyBilling, credentialEnv, foldDecision, keepDecision, runDecision, runHarness } from "../scripts/lib/harness.mjs";
 import { progressReporter, writeUsage } from "../scripts/lib/session.mjs";
 import { activityLine, capReached, copilotCount, harnessActivity, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, selectReady, spendMarker, spendOf, spendParts, spendText, stageSpendLine, usdText, vendorBody } from "../scripts/lib/logic.mjs";
@@ -427,4 +429,32 @@ test("#617: a stage's dollars are the sum of its passes' to the millionth: its u
   assert.deepEqual(rebaseCost(s.usage, { records }), { usd: 0.228606, usdByBilling: { credits: 0.228606 }, billing: "credits" });
   // The caller's records are left as the harness reported them.
   assert.deepEqual(records.map((r) => r.usd), [0.0851386, 0.1434666]);
+});
+
+test("the running spend line carries each pass's dollars under the billing it booked when it ended", async () => {
+  // One stage process: one pass on a Console key and one on a claude.ai login, then the spend line after them.
+  const gh = await fakeGitHub();
+  const lib = (f) => pathToFileURL(join(ROOT, "plugin", "scripts", "lib", f)).href;
+  const script = `
+    import { progressReporter } from ${JSON.stringify(lib("session.mjs"))};
+    import { credentialEnv, runHarness } from ${JSON.stringify(lib("harness.mjs"))};
+    import { repoOf } from ${JSON.stringify(lib("github.mjs"))};
+    process.env.PENDULUM_LOCAL = "1";
+    const progress = progressReporter(repoOf("owner/repo"), 7, { token: () => "t" }, { stage: "work", runId: "1", harness: "claude" });
+    delete process.env.PENDULUM_LOCAL;
+    progress.billing((await credentialEnv({ harness: "claude", credential: "login", inputs: {}, env: process.env })).billing);
+    const env = { HOME: process.env.HOME, PATH: process.env.PATH };
+    await runHarness({ harness: "claude", model: "m", prompt: "p", maxUsd: 0, cwd: process.env.HOME, env: { ...env, FAKE_USD: "0.5", FAKE_KEY_SOURCE: "/login managed key" }, timeoutMs: 60_000, label: "work-1" });
+    await runHarness({ harness: "claude", model: "m", prompt: "p", maxUsd: 0, cwd: process.env.HOME, env: { ...env, FAKE_USD: "0.25", FAKE_STORED: "claudeai" }, timeoutMs: 60_000, label: "work-2" });
+    await progress("work-2 ended");
+    process.exit(0);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: BASE.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url }, stdio: ["ignore", "pipe", "pipe"] });
+  let err = "";
+  child.stderr.on("data", (c) => (err += c));
+  const code = await new Promise((r) => child.on("exit", r));
+  gh.close();
+  assert.equal(code, 0, err);
+  const line = spendParts(gh.written.at(-1));
+  assert.deepEqual([line?.usd, line?.usdByBilling], [0.75, { api: 0.5, subscription: 0.25 }], gh.written.at(-1));
 });

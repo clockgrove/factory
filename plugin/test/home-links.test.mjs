@@ -109,3 +109,11 @@ test("#261: a stage whose harness home holds such a link Blocks before it starts
   assert.doesNotMatch(homeLinkReason, /\/home|\/tmp|\/Users|nowhere/, "no local path reaches GitHub");
   assert.match(homeLinkReason, /home-link/);
 });
+
+test("#261: every directory Pendulum makes is checked where it really lies", () => {
+  const outside = mkdtempSync(join(tmpdir(), "elsewhere-"));
+  // `cache` a link to a directory that exists outside every home: `cache/model-catalog` would be made there.
+  const { h, two, env } = fakeHome();
+  symlinkSync(outside, join(two, "cache"));
+  refused(() => ensureHarnessHomes("claude", env, h), { link: join(two, "cache", "model-catalog"), target: join(outside, "model-catalog") });
+});

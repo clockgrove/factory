@@ -286,3 +286,24 @@ test("the merge pass never merges an Objective waiting for its restart, whoever 
     }
   });
 });
+
+test("a stage that missed the restart's label learns of it from a record newer than the ones it started with, whatever its clock", async () => {
+  const { objectiveReader } = await import("../scripts/lib/stop.mjs");
+  setSelf(BOT.login);
+  try {
+    let lists = 0;
+    const comments = [recordComment()];
+    const own = objectiveReader({ read: async () => ({ ...issue(["pendulum:objective"]), comments: comments.length }), list: async () => (lists++, comments) });
+    // The restarted run's own stage: the record is there when it starts, so it is no restart of this stage.
+    await own.prime();
+    assert.equal(stopCause(await own(), "pendulum:objective"), null);
+    const n = lists;
+    await own();
+    assert.equal(lists, n, "the comments are read again only when their count changes");
+    // A later restart, recorded while the stage runs: it stops.
+    comments.push(recordComment(7, "2031-03-02T05:00:00Z"));
+    assert.equal(stopCause(await own(), "pendulum:objective"), "restart");
+  } finally {
+    setSelf(null);
+  }
+});

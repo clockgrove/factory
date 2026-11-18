@@ -1121,6 +1121,33 @@ test("#519 triage: a job cancelled at its time limit is said so on the progress 
   });
 });
 
+const FAIL_FAST_YML = "on: pull_request\njobs:\n  test:\n    strategy:\n      matrix:\n        os: [ubuntu-26.04, windows-2025]\n    name: test (${{ matrix.os }}, 1/1)\n    runs-on: ${{ matrix.os }}\n    timeout-minutes: 20\n    steps:\n      - run: pnpm test\n";
+const UBUNTU = "test (ubuntu-26.04, 1/1)";
+const flakeLog = legLog("Error: connect ETIMEDOUT 10.0.0.1:5432");
+/** The two legs on one workflow run: ubuntu failed at 20:55:00, Windows cancelled at 20:55:04 (ids `u` and `w`). */
+const failFastRed = (u, w) => ({
+  jobs: {
+    [u]: { id: u, run_id: 7000, name: UBUNTU, status: "completed", conclusion: "failure", started_at: "2026-11-16T20:51:53Z", completed_at: "2026-11-16T20:55:00Z", runner_id: 1, runner_name: "u", steps: [{ name: "Set up job", conclusion: "success", number: 1 }, { name: "Test", conclusion: "failure", number: 9 }] },
+    [w]: { ...cancelledJob(w, "2026-11-16T20:55:04Z"), run_id: 7000 },
+  },
+  runs: [{ ...cancelRun(u, "2026-11-16T20:55:00Z"), name: UBUNTU, conclusion: "failure" }, cancelRun(w, "2026-11-16T20:55:04Z")],
+});
+
+test("#519 triage: a leg fail-fast cancelled after a sibling leg's flake is left to that leg: the flake is rerun, both legs with it", async () => {
+  const { redCancels } = await import("../scripts/lib/triage.mjs");
+  const { jobs, runs } = failFastRed(811, 812);
+  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.95 });
+  await withHead({ runs: [], jobs, logs: { 811: flakeLog, 812: cancelledLog }, workflow: FAIL_FAST_YML }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async () => {} });
+    // Not a cancel a fix pass cannot answer: the validation loop goes on to triage.
+    assert.deepEqual((await redCancels(repo165, runs, { token: "t", sha: "d".repeat(40), cache: t.cache })).unplaced, []);
+    const r = await t.red({ sha: "d".repeat(40), failedRuns: runs, required: [UBUNTU, WIN] });
+    assert.equal(r.rerun, true);
+    assert.equal(seen.reruns, 1, "the run's rerun-failed-jobs reruns the cancelled leg too");
+    assert.equal(decider.asked.length, 1, "only the leg that failed is asked");
+  });
+});
+
 test("#519 awaitChecks: a required check cancelled because a newer run of its workflow replaced it on the same head is pending, not red; failed runs are the latest of each name", async () => {
   const { awaitChecks } = await import("../scripts/lib/github.mjs");
   const sha = "b".repeat(40);

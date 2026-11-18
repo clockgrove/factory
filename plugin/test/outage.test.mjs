@@ -460,3 +460,24 @@ console.log(JSON.stringify(out));`;
   }
 });
 
+
+test("#337: with no exit record while the host the stage gave up on still does not answer, the harness is not asked; the stage ends on the outage", async () => {
+  const { bin } = fakeCodex({ fail: 0 });
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  try {
+    await offline(
+      () => Promise.reject(dns()),
+      async () => {
+        waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+        const lost = await rest("repos/o/r/issues/7", { token: "t" }).then(() => assert.fail("answered"), (x) => x);
+        assert.ok(lost instanceof NetworkDown, String(lost));
+        const asked = sessionLib.exitRecord({ text: undefined, harness: "codex", model: "gpt-6.1-sol", session: { id: null, canResume: false }, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, eventsFile: join(bin, "events.jsonl"), deadlineAt: Date.now() + 60 * 60_000, maxUsd: 0 });
+        await assert.rejects(asked, (x) => x instanceof NetworkDown && x.since === lost.since && x.origin === lost.origin);
+        assert.equal(existsSync(join(bin, "calls.jsonl")), false, "no harness call");
+      },
+    );
+  } finally {
+    process.env.PATH = saved;
+  }
+});

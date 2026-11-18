@@ -565,3 +565,25 @@ test("#601: in local mode no stranger's comment counts as Pendulum's reviewer's,
   const flaky = github({ reviews: (n) => (n === 1 ? new Error("down") : [ourReview, strangerReview]), lineComments: [ourRoot, strangerRoot] });
   await withGitHub(flaky, async () => assert.deepEqual([...(await ownReviewIds(repo, 7, 7, { token: "t" }))], [1]));
 });
+
+test("#311: run and review, which may have no serve behind them, never leave the label off: they wait in place; serve's own reviews do not", async () => {
+  const { Local } = await import("../scripts/local.mjs");
+  const make = (serving) => {
+    const exits = ["waiting", "delivered"];
+    const seen = { waits: 0, stages: 0 };
+    const loop = Object.assign(Object.create(Local.prototype), {
+      repo,
+      opts: { token: "t" },
+      serving,
+      stage: async () => ({ exit: exits[seen.stages++], usd: null }),
+      thirdPartyWait: async () => (seen.waits++, true),
+    });
+    return { loop, seen };
+  };
+  const cli = make(false);
+  assert.equal((await cli.loop.review(7, 12)).exit, "delivered", "pendulum review / pendulum run without --wait");
+  assert.deepEqual(cli.seen, { waits: 1, stages: 2 });
+  const serve = make(true);
+  assert.equal((await serve.loop.review(7, 12)).exit, "waiting", "serve's slot is free: its dispatcher ticks resume it");
+  assert.deepEqual(serve.seen, { waits: 0, stages: 1 });
+});

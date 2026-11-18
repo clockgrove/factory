@@ -6,8 +6,8 @@ import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { EXIT_PROMPT, acceptanceEntries, capReached, commandPaths, decideExit, deniedHostsFix, fenceDecidable, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, namesPath, parseExitRecord, parseFindings, parseReview, protectedPaths, setupPaths, snapComments, pushRefusal, toolchainFile, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
-import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewPost, reviewProduced, reviewRetry } from "../scripts/lib/handoff.mjs";
-import { scopeRefusal } from "../scripts/lib/session.mjs";
+import { noReviewReason, reviewMissed, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewPost, reviewProduced, reviewRetry } from "../scripts/lib/handoff.mjs";
+import { exitRecord, scopeRefusal } from "../scripts/lib/session.mjs";
 
 const ok = { ok: true };
 const pr = (body = "## Acceptance\nok", draft = false) => ({ exists: true, draft, body });
@@ -701,4 +701,16 @@ test("Block causes: each Block carries a code from the one closed list; refusals
   assert.equal(blockCauseOf('<!-- pendulum:block {"cause":"bogus"} -->'), null);
   assert.equal(blockCauseOf("@dev Blocked (work): an older notice"), null);
   assert.equal(blockCauseOf(`${blockMarker("max-usd")}\n${blockMarker("work")}`), "work", "the last line is Pendulum's");
+});
+
+test("exitRecord: with no exit record and no budget left, the stage is blocked and the harness is not asked", async () => {
+  const r = await exitRecord({ text: undefined, harness: "claude", model: "m", session: null, cwd: "/nonexistent", env: {}, eventsFile: null, deadlineAt: Date.now() + 60 * 60_000, maxUsd: 1, spentUsd: 1 });
+  assert.deepEqual(r.record, { exit: "blocked", reason: "no exit record and no budget left to ask", questions: [] });
+  assert.deepEqual(r.usage, [], "no call");
+});
+
+test("reviewMissed: a comments-only answer is a miss; one that judges an entry is not", () => {
+  const entries = [{ id: "A", text: "a" }, { id: "B", text: "b" }];
+  assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), entries }), true);
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"B","met":false}],"comments":[]}'), entries }), false);
 });

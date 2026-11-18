@@ -2,13 +2,14 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { POINTER_HEAD, lfsVersion } from "../scripts/lib/lfs.mjs";
 import { parsePointer } from "../scripts/lib/outbox.mjs";
 import { gitError } from "../scripts/lib/inputs.mjs";
+import { setupPaths } from "../scripts/lib/logic.mjs";
 import { open, quiet, repos } from "./fixtures/outbox.mjs";
 
 test("outbox: the branch goes from the agent's checkout through Pendulum's mirror to the remote, leased and read back", async () => {
@@ -679,4 +680,101 @@ test("outbox: the hand-over downloads only what the checkout's store lacks by oi
   for (const [f, bytes] of [["a", a], ["b", b], ["c", c]]) assert.deepEqual(readFileSync(join(r.work, `assets/${f}.bin`)), bytes);
   // Time runs out before git lfs checkout: said, not skipped silently.
   assert.match((await box2.lfsHandOver(box2.expected(), { timeoutMs: 1 })).warning, /no time was left in the stage for git lfs checkout; the files stay pointers$/);
+});
+
+test("outbox: a branch's lfs.fetchinclude does not filter the hand-over's download (#79)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  const box = await open(r);
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+  assert.equal((await box.lfsSetup(box.base)).warning, "");
+  // The branch's .lfsconfig limits fetches to paths no media has; once pushed, Pendulum's mirror reads it from its HEAD.
+  r.put(r.work, ".lfsconfig", "[lfs]\n\tfetchinclude = nothing/**\n");
+  r.run(r.work, "commit", "-q", "-m", "fetch filter");
+  assert.equal(await box.push(), true, box.error);
+  const bytes = media("main", "assets/b.bin");
+  await box.refresh();
+  assert.deepEqual(await box.lfsHandOver(null), { used: true, warning: "" });
+  assert.ok(inStore(r, bytes), "the default branch's media is in the checkout's store");
+});
+
+test("outbox: a catch-up merge that conflicts leaves the default branch's media in the checkout's store for the conflict pass (#76)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  const box = await withWorkflow(r);
+  r.put(r.work, "app.txt", "branch\n");
+  r.run(r.work, "commit", "-q", "-m", "work");
+  // Mid-run the default branch gains media, changes the workflow file and changes app.txt the other way.
+  const bytes = media("main", "assets/b.bin");
+  r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
+  r.put(r.other, "app.txt", "main\n");
+  r.run(r.other, "commit", "-q", "-m", "ci v2, main's app");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  assert.equal(await box.push(), false);
+  assert.ok(box.conflict, "Pendulum's merge conflicts: the harness resolves it");
+  assert.equal(box.lfsWarning, "");
+  assert.ok(inStore(r, bytes));
+});
+
+test("outbox: a conflict pass's own rebase onto a default branch with new media has every object in the store, so it downloads nothing (#76)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  await firstStage(r);
+  // Someone else's commits on the branch change its media twice: a rebase replays the first version too.
+  const v1 = media("pendulum/1", "assets/a.bin");
+  const v2 = media("pendulum/1", "assets/a.bin");
+  // The default branch gains media and a change of app.txt that conflicts with the branch's.
+  const b = media("main", "assets/b.bin");
+  r.put(r.other, "app.txt", "main\n");
+  r.run(r.other, "commit", "-q", "-m", "main's app");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  // The send-back stage: Pendulum's rebase conflicts, so the harness rebases in the checkout itself.
+  const box = await open(r);
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/pendulum/1"), { code: 0, error: "" });
+  assert.equal((await box.lfsSetup(box.expected())).warning, "");
+  assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null, "Pendulum's rebase conflicts");
+  assert.ok(inStore(r, v1) && inStore(r, v2) && inStore(r, b), "every object the rebase can check out is in the store");
+});
+
+test("outbox: a pnpm-workspace.yaml catalog change is refused when setup runs pnpm; a packages change is the branch's (#387 R1)", async () => {
+  const ws = "packages:\n  - 'packages/*'\ncatalog:\n  zod: ^4\n";
+  const members = await guardPush({ main: { "pnpm-workspace.yaml": ws }, work: { "pnpm-workspace.yaml": ws.replace("  - 'packages/*'\n", "  - 'packages/*'\n  - 'tools/*'\n") }, setup: "pnpm install" });
+  assert.equal(members.ok, true, members.error);
+  const catalog = await guardPush({ main: { "pnpm-workspace.yaml": ws }, work: { "pnpm-workspace.yaml": ws.replace("^4", "npm:evil@1") }, setup: "pnpm install" });
+  assert.equal(catalog.ok, false);
+  assert.equal(catalog.kind, "protected");
+});
+
+test("outbox: with a setup command Pendulum cannot resolve, a fix pass may change no file out of scope (#387)", async () => {
+  const r = repos();
+  const box = await open(r, { toolchain: setupPaths({ setup: "bash $SETUP" }) });
+  await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
+  r.put(r.work, "app.txt", "v3\n");
+  r.put(r.work, "lib/util.sh", "echo\n");
+  r.run(r.work, "commit", "-q", "-m", "fix, and a file setup may run");
+  assert.deepEqual(await box.outside(), ["lib/util.sh"]);
+  assert.equal(await box.push(), false);
+});
+
+test("outbox: a fence that cannot be set refuses every later push", async () => {
+  // Pendulum's mirror cannot read the branch when the fence is set: closed, not open.
+  const r = repos();
+  const box = await open(r);
+  r.put(r.work, "app.txt", "v2\n");
+  r.run(r.work, "commit", "-q", "-m", "work");
+  assert.equal(await box.push(), true, box.error);
+  const mirror = join(r.root, readdirSync(r.root).find((d) => d.startsWith("mirror-")));
+  renameSync(join(mirror, "objects"), join(mirror, "objects.away"));
+  await assert.rejects(box.fence({ texts: ["red"] }));
+  renameSync(join(mirror, "objects.away"), join(mirror, "objects"));
+  assert.equal(box.fenced(), true);
+  await assert.rejects(box.outside());
+  r.put(r.work, "app.txt", "v3\n");
+  r.run(r.work, "commit", "-q", "-m", "fix");
+  assert.equal(await box.push(), false);
 });

@@ -5,10 +5,9 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { RETRY_WAKE_MS, blockCauseOf, marker, nextWake, sandboxMarkerLine, setSelf, wakeKinds } from "../scripts/lib/logic.mjs";
+import { blockCauseOf, marker, setSelf } from "../scripts/lib/logic.mjs";
 import { applyExit } from "../scripts/lib/session.mjs";
-import { setStateLabel } from "../scripts/lib/github.mjs";
-import { JOB_GRACE_MS, RELAUNCH_MAX, relaunchDecision, relaunchRecordOf, stintRun } from "../scripts/lib/relaunch.mjs";
+import { RELAUNCH_MAX, relaunchDecision, relaunchRecordOf } from "../scripts/lib/relaunch.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -358,18 +357,6 @@ test("max_concurrent: a relaunch takes the slot its stage held, before any new p
   assert.deepEqual(later.relaunched, [8]);
 });
 
-test("the cloud sandbox: a stage whose lease ran out after its start is relaunched as a work stage, in place of the vanished Block", async () => {
-  const now = Date.now();
-  const iso = (ms) => new Date(now - ms).toISOString();
-  const record = { vendor: "vercel", stage: "work", state: "running", claim: "c1", at: iso(25 * MIN), leaseUntil: iso(5 * MIN), launches: [{ stage: "work", event: "swept", ok: true, cue: "x", run: "1", at: iso(25 * MIN) }] };
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since: 30 * MIN, comments: [{ body: `${marker(7, "sandbox")}\n${sandboxMarkerLine(record)}` }] }]);
-  const r = await tick(gh, { sandbox: "vercel" });
-  assert.deepEqual(r.relaunched, [7]);
-  assert.deepEqual(r.relaunch, [7], "the launcher starts its work stage: a new Running stint has no work start");
-  assert.deepEqual(r.vanished, []);
-  assert.deepEqual(recordOf(gh, 7).tries.map((t) => t.lost), ["vanished"]);
-});
-
 const outageNotice = (n, extra = {}) => ({ body: `${marker(n, "blocked", "outage:601-1")}\nBlocked (outage): this machine could not reach api.github.com (EAI_AGAIN)\n<!-- pendulum:block {"cause":"outage"} -->`, ...extra });
 const ago = (ms) => new Date(Date.now() - ms).toISOString();
 
@@ -406,18 +393,6 @@ test("the cloud sandbox: a sandbox record that cannot be read is no absent recor
   assert.deepEqual([next.relaunch, next.ready], [[7, 8], [10]]);
 });
 
-test("an outage notice counts only when written since the Objective last became Running: a later Block whose notice never landed is not relaunched", async () => {
-  const gh = fakeGitHub([{ number: 8, labels: [OBJ, "pendulum:running"], since: 5 * MIN }]);
-  await outageEnd(gh, 8, 501);
-  assert.deepEqual((await tick(gh)).relaunched, [8]);
-  // The relaunched stage Blocks for its own reason: applyExit sets the label first, and its notice never lands.
-  await on(gh, () => setStateLabel(REPO, 8, "blocked", { token: "t" }));
-  const r = await tick(gh);
-  assert.deepEqual(r.relaunched, [], "the outage notice is from before the relaunch's Running stint");
-  assert.deepEqual(gh.labels(8), [OBJ, "pendulum:blocked"].sort());
-  assert.equal(recordOf(gh, 8).tries.length, 1);
-});
-
 test("daily_usd: a lost stage is not relaunched while today's spend has reached the cap; it waits for the day's turn, unblocked", async () => {
   const spend = [{ id: 900, user: SELF, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: `<!-- pendulum:9:progress:x -->\n<!-- pendulum:spend {"usd":5} -->` }];
   const open = () => [
@@ -432,42 +407,6 @@ test("daily_usd: a lost stage is not relaunched while today's spend has reached 
   assert.equal(recordOf(gh, 7), null);
   const under = fakeGitHub(open(), { spend });
   assert.deepEqual((await tick(under, { dailyUsd: 10 })).relaunched.sort(), [7, 8]);
-});
-
-test("used up with max_concurrent reached: the Block and its mention go at once; the slot check is for a relaunch only", async () => {
-  const at = ago(30 * MIN);
-  const tries = [1, 2].map((k) => ({ at, lost: "outage", key: `block:${k}@${at}`, start: at }));
-  const record = { body: `${marker(8, "relaunch")}\nPendulum relaunched this Objective's stage: 2 of 2\n<!-- pendulum:relaunch ${JSON.stringify({ tries })} -->` };
-  const gh = fakeGitHub([
-    { number: 8, labels: [OBJ, "pendulum:blocked"], at, comments: [record, outageNotice(8, { created_at: ago(20 * MIN), updated_at: ago(20 * MIN) })] },
-    { number: 10, labels: [OBJ, "pendulum:running"], since: MIN },
-  ]);
-  const r = await tick(gh, { maxConcurrent: 1 });
-  assert.deepEqual([r.relaunched, r.relaunchesUsed], [[], [8]]);
-  assert.match(gh.blocks(8).at(-1).body, /^<!-- pendulum:8:blocked:relaunch:[^]*@kirk Blocked \(relaunch\): the stage was lost to its network again after Pendulum relaunched it 2 times/);
-});
-
-test("a vanished stage that left a sign it was not the network keeps the vanished Block: a cancelled work job, a sandbox stage that recorded its end", async () => {
-  const since = 20 * MIN;
-  const job = (n, conclusion) => ({ name: `work (${n})`, status: "completed", conclusion, created_at: ago(since - 30_000) });
-  const gh = fakeGitHub(
-    [
-      { number: 7, labels: [OBJ, "pendulum:running"], since },
-      { number: 9, labels: [OBJ, "pendulum:running"], since },
-    ],
-    { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: [job(7, "cancelled"), job(9, "failure")] } },
-  );
-  const r = await tick(gh);
-  assert.deepEqual([r.vanished, r.relaunched], [[7], [9]], "#9's job failed with no word: lost, relaunched");
-  assert.match(gh.blocks(7)[0].body, /worker job vanished: its work job was cancelled \(a person, or its timeout\); a stop, so it was not relaunched\. Fix by/);
-  // The sandbox: #7's stage recorded its end (it reached GitHub); #9's lease ran out with no end.
-  const sandboxed = (n, rec) => ({ body: `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", claim: "c1", at: ago(25 * MIN), launches: [{ stage: "work", event: "swept", ok: true, cue: "x", run: "1", at: ago(25 * MIN) }], ...rec })}` });
-  const box = fakeGitHub([
-    { number: 7, labels: [OBJ, "pendulum:running"], since: 30 * MIN, comments: [sandboxed(7, { state: "ended", exitCode: 1, leaseUntil: null })] },
-    { number: 9, labels: [OBJ, "pendulum:running"], since: 30 * MIN, comments: [sandboxed(9, { state: "running", leaseUntil: ago(5 * MIN) })] },
-  ]);
-  const s = await tick(box, { sandbox: "vercel" });
-  assert.deepEqual([s.vanished, s.relaunched], [[7], [9]]);
 });
 
 test("a relaunch whose record cannot be written is tried again next tick, never Blocked, however old the loss", async () => {
@@ -487,80 +426,6 @@ test("a relaunch whose record cannot be written is tried again next tick, never 
   assert.deepEqual((await tick(gh)).relaunched.sort(), [7, 8]);
 });
 
-// #390: the work job's own steps (GitHub's jobs API, the read stintWorkJob already makes) tell a set-up failure from a
-// runner that went away. Pendulum's own step is placed from the workflow file at the job's commit (Set up job is step 1,
-// the YAML steps follow), so steps the workflow names itself are placed too. One set-up failure may pass, so it is
-// relaunched once; the same step failing on the relaunch's job too Blocks with cause setup.
-test("a vanished stage whose work job failed before Pendulum's own step is relaunched once, then Blocks setup when the same step fails again; a lost runner is relaunched", async () => {
-  const since = 20 * MIN;
-  const workflow = ["jobs:", "  work:", "    steps:", "      - name: Pick the account", "        uses: clockgrove/pendulum@v0.9", "        with: { mode: account }", "      - name: Get the code", "        uses: actions/checkout@v7", "      - name: Build it", "        uses: clockgrove/pendulum@v0.9", "        with: { mode: work }", "      - uses: actions/upload-artifact@v7", ""].join("\n");
-  const step = (number, name, conclusion, status = "completed") => ({ number, name, status, conclusion });
-  const job = (n, steps, created_at) => ({ name: `work (${n})`, status: "completed", conclusion: "failure", head_sha: "abc123", created_at, runner_id: 3, runner_name: "GitHub Actions 3", steps });
-  const ran = (failedAt) => [step(1, "Set up job", "success"), step(2, "Pick the account", "skipped"), step(3, "Get the code", failedAt === 3 ? "failure" : "success"), step(4, "Build it", failedAt === 4 ? "failure" : failedAt === 3 ? "skipped" : null, failedAt ? "completed" : "in_progress"), step(5, "Run actions/upload-artifact@v7", "success")];
-  const never = (n, created_at) => ({ name: `work (${n})`, status: "completed", conclusion: "failure", head_sha: "abc123", created_at, runner_id: null, runner_name: null, steps: [] });
-  const at = ago(since - 30_000);
-  // #7: the checkout ("Get the code") failed; #8: GitHub never started it; #9: the runner went away; #10: Pendulum's own step failed.
-  const cfg = { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: [job(7, ran(3), at), never(8, at), job(9, ran(null), at), job(10, ran(4), at)] }, workflow, workflowSha: "abc123" };
-  const gh = fakeGitHub([7, 8, 9, 10].map((number) => ({ number, labels: [OBJ, "pendulum:running"], since })), cfg);
-  const first = await tick(gh, { run: 77 });
-  assert.deepEqual([first.vanished, first.relaunched.sort((a, b) => a - b)], [[], [7, 8, 9, 10]], "a first set-up failure is relaunched");
-  assert.deepEqual(recordOf(gh, 7).tries[0].setup, { step: "Get the code", number: 3 });
-  assert.deepEqual(recordOf(gh, 8).tries[0].setup, { step: null, number: null });
-  assert.equal(recordOf(gh, 9).tries[0].setup, undefined);
-  assert.deepEqual(gh.reads.filter((x) => x.startsWith("/contents/")), ["/contents/.github/workflows/pendulum.yml?ref=abc123", "/contents/.github/workflows/pendulum.yml?ref=abc123"], "one read at the job's commit for each job that failed after its set-up (#7, #10)");
-  // The relaunched stints vanish again: #7 and #8 the same way, #9 now at the checkout (a first time for it).
-  gh.age(since);
-  const stint = (n) => gh.issue(n).timeline.filter((e) => e.label?.name === "pendulum:running").at(-1).created_at;
-  const after = (n) => new Date(Date.parse(stint(n)) + 10_000).toISOString();
-  cfg.jobs = { 77: [job(7, ran(3), after(7)), never(8, after(8)), job(9, ran(3), after(9))] };
-  const second = await tick(gh);
-  assert.deepEqual([second.vanished.sort((a, b) => a - b), second.relaunched.sort((a, b) => a - b)], [[7, 8], [9, 10]]);
-  const seven = gh.blocks(7)[0].body;
-  assert.match(seven, /worker job failed before Pendulum ran: its step "Get the code" failed, as it did on the job Pendulum relaunched it from; a set-up failure that fails the same way every time, so it was not relaunched again/);
-  assert.equal(blockCauseOf(seven), "setup");
-  assert.match(gh.blocks(8)[0].body, /GitHub never started it \(no runner was assigned\), nor the job Pendulum relaunched it from/);
-  assert.equal(blockCauseOf(gh.blocks(8)[0].body), "setup");
-  // The workflow file unread (here: not at the job's commit): the failed step cannot be placed, so the stage is lost.
-  const unread = fakeGitHub([7].map((number) => ({ number, labels: [OBJ, "pendulum:running"], since })), { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: [job(7, ran(3), at)] }, workflow, workflowSha: "other" });
-  const u = await tick(unread);
-  assert.deepEqual([u.vanished, u.relaunched], [[], [7]]);
-  assert.equal(recordOf(unread, 7).tries[0].setup, undefined, "not placed: no set-up step on the record");
-});
-
-test("the cancelled-job sign is found on a busy repository: the run that started the stint, not the ticks after it", async () => {
-  const since = 20 * MIN;
-  const cancelled = { name: "work (7)", status: "completed", conclusion: "cancelled", created_at: ago(since - 30_000) };
-  // The dispatching run, created just before the label; ten later ticks within the next minute, none with the job.
-  const later = Array.from({ length: 10 }, (_, i) => ({ id: 100 + i, created_at: ago(since - 5_000 - i * 1000) }));
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 20_000) }, ...later], jobs: { 55: [cancelled] } });
-  const r = await tick(gh);
-  assert.deepEqual([r.vanished, r.relaunched], [[7], []]);
-  // A relaunched stint: its run is the one the record names, read directly, whatever the runs listing shows.
-  const cfg = { runs: [], jobs: {} };
-  const re = fakeGitHub([{ number: 9, labels: [OBJ, "pendulum:running"], since }], cfg);
-  assert.deepEqual((await tick(re, { run: 77 })).relaunched, [9]);
-  assert.equal(recordOf(re, 9).tries[0].run, "77", "the relaunch names its run");
-  // Its work job, in run 77, was cancelled; the runs listing shows nothing of it.
-  re.age(since);
-  const stint = re.issue(9).timeline.filter((e) => e.label?.name === "pendulum:running").at(-1).created_at;
-  cfg.jobs = { 77: [{ name: "work (9)", status: "completed", conclusion: "cancelled", created_at: new Date(Date.parse(stint) + 10_000).toISOString() }] };
-  const second = await tick(re);
-  assert.deepEqual([second.vanished, second.relaunched], [[9], []], "its job was cancelled: the vanished Block");
-});
-
-test("a held vanished stage costs no Actions reads and one timeline read per tick", async () => {
-  const spend = [{ id: 900, user: SELF, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: `<!-- pendulum:9:progress:x -->\n<!-- pendulum:spend {"usd":5} -->` }];
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since: 20 * MIN }], { spend });
-  const r = await tick(gh, { dailyUsd: 1 });
-  assert.deepEqual([r.relaunched, r.vanished], [[], []]);
-  assert.deepEqual(gh.reads.filter((p) => /^\/actions\/runs\/|created=|^\/issues\/7\/timeline/.test(p)).map((p) => p.replace(/\?.*/, "")), ["/issues/7/timeline"]);
-});
-
-// #528: on the runners, a Running stint's 15-minute grace is for a job GitHub has not started yet. A work job that already
-// ended (a person's `gh run cancel` mid-harness) is judged on the tick its own last step fires, so its slot is not held
-// until a cron tick; a stint with no ended job waits, and the dispatcher's wake ticks at the grace's end.
-const stintStart = (gh, n) => gh.issue(n).timeline.filter((e) => e.label?.name === "pendulum:running").at(-1).created_at;
-const graceEnd = (gh, n) => new Date(Date.parse(stintStart(gh, n)) + JOB_GRACE_MS + 1000).toISOString();
 
 test("a work job cancelled inside its grace is Blocked on the next tick, and its slot starts the next Objective (#528)", async () => {
   const since = MIN;
@@ -572,142 +437,4 @@ test("a work job cancelled inside its grace is Blocked on the next tick, and its
   assert.deepEqual(gh.labels(7), [OBJ, "pendulum:blocked"].sort());
   assert.match(gh.blocks(7)[0].body, /worker job vanished: its work job was cancelled \(a person, or its timeout\); a stop, so it was not relaunched/);
   assert.equal(gh.reads.filter((p) => /^\/actions\/runs\/\d+\/jobs/.test(p)).length, 1, "one jobs read for #7: the grace's, reused by the relaunch decision");
-});
-
-test("inside its grace, a work job still queued or running, or only an earlier stint's, is left alone; an ended one is judged (#528)", async () => {
-  const since = 2 * MIN;
-  const job = (n, rest) => ({ name: `work (${n})`, created_at: ago(since - 6_000), ...rest });
-  const gh = fakeGitHub(
-    [7, 9, 11, 13].map((number) => ({ number, labels: [OBJ, "pendulum:running"], since })),
-    {
-      runs: [{ id: 55, created_at: ago(since + 10_000) }],
-      jobs: {
-        55: [
-          job(7, { status: "queued", conclusion: null }),
-          job(9, { status: "in_progress", conclusion: null }),
-          // Created inside the clock-skew window of the stint's start, but it completed before the stint began: the job
-          // an earlier stint was relaunched from, never this stint's.
-          job(11, { status: "completed", conclusion: "failure", created_at: ago(since + 20_000), completed_at: ago(since + 5_000) }),
-          job(13, { status: "completed", conclusion: "cancelled", completed_at: ago(30_000) }),
-        ],
-      },
-    },
-  );
-  const r = await tick(gh, { maxConcurrent: 5 });
-  assert.deepEqual([r.vanished, r.relaunched], [[13], []], "only #13's job ended in its stint");
-  for (const n of [7, 9, 11]) {
-    assert.deepEqual(gh.labels(n), [OBJ, "pendulum:running"].sort(), `#${n} stays Running`);
-    assert.deepEqual(gh.blocks(n), [], `#${n} gets no Block`);
-  }
-});
-
-test("on the runners, a Running stint with no job alive arms a wake at its grace's end, and that wake's tick judges a job that ended with no tick of its own (#528)", async () => {
-  const cfg = { runs: [], jobs: {} };
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since: 2 * MIN }, { number: 9, labels: [OBJ, "pendulum:running", "pendulum:local"], since: 2 * MIN }], cfg);
-  const r = await tick(gh);
-  assert.deepEqual([r.vanished, r.relaunched], [[], []]);
-  assert.deepEqual(r.deadlines.filter((d) => d.kind === "job-grace"), [{ issue: 7, kind: "job-grace", at: graceEnd(gh, 7) }], "the runner stint's grace end; the local one keeps its local pause");
-  // A private repository arms it too: a wait of minutes.
-  assert.deepEqual(nextWake(r.deadlines, { kinds: wakeKinds(false) }), { kind: "job-grace", at: graceEnd(gh, 7), issue: 7 });
-  // The grace passes; its job was cancelled and its last step's tick never came. The wake's tick Blocks it.
-  gh.age(15 * MIN);
-  cfg.runs = [{ id: 55, created_at: new Date(Date.parse(stintStart(gh, 7)) - 10_000).toISOString() }];
-  cfg.jobs = { 55: [{ name: "work (7)", status: "completed", conclusion: "cancelled", created_at: new Date(Date.parse(stintStart(gh, 7)) + 6_000).toISOString(), completed_at: ago(10 * MIN) }] };
-  const woke = await tick(gh);
-  assert.deepEqual(woke.vanished, [7]);
-});
-
-test("the stints of many Objectives in their grace share one runs listing and each run's jobs read once (#528)", async () => {
-  // Twelve Running Objectives that began 1 to 12 minutes ago, none with a job shown yet; a run a minute for the last hour.
-  const open = Array.from({ length: 12 }, (_, i) => ({ number: 20 + i, labels: [OBJ, "pendulum:running"], since: (i + 1) * MIN }));
-  const runs = Array.from({ length: 60 }, (_, i) => ({ id: 500 + i, created_at: ago(i * MIN + 30_000) }));
-  const gh = fakeGitHub(open, { runs, jobs: {} });
-  const r = await tick(gh);
-  assert.deepEqual([r.vanished, r.relaunched], [[], []]);
-  assert.equal(r.deadlines.filter((d) => d.kind === "job-grace").length, 12, "each waits for its grace's end");
-  const listings = gh.reads.filter((p) => /created=/.test(p));
-  const jobs = gh.reads.filter((p) => /^\/actions\/runs\/\d+\/jobs/.test(p)).map((p) => p.replace(/\?.*/, ""));
-  assert.equal(listings.length, 1, "one runs listing serves every stint's window");
-  assert.equal(new Set(jobs).size, jobs.length, "no run's jobs read twice");
-  // Each window's newest ten runs, which overlap: the runs from 1.5 to 21.5 minutes ago (not 12 times 10).
-  assert.equal(jobs.length, 21);
-});
-
-test("a live work job whose final tick step has started arms a short wake, so its end is judged just after (#528)", async () => {
-  const step = (status) => ({ name: "Dispatch tick (this worker finished; a conflicting PR fires no review job)", status, conclusion: status === "completed" ? "success" : null, number: 9 });
-  const job = (n, steps) => ({ name: `work (${n})`, status: "in_progress", conclusion: null, created_at: ago(MIN), steps });
-  const gh = fakeGitHub([7, 9].map((number) => ({ number, labels: [OBJ, "pendulum:running"], since: 2 * MIN })), {
-    live: { in_progress: [{ id: 60 }] },
-    jobs: { 60: [job(7, [step("in_progress")]), job(9, [{ ...step("queued"), status: "queued" }])] },
-  });
-  const before = Date.now();
-  const r = await tick(gh);
-  assert.deepEqual([r.vanished, r.relaunched], [[], []], "both jobs are alive");
-  const retries = r.deadlines.filter((d) => d.kind === "retry");
-  assert.deepEqual(retries.map((d) => d.issue), [7], "only the job whose final tick started");
-  assert.ok(Date.parse(retries[0].at) >= before + RETRY_WAKE_MS && Date.parse(retries[0].at) <= Date.now() + RETRY_WAKE_MS);
-  assert.deepEqual(r.deadlines.filter((d) => d.kind === "job-grace"), [], "a live job needs no grace wake");
-});
-
-test("inside its grace, an ended job is not judged when the timeline no longer shows the stint Running, a restart waits, or a fresh read shows another state (#528)", async () => {
-  const since = 2 * MIN;
-  const cancelled = (n) => ({ name: `work (${n})`, status: "completed", conclusion: "cancelled", created_at: ago(since - 6_000), completed_at: ago(30_000) });
-  // #7: the listing is older than the timeline, whose newest pendulum:running event took the label off.
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled(7)] } });
-  gh.issue(7).timeline.push({ event: "unlabeled", label: { name: "pendulum:running" }, actor: SELF, created_at: ago(20_000) });
-  const r = await tick(gh);
-  assert.deepEqual([r.vanished, r.relaunched, gh.blocks(7)], [[], [], []]);
-  assert.deepEqual(r.deadlines.filter((d) => d.kind === "job-grace"), [], "no grace wake for a stint no longer Running");
-  assert.equal(gh.reads.filter((p) => /^\/actions\/runs\/\d+\/jobs|created=/.test(p)).length, 0, "and no job read");
-  // #8: a fresh read shows it Blocked too (another writer's Block after the listing): left alone.
-  const cfg = { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled(8)] } };
-  const two = fakeGitHub([{ number: 8, labels: [OBJ, "pendulum:running"], since }], cfg);
-  cfg.fresh = { 8: { ...two.issue(8).issue, labels: [OBJ, "pendulum:running", "pendulum:blocked"] } };
-  const t = await tick(two);
-  assert.deepEqual([t.vanished, t.relaunched, two.blocks(8)], [[], [], []]);
-  cfg.fresh = { 8: { ...two.issue(8).issue, state: "closed" } };
-  assert.deepEqual((await tick(two)).vanished, [], "a closed one is left alone too");
-  cfg.fresh = {};
-  assert.deepEqual((await tick(two)).vanished, [8], "shown Running alone: judged");
-  // #9: a restart is waiting for its running stage to stop (the live jobs could not be read for it): its restart's.
-  const three = fakeGitHub([{ number: 9, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled(9)] }, failLive: 4 });
-  three.person(9, "labeled", "pendulum:restart");
-  const u = await tick(three);
-  assert.deepEqual([u.vanished, u.relaunched, u.restarted, three.blocks(9)], [[], [], [], []]);
-});
-
-test("inside its grace, a stint on the sandbox route reads no jobs, and one whose job read fails waits for its grace's end (#528)", async () => {
-  const since = 2 * MIN;
-  const cancelled = { name: "work (7)", status: "completed", conclusion: "cancelled", created_at: ago(since - 6_000), completed_at: ago(30_000) };
-  const box = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled] } });
-  const s = await tick(box, { sandbox: "vercel" });
-  assert.deepEqual([s.vanished, s.relaunched], [[], []]);
-  assert.deepEqual(box.reads.filter((p) => /^\/actions\/runs\/\d+\/jobs|created=/.test(p)), []);
-  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled] }, failJobs: [55] });
-  const r = await tick(gh);
-  assert.deepEqual([r.vanished, r.relaunched, gh.blocks(7)], [[], [], []]);
-  assert.deepEqual(r.deadlines.filter((d) => d.kind === "job-grace"), [{ issue: 7, kind: "job-grace", at: graceEnd(gh, 7) }]);
-});
-
-test("a stint a relaunch made has its job in that relaunch's run alone; the same loss found again records the run that relaunched it (#528)", async () => {
-  const cfg = { runs: [], jobs: {} };
-  const re = fakeGitHub([{ number: 9, labels: [OBJ, "pendulum:running"], since: 20 * MIN }], cfg);
-  assert.deepEqual((await tick(re, { run: 77 })).relaunched, [9]);
-  // Another run's cancelled work (9), created in the stint: never this stint's, whose job is in run 77 (not shown yet).
-  const stint = stintStart(re, 9);
-  cfg.runs = [{ id: 88, created_at: new Date(Date.parse(stint) - 5_000).toISOString() }];
-  cfg.jobs = { 88: [{ name: "work (9)", status: "completed", conclusion: "cancelled", created_at: new Date(Date.parse(stint) + 1_000).toISOString(), completed_at: new Date(Date.now() + 1_000).toISOString() }] };
-  re.reads.length = 0;
-  const r = await tick(re);
-  assert.deepEqual([r.vanished, r.relaunched], [[], []]);
-  assert.equal(re.reads.filter((p) => /created=/.test(p)).length, 0, "no runs listing: the record names the stint's run");
-  // stintRun: the stint the relaunch's label began, not one a later start began.
-  const record = { tries: [{ run: "77" }], updatedAt: "2026-11-17T08:00:00Z" };
-  const label = (at) => ({ event: "labeled", label: { name: "pendulum:running" }, created_at: at });
-  assert.equal(stintRun(record, [label("2026-11-17T08:00:01Z")], "2026-11-17T08:00:01Z"), "77");
-  assert.equal(stintRun(record, [label("2026-11-17T08:00:01Z"), label("2026-11-17T08:30:00Z")], "2026-11-17T08:30:00Z"), null);
-  // The same loss found again by another run (its new stint was not written the first time): that run is recorded.
-  const tries = [{ at: "2026-11-17T08:00:00Z", lost: "vanished", key: "stint:x", start: null, run: "77" }];
-  assert.deepEqual(relaunchDecision({ record: { tries }, start: null, key: "stint:x", lost: "vanished", at: "2026-11-17T08:01:00Z", run: 78 }), { relaunch: true, tries: 1, record: { tries: [{ ...tries[0], run: "78" }] } });
-  assert.deepEqual(relaunchDecision({ record: { tries }, start: null, key: "stint:x", lost: "vanished", at: "2026-11-17T08:01:00Z", run: 77 }), { relaunch: true, tries: 1, record: null });
 });

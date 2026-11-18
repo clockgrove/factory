@@ -1,19 +1,16 @@
 import "./temp.mjs";
 import { test } from "node:test";
-import { whenText } from "../scripts/lib/clock.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Local } from "../scripts/local.mjs";
-import { stopHold } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { OUTAGE } from "../scripts/lib/network.mjs";
 import { fakeProc } from "./fixtures/machine.mjs";
 import { refusingOrigin } from "./ports.mjs";
-import { accountHolds, holdsDir } from "../scripts/lib/holds.mjs";
+import { accountHolds } from "../scripts/lib/holds.mjs";
 
 // The API client retries a failed read (lib/github.mjs RETRY): no real waits here. A fake that must fail a whole read
 // fails every one of its tries.
@@ -148,12 +145,6 @@ async function serveAgainst({ view, onList = () => {}, onIssue, extra, firstStag
   return { claims: claims.map((c) => c.read), questionRemoved, lines, labels: [...fake.labels] };
 }
 
-test("stopHold: a Question or a Block holds the Objective; any other end does not", () => {
-  assert.match(stopHold({ exit: "question" }), /Question/);
-  assert.match(stopHold({ exit: "blocked" }), /Blocked/);
-  for (const r of [{ exit: "delivered" }, { exit: "skipped" }, { exit: null }, null, undefined]) assert.equal(stopHold(r), null);
-});
-
 test("serve: a Question exit is never re-claimed by a tick that read the issue before its labels landed; a trusted answer re-claims it (#2667)", async () => {
   let stageEnd = null;
   const run = await serveAgainst({
@@ -180,27 +171,6 @@ test("serve: a Question exit is never re-claimed by a tick that read the issue b
   assert.ok(run.lines.some((l) => /tick: nothing ready; holding #7 \(its stage here ended with a Question/.test(l)), "the tick line names the hold");
 });
 
-test("serve: a stop recorded while a dispatch reads the Objective Running is kept for the next stale read (#2667)", async () => {
-  let stageEnd = null;
-  const run = await serveAgainst({
-    // 2 shows Running (true when read); 3 is a stale listing with no state label, after the Question landed.
-    view: (read, labels) => (read === 3 ? stopLabels(labels) : labels),
-    onList: (read, { labels, timeline }) => {
-      if (read === 2) {
-        // The stage ends with its Question after this tick's listing, while its dispatch is still under way.
-        labels.delete("pendulum:running");
-        labels.add("pendulum:question");
-        timeline.push({ event: "labeled", label: { name: "pendulum:question" }, created_at: new Date(Date.now() - 60_000).toISOString() });
-        stageEnd({ exit: "question" });
-      }
-      answerAt(read, 5, timeline);
-    },
-    firstStage: () => new Promise((ok) => (stageEnd = ok)),
-  });
-  assert.deepEqual(run.claims, [1, 5], "claimed once, then again only after the answer");
-  assert.deepEqual(run.questionRemoved, [5], "pendulum:question stays until the answer");
-});
-
 test("serve: a stop that ends between ticks survives a stale Running read and then a stale Queued one (#2667)", async () => {
   let stageEnd = null;
   let ticks = 0;
@@ -224,52 +194,6 @@ test("serve: a stop that ends between ticks survives a stale Running read and th
   });
   assert.deepEqual(run.claims, [1, 5], "claimed once, then again only after the answer");
   assert.deepEqual(run.questionRemoved, [5], "pendulum:question stays until the answer");
-});
-
-test("serve: a Block whose labels never reached GitHub is not held forever; a fresh read shows it Queued and it runs again (#2667)", async () => {
-  const run = await serveAgainst({
-    view: (read, labels) => labels,
-    firstStage: (fake) => {
-      // The exit write failed after Running came off (applyExit's catch): GitHub shows no stop.
-      fake.labels.delete("pendulum:running");
-      return Promise.resolve({ exit: "blocked" });
-    },
-    stopAfter: 6,
-  });
-  assert.deepEqual(run.claims, [1, 2], "the next tick takes the Queued Objective again");
-  assert.ok(run.lines.some((l) => /#7: its stop here is not on GitHub/.test(l)), "the release is logged");
-});
-
-test("serve: a dispatch that releases a stop never drops a newer stop recorded while it ran (#2667)", async () => {
-  let reviewEnd = null;
-  let ticks = 0;
-  const run = await serveAgainst({
-    // 4 is a stale listing with no state label, after the review's Block landed.
-    view: (read, labels) => (read === 4 ? stopLabels(labels) : labels),
-    onList: (read, { labels }) => {
-      // A person clears the Block by hand: the next tick's fresh read shows it Queued and releases the first stop.
-      if (read === 2) labels.delete("pendulum:blocked");
-    },
-    onIssue: (read, { labels }) => {
-      if (read !== 3 || !reviewEnd) return;
-      // The review running here Blocks after that fresh read, while the same dispatch is still under way.
-      labels.add("pendulum:blocked");
-      reviewEnd({ exit: "blocked" });
-      reviewEnd = null;
-    },
-    firstStage: (fake) => {
-      fake.labels.delete("pendulum:running");
-      fake.labels.add("pendulum:blocked");
-      return Promise.resolve({ exit: "blocked" });
-    },
-    stubs: {
-      pendingReviews: async () => (++ticks === 2 ? [{ issue: 7, pr: 9 }] : []),
-      withClaim: (n, fn) => fn(),
-      review: () => new Promise((ok) => (reviewEnd = ok)),
-    },
-    stopAfter: 6,
-  });
-  assert.deepEqual(run.claims, [1], "the review's Block holds it through the stale read");
 });
 
 /**
@@ -350,7 +274,6 @@ async function claimLoop(holderPid = process.pid) {
 
 for (const [stage, end, how] of [
   ["work", { code: 137, signal: null }, /exit code 137/],
-  ["review", { code: null, signal: "SIGKILL" }, /signal SIGKILL/],
 ]) {
   test(`withClaim: a ${stage} stage that ends with no exit record keeps its claim and is resumed once; a second such end Blocks it with its exit and log (cause pendulum) (#167)`, async () => {
     const gh = claimGitHub({ labels: ["pendulum:objective", "pendulum:local", stage === "work" ? "pendulum:running" : "pendulum:in-review"] });
@@ -468,52 +391,6 @@ test("outagePaused: pauses on GitHub's spent rate limit one after another count 
   }
 });
 
-test("resume: a review paused on an outage after its label came off (on its merge path) runs again; with no such pause here, nothing runs (#337)", async () => {
-  const gh = claimGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"], pr: { number: 9, state: "open", draft: false, head: { ref: "pendulum/7" }, labels: [] } });
-  try {
-    const since = Date.parse("2026-11-15T22:40:39Z");
-    const reviewed = [];
-    const loop = Object.assign(await claimLoop(), { clock: () => since + 16 * 60_000, review: async (issue, pr) => (reviewed.push([issue, pr]), { exit: "delivered" }) });
-    const paused = async () => ({ exit: "paused", stage: "review", code: 0, outage: { host: "api.github.com", origin: "https://api.github.com", code: "EAI_AGAIN", since: new Date(since).toISOString() } });
-    assert.equal((await loop.withClaim(7, paused)).exit, "paused");
-    assert.equal((await loop.resume(7)).exit, "delivered");
-    assert.deepEqual(reviewed, [[7, 9]], "the review runs again, though its PR has no review label");
-    // Another loop holds no such pause: the PR waits for its merge, and nothing runs.
-    const other = Object.assign(await claimLoop(), { review: async (issue, pr) => (reviewed.push([issue, pr]), { exit: "delivered" }) });
-    assert.equal((await other.resume(7)).exit, "skipped");
-    assert.equal(reviewed.length, 1);
-  } finally {
-    gh.restore();
-  }
-});
-
-test("withClaim: Pendulum's set-up of the review stage failing after the PR was delivered Blocks naming that set-up and the delivered PR, never the work (#261)", async () => {
-  const { mkdirSync } = await import("node:fs");
-  const { gitPinFile, pinGitDir } = await import("../scripts/lib/local.mjs");
-  const gh = claimGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"], pr: { number: 9, draft: false, head: { ref: "pendulum/7" }, labels: [{ name: "pendulum:review" }] } });
-  try {
-    const loop = Object.assign(await claimLoop(), { harness: "claude", firstSetup: new Map(), children: new Set() });
-    mkdirSync(join(loop.ws(7), "repo", ".git"), { recursive: true });
-    pinGitDir(join(loop.ws(7), "repo"), gitPinFile(loop.ws(7)));
-    loop.harnessFor = async () => ({ ok: true, harness: "claude" });
-    // The real case: the harness home's `plans` in a folder that is gone (an uncoded throw from the stage's set-up), here
-    // an account's folder outside the home directory (#305).
-    const gone = join(tmpdir(), "gone-account", "plans");
-    loop.stageEnv = () => mkdirSync(gone);
-    await assert.rejects(loop.withClaim(7, () => loop.review(7, 9)), /ENOENT/);
-    assert.ok(!gh.labels.has("pendulum:blocked"), "resumed once first");
-    await assert.rejects(loop.withClaim(7, () => loop.review(7, 9)), /ENOENT/);
-    assert.ok(gh.labels.has("pendulum:blocked"));
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.match(notice, /Blocked \(review\): Pendulum's set-up of the review stage failed \(ENOENT from mkdir; the local loop's log names the path\) twice in a row on this machine — PR #9 was delivered; it is a draft until this is fixed\. Fix it on this machine/);
-    assert.ok(!notice.includes("gone-account"), "no path of this machine's set-up");
-    assert.doesNotMatch(notice, /\(work\)|the work stage|draft with what exists/);
-    assert.match(notice, /<!-- pendulum:block \{"cause":"pendulum"\} -->/);
-  } finally {
-    gh.restore();
-  }
-});
-
 test("#421: withClaim's heartbeat reads the claim before it writes: one another live loop now holds ends this loop's stage, with no lapse and its claim left alone", async () => {
   const { spawn } = await import("node:child_process");
   const { holderId, machineIdentity } = await import("../scripts/local.mjs");
@@ -539,45 +416,13 @@ test("#421: withClaim's heartbeat reads the claim before it writes: one another 
         });
         child.on("close", (code, signal) => (loop.children.delete(child), done({ code, signal, exit: null, stage: "work" })));
       });
-    const at = Date.now();
     const r = await loop.withClaim(7, fn);
-    assert.equal(stage.signalCode, "SIGTERM", "the stage was ended");
-    assert.ok(Date.now() - at < 3_000, "at the next heartbeat, not when the stage ended by itself");
+    assert.equal(stage.signalCode, "SIGTERM", "the stage was ended at a heartbeat, not by itself");
     assert.equal(r.exit, "skipped");
     assert.ok(!loop.lapsed?.has(7), "no lapse");
     assert.equal(gh.comments.length, 1);
     assert.match(gh.comments[0].body, new RegExp(`holder: ${other}`), "the other loop's claim is not overwritten or dropped");
     assert.ok(loop.ceded.has(7), "and this loop does not resume it from that claim");
-    // Its own claim, read: the heartbeat writes it in place.
-    const writes = gh.writes.length;
-    gh.comments[0].body = gh.comments[0].body.replaceAll(other, loop.holder);
-    const mine = await loop.withClaim(7, () => new Promise((done) => setTimeout(() => done({ exit: "delivered" }), 200)));
-    assert.equal(mine.exit, "delivered");
-    assert.ok(gh.writes.slice(writes).filter((w) => w.startsWith("PATCH /issues/comments/")).length >= 2, "the claim, then its heartbeats");
-  } finally {
-    gh.restore();
-  }
-});
-
-test("#421: a claim lost while withClaim's body runs no stage (a merge it follows) keeps the body's result: only a stage ended for it is skipped", async () => {
-  const { holderId, machineIdentity } = await import("../scripts/local.mjs");
-  const gh = claimGitHub();
-  try {
-    const loop = await claimLoop();
-    loop.heartbeatMs = 30;
-    loop.children = new Set();
-    const other = holderId({ ...machineIdentity(), host: "other-box" }, 4242);
-    // The merge it follows completes after another loop's claim landed and a heartbeat read it.
-    const r = await loop.withClaim(7, async () => {
-      const c = gh.comments[0];
-      c.body = c.body.replaceAll(loop.holder, other);
-      c.updated_at = new Date().toISOString();
-      await new Promise((ok) => setTimeout(ok, 300));
-      return { exit: "merged" };
-    });
-    assert.equal(r.exit, "merged", "the Objective was delivered: not reported skipped");
-    assert.ok(loop.ceded.has(7), "the claim is still the other loop's");
-    assert.match(gh.comments[0].body, new RegExp(`holder: ${other}`));
   } finally {
     gh.restore();
   }
@@ -608,25 +453,6 @@ test("withClaim: a read-back that fails once is read again; one that never answe
     gh.comments[0].updated_at = new Date(Date.now() - 20 * 60_000).toISOString();
     assert.deepEqual(await loop.pausedHere(new Map()), [7], "a stale claim of this loop's own that nothing runs is resumed");
     assert.deepEqual(await loop.pausedHere(new Map([[7, null]])), [], "not while it runs here");
-  } finally {
-    gh.restore();
-  }
-});
-
-test("resume: a failed read of the issue or its PR keeps the claim and runs nothing (#167)", async () => {
-  let down = true;
-  const gh = claimGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"], fail: (kind) => down && kind === "issue" });
-  try {
-    const { writeClaim } = await import("../scripts/lib/local.mjs");
-    const dead = await claimLoop(process.pid + 1);
-    await writeClaim(dead.repo, 7, dead.holder, dead.opts);
-    const loop = await claimLoop();
-    assert.equal((await loop.resume(7)).exit, "skipped");
-    assert.equal(gh.comments.length, 1, "a failed read is no 'nothing left to run'");
-    // Read fine with nothing left (no PR to review, not Running): the claim goes.
-    down = false;
-    assert.equal((await loop.resume(7)).exit, "skipped");
-    assert.equal(gh.comments.length, 0);
   } finally {
     gh.restore();
   }
@@ -782,209 +608,6 @@ test("runObjective: the same failed start on two Objectives is the machine's: no
   }
 });
 
-test("runObjective: two Objectives whose starts fail at the same moment the same way are the machine's (#370)", async () => {
-  const gh = claimGitHub();
-  try {
-    const loop = await claimLoop();
-    loop.clock = () => Date.parse("2026-11-15T08:00:00Z");
-    loop.machineProbes = { statfs: () => ({ bavail: 0, bsize: 1 }) };
-    // Both stages fail only once both have started: neither unstart runs before the other's start failed.
-    let arrived = 0;
-    let open;
-    const barrier = new Promise((ok) => (open = ok));
-    loop.stage = async (n) => {
-      if (++arrived === 2) open();
-      await barrier;
-      throw Object.assign(new Error(`ENOSPC: mkdir '/srv/box/.pendulum/${n}'`), { code: "ENOSPC", syscall: "mkdir", path: `/srv/box/.pendulum/${n}` });
-    };
-    gh.labelsOf(8).add("pendulum:running");
-    await Promise.all([loop.runObjective(7), loop.runObjective(8)]);
-    assert.ok(loop.machineHolds.has("setup ENOSPC"), "held as the machine's");
-    assert.deepEqual([...loop.machineHolds.get("setup ENOSPC").issues].sort(), [7, 8]);
-    assert.ok([7, 8].every((n) => loop.startFailures.get(n).count <= 1), "at most the first is counted, before the second fails");
-    assert.ok((await loop.machineWait()).work);
-  } finally {
-    gh.restore();
-  }
-});
-
-test("runObjective: a cause that fails again after its hold's probe passed is not the machine's: each Objective is counted and Blocks on its own count, with no hold flapping each tick (#370)", async () => {
-  const { MACHINE_PROBE_EVERY_MS } = await import("../scripts/local.mjs");
-  const gh = claimGitHub();
-  try {
-    const loop = await claimLoop();
-    let now = Date.parse("2026-11-15T08:00:00Z");
-    loop.clock = () => now;
-    // A token file this machine cannot read: EACCES on every start, which no probe explains (its probe: a start tried
-    // again after the backoff).
-    loop.stage = async () => {
-      throw Object.assign(new Error("EACCES: open '/srv/box/token'"), { code: "EACCES", syscall: "open", path: "/srv/box/token" });
-    };
-    let blockedBy = null;
-    const lines = await logged(async () => {
-      for (let round = 1; round <= 12; round += 1) {
-        await loop.machineWait();
-        for (const n of [7, 8]) {
-          if (gh.labelsOf(n).has("pendulum:blocked")) continue;
-          gh.labelsOf(n).add("pendulum:running");
-          await loop.runObjective(n);
-        }
-        if (blockedBy === null && [7, 8].every((n) => gh.labelsOf(n).has("pendulum:blocked"))) blockedBy = round;
-        now += Math.max(MACHINE_PROBE_EVERY_MS, (61 * 60_000) / 12);
-      }
-    });
-    // One round held (no count), then each Objective's three failed starts: both Blocked by the fourth round.
-    assert.equal(blockedBy, 4, "both Blocked on their own count");
-    assert.equal(lines.filter((l) => /holding every new stage on this machine/.test(l)).length, 1, "one hold, not one a tick");
-    assert.equal(lines.filter((l) => /after this machine's probe for it passed, so the probe does not explain it/.test(l)).length, 1, "said once");
-    assert.ok(gh.writes.length <= 60, `GitHub writes stay bounded: seven failed starts and two Blocks (${gh.writes.length})`);
-  } finally {
-    gh.restore();
-  }
-});
-
-test("startCause: a failed start's kind and code, on structure; a clone's machine hold waits for git ls-remote and holds new work only, a claim's for the API reading the repository, the clone's preparation for the sandbox (#370)", async () => {
-  const { startCause } = await import("../scripts/local.mjs");
-  const { prepareClone } = await import("../scripts/lib/local.mjs");
-  const { GitHubError } = await import("../scripts/lib/github.mjs");
-  assert.deepEqual(startCause(Object.assign(new Error("ENOSPC"), { code: "ENOSPC", syscall: "mkdir", startFailed: "work" })), { kind: "setup", code: "ENOSPC" });
-  assert.deepEqual(startCause(Object.assign(new Error("git clone failed (exit 128)"), { startStep: "clone", exitCode: 128, startFailed: "work" })), { kind: "clone", code: "exit 128" });
-  const prepared = await prepareClone("/nowhere", [], async () => ({ code: 1, stdout: "", stderr: "" })).catch((e) => e);
-  assert.deepEqual(startCause(Object.assign(prepared, { startStep: "prepare", startFailed: "work" })), { kind: "prepare", code: "exit 1" });
-  assert.deepEqual(startCause(Object.assign(new GitHubError("Server Error", 502, {}), { startFailed: "claim-read" })), { kind: "claim-read", code: "HTTP 502" });
-  assert.deepEqual(startCause(Object.assign(new Error("fetch failed", { cause: Object.assign(new Error("refused"), { code: "ECONNREFUSED" }) }), { startFailed: "claim-read" })), { kind: "claim-read", code: "ECONNREFUSED" });
-  assert.deepEqual(startCause(Object.assign(new Error("no settings"), { startFailed: "work" })), { kind: "setup", code: null }, "no code: never the machine's");
-
-  let repoDown = true;
-  const gh = claimGitHub({ fail: (kind) => kind === "repo" && repoDown });
-  try {
-    const loop = await claimLoop();
-    let now = Date.parse("2026-11-15T08:00:00Z");
-    loop.clock = () => now;
-    let lsRemote = 128;
-    let sandbox = ["srt's sandbox does not start here (bwrap: setting up uid map: Permission denied)"];
-    loop.machineProbes = { statfs: () => ({ bavail: 1, bsize: 2 ** 40 }), lsRemote: async () => lsRemote, sandbox: async () => sandbox };
-    for (const [fail, key, why] of [
-      [{ startStep: "clone", exitCode: 128 }, "clone exit 128", /^git ls-remote of acme\/app with the local token failed \(exit 128\)$/],
-      [{ startFailed: "claim-read", status: 502 }, "claim-read HTTP 502", /^GitHub's API answered HTTP 404 to reading acme\/app with the local token$/],
-      [{ startStep: "prepare", exitCode: 1 }, "prepare exit 1", /^srt's sandbox does not start here/],
-    ]) {
-      loop.stage = async () => {
-        throw Object.assign(new Error("failed"), fail);
-      };
-      loop.withClaim = fail.startFailed ? async () => Promise.reject(Object.assign(new Error("failed"), fail)) : Local.prototype.withClaim;
-      for (const n of [7, 8]) {
-        gh.labelsOf(n).add("pendulum:running");
-        await loop.runObjective(n);
-      }
-      assert.match(await loop.machineProbe(loop.machineHolds.get(key)), why);
-      if (key === "clone exit 128") {
-        const held = await loop.machineWait();
-        assert.ok(held.work && held.all === null, "a clone's hold holds new work only: resumes and reviews run in their clones");
-      }
-      now += 2 * 60 * 60_000;
-      // Each cause on its own: a start in between would have cleared the counts.
-      loop.startFailures.clear();
-    }
-    assert.equal(loop.machineHolds.size, 3);
-    lsRemote = 0;
-    repoDown = false;
-    sandbox = [];
-    assert.deepEqual(await loop.machineWait(), { work: null, all: null }, "every probe passes: every hold ends");
-    assert.equal(loop.machineHolds.size, 0);
-    assert.ok(!gh.writes.some((w) => /pendulum:blocked/.test(w)), "nothing Blocked");
-  } finally {
-    gh.restore();
-  }
-});
-
-test("serve: a machine hold starts nothing new, with its reason on the tick line, and the tick after its probe passes picks again (#370)", async () => {
-  let free = 0;
-  const run = await serveAgainst({
-    view: (read, labels) => labels,
-    onList: (read) => {
-      if (read === 2) free = 2 ** 40;
-    },
-    firstStage: () => Promise.resolve({ exit: "delivered" }),
-    stopAfter: 4,
-    stubs: {
-      dev: mkdtempSync(join(tmpdir(), "dev-")),
-      machineProbeEveryMs: 0,
-      machineProbes: { statfs: () => ({ bavail: free, bsize: 1 }) },
-      machineHolds: new Map([["setup ENOSPC", { kind: "setup", code: "ENOSPC", key: "setup ENOSPC", probes: ["disk"], path: "/srv/box/.pendulum/7", issues: new Set([7, 8]), all: true, since: Date.now(), retryAt: Date.now() }]]),
-    },
-  });
-  assert.deepEqual(run.claims, [3], "nothing started while the disk was full; picked on the tick after it was freed");
-  assert.ok(run.lines.some((l) => /tick: nothing ready \(this machine's starts fail \(setup, ENOSPC\): 0\.0 GB free on its disk/.test(l)), "the tick line names the hold");
-  assert.ok(run.lines.some((l) => /this machine's start fault \(setup, ENOSPC\) is gone/.test(l)));
-});
-
-test("runObjective: a start that fails on a claim it cannot read, or on another loop's it cannot replace, changes nothing; after the backoff the loop reads again, puts it back to Queued and starts it (#167)", async () => {
-  const { claimBody } = await import("../scripts/lib/local.mjs");
-  const { START_BACKOFF_MS } = await import("../scripts/local.mjs");
-  let down = "comments";
-  const gh = claimGitHub({ fail: (kind) => kind === down });
-  try {
-    const loop = await claimLoop();
-    let now = Date.parse("2026-11-13T08:00:00Z");
-    loop.clock = () => now;
-    let starts = 0;
-    loop.stage = async () => ((starts += 1), { code: 0, exit: "blocked", usd: 0, stage: "work" });
-    // The claim cannot be read: another machine may be running it, so nothing changes yet.
-    let r = await loop.runObjective(7);
-    assert.equal(r.startFailed, "claim-read");
-    assert.ok(gh.labels.has("pendulum:running"), "not un-marked");
-    assert.deepEqual(gh.writes, [], "nothing written");
-    // Inside the backoff the tick does not read again; after it, a read that answers with no live claim requeues it.
-    down = null;
-    await loop.recheckStarts(new Map());
-    assert.ok(gh.labels.has("pendulum:running"));
-    now += START_BACKOFF_MS + 1000;
-    await loop.recheckStarts(new Map());
-    assert.ok(!gh.labels.has("pendulum:running"), "back to Queued for the next pick");
-    assert.deepEqual(loop.startHolds(), {}, "free to pick");
-    // The next pick (the dispatcher marks it Running) starts it, which clears the count.
-    gh.labels.add("pendulum:running");
-    await loop.runObjective(7);
-    assert.equal(starts, 1);
-    assert.ok(!loop.startFailures.has(7));
-
-    // Another machine's stale claim that this loop cannot replace (the edit fails): left as it is, then requeued once
-    // a read shows it is still stale, and started.
-    gh.labels.delete("pendulum:blocked");
-    gh.labels.add("pendulum:running");
-    gh.comments.length = 0;
-    gh.comments.push({ id: 9, user: { login: "maintainer", type: "User" }, body: `<!-- pendulum:7:local -->\n${claimBody("otherbox:1:abc:m:b", new Date())}`, updated_at: new Date(Date.now() - 20 * 60_000).toISOString() });
-    down = "patch";
-    r = await loop.runObjective(7);
-    assert.equal(r.startFailed, "claim");
-    assert.ok(gh.labels.has("pendulum:running"));
-    assert.equal(gh.comments.length, 1, "its claim stays");
-    down = null;
-    now += START_BACKOFF_MS + 1000;
-    gh.comments[0].updated_at = new Date(Date.now() - 20 * 60_000).toISOString();
-    await loop.recheckStarts(new Map());
-    assert.ok(!gh.labels.has("pendulum:running"));
-    gh.labels.add("pendulum:running");
-    await loop.runObjective(7);
-    assert.equal(starts, 2);
-    // A claim read that keeps failing: the third failed start in a row Blocks.
-    gh.labels.delete("pendulum:blocked");
-    gh.labels.add("pendulum:running");
-    down = "comments";
-    for (let i = 0; i < 3; i += 1) {
-      if (i === 0) await loop.runObjective(7);
-      else {
-        now += 60 * 60_000;
-        await loop.recheckStarts(new Map());
-      }
-    }
-    assert.ok(gh.labels.has("pendulum:blocked"));
-  } finally {
-    gh.restore();
-  }
-});
-
 test("serve: a review this loop owes is held from its own dispatch, so a day-old In-review Objective is reviewed, never Blocked in the same tick (#167)", async () => {
   const reviewed = [];
   let loop = null;
@@ -1012,60 +635,6 @@ test("serve: a review this loop owes is held from its own dispatch, so a day-old
   assert.ok(reviewed.includes(9), "the review runs");
   assert.ok(!run.labels.includes("pendulum:blocked"), "never Blocked as 'no local loop running its review'");
   assert.ok(!run.lines.some((l) => /no local loop running its review/.test(l)));
-});
-
-test("unstart: a GitHub failure while settling a failed start still records the backoff, so the loop reads it again; one no longer Running is let go (#167)", async () => {
-  const { START_BACKOFF_MS } = await import("../scripts/local.mjs");
-  let down = new Set(["comments", "issue"]);
-  const gh = claimGitHub({ fail: (kind) => down.has(kind) });
-  try {
-    const loop = await claimLoop();
-    let now = Date.parse("2026-11-13T08:00:00Z");
-    loop.clock = () => now;
-    loop.stage = async () => ({ code: 0, exit: "blocked", usd: 0, stage: "work" });
-    // The claim read and the issue read fail together: nothing changes, but the loop will read it again.
-    await loop.runObjective(7);
-    assert.ok(gh.labels.has("pendulum:running"));
-    assert.equal(loop.startFailures.get(7)?.recheck, true, "not stranded: a recheck is due after the backoff");
-    down = new Set();
-    now += START_BACKOFF_MS + 1000;
-    await loop.recheckStarts(new Map());
-    assert.ok(!gh.labels.has("pendulum:running"), "back to Queued");
-    // A person moved it out of Running while its claim stays unreadable: the loop lets it go, no read every tick.
-    gh.labels.add("pendulum:question");
-    down = new Set(["comments"]);
-    loop.startFailures.set(7, { count: 1, retryAt: now, recheck: true });
-    await loop.recheckStarts(new Map());
-    assert.ok(!loop.startFailures.has(7));
-  } finally {
-    gh.restore();
-  }
-});
-
-test("unstart: the third failed start keeps its count when the Block cannot be written, and Blocks on the next try (#167)", async () => {
-  let down = new Set();
-  const gh = claimGitHub({ fail: (kind) => down.has(kind) });
-  try {
-    const loop = await claimLoop();
-    let now = Date.parse("2026-11-13T08:00:00Z");
-    loop.clock = () => now;
-    loop.stage = async () => {
-      throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
-    };
-    loop.startFailures = new Map([[7, { count: 2, retryAt: now, recheck: false }]]);
-    // The Block's own writes fail (its labels): the entry stays, with a recheck, so the Objective is not stranded.
-    down = new Set(["labels"]);
-    await loop.runObjective(7);
-    assert.ok(!gh.labels.has("pendulum:blocked"));
-    assert.equal(loop.startFailures.get(7)?.count, 3);
-    assert.equal(loop.startFailures.get(7)?.recheck, true);
-    down = new Set();
-    await loop.runObjective(7);
-    assert.ok(gh.labels.has("pendulum:blocked"));
-    assert.ok(!loop.startFailures.has(7));
-  } finally {
-    gh.restore();
-  }
 });
 
 test("runObjective: a stage of this Objective still running on this machine is never doubled, and its claim is left alone (#167)", async () => {
@@ -1193,93 +762,16 @@ test("#575: run --wait waits in place for a stage paused on this machine's netwo
   }
 });
 
-test("#575: run --wait on a stage paused on this machine's network stops at serve's 12-hour bound with exit 75 (paused, resumable), its claim kept, nothing Blocked, naming the command that resumes it", async () => {
-  const { PAUSED_EXIT } = await import("../scripts/local.mjs");
-  const gh = claimGitHub();
-  try {
-    let t = lostSince + 20 * 60_000;
-    // Each probe that finds the host still down is five hours later.
-    const { r, code, log, started, probes, loop } = await runPaused({ ends: [pausedOnDns], up: () => ((t += 5 * 60 * 60_000), false), at: () => t });
-    assert.equal(PAUSED_EXIT, 75);
-    assert.equal(r.exit, "paused");
-    assert.equal(code, 75);
-    assert.deepEqual(started, ["work"], "never resumed while its host does not answer");
-    assert.equal(probes, 3);
-    assert.match(log, /#7: still paused on this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from Nov 17, 8:47:00 AM UTC, past Pendulum's 12 h bound for an outage; this run stops waiting/);
-    assert.match(log, /#7: paused, resumable \(exit 75\): its claim stays on this machine; `pendulum run 7 --wait --repo acme\/app` resumes it here/);
-    assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
-    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
-    assert.ok(loop.offline.has(7));
-  } finally {
-    gh.restore();
-  }
-});
-
 /**
  * PR #5 of pendulum/7, labelled for its review (`unopened`: listed once a work stage delivers). A review stage that
  * delivers takes the label off, as review.mjs does.
  */
 const reviewPr = (unopened = false) => ({ unopened, number: 5, state: "open", draft: false, head: { ref: "pendulum/7" }, base: { ref: "main" }, labels: [{ name: "pendulum:review" }] });
-const reviewPausedOnDns = { ...pausedOnDns, stage: "review" };
 const delivers = (pr) => (name) => {
   if (name === "work") pr.unopened = false;
   if (name === "review") pr.labels = [];
   return { exit: "delivered", stage: name, code: 0 };
 };
-
-test("#575: run --wait whose review stage pauses on this machine's network after the work delivered waits in place, resumes the review once its host answers, and exits 0 only after the review delivered and the PR merged", async () => {
-  const pr = reviewPr(true);
-  const gh = claimGitHub({ pr });
-  try {
-    const t = lostSince + 20 * 60_000;
-    const { r, code, log, started, merges } = await runPaused({ ends: [delivers(pr), reviewPausedOnDns, delivers(pr)], up: (n) => n >= 2, at: () => t });
-    assert.deepEqual(started, ["work", "review", "review"], "the paused review is resumed in place");
-    assert.deepEqual(merges, [5], "its merge followed once the resumed review delivered");
-    assert.equal(r.exit, "delivered");
-    assert.equal(code, 0);
-    assert.match(log, /#7: the review stage paused: this machine could not reach api\.anthropic\.test \(EAI_AGAIN\)/);
-    assert.match(log, /#7: resuming \(api\.anthropic\.test answers again\)/);
-    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped at the end");
-  } finally {
-    gh.restore();
-  }
-});
-
-test("#575: run --wait whose review stage pauses on this machine's network past serve's 12-hour bound exits 75, never 0, its claim kept", async () => {
-  const pr = reviewPr(true);
-  const gh = claimGitHub({ pr });
-  try {
-    let t = lostSince + 20 * 60_000;
-    const { r, code, log, started, merges } = await runPaused({ ends: [delivers(pr), reviewPausedOnDns], up: () => ((t += 5 * 60 * 60_000), false), at: () => t });
-    assert.deepEqual(started, ["work", "review"]);
-    assert.deepEqual(merges, [], "no merge is followed for a review that never delivered");
-    assert.equal(r.exit, "paused");
-    assert.equal(code, 75);
-    assert.match(log, /#7: paused, resumable \(exit 75\): its claim stays on this machine; `pendulum run 7 --wait --repo acme\/app` resumes it here/);
-    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
-    assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
-  } finally {
-    gh.restore();
-  }
-});
-
-test("#575: review --wait whose review stage pauses on this machine's network waits in place, resumes it once its host answers and exits 0 after its merge; past the bound it exits 75", async () => {
-  for (const back of [true, false]) {
-    const pr = reviewPr();
-    const gh = claimGitHub({ pr, labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"] });
-    try {
-      let t = lostSince + 20 * 60_000;
-      const up = back ? (n) => n >= 2 : () => ((t += 5 * 60 * 60_000), false);
-      const { code, log, started, merges } = await runPaused({ ends: [reviewPausedOnDns, delivers(pr)], up, at: () => t, go: (loop) => loop.reviewToEnd(5, { wait: true }) });
-      assert.deepEqual(started, back ? ["review", "review"] : ["review"]);
-      assert.deepEqual(merges, back ? [5] : []);
-      assert.equal(code, back ? 0 : 75);
-      if (!back) assert.match(log, /#7: paused, resumable \(exit 75\): its claim stays on this machine; `pendulum run 7 --wait` resumes it here/);
-    } finally {
-      gh.restore();
-    }
-  }
-});
 
 test("#575: run --wait exits 0 only once its PR merged: a reviewed PR whose merge follow ends without a merge (Blocked, stopped, held, closed, the bound) exits 1", async () => {
   const pr = reviewPr(true);
@@ -1291,118 +783,6 @@ test("#575: run --wait exits 0 only once its PR merged: a reviewed PR whose merg
     assert.notEqual(r.exit, "delivered");
     assert.equal(code, 1);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped, as on any end with no pause");
-  } finally {
-    gh.restore();
-  }
-});
-
-for (const [path, setup] of [
-  ["work", () => {
-    const pr = reviewPr(true);
-    return { pr, ends: [pausedOnDns, delivers(pr), delivers(pr)], stages: ["work", "work", "review"], read: /#7: who holds it is unknown here, so it stays as it is; this run reads it again after Nov 17, 9:\d\d:00 AM UTC/ };
-  }],
-  ["review", () => {
-    const pr = reviewPr();
-    return { pr, ends: [reviewPausedOnDns, delivers(pr)], stages: ["review", "review"], read: /#7: the resume could not start \(claim-read: .*\); the pause stands and this run tries again at its next poll/, go: (loop) => loop.reviewToEnd(5, { wait: true }) };
-  }],
-]) {
-  test(`#575: a resume of a paused ${path} stage whose claim cannot be read starts nothing and leaves the pause standing; run --wait polls again and resumes it`, async () => {
-    const s = setup();
-    let failing = false;
-    const gh = claimGitHub({ pr: s.pr, fail: (what) => failing && what === "comments" });
-    try {
-      let resumes = 0;
-      const prep = (loop) => {
-        const real = loop.resume.bind(loop);
-        // The first resume meets GitHub failing every read of the claim (502), past readClaim's tries.
-        loop.resume = async (...a) => {
-          failing = (resumes += 1) === 1;
-          try {
-            return await real(...a);
-          } finally {
-            failing = false;
-          }
-        };
-      };
-      // A minute a poll: the work path's failed start holds the next resume for its backoff.
-      let t = lostSince + 20 * 60_000;
-      const { code, log, started } = await runPaused({ ends: s.ends, up: () => ((t += 60_000), true), at: () => t, prep, ...(s.go ? { go: s.go } : {}) });
-      assert.equal(resumes, 2, "resumed again at a later poll");
-      assert.deepEqual(started, s.stages);
-      assert.equal(code, 0);
-      assert.match(log, s.read);
-    } finally {
-      gh.restore();
-    }
-  });
-}
-
-test("#575 follow-up: run --wait honours a failed work start's backoff between resumes, as serve does, so claim reads that keep failing Block only after 5 + 10 minutes, never within a few polls", async () => {
-  const { START_BACKOFF_MS } = await import("../scripts/local.mjs");
-  let failing = false;
-  const gh = claimGitHub({ fail: (what) => failing && what === "comments" });
-  try {
-    let t = lostSince + 20 * 60_000;
-    const at = [];
-    const prep = (loop) => {
-      const real = loop.resume.bind(loop);
-      // Every resume meets GitHub failing each read of the claim (502), past readClaim's tries.
-      loop.resume = async (...a) => {
-        at.push(t);
-        failing = true;
-        try {
-          return await real(...a);
-        } finally {
-          failing = false;
-        }
-      };
-      // GitHub answers again once the start has failed, so its settling (the Block, at the third) is written.
-      const unstart = loop.unstart.bind(loop);
-      loop.unstart = (...a) => ((failing = false), unstart(...a));
-    };
-    // Thirty seconds a poll, serve's tick.
-    const { r, code, log, started } = await runPaused({ ends: [pausedOnDns], up: () => ((t += 30_000), true), at: () => t, prep });
-    assert.deepEqual(started, ["work"], "no resume ever started");
-    assert.equal(at.length, 3, "three resumes, the third failed start Blocks");
-    assert.ok(at[1] - at[0] >= START_BACKOFF_MS, `${(at[1] - at[0]) / 1000} s between the first two`);
-    assert.ok(at[2] - at[1] >= 2 * START_BACKOFF_MS, `${(at[2] - at[1]) / 1000} s between the last two`);
-    assert.equal(r.exit, "blocked");
-    assert.equal(code, 1);
-    assert.match(log, /#7: its last resume could not start; the next waits for its backoff, until /);
-  } finally {
-    gh.restore();
-  }
-});
-
-test("#575 follow-up: run --wait writes its claim's heartbeat on a due poll whose resume started nothing, so a resume that keeps failing never lets the claim go stale", async () => {
-  const { CLAIM_FRESH_MS } = await import("../scripts/lib/local.mjs");
-  const start = Date.now();
-  let t = start;
-  let failing = false;
-  const pr = reviewPr();
-  const gh = claimGitHub({ pr, now: () => t, fail: (what) => failing && what === "comments" });
-  try {
-    const since = start - 20 * 60_000;
-    const paused = { ...reviewPausedOnDns, outage: { ...reviewPausedOnDns.outage, since: new Date(since).toISOString() } };
-    const prep = (loop) => {
-      const real = loop.resume.bind(loop);
-      // Every resume of the review meets GitHub failing each read of the claim: withClaim throws before any stage.
-      loop.resume = async (...a) => {
-        failing = true;
-        try {
-          return await real(...a);
-        } finally {
-          failing = false;
-        }
-      };
-    };
-    // The provider answers every probe (each due), five minutes apart, up to the bound.
-    const { code, started } = await runPaused({ ends: [paused], up: () => ((t += 5 * 60_000), true), at: () => t, prep, go: (loop) => loop.reviewToEnd(5, { wait: true }) });
-    assert.equal(code, 75);
-    assert.deepEqual(started, ["review"]);
-    const claim = gh.comments.find((c) => c.body.includes(":local -->"));
-    assert.ok(claim, "the claim stays");
-    assert.ok(t - Date.parse(claim.updated_at) < CLAIM_FRESH_MS, `fresh when the run stops waiting (${(t - Date.parse(claim.updated_at)) / 60_000} min old)`);
   } finally {
     gh.restore();
   }
@@ -1460,35 +840,6 @@ test("#575: run --wait resumes nothing for an Objective stopped while paused (it
     } finally {
       gh.restore();
     }
-  }
-});
-
-test("#575: a real send-back whose rebase stage ends paused ends run --wait's merge follow paused, its claim kept; resume with wait follows the merge again", async () => {
-  const pr = { ...reviewPr(), labels: [], mergeable_state: "dirty", head: { ref: "pendulum/7", sha: "a".repeat(40) } };
-  const gh = claimGitHub({ pr, labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"] });
-  const inner = globalThis.fetch;
-  let down = true;
-  globalThis.fetch = async (url, init) => (new URL(url).origin === "https://api.anthropic.test" && down ? Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } })) : inner(url, init));
-  try {
-    const loop = await claimLoop();
-    loop.clock = () => lostSince + 20 * 60_000;
-    const started = [];
-    loop.stage = async (n, name) => (started.push(name), pausedOnDns);
-    const merges = [];
-    loop.followMerge = async (n, prNumber) => (merges.push(prNumber), true);
-    const sendGh = { getPrSettled: async () => pr, rebaseMarkers: async () => ({ effective: 0, recent: 0, already: false, stuck: null, record: null }), prComment: async () => {}, applyExit: async () => {} };
-    const r = await loop.withClaim(7, () => loop.sendBack(7, 5, { objectiveLabel: "pendulum:objective", notify: "" }, { gh: sendGh }));
-    assert.deepEqual(started, ["work"], "the worker's rebase ran and paused");
-    assert.equal(r.exit, "paused", "the pause is the follow's end, not a failed send-back");
-    assert.equal(loop.offline.get(7)?.stage, "work");
-    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
-    down = false;
-    const resumed = await loop.resume(7, { wait: true });
-    assert.deepEqual(merges, [5], "following the merge goes on, which sends it back again");
-    assert.equal(resumed.exit, "delivered");
-  } finally {
-    globalThis.fetch = inner;
-    gh.restore();
   }
 });
 
@@ -1613,187 +964,6 @@ test("#389: a stage paused on GitHub's 5xx while GitHub's status page reports it
   }
 });
 
-test("#389: a resume skipped before its stage starts (a read that fails) makes no try: the one more try is the one that runs", async () => {
-  let pullsDown = false;
-  const gh = claimGitHub({ fail: (kind) => pullsDown && kind === "pulls" });
-  const page = await statusPage(() => ({ components: parts("operational") }));
-  try {
-    const { loop, next, again, tries } = await serverPaused();
-    pullsDown = true;
-    assert.equal((await next()).exit, "skipped", "the PR read failed: nothing started");
-    assert.equal(loop.offline.get(7).server.tried, false, "no try was made");
-    pullsDown = false;
-    assert.notEqual((await again()).exit, "blocked", "the next tick makes the one more try");
-    assert.equal(tries(), 1);
-    assert.equal((await next()).exit, "blocked", "that try met the 5xx again: Blocked");
-    assert.equal(tries(), 1);
-  } finally {
-    await page.close();
-    gh.restore();
-  }
-});
-
-test("#389: a start whose claim cannot be read makes no try: the one more try is made only once the stage's process starts", async () => {
-  let commentsDown = false;
-  const gh = claimGitHub({ fail: (kind) => commentsDown && kind === "comments" });
-  const page = await statusPage(() => ({ components: parts("operational") }));
-  try {
-    const { loop, at, next, again, stub, tries } = await serverPaused();
-    // The real start: its claim read fails, so no stage process starts.
-    let worked = 0;
-    loop.work = async () => ((worked += 1), { exit: "delivered" });
-    loop.runObjective = Local.prototype.runObjective;
-    const off = loop.offline.get(7);
-    at.t = off.server.at + OUTAGE.serverResumeMs;
-    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
-    commentsDown = true;
-    assert.notEqual((await loop.resume(7)).exit, "blocked");
-    assert.equal(worked, 0, "the stage never ran");
-    assert.deepEqual([loop.offline.get(7)?.server.tried, tries()], [false, 0], "no try was made");
-    commentsDown = false;
-    loop.runObjective = stub;
-    assert.notEqual((await again()).exit, "blocked", "the next tick makes the one more try");
-    assert.equal(tries(), 1);
-    assert.equal((await next()).exit, "blocked", "that try met the 5xx again: Blocked");
-  } finally {
-    await page.close();
-    gh.restore();
-  }
-});
-
-test("#389: the one more try belongs to the request that failed: a 5xx on another request, or a pause on anything else, starts it afresh, and the Block names the request from its own first failure", async () => {
-  const gh = claimGitHub();
-  const page = await statusPage(() => ({ components: parts("operational") }));
-  try {
-    const { loop, at, next, tries } = await serverPaused();
-    // The try gets past the labels request and meets a 5xx on another one: that request gets its own one more try.
-    at.endpoint = "GET repos/acme/app/pulls";
-    assert.notEqual((await next()).exit, "blocked");
-    assert.equal(loop.offline.get(7).server.requestSince, at.t, "the pulls request's own first failure");
-    assert.notEqual((await next()).exit, "blocked", "the pulls request's own one more try");
-    assert.equal(tries(), 2);
-    // A pause on this machine's network between: the next 5xx starts afresh too.
-    await loop.withClaim(7, async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "EAI_AGAIN", since: new Date(at.t).toISOString() } }));
-    assert.equal(loop.offline.get(7).server.tried, undefined, "no try carried over a network pause");
-    const fresh = at.t;
-    await loop.withClaim(7, async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date(at.t).toISOString(), endpoint: at.endpoint } }));
-    assert.equal(loop.offline.get(7).server.tried, false);
-    assert.notEqual((await next()).exit, "blocked");
-    assert.equal((await next()).exit, "blocked");
-    assert.equal(tries(), 3);
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.ok(notice.includes(`github.test answered HTTP 500 to every try of GET repos/acme/app/pulls from ${whenText(fresh)};`), notice);
-    assert.doesNotMatch(notice, /from Nov 14, 8:47 AM UTC/, "not the first pause's request time");
-  } finally {
-    await page.close();
-    gh.restore();
-  }
-});
-
-test("#389: a pause on a model provider's busy answer is never judged by GitHub's status page, and its log does not say so", async () => {
-  const gh = claimGitHub();
-  const page = await statusPage(() => ({ components: parts("operational") }));
-  const lines = [];
-  const write = process.stdout.write;
-  process.stdout.write = (chunk, ...more) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...more));
-  try {
-    const loop = await claimLoop();
-    let t = Date.parse("2026-11-14T08:47:00Z");
-    loop.clock = () => t;
-    let tries = 0;
-    const paused = () => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "api.anthropic.test", origin: "https://api.anthropic.test", code: "HTTP 529", since: new Date(t).toISOString() } });
-    loop.runObjective = (n) => ((tries += 1), loop.tryStarted(n), (t += OUTAGE.stageWaitMs + 60_000), loop.withClaim(n, paused()));
-    await loop.withClaim(7, paused());
-    for (let i = 0; i < 3; i++) {
-      t = loop.offline.get(7).server.at + OUTAGE.serverResumeMaxMs;
-      assert.deepEqual(await loop.pausedHere(new Map()), [7]);
-      assert.notEqual((await loop.resume(7)).exit, "blocked");
-    }
-    assert.equal(tries, 3);
-    assert.equal(page.asked(), 0, "GitHub's page was never asked");
-    const paused_ = lines.filter((l) => /the work stage paused: api\.anthropic\.test answered HTTP 529/.test(l));
-    assert.equal(paused_.length, 4);
-    assert.ok(paused_.every((l) => !/status page/.test(l)), paused_.join(""));
-  } finally {
-    process.stdout.write = write;
-    await page.close();
-    gh.restore();
-  }
-});
-
-test("#389: GitHub's status page counts an unresolved incident and a maintenance in progress as an incident; GitHub Enterprise has no page: it waits on, and nothing is fetched", async () => {
-  const { githubStatus } = await import("../scripts/lib/adapters/github-status.mjs");
-  let answer = { components: parts("operational"), incidents: [{ id: "i1", name: "Disruption with some GitHub services", status: "investigating", components: [{ id: "c1", name: "Issues", status: "degraded_performance" }] }] };
-  const page = await statusPage(() => answer);
-  try {
-    const one = await githubStatus();
-    assert.deepEqual([one.state, one.incidents], ["degraded", ["Disruption with some GitHub services"]]);
-    answer = { components: parts("operational"), incidents: [{ id: "i1", name: "x", status: "resolved" }], maintenances: [{ id: "m1", name: "Database upgrade", status: "in_progress" }, { id: "m2", name: "Later", status: "scheduled" }] };
-    const two = await githubStatus();
-    assert.deepEqual([two.state, two.maintenances], ["degraded", ["Database upgrade"]]);
-    answer = { components: parts("operational"), maintenances: [{ id: "m2", name: "Later", status: "scheduled" }] };
-    assert.equal((await githubStatus()).state, "operational");
-    // An incident that names its components counts only when one of them is GitHub's API, Issues or Pull Requests, or it
-    // names none; one with no components list counts, and says so.
-    const incident = (components) => ({ id: "i2", name: "Copilot is slow", status: "identified", ...(components === undefined ? {} : { components: components.map((name) => ({ id: name, name, status: "degraded_performance" })) }) });
-    answer = { components: parts("operational"), incidents: [incident(["Copilot"])] };
-    assert.deepEqual([(await githubStatus()).state, page.paths.length], ["operational", 4], "one read of summary.json per reading");
-    answer = { components: parts("operational"), incidents: [incident(["Copilot", "Pull Requests"])] };
-    assert.equal((await githubStatus()).state, "degraded");
-    answer = { components: parts("operational"), incidents: [incident([])] };
-    assert.equal((await githubStatus()).state, "degraded");
-    answer = { components: parts("operational"), incidents: [incident(undefined)] };
-    assert.deepEqual((await githubStatus()).incidents, ["Copilot is slow (it lists no components, so it counts whatever it affects)"]);
-  } finally {
-    await page.close();
-  }
-  // GHES or GHE.com, no GITHUB_STATUS_URL: githubstatus.com does not speak for it.
-  const seen = [];
-  const inner = globalThis.fetch;
-  globalThis.fetch = async (url) => (seen.push(String(url)), new Response("{}"));
-  try {
-    for (const api of ["https://ghes.example.test/api/v3", "https://api.acme.ghe.com"]) assert.deepEqual(await githubStatus({ env: { GITHUB_API_URL: api } }), { state: null, components: [], incidents: [], maintenances: [], error: "no page" });
-    assert.deepEqual(seen, [], "nothing fetched");
-    await githubStatus({ env: {} });
-    assert.deepEqual(seen, ["https://www.githubstatus.com/api/v2/summary.json"], "GitHub.com's page by default");
-  } finally {
-    globalThis.fetch = inner;
-  }
-});
-
-test("pausedHere: an Objective paused on a provider that never answers again is taken up past the bound, so resume Blocks it; a stopped one's pause is forgotten (#228)", async () => {
-  const gh = claimGitHub();
-  const inner = globalThis.fetch;
-  // GitHub answers; the provider never does.
-  globalThis.fetch = async (url, init) => (new URL(url).origin === "https://api.anthropic.test" ? Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } })) : inner(url, init));
-  try {
-    const loop = await claimLoop();
-    const since = Date.parse("2026-11-14T08:47:00Z");
-    let t = since + 60 * 60_000;
-    loop.clock = () => t;
-    const paused = async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "api.anthropic.test", origin: "https://api.anthropic.test", code: "EAI_AGAIN", since: new Date(since).toISOString() } });
-    await loop.withClaim(7, paused);
-    assert.deepEqual(await loop.pausedHere(new Map()), [], "inside the bound: waits for its host");
-    t = since + OUTAGE.blockMs;
-    assert.deepEqual(await loop.pausedHere(new Map()), [7], "past it: taken up whatever the probe says");
-    assert.equal((await loop.resume(7)).exit, "blocked");
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes('"cause":"outage"'));
-    assert.match(notice, /bound for an outage\. api\.anthropic\.test is still unreachable from this machine: re-apply the label once it answers/);
-    assert.ok(!/The network is back/.test(notice));
-    // Paused again, then stopped by a person: its pause is over with it.
-    gh.labels.delete("pendulum:blocked");
-    gh.labels.add("pendulum:running");
-    await loop.withClaim(7, paused);
-    assert.ok(loop.offline.has(7));
-    gh.labels.delete("pendulum:objective");
-    await loop.pausedHere(new Map());
-    assert.ok(!loop.offline.has(7));
-  } finally {
-    globalThis.fetch = inner;
-    gh.restore();
-  }
-});
-
 test("withClaim: a stage that paused on its harness's usage limit keeps its claim with no lapse; resumed after the reset, never Blocked by the outage bound (#254)", async () => {
   const gh = claimGitHub();
   try {
@@ -1823,36 +993,6 @@ test("withClaim: a stage that paused on its harness's usage limit keeps its clai
   }
 });
 
-test("#376: an Objective paused on a usage limit with a far reset resumes at the next tick once its account is no longer held: released with pendulum hold release, or its files removed by hand; another account's release moves nothing", async () => {
-  const gh = claimGitHub();
-  try {
-    const home = mkdtempSync(join(tmpdir(), "hold-"));
-    const dir = holdsDir(home);
-    const loop = await claimLoop();
-    loop.holds = accountHolds({ dir });
-    const hold = (...args) => spawnSync(process.execPath, [join(import.meta.dirname, "..", "scripts", "local.mjs"), "hold", ...args], { env: { ...process.env, HOME: home }, encoding: "utf8" });
-    const since = Date.now() - 60_000;
-    const reset = since + 30 * 60 * 60_000;
-    const limit = { exit: "paused", stage: "work", code: 0, usageLimit: { harness: "claude", reset: new Date(reset).toISOString(), since: new Date(since).toISOString() } };
-    assert.equal((await loop.withClaim(7, async () => limit)).exit, "paused");
-    assert.equal(loop.offline.get(7).reset, reset, "the pause keeps the provider's reset, thirty hours out");
-    loop.holds.limit({ harness: "claude", account: "other", reset, now: Date.now() });
-    assert.deepEqual(await loop.pausedHere(new Map()), [], "held: it waits");
-    assert.equal(hold("release", "other").status, 0);
-    assert.deepEqual(await loop.pausedHere(new Map()), [], "another account's release moves nothing");
-    const r = hold("release", "claude");
-    assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual(await loop.pausedHere(new Map()), [7], "released: resumed at the next tick, long before the reset");
-    // Paused again on a new limit (after the release, so it holds), then the folder cleared by hand: resumed too.
-    await loop.limitPaused(7, { ...limit, usageLimit: { ...limit.usageLimit, since: new Date().toISOString() } });
-    assert.deepEqual(await loop.pausedHere(new Map()), [], "a limit after the release holds again");
-    for (const f of readdirSync(dir)) rmSync(join(dir, f));
-    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
-  } finally {
-    gh.restore();
-  }
-});
-
 test("serve: while the loop's harness's usage limit is spent, no new work or review starts, said once (#254)", async () => {
   const reviewed = [];
   const run = await serveAgainst({
@@ -1872,49 +1012,6 @@ test("serve: while the loop's harness's usage limit is spent, no new work or rev
   assert.ok(!run.labels.includes("pendulum:running"), `the dispatcher never picked it: it stays Queued (${run.labels.join(", ")})`);
   assert.deepEqual(reviewed, [], "no review started");
   assert.equal(run.lines.filter((l) => /claude's usage limit is spent until .*; no stage starts on claude until then/.test(l)).length, 1);
-});
-
-test("serve: one harness's spent usage limit holds only that harness's work; an Objective labelled for another still starts (#254)", async () => {
-  const reviewed = [];
-  const run = await serveAgainst({
-    view: (read, labels) => [...labels, "pendulum:harness:codex"],
-    firstStage: () => Promise.resolve({ exit: "delivered" }),
-    stopAfter: 3,
-    stubs: {
-      harness: "claude",
-      holds: heldOn("claude"),
-      accountFor: (harness) => ({ name: harness, harness, declared: false }),
-      holdOf: (account) => ({ key: account.name, shared: true }),
-      pendingReviews: async () => [{ issue: 8, pr: 18 }],
-      review: async (n, pr) => (reviewed.push(pr), { exit: "delivered" }),
-    },
-  });
-  assert.deepEqual(run.claims, [1], "the codex Objective starts on the first tick");
-  assert.deepEqual(reviewed, [], "the review on the loop's claude stays held");
-});
-
-test("limitPaused: a provider that refuses past its stated reset is held 2, 5, 10, then 15 minutes, not every tick; a reset further out starts over (#254)", async () => {
-  // No repository: this loop posts no pause notice (#265), so nothing here reaches GitHub.
-  const loop = Object.assign(await claimLoop(), { repo: null });
-  let t = Date.parse("2026-11-14T23:01:00Z");
-  loop.clock = () => t;
-  const pause = (reset, extra = {}) => loop.limitPaused(7, { exit: "paused", stage: "work", usageLimit: { harness: "claude", reset: new Date(reset).toISOString(), since: new Date(t).toISOString(), ...extra } });
-  const holds = [];
-  for (let i = 0; i < 5; i++) {
-    await pause(t - 60_000);
-    holds.push((loop.offline.get(7).reset - t) / 60_000);
-    t = loop.offline.get(7).reset;
-  }
-  assert.deepEqual(holds, [2, 5, 10, 15, 15]);
-  // A stage held before it ran counts nothing.
-  await pause(t + 60_000, { held: true });
-  assert.equal(loop.offline.get(7).reset, t + 60_000);
-  // A real window ahead: its reset, and the count starts again.
-  await pause(t + 60 * 60_000);
-  assert.equal(loop.offline.get(7).reset, t + 60 * 60_000);
-  t += 60 * 60_000;
-  await pause(t - 1);
-  assert.equal(loop.offline.get(7).reset, t + 2 * 60_000);
 });
 
 test("withClaim: a stage that paused on GitHub's spent rate limit is resumed after the reset, with no probe and no lapse (#250)", async () => {

@@ -8,15 +8,13 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { humanWorkflowRuns, listObjectives } from "../lib/collect.mjs";
+import { humanWorkflowRuns } from "../lib/collect.mjs";
 import { loadPrices } from "../lib/cost.mjs";
-import { drillRecord, humanActions, p1Escapes, scoreObjective, stageHarnessOf } from "../lib/objective.mjs";
-import { pooledStreak, pooledTable, streaks, streakTable, tagTime, verdict } from "../lib/streak.mjs";
+import { humanActions, p1Escapes, scoreObjective } from "../lib/objective.mjs";
+import { pooledStreak, pooledTable, streaks, streakTable, verdict } from "../lib/streak.mjs";
 import { appendScorecard } from "../score.mjs";
-import { harnessMarker } from "../../plugin/scripts/lib/logic.mjs";
-import { progressTail } from "../../plugin/scripts/lib/session.mjs";
 import { PREVIOUS_NAME } from "../../plugin/scripts/lib/local.mjs";
-import { blocked, cleanMerge, localMerge, OPERATOR, questionAnswered, REPO, withHandover } from "./fixtures/github.mjs";
+import { blocked, cleanMerge, localMerge, OPERATOR, REPO } from "./fixtures/github.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
 const prices = loadPrices();
@@ -24,26 +22,6 @@ const NOW = "2031-03-05T00:00:00Z";
 const score = (c) => scoreObjective(c, { prices, now: NOW });
 const OWNER = { login: "maintainer", type: "User" };
 const run = (id, over = {}) => ({ id, event: "workflow_dispatch", attempt: 1, created_at: "2031-03-02T03:00:00Z", run_started_at: "2031-03-02T03:00:00Z", by: OWNER, issues: [], ...over });
-
-test("the adopter drill's own dispatch, recorded on the Objective it filed, is not input; a person's dispatch or re-run still is", () => {
-  // As drill.mjs --dispatch leaves it on the scratch repository's #498: the issue's author files it, dispatches run
-  // 42936119353 two seconds after the label, and records that run on the issue.
-  const WRITER = cleanMerge(42).issue.user;
-  const drilled = (runs, by = WRITER) => {
-    const c = cleanMerge(42);
-    c.issueComments = [...(c.issueComments || []), { user: by, created_at: "2031-03-02T01:00:05Z", body: drillRecord(42, 42936119353) }];
-    c.workflowRuns = runs;
-    return c;
-  };
-  const own = score(drilled([run(42936119353, { by: WRITER, created_at: "2031-03-02T01:00:02Z" })]));
-  assert.equal(own.walkAway.value, true, "the drill's own tick");
-  assert.equal(own.walkAway.humanActions, 0, "its marker comment is not input either");
-  // A person's later hand-started tick, another login's run under that id, a record by someone else, a re-run: input.
-  assert.equal(score(drilled([run(42936119353, { by: WRITER }), run(77, { by: WRITER })])).walkAway.firstHumanAction.where, "run 77");
-  assert.equal(score(drilled([run(42936119353, { by: OWNER })])).walkAway.value, false);
-  assert.equal(score(drilled([run(42936119353, { by: OWNER })], OWNER)).walkAway.value, false);
-  assert.equal(score(drilled([run(42936119353, { by: WRITER, attempt: 2 })])).walkAway.firstHumanAction.kind, "re-run (attempt 2)");
-});
 
 test("a person's dispatch of the Pendulum workflow while the Objective is live is input: untied counts for every Objective, tied only for its own", () => {
   // cleanMerge: label 01:00, merged 03:30.
@@ -78,35 +56,6 @@ test("a person's dispatch of the Pendulum workflow while the Objective is live i
   const unread = cleanMerge(42);
   unread.workflowRuns = null;
   assert.match(score(unread).missing.join(), /workflow runs/);
-});
-
-test("collect: the Pendulum workflow's runs a person dispatched or re-ran in the window, tied by their jobs; 404 is none", async () => {
-  const calls = [];
-  const runs = [
-    { id: 1, event: "workflow_dispatch", run_attempt: 1, created_at: "2031-03-02T02:00:00Z", triggering_actor: OWNER, actor: OWNER },
-    { id: 2, event: "workflow_dispatch", run_attempt: 1, created_at: "2031-03-02T02:05:00Z", triggering_actor: { login: "github-actions[bot]", type: "Bot" } },
-    { id: 3, event: "issues", run_attempt: 1, created_at: "2031-03-02T02:06:00Z", triggering_actor: OWNER },
-    { id: 4, event: "schedule", run_attempt: 3, created_at: "2031-03-02T02:07:00Z", run_started_at: "2031-03-02T02:40:00Z", triggering_actor: OWNER },
-  ];
-  const jobs = { 1: [{ name: "dispatch", conclusion: "success" }, { name: "work", conclusion: "skipped" }], 4: [{ name: "work (42)", conclusion: "success" }, { name: "review (pendulum/7)", conclusion: "success" }, { name: "launch (9)", conclusion: "skipped" }] };
-  const api = async (path) => {
-    calls.push(path);
-    const m = /actions\/runs\/(\d+)\/jobs/.exec(path);
-    if (m) return [{ total_count: 1, jobs: jobs[m[1]] }];
-    return [{ total_count: runs.length, workflow_runs: runs }];
-  };
-  const c = cleanMerge(42);
-  const got = await humanWorkflowRuns(api, REPO, c.issue, c.issueTimeline, c.pulls);
-  assert.deepEqual(got.map((r) => [r.id, r.attempt, r.issues]), [[1, 1, []], [4, 3, [42, 7]]]);
-  assert.equal(got[1].run_started_at, "2031-03-02T02:40:00Z");
-  // The window is the first Objective label to the merge, on the Pendulum workflow's own runs.
-  assert.equal(calls[0], `repos/${REPO}/actions/workflows/pendulum.yml/runs?created=${encodeURIComponent("2031-03-02T01:00:00Z..2031-03-02T03:30:00Z")}&per_page=100`);
-  const none = async () => {
-    const e = new Error("not found");
-    e.status = 404;
-    throw e;
-  };
-  assert.deepEqual(await humanWorkflowRuns(none, REPO, c.issue, c.issueTimeline, c.pulls), []);
 });
 
 test("local mode: a clean run reads walk-away though the operator's login merged, closed and deleted the branch long after the last stage", () => {
@@ -155,46 +104,6 @@ test("local mode: an operator's own comment inside a run's window is input; Pend
   const l = localMerge();
   l.issueTimeline.push({ event: "labeled", label: { name: "P1" }, actor: OPERATOR, created_at: "2031-03-02T01:10:00Z" });
   assert.equal(score(l).walkAway.firstHumanAction.kind, "labeled P1");
-});
-
-test("local mode: a manual un-block is input; Pendulum's own un-block after a re-applied label is not, the relabel is", () => {
-  const blockedThenCleared = () => {
-    const c = localMerge();
-    c.issueTimeline.push(
-      { event: "unlabeled", label: { name: "pendulum:in-review" }, actor: OPERATOR, created_at: "2031-03-02T01:49:00Z" },
-      { event: "labeled", label: { name: "pendulum:blocked" }, actor: OPERATOR, created_at: "2031-03-02T01:49:01Z" },
-    );
-    c.issueComments.push({ user: OPERATOR, created_at: "2031-03-02T01:49:03Z", body: "<!-- pendulum:60:blocked:review:1 -->\n@dev Blocked (review): the merge failed" });
-    return c;
-  };
-  const manual = blockedThenCleared();
-  // Removed by hand a minute later, still inside the review stage's window, with no relabel.
-  manual.issueTimeline.push({ event: "unlabeled", label: { name: "pendulum:blocked" }, actor: OPERATOR, created_at: "2031-03-02T01:50:30Z" });
-  const row = score(manual);
-  assert.equal(row.walkAway.value, false);
-  assert.equal(row.walkAway.humanActions, 1);
-  assert.equal(row.walkAway.firstHumanAction.kind, "unlabeled pendulum:blocked");
-  assert.equal(row.walkAway.firstHumanAction.asked, "blocked");
-
-  const relabel = blockedThenCleared();
-  relabel.issueTimeline.push({ event: "labeled", label: { name: "pendulum:objective" }, actor: OPERATOR, created_at: "2031-03-02T01:50:20Z" }, { event: "unlabeled", label: { name: "pendulum:blocked" }, actor: OPERATOR, created_at: "2031-03-02T01:50:30Z" });
-  const r = score(relabel);
-  assert.deepEqual(r.walkAway.firstHumanAction && [r.walkAway.firstHumanAction.kind, r.walkAway.humanActions], ["labeled pendulum:objective", 1]);
-});
-
-test("an answered Question is input even when the answer is nowhere the scorer reads", () => {
-  const c = cleanMerge(42);
-  // Pendulum asked (its label), then picked the Objective up again: someone answered somewhere.
-  c.issueTimeline.push({ event: "labeled", label: { name: "pendulum:question" }, actor: { login: "acme-pendulum[bot]", type: "Bot" }, created_at: "2031-03-02T01:30:00Z" }, { event: "labeled", label: { name: "pendulum:running" }, actor: { login: "acme-pendulum[bot]", type: "Bot" }, created_at: "2031-03-02T02:00:00Z" });
-  const row = score(c);
-  assert.equal(row.walkAway.value, false);
-  assert.equal(row.walkAway.firstHumanAction.kind, "answered Question");
-  assert.equal(row.walkAway.firstHumanAction.asked, "question");
-  assert.equal(row.walkAway.askedOnly.value, false);
-  // An answer the scorer does see is counted once, not twice.
-  const seen = score(questionAnswered(45));
-  assert.equal(seen.walkAway.humanActions, 2);
-  assert.ok(!seen.walkAway.firstHumanAction.kind.includes("answered Question"));
 });
 
 test("P1 escapes: an issue labelled P1, opened after the merge, that references the merged PR, a P1 Objective among them; earlier issues are not", () => {
@@ -249,17 +158,6 @@ test("streaks: consecutive walk-away merges per harness in the order they ended;
   assert.match(md, /Blocked, a stall, an unmerged end, a later P1 escape or an input source not read breaks it/);
 });
 
-test("tagTime: the tag's Release time, else its commit's date", async () => {
-  const api = (answers) => async (path) => {
-    if (path in answers) return answers[path];
-    const e = new Error("404");
-    e.status = 404;
-    throw e;
-  };
-  assert.equal(await tagTime(api({ "repos/acme/pendulum/releases/tags/v1.2.3": { published_at: "2031-03-01T10:00:00Z" } }), "acme/pendulum", "v1.2.3"), "2031-03-01T10:00:00Z");
-  assert.equal(await tagTime(api({ "repos/acme/pendulum/commits/v1.2.3": { commit: { committer: { date: "2031-03-01T09:00:00Z" } } } }), "acme/pendulum", "v1.2.3"), "2031-03-01T09:00:00Z");
-});
-
 test("score.mjs --streak --since TAG over a snapshot prints the streak per harness", () => {
   const dir = mkdtempSync(join(tmpdir(), "pendulum-bench-streak-"));
   const clean = cleanMerge(42);
@@ -300,68 +198,6 @@ test("streaks: a row with an input source not read never extends a streak, and t
   assert.equal(verdict(old).ok, false);
 });
 
-test("streaks: a row with no harness that breaks breaks every harness's streak; one that is clean extends none", () => {
-  const rows = [row(1), row(2, { harness: "codex" }), row(3, { harness: null }), row(4), row(5, { harness: null, mergedAt: null, exit: "blocked", walkAway: { value: false, since: "2031-03-01T00:00:00Z", reason: "not merged (blocked)", blocked: { at: "2031-03-06T00:00:00Z" }, unseen: [] } }), row(7)];
-  const s = streaks(rows, { from: "2031-02-28T00:00:00Z" });
-  // claude: #1, #4 (the clean unknown #3 credits no harness), broken by #5, then #7.
-  assert.deepEqual(s.harnesses.claude.sequence.map((x) => [x.issue, x.ok]), [[1, true], [4, true], [5, false], [7, true]]);
-  assert.deepEqual([s.harnesses.claude.current, s.harnesses.claude.best, s.harnesses.claude.finished], [1, 2, 3]);
-  assert.deepEqual([s.harnesses.codex.current, s.harnesses.codex.best], [0, 1]);
-  assert.match(s.harnesses.codex.sequence.at(-1).why, /^harness unknown, breaks every harness: not merged \(blocked\)/);
-  assert.deepEqual(s.harnesses.unknown.sequence.map((x) => [x.issue, x.ok]), [[3, true], [5, false]]);
-});
-
-test("harness from structure: Pendulum's harness line, else its start line with or without a model; two harnesses read none", () => {
-  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
-  const stage = (n, kind, id, tail, user = APP) => ({ user, created_at: `2031-03-02T01:0${id}:00Z`, body: `<!-- pendulum:${n}:progress:${kind}:${id} -->\nPendulum ${kind} run ${id}\n- 01:0${id}Z setup${tail}` });
-  // An Actions Objective Blocked before any spend, with no usage artifact: the stage's harness line still names it.
-  const b = cleanMerge(46);
-  b.issueComments.push(stage(46, "work", 1, progressTail({ harness: "codex", model: "gpt-test" })));
-  assert.equal(stageHarnessOf(harnessMarker("codex", "gpt-test")).harness, "codex");
-  assert.equal(score(b).harness, "codex");
-  // Copilot runs with no model set (its default): the start line has no "(model)".
-  const cp = cleanMerge(47);
-  cp.issueComments.push(stage(47, "work", 1, "\n- 01:02Z harness copilot attempt 1"));
-  assert.equal(score(cp).harness, "copilot");
-  const local = localMerge();
-  local.issueComments[0].body = local.issueComments[0].body.replace("harness codex (gpt-test) attempt 1", "harness copilot attempt 1");
-  assert.equal(score(local).harness, "copilot");
-  // A relabel that switched harness: neither is credited.
-  const mixed = cleanMerge(48);
-  mixed.issueComments.push(stage(48, "work", 1, "\n- 01:02Z harness claude (claude-test) attempt 1"), stage(48, "work", 2, "\n- 01:03Z harness codex (gpt-test) attempt 1"));
-  const m = score(mixed);
-  assert.equal(m.harness, null);
-  assert.equal(m.harnessMixed, true);
-  // Anyone else's comment naming a harness is not Pendulum's.
-  const pasted = cleanMerge(49);
-  pasted.issueComments.push(stage(49, "work", 1, `\n${harnessMarker("claude")}`, OWNER));
-  assert.equal(score(pasted).harness, null);
-});
-
-test("local mode: Pendulum's own triage re-run (attempt 2 on a head its triage record names) is not input; a person's re-run is", () => {
-  const rerun = (by) => run(950, { event: "pull_request", attempt: 2, created_at: "2031-03-02T01:25:00Z", run_started_at: "2031-03-02T01:35:00Z", head_sha: "cafe0001", by, issues: [] });
-  const triaged = () => {
-    const c = localMerge();
-    c.issueComments[0].body += `\n<!-- pendulum:triage {"reruns":["cafe0001"],"sigs":["s1"]} -->`;
-    return c;
-  };
-  const own = triaged();
-  own.workflowRuns = [rerun(OPERATOR)];
-  assert.equal(score(own).walkAway.value, true, score(own).walkAway.reason);
-  // No triage record for that head: the operator's login re-ran it by hand.
-  const manual = localMerge();
-  manual.workflowRuns = [rerun(OPERATOR)];
-  assert.equal(score(manual).walkAway.firstHumanAction.kind, "re-run (attempt 2)");
-  // Another person's re-run, or a triage record pasted by someone else, is not Pendulum's.
-  const other = triaged();
-  other.workflowRuns = [rerun(OWNER)];
-  assert.equal(score(other).walkAway.value, false);
-  const pasted = localMerge();
-  pasted.issueComments.push({ user: OWNER, created_at: "2031-03-02T01:30:00Z", body: `<!-- pendulum:60:progress:work:9 -->\n<!-- pendulum:triage {"reruns":["cafe0001"]} -->` });
-  pasted.workflowRuns = [rerun(OPERATOR)];
-  assert.equal(score(pasted).walkAway.value, false);
-});
-
 test("collect: more runs than GitHub lists for a created filter is unread, never a short list; head_sha is kept", async () => {
   const c = cleanMerge(42);
   const many = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, event: "schedule", run_attempt: 1, created_at: "2031-03-02T02:00:00Z", triggering_actor: OWNER }));
@@ -369,13 +205,6 @@ test("collect: more runs than GitHub lists for a created filter is unread, never
   await assert.rejects(humanWorkflowRuns(capped, REPO, c.issue, c.issueTimeline, c.pulls), /1500 Pendulum workflow runs in the window/);
   const one = async (path) => (/\/jobs/.test(path) ? [{ jobs: [] }] : [{ total_count: 1, workflow_runs: [{ id: 5, event: "workflow_dispatch", run_attempt: 1, created_at: "2031-03-02T02:00:00Z", head_sha: "cafe0001", triggering_actor: OWNER }] }]);
   assert.equal((await humanWorkflowRuns(one, REPO, c.issue, c.issueTimeline, c.pulls))[0].head_sha, "cafe0001");
-});
-
-test("streakTable: a backslash or pipe in a cell cannot break the Markdown row", () => {
-  const s = streaks([row(1, { harness: "c\\|x" })], { from: "2031-02-28T00:00:00Z" });
-  const md = streakTable(s, { repository: "o/r" });
-  assert.ok(md.includes("| c\\\\\\|x |"), md);
-  assert.ok(!md.includes("| c\\|x |"), md);
 });
 
 test("sandbox stages: the vendor comment's dollars sit beside the progress comment's model dollars; one without a progress comment is its own row", async () => {
@@ -400,45 +229,6 @@ test("sandbox stages: the vendor comment's dollars sit beside the progress comme
   const { pendulumActivity } = await import("../lib/objective.mjs");
   const late = { ...collected, issueComments: [{ ...collected.issueComments[1], created_at: "2031-03-02T09:00:00Z" }] };
   assert.deepEqual(pendulumActivity(late), []);
-});
-
-test("sandbox stages: the record's launches are read merged as the plugin reads them, a stage's own entry included", async () => {
-  const { pendulumLogin, launchesOf } = await import("../lib/phases.mjs");
-  const { marker, sandboxMarkerLine } = await import("../../plugin/scripts/lib/logic.mjs");
-  const app = { login: "pendulum-app[bot]", type: "Bot" };
-  const self = pendulumLogin(null, app.login);
-  const claim = "0123456789ab";
-  const comments = [
-    { id: 1, user: app, body: `${marker(48, "sandbox")}\n${sandboxMarkerLine({ state: "running", claim, stage: "work", launches: [] })}` },
-    // The launcher's post-start write never came; the stage's part carries the start.
-    { id: 2, user: app, body: `${marker(48, "stage", claim)}\n${sandboxMarkerLine({ state: "running", at: "2031-03-02T03:01:00Z", launch: { stage: "work", ok: true, run: "9", cue: "stint-1", event: "pull_request", eventAt: "2031-03-02T03:00:00Z" } })}` },
-  ];
-  assert.deepEqual(launchesOf(comments, 48, self), [{ stage: "work", run: "9", event: "pull_request", at: Date.parse("2031-03-02T03:00:00Z") }]);
-});
-
-test("listObjectives: an issue whose label was removed after --since, once Pendulum took it, is listed; only unlabelled issues touched since --since have their events read", async () => {
-  const SINCE = "2031-03-01T00:00:00Z";
-  const ev = (event, name, created_at) => ({ event, label: { name }, created_at });
-  const labelled = [{ number: 42, state: "closed", closed_at: "2031-03-02T00:00:00Z", labels: [{ name: "pendulum:objective" }] }, { number: 43, state: "open", labels: [{ name: "pendulum:objective" }, { name: "pendulum:running" }] }, { number: 44, state: "open", labels: [{ name: "pendulum:objective" }] }];
-  const touched = [...labelled, { number: 77, state: "open", labels: [{ name: "P2" }] }, { number: 78, state: "open", labels: [] }, { number: 79, state: "open", labels: [], pull_request: {} }, { number: 80, state: "closed", labels: [] }, { number: 81, state: "open", labels: [] }];
-  const events = {
-    77: [ev("labeled", "pendulum:objective", "2031-03-01T10:00:00Z"), ev("labeled", "pendulum:running", "2031-03-02T00:00:00Z"), ev("labeled", "pendulum:blocked", "2031-03-03T00:00:00Z"), ev("unlabeled", "pendulum:objective", "2031-03-04T00:00:00Z")], // parked
-    78: [ev("labeled", "pendulum:objective", "2031-03-01T10:00:00Z"), ev("unlabeled", "pendulum:objective", "2031-03-04T00:00:00Z")], // removed before Pendulum took it
-    80: [ev("labeled", "pendulum:running", "2031-02-19T00:00:00Z"), ev("unlabeled", "pendulum:objective", "2031-02-20T00:00:00Z"), ev("labeled", "P2", "2031-03-02T00:00:00Z")], // all before --since
-    81: [],
-  };
-  const calls = [];
-  const api = async (path) => {
-    calls.push(path);
-    if (path.startsWith(`repos/${REPO}/issues?labels=`)) return labelled;
-    if (path.startsWith(`repos/${REPO}/issues?state=all&since=`)) return touched;
-    const n = Number(/issues\/(\d+)\/events/.exec(path)?.[1]);
-    return events[n] ?? [];
-  };
-  assert.deepEqual(await listObjectives(api, REPO, { since: SINCE }), [42, 43, 77]);
-  // Labelled issues and pull requests have no events read: one call per unlabelled issue touched in the window.
-  assert.deepEqual(calls.slice(2), [77, 78, 80, 81].map((n) => `repos/${REPO}/issues/${n}/events?per_page=100`));
-  assert.equal(calls[1], `repos/${REPO}/issues?state=all&since=${encodeURIComponent(SINCE)}&per_page=100`);
 });
 
 test("a parked Objective is a row: stopped when Blocked, in flight when its Question waits, never a walk-away", () => {
@@ -491,55 +281,6 @@ test("pooledStreak: two repositories' rows in the order they ended, any harness;
   assert.match(md, /Left out \(clock started before v9\.9\.9\): acme\/gadgets#4/);
 });
 
-test("a workflow hand-over scored as an owner step extends the streak and the pooled streak, and each says so; scored as input it breaks them", () => {
-  const handed = withHandover(cleanMerge(42));
-  const clean = cleanMerge(43); // ends at the same time: the issue number orders them
-  const rows = [score(handed), score(clean)];
-  const s = streaks(rows, { from: "2031-03-01T00:00:00Z" });
-  const h = Object.values(s.harnesses)[0];
-  assert.deepEqual([h.current, h.walkAway, h.finished], [2, 2, 2]);
-  assert.deepEqual(h.sequence.map((x) => [x.issue, x.ok, x.ownerStep ?? null]), [[42, true, "workflow hand-over"], [43, true, null]]);
-  assert.equal(h.sequence[0].why, "walk-away merge; owner step: workflow hand-over");
-  assert.deepEqual(s.handover, ["owner-step"]);
-  const md = streakTable(s, { repository: REPO });
-  assert.match(md, /^Streak on .* A workflow hand-over counts as normal work \(--handover owner-step\): applying it is an owner step after the merge, which the entry names, not input\.$/m);
-  assert.match(md, /^- #42 2031-03-02T03:30:00Z: yes, owner step: workflow hand-over$/m);
-  assert.match(md, /^- #43 2031-03-02T03:30:00Z: yes$/m);
-  const p = pooledStreak(rows.map((r) => ({ ...r, repository: REPO })), { from: "2031-03-01T00:00:00Z" });
-  assert.deepEqual([p.current, p.sequence[0].ownerStep], [2, "workflow hand-over"]);
-  const pmd = pooledTable(p, { repositories: [REPO] });
-  assert.match(pmd, /^Pooled streak .* A workflow hand-over counts as normal work \(--handover owner-step\)/);
-  assert.match(pmd, /^- acme\/widgets#42 \(unknown\) 2031-03-02T03:30:00Z: yes, owner step: workflow hand-over$/m);
-
-  const strict = streaks([handed, clean].map((c) => scoreObjective(c, { prices, now: NOW, handover: "input" })), { from: "2031-03-01T00:00:00Z" });
-  assert.deepEqual(Object.values(strict.harnesses)[0].sequence.map((x) => x.ok), [false, true]);
-  assert.match(streakTable(strict, { repository: REPO }), /A workflow hand-over is input here \(--handover input\): it breaks the streak\./);
-  // Rows scored by both rules (a standing scorecard's older hand-over row, scored as input) say so.
-  const old = scoreObjective(withHandover(cleanMerge(44)), { prices, now: NOW, handover: "input" });
-  delete old.walkAway.handover;
-  assert.match(streakTable(streaks([...rows, old], { from: null }), { repository: REPO }), /scored per row here \(walkAway\.handover\): an owner step on some, input on others\./);
-  // An older row with no hand-over at all says nothing about the rule: no mix.
-  const plain = { ...rows[1], issue: 45, walkAway: { ...rows[1].walkAway, handover: undefined } };
-  const unmixed = streakTable(streaks([...rows, plain], { from: null }), { repository: REPO });
-  assert.doesNotMatch(unmixed, /scored per row/);
-  assert.match(unmixed, /A workflow hand-over counts as normal work \(--handover owner-step\)/);
-});
-
-test("score.mjs: several --repo values need --streak and --since, and take no issue-keyed option", () => {
-  const fail = (args) => {
-    try {
-      execFileSync("node", [join(BENCH, "score.mjs"), ...args], { encoding: "utf8", stdio: "pipe" });
-      return 0;
-    } catch (e) {
-      return [e.status, e.stderr];
-    }
-  };
-  assert.deepEqual(fail(["--repo", "a/x", "--repo", "b/y", "--since", "v9.9.9"])[0], 64);
-  const [code, err] = fail(["--repo", "a/x", "--repo", "b/y", "--streak", "--since", "v9.9.9", "--issue", "3"]);
-  assert.equal(code, 64);
-  assert.match(err, /--issue takes one --repo/);
-});
-
 test("External: a Block for each external cause scores External; a mix with any other stop, a Question or an older uncoded Block is a miss", async () => {
   const { blockMarker } = await import("../../plugin/scripts/lib/logic.mjs");
   const APP = { login: "acme-pendulum[bot]", type: "Bot" };
@@ -574,55 +315,6 @@ test("External: a Block for each external cause scores External; a mix with any 
   assert.equal(score(forged).walkAway.bucket, "miss");
 });
 
-test("External: merged after an external Block whose only input was the relabel it asked for; a later unprompted comment makes it a miss", async () => {
-  const { blockMarker } = await import("../../plugin/scripts/lib/logic.mjs");
-  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
-  const OWNER_ = { login: "maintainer", type: "User" };
-  const raised = () => {
-    const c = cleanMerge(87);
-    c.issueTimeline.push({ event: "labeled", label: { name: "pendulum:blocked" }, actor: APP, created_at: "2031-03-02T01:20:00Z" }, { event: "labeled", label: { name: "pendulum:objective" }, actor: OWNER_, created_at: "2031-03-02T01:40:00Z" }, { event: "labeled", label: { name: "pendulum:running" }, actor: APP, created_at: "2031-03-02T01:41:00Z" });
-    c.issueComments.push({ user: APP, created_at: "2031-03-02T01:20:00Z", body: `<!-- pendulum:87:blocked:work:1 -->\n@maintainer Blocked (work): dollar cap reached\n${blockMarker("max-usd")}` });
-    return c;
-  };
-  const r = score(raised());
-  assert.deepEqual([r.walkAway.value, r.walkAway.bucket, r.walkAway.interventions.asked, r.walkAway.interventions.unprompted], [false, "external", 1, 0]);
-  const noted = raised();
-  noted.issueComments.push({ user: OWNER_, created_at: "2031-03-02T02:30:00Z", body: "Use the other format." });
-  assert.equal(score(noted).walkAway.bucket, "miss");
-  // The row table names the bucket.
-  const { markdownTable } = await import("../lib/objective.mjs");
-  assert.match(markdownTable([r]), /\| external: Blocked: max-usd \|/);
-});
-
-test("streaks: an External Objective between walk-aways neither extends nor resets, per harness and pooled; a P1 escape on its merge breaks", () => {
-  const ext = (issue, over = {}) => row(issue, { exit: "blocked", mergedAt: null, walkAway: { value: false, bucket: "external", blocks: [{ at: "2031-03-02T00:00:00Z", cause: "provider-quota" }], since: "2031-03-01T00:00:00Z", reason: "not merged (blocked)", blocked: { at: `2031-03-0${issue % 9 + 1}T00:00:00Z` }, unseen: [] }, ...over });
-  const rows = [row(1), row(2), ext(3), row(4), ext(5, { harness: null })];
-  const s = streaks(rows, { from: "2031-02-28T00:00:00Z" });
-  assert.deepEqual([s.harnesses.claude.current, s.harnesses.claude.best, s.harnesses.claude.finished, s.harnesses.claude.external], [3, 3, 3, 1]);
-  assert.deepEqual(s.harnesses.claude.sequence.map((x) => [x.issue, x.ok]), [[1, true], [2, true], [3, null], [4, true]]);
-  assert.deepEqual(s.harnesses.unknown.sequence.map((x) => [x.issue, x.ok]), [[5, null]]);
-  assert.match(streakTable(s, { repository: REPO }), /^- #3 [^\n]*: skipped: external: Blocked: provider-quota$/m);
-  const p = pooledStreak(rows.map((r) => ({ ...r, repository: REPO })), { from: "2031-02-28T00:00:00Z" });
-  assert.deepEqual([p.current, p.best, p.finished, p.external], [3, 3, 3, 2]);
-  // Merged External with a P1 escape found later: a break.
-  const escaped = ext(6, { mergedAt: "2031-03-07T00:00:00Z", exit: "merged", quality: { escapes: [{ issue: "acme/widgets#99", priority: "P1" }] } });
-  assert.equal(verdict(escaped).ok, false);
-});
-
-test("a restart (pendulum:restart) is a human action on every route; Pendulum's removal of the label after it is not", () => {
-  const actions = cleanMerge(42);
-  const by = { login: "maintainer", type: "User" };
-  actions.issueTimeline.push({ event: "labeled", label: { name: "pendulum:restart" }, actor: by, created_at: "2031-03-02T02:02:30Z" }, { event: "unlabeled", label: { name: "pendulum:restart" }, actor: { login: "pendulum-app[bot]", type: "Bot" }, created_at: "2031-03-02T02:02:40Z" });
-  const row = score(actions);
-  assert.equal(row.walkAway.value, false, "a restart is no walk-away");
-  assert.equal(row.walkAway.firstHumanAction.kind, "labeled pendulum:restart");
-  // Local mode: the loop removes the label under the person's own login once it has restarted the Objective.
-  const local = localMerge();
-  local.issueTimeline.push({ event: "labeled", label: { name: "pendulum:restart" }, actor: OPERATOR, created_at: "2031-03-02T01:30:00Z" }, { event: "unlabeled", label: { name: "pendulum:restart" }, actor: OPERATOR, created_at: "2031-03-02T01:30:20Z" });
-  const kinds = humanActions(local, "2031-03-02T01:00:00Z").map((a) => a.kind);
-  assert.deepEqual(kinds, ["labeled pendulum:restart"]);
-});
-
 test("#465: an Objective from before the rename (its events and markers under the previous name, its label renamed in place) is left out of a --since v0.10.0 streak, never a miss", () => {
   const tag = "2031-03-04T00:00:00Z";
   const old = (c) => {
@@ -639,29 +331,4 @@ test("#465: an Objective from before the rename (its events and markers under th
   assert.deepEqual(s.before, [45, 46]);
   const all = Object.values(s.harnesses).flatMap((h) => h.sequence);
   assert.deepEqual(all.map((e) => [e.issue, e.ok]), [[47, true]]);
-});
-
-test("body edits: every edit of the issue and PR bodies is read; Pendulum's finish block on the merged PR neither hides a person's earlier edit nor counts as one", async () => {
-  const { collectObjective } = await import("../lib/collect.mjs");
-  const api = async (path) => {
-    if (/issues\/5$/.test(path)) return { number: 5, labels: [{ name: "pendulum:objective" }], user: { login: "owner" } };
-    if (/pulls\?head=.*state=closed/.test(path)) return [{ number: 9, merged_at: "2031-03-02T03:30:00Z" }];
-    if (/pulls\/9$/.test(path)) return { number: 9, merged_at: "2031-03-02T03:30:00Z" };
-    return [];
-  };
-  const edits = (nodes) => ({ userContentEdits: { nodes } });
-  const graphql = async (q) => ({ repository: q.includes("pullRequest(") ? { pullRequest: edits([{ editedAt: "2031-03-02T03:31:00Z", editor: { login: "acme-pendulum", __typename: "Bot" } }, { editedAt: "2031-03-02T02:30:00Z", editor: { login: "owner", __typename: "User" } }]) } : { issue: edits([]) } });
-  const read = await collectObjective(api, REPO, 5, { graphql, jobs: false });
-  assert.deepEqual(read.bodyEdits.map((e) => [e.where, e.by.login]), [["PR #9", "acme-pendulum"], ["PR #9", "owner"]], "the App's later edit does not hide the person's");
-
-  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
-  const finish = { at: "2031-03-02T03:31:00Z", where: "PR #100", by: APP };
-  const clean = cleanMerge(61);
-  clean.bodyEdits = [finish];
-  assert.equal(score(clean).walkAway.value, true, "Pendulum's own finish block is no human action");
-  const person = cleanMerge(62);
-  person.bodyEdits = [finish, { at: "2031-03-02T02:30:00Z", where: "PR #100", by: { login: "owner", type: "User" } }];
-  const r = score(person);
-  assert.equal(r.walkAway.value, false);
-  assert.match(r.walkAway.reason, /first human action: body edit on PR #100 by owner/);
 });

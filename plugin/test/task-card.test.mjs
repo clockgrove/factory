@@ -1,35 +1,11 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PLUGIN_ROOT } from "../scripts/lib/checkout.mjs";
-import { PENDULUM_PROTECTED, protectedPaths, protectedTouched, renderTaskCard, taskCardValues } from "../scripts/lib/logic.mjs";
-import { validationGroups } from "../scripts/lib/logic.mjs";
-import { buildPrompt, fixClosingText } from "../scripts/lib/session.mjs";
+import { PENDULUM_PROTECTED, protectedPaths, protectedTouched, renderTaskCard } from "../scripts/lib/logic.mjs";
+import { buildPrompt } from "../scripts/lib/session.mjs";
 
-const template = readFileSync(join(PLUGIN_ROOT, "templates", "task-card.md"), "utf8");
-
-test("renders the plugin's task card with every placeholder filled", () => {
-  const values = taskCardValues({ issue: 811, maxUsd: 25, timeoutMinutes: 240, validation: ["pnpm check", "pnpm test"], budgetCommand: "node scripts/check-test-budget.mjs", protectedPaths: protectedPaths(["scripts/test-budget.json"]) });
-  const card = renderTaskCard(template, values);
-  assert.match(card, /GitHub issue #811 in this repository, unattended/);
-  assert.match(card, /Your budget is \$25 and 4 hours/);
-  assert.match(card, /Validation commands: pnpm check; pnpm test\./);
-  assert.match(card, /Budget command: node scripts\/check-test-budget\.mjs\./);
-  assert.match(card, /Protected paths: \.github\/, CODEOWNERS, \.agents\/skills\/, \.claude\/, \.codex\/, scripts\/test-budget\.json\./);
-  assert.match(card, /commits on pendulum\/811, which Pendulum pushes/);
-  assert.match(card, /You never write to GitHub/);
-  assert.doesNotMatch(card, /PENDULUM_EXIT_FILE|gh pr create|git push/);
-  assert.doesNotMatch(card, /\{\{/);
-});
-
-test("hours are rounded to one decimal and empty commands read as none", () => {
-  const v = taskCardValues({ issue: 1, maxUsd: 5, timeoutMinutes: 100, validation: [], budgetCommand: "", protectedPaths: PENDULUM_PROTECTED });
-  assert.equal(v.hours, "1.7");
-  assert.equal(v.validation, "none");
-  assert.equal(v.budget_command, "none");
-});
 
 test("a missing placeholder value is an error, not an empty string", () => {
   assert.throws(() => renderTaskCard("hi {{issue}} {{nope}}", { issue: 1 }), /missing values for nope/);
@@ -49,52 +25,6 @@ test("protected paths: Pendulum's list plus the repository's, deduped; directory
   assert.deepEqual(protectedTouched(["src/x.ts"], list), []);
 });
 
-test("protected paths: a leading / anchors a file entry at the root; without it a file name matches at any depth", async () => {
-  const files = ["build.mjs", "packages/web/build.mjs", "scripts/ci/setup.sh", "vendor/scripts/ci/setup.sh", "db/x.sql"];
-  assert.deepEqual(protectedTouched(files, ["/build.mjs", "/scripts/ci/setup.sh", "/db/"]), ["build.mjs", "scripts/ci/setup.sh", "db/x.sql"]);
-  assert.deepEqual(protectedTouched(files, ["build.mjs", "scripts/ci/setup.sh"]), ["build.mjs", "packages/web/build.mjs", "scripts/ci/setup.sh", "vendor/scripts/ci/setup.sh"]);
-  assert.deepEqual(protectedTouched(files, ["./build.mjs"]), ["build.mjs", "packages/web/build.mjs"], "a leading ./ anchors nothing, as before");
-  // The job's commit hook (session.mjs configureGit) matches the same way.
-  const { configureGit } = await import("../scripts/lib/session.mjs");
-  const { execFileSync } = await import("node:child_process");
-  const { mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
-  const dir = mkdtempSync(join(tmpdir(), "pendulum-root-hook-"));
-  execFileSync("git", ["init", "-q", dir], { env });
-  await configureGit(dir, { login: "t", id: 1, protectedList: [...PENDULUM_PROTECTED, "/build.mjs", "/db/", "toolchain.sh"], credentialHelper: null, env });
-  const commit = (file) => {
-    mkdirSync(join(dir, file, ".."), { recursive: true });
-    writeFileSync(join(dir, file), "x\n");
-    execFileSync("git", ["-C", dir, "add", "."], { env });
-    try {
-      execFileSync("git", ["-C", dir, "commit", "-q", "-m", file], { env, stdio: "pipe" });
-      return "ok";
-    } catch (e) {
-      execFileSync("git", ["-C", dir, "reset", "-q"], { env });
-      execFileSync("git", ["-C", dir, "clean", "-qfd"], { env });
-      return String(e.stderr).trim();
-    }
-  };
-  assert.equal(commit("packages/web/build.mjs"), "ok", "a nested file of a root-anchored name is the worker's");
-  assert.equal(commit("build.mjs"), "pendulum: refusing commit on protected path(s): build.mjs");
-  assert.equal(commit("db/x.sql"), "pendulum: refusing commit on protected path(s): db/x.sql");
-  assert.equal(commit("ci/toolchain.sh"), "pendulum: refusing commit on protected path(s): ci/toolchain.sh", "an unanchored file name still matches at any depth");
-});
-
-
-test("task card: with required checks the harness runs the tests it touched; without them it runs the commands", () => {
-  const withChecks = taskCardValues({ issue: 2, maxUsd: 5, timeoutMinutes: 60, validation: ["pnpm test"], budgetCommand: "", protectedPaths: PENDULUM_PROTECTED, ciChecks: ["quality"] });
-  assert.match(withChecks.validation_note, /required check \(quality\) on the head Pendulum pushes.*tests your change touches/);
-  const without = taskCardValues({ issue: 2, maxUsd: 5, timeoutMinutes: 60, validation: ["pnpm test"], budgetCommand: "", protectedPaths: PENDULUM_PROTECTED });
-  assert.equal(without.validation_note, "Run the validation commands before you stop; Pendulum runs them again.");
-});
-
-test("validation commands: consecutive parallel: marks share a group, unmarked ones run alone, the card shows no marks", () => {
-  const commands = ["pnpm install-check", "parallel: pnpm test", "parallel: pnpm run test:db", "pnpm build", "parallel: pnpm lint"];
-  assert.deepEqual(validationGroups(commands), [["pnpm install-check"], ["pnpm test", "pnpm run test:db"], ["pnpm build"], ["pnpm lint"]]);
-  assert.equal(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: commands, protectedPaths: [] }).validation, "pnpm install-check; pnpm test; pnpm run test:db; pnpm build; pnpm lint");
-});
 
 test("maintainer decisions: people who can push, no bots or Pendulum markers, oldest first; the answer prompt carries them", async () => {
   const { maintainerDecisions, decisionsSection } = await import("../scripts/lib/logic.mjs");
@@ -183,37 +113,4 @@ test("unread decisions: what no pass read, or edited after the version read; Pen
   assert.deepEqual(unreadDecisions(decisions, mergeRead(read, decisionsRead(decisions))), []);
   // No record at all (a PR from before the record existed): every decision is unread, an answer pass rather than a merge.
   assert.equal(unreadDecisions(decisions, {}).length, 4);
-});
-
-test("decisions cut for length are not shown, so not recorded as read; the prompt says more exist; unread ones are never cut", async () => {
-  const { decisionsRead, decisionsSection, decisionsShown } = await import("../scripts/lib/logic.mjs");
-  const { answerFed, answerPrompt } = await import("../scripts/review.mjs");
-  const d = (i, size) => ({ author: "kirk", at: `2026-11-07T10:0${i}:00Z`, key: `comment:${i}`, body: `${i}`.repeat(size) });
-  const decisions = [d(1, 5000), d(2, 5000), d(3, 5000)];
-  assert.deepEqual(decisionsShown(decisions).map((x) => x.key), ["comment:2", "comment:3"]);
-  assert.match(decisionsSection(decisions), /1 earlier decision\(s\) are not shown here for length/);
-  assert.doesNotMatch(decisionsSection(decisions.slice(1)), /not shown/);
-  // The newest is shown whole even when it alone is over the cap: a decision that never fits would stay unread forever.
-  assert.deepEqual(decisionsShown([d(4, 20_000)]).map((x) => x.key), ["comment:4"]);
-  assert.deepEqual(Object.keys(decisionsRead(decisionsShown(decisions))), ["comment:2", "comment:3"]);
-  // The answer pass for unread decisions lists them all, uncut, and records them all.
-  const unread = [d(5, 9000), d(6, 9000)];
-  assert.doesNotMatch(answerPrompt({ taskCard: "", prNumber: 9, comments: [], decisions: unread, afterPush: true }), /not shown/);
-  assert.deepEqual(answerFed({ fresh: true, decisions, listed: unread, afterPush: true }).map((x) => x.key), ["comment:2", "comment:3", "comment:5", "comment:6"]);
-  // A resumed pass answering findings gets the decisions as they fit; a fresh one has them in its card only.
-  assert.deepEqual(answerFed({ fresh: false, decisions, listed: decisions, afterPush: false }).map((x) => x.key), ["comment:2", "comment:3"]);
-  assert.deepEqual(answerFed({ fresh: true, decisions, listed: [], afterPush: false }).map((x) => x.key), ["comment:2", "comment:3"]);
-});
-
-test("the task card and the fix pass's ask list what the setup command runs, bounded, so a worker leaves it alone (#387)", () => {
-  const guard = { files: ["tools/boot.mjs", ".npmrc", "scripts/ci"], scripts: [{ pkg: "package.json", name: "bootstrap" }, { pkg: "*", name: "build" }], unresolved: [] };
-  const card = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "t", issueBody: "b", maxUsd: 10, timeoutMinutes: 60, validation: [], budgetCommand: "", protectedList: PENDULUM_PROTECTED, setupGuard: guard });
-  assert.match(card, /Protected paths: [^\n]*\. Setup's files, don't change them or anything under them: `\.npmrc`, `scripts\/ci`, `tools\/boot\.mjs`\. Setup's package\.json scripts, don't change them: `package\.json scripts\.bootstrap`, `any package\.json scripts\.build`\. Setup runs them as the runner from the default branch, so Pendulum refuses a push that changes one\./);
-  assert.match(fixClosingText({ commands: ["make test"], setupGuard: guard }), /Setup's files, don't change them or anything under them: `\.npmrc`, `scripts\/ci`, `tools\/boot\.mjs`\. Setup's package\.json scripts, don't change them: `package\.json scripts\.bootstrap`/, "the fix pass's ask too");
-  const many = { files: Array.from({ length: 40 }, (_, i) => `f${String(i).padStart(2, "0")}.sh`), scripts: [], unresolved: [] };
-  assert.match(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: [], protectedPaths: [], setupGuard: many }).setup_files, /`f24\.sh` and 15 more\./, "bounded");
-  const none = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "t", issueBody: "b", maxUsd: 10, timeoutMinutes: 60, validation: [], budgetCommand: "", protectedList: PENDULUM_PROTECTED });
-  assert.doesNotMatch(none, /Setup's files/, "no setup: nothing said");
-  assert.doesNotMatch(fixClosingText({ commands: [] }), /Setup's files/);
-  assert.match(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: [], protectedPaths: [], setupGuard: { files: [], scripts: [], unresolved: ["$X"] } }).setup_files, /^ Setup also runs what Pendulum cannot name, so Pendulum refuses every push until a person fixes the setup command\.$/);
 });

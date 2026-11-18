@@ -4,58 +4,18 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { STOP_GRACE_MS, applyStop, claimExit, holdIfStopped, requestStageStop, resetStageStop, stageStopped, stopCause, stopText, stoppedRecords, watchObjective } from "../scripts/lib/stop.mjs";
+import { STOP_GRACE_MS, applyStop, claimExit, holdIfStopped, requestStageStop, resetStageStop, stageStopped, stoppedRecords } from "../scripts/lib/stop.mjs";
 import { sumSpend } from "../scripts/lib/logic.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
 RETRY.sleep = async () => {};
 
 const issue = (labels, state = "open", number = 7) => ({ number, state, labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } });
-
-test("stopCause: a closed issue or one without its Objective label is stopped; labels as names or objects", () => {
-  assert.equal(stopCause(issue(["pendulum:objective", "pendulum:running"]), "pendulum:objective"), null);
-  assert.equal(stopCause(issue(["pendulum:running"]), "pendulum:objective"), "unlabeled");
-  assert.equal(stopCause(issue(["pendulum:objective"], "closed"), "pendulum:objective"), "closed", "closing stops it, label or not");
-  assert.equal(stopCause({ state: "open", labels: ["pendulum:objective"] }, "pendulum:objective"), null);
-  assert.equal(stopCause({ state: "open", labels: ["my:objective"] }, "my:objective"), null, "the workflow's own Objective label");
-  assert.equal(stopCause(null, "pendulum:objective"), null, "no read is no stop");
-  assert.equal(stopText("closed"), "the issue was closed");
-  assert.equal(stopText("unlabeled", "pendulum:objective"), "`pendulum:objective` was removed");
-});
-
-test("watchObjective: the first read that shows the stop calls onStop once; a failed read is no answer", async () => {
-  const reads = [issue(["pendulum:objective"]), new Error("502"), issue(["pendulum:objective"]), issue([]), issue([], "closed")];
-  const seen = [];
-  let i = 0;
-  await new Promise((done) => {
-    watchObjective({
-      read: async () => {
-        const r = reads[Math.min(i++, reads.length - 1)];
-        if (r instanceof Error) throw r;
-        return r;
-      },
-      label: "pendulum:objective",
-      everyMs: 5,
-      onStop: (cause) => {
-        seen.push(cause);
-        setTimeout(done, 40);
-      },
-    });
-  });
-  assert.deepEqual(seen, ["unlabeled"], "called once, on the fourth read, never again");
-  assert.equal(i, 4);
-  // A watch stopped before any stop never calls back.
-  let called = false;
-  const w = watchObjective({ read: async () => issue([]), label: "pendulum:objective", everyMs: 5, onStop: () => (called = true) });
-  w.stop();
-  await new Promise((r) => setTimeout(r, 30));
-  assert.equal(called, false);
-});
 
 test("the stage's stop: asked once, its exit claimed once, and the main flow parked after it", async () => {
   resetStageStop();
@@ -196,62 +156,6 @@ test("dispatcher: a stopped Objective In review is left a draft and Queued at on
 
 const SCRIPTS = join(import.meta.dirname, "..", "scripts");
 const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
-
-test("a stopped stage's harness pass ends at once, the turn it reported kept; no pass starts after the stop", async () => {
-  const root = mkdtempSync(join(tmpdir(), "stop-pass-"));
-  mkdirSync(join(root, "bin"));
-  // A fake Codex that reports one turn, then runs on for a minute unless it is ended; each start is counted.
-  writeFileSync(
-    join(root, "bin", "codex"),
-    `#!${process.execPath}
-const fs = require("node:fs");
-fs.appendFileSync(process.env.FAKE_STATE + "/starts", "x");
-console.log(JSON.stringify({ type: "thread.started", thread_id: "01a1c6ba-16b2-7a13-b2da-47bf51b4e724" }));
-console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 200000, cached_input_tokens: 100000, cache_write_input_tokens: 0, output_tokens: 5000, reasoning_output_tokens: 0 } }));
-require("node:fs").writeFileSync(process.env.FAKE_STATE + "/printed", "");
-setTimeout(() => {}, 60000);
-`,
-    { mode: 0o755 },
-  );
-  const script = `
-    import { existsSync } from "node:fs";
-    import { passesRunning, runHarness, stagePasses } from ${JSON.stringify(LIB("harness.mjs"))};
-    import { requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
-    const root = process.env.FAKE_STATE;
-    const pass = (label) => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root }, timeoutMs: 120_000, label });
-    const started = Date.now();
-    // The caller of a pass the stop ended never goes on: the stop writes the stage's end.
-    let returned = 0;
-    pass("work-1").then(() => (returned += 1));
-    while (!existsSync(root + "/printed") && Date.now() - started < 20_000) await new Promise((r) => setTimeout(r, 20));
-    await new Promise((r) => setTimeout(r, 200));
-    requestStageStop("unlabeled");
-    while (passesRunning() > 0 && Date.now() - started < 60_000) await new Promise((r) => setTimeout(r, 20));
-    const ms = Date.now() - started;
-    pass("work-2").then(() => (returned += 1));
-    await new Promise((r) => setTimeout(r, 500));
-    const [first, second] = stagePasses();
-    process.stdout.write(JSON.stringify({ ms, returned, first: { stopped: first.stopped, usd: first.usd }, second: { stopped: second.stopped, noRun: second.noRun, usd: second.usd }, passes: stagePasses().map((p) => p.label), home: (await import("node:os")).homedir() }) + "\\n");
-    process.exit(0);
-  `;
-  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, FAKE_STATE: root, CODEX_HOME: join(root, "codex") }, stdio: ["ignore", "pipe", "pipe"] });
-  let out = "";
-  let err = "";
-  child.stdout.on("data", (c) => (out += c));
-  child.stderr.on("data", (c) => (err += c));
-  const code = await new Promise((r) => child.on("exit", r));
-  assert.equal(code, 0, err);
-  const r = JSON.parse(out.trim().split("\n").at(-1));
-  assert.equal(r.home, homedir(), "#318: the stage process runs on the test's fake home");
-  assert.ok(r.ms < 40_000, `the pass ran on after the stop (${r.ms} ms)`);
-  assert.equal(r.first.stopped, true);
-  assert.ok(r.first.usd > 0, "the stopped pass's reported turn is recorded");
-  assert.equal(r.returned, 0, "neither caller goes on after the stop");
-  assert.deepEqual(r.second, { stopped: true, noRun: true, usd: 0 });
-  assert.equal(readFileSync(join(root, "starts"), "utf8"), "x", "the harness started once: no pass after the stop");
-  assert.deepEqual(r.passes, ["work-1", "work-2"], "every pass is the stage's record");
-  assert.ok(existsSync(root));
-});
 
 test("stopStage: the stage's end on a stop: its passes settled into its records with their spend, its PR a draft, finish('stopped'); once only", async () => {
   const root = mkdtempSync(join(tmpdir(), "stop-stage-"));

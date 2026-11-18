@@ -17,6 +17,7 @@ import { CODEX_NO_TOKENS, mergeUsage, parseUsage } from "../../plugin/scripts/li
 import { harnessMarker, usdText } from "../../plugin/scripts/lib/logic.mjs";
 import { handoverLine } from "../../plugin/scripts/lib/handover.mjs";
 import { PREVIOUS_NAME } from "../../plugin/scripts/lib/local.mjs";
+import { newForms } from "../../plugin/test/fixtures/progress-new-form.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
 const USAGE = join(import.meta.dirname, "fixtures", "usage");
@@ -1571,4 +1572,16 @@ test("an Objective labelled before the rename to Pendulum (#567): a walk-away wi
     const v = verdict({ ...clean, walkAway: { ...clean.walkAway, unseen } });
     assert.deepEqual([v.ok, v.why], [false, `input not readable (${(unseen ?? ["input sources not recorded"]).join(", ")}): walk-away unproven`]);
   }
+});
+
+test("#589: the scorecard reads progress comments with the card over their log as the same comments before it", () => {
+  for (const make of [() => localMerge(60), () => cleanMerge(42, usage("claude")), () => blocked(44, usage("claude"))]) {
+    const c = make();
+    const fresh = make();
+    fresh.issueComments = newForms(fresh.issueComments);
+    fresh.issueTimeline = newForms(fresh.issueTimeline);
+    assert.deepEqual(scoreObjective(fresh, { prices, now: NOW }), scoreObjective(c, { prices, now: NOW }));
+  }
+  const local = localMerge(60);
+  assert.ok(newForms(local.issueComments).some((x, i) => x.body !== local.issueComments[i].body), "the fixture has progress comments, now in the new form");
 });

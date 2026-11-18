@@ -1294,7 +1294,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     mine = mergeTriage(mine, rec);
     progress?.triage?.(mine);
     log(line);
-    if (progress) await progress(line);
+    if (progress) await progress(line, { step: "triage", detail: line });
   };
   const known = async () => {
     if (!earlier) {
@@ -1431,7 +1431,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     offSaid = true;
     const line = `triage: off (${code}); ${cancels.map((c) => `${c.text}, no flake; `).join("")}fix pass`;
     log(line);
-    if (progress) await progress(line);
+    if (progress) await progress(line, { step: "triage", detail: line });
     return { rerun: false };
   };
 

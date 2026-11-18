@@ -22,7 +22,7 @@ import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolv
 import { useObjectiveZone } from "./lib/clock.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, workValidation, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, appliedExit, endStep, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, workValidation, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
 import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -91,7 +91,7 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
   if (!left && outbox.rebaseNote) {
     log(`rebase check: ${outbox.rebaseNote}`);
     try {
-      await progress?.(`rebase check: ${outbox.rebaseNote}`);
+      await progress?.(`rebase check: ${outbox.rebaseNote}`, { step: "rebase", detail: outbox.rebaseNote });
     } catch (e) {
       log(`rebase note: ${String(e?.message || e).slice(0, 120)}`);
     }
@@ -123,9 +123,13 @@ const settleExit = async () => {
   await beforeExit?.();
   if (!commitExit()) await parked();
 };
+// The exit the stage applied last (session.mjs appliedExit), for its exit line's "what to do" (endStep).
+let lastApplied = null;
 const applyExit = async (...args) => {
   await settleExit();
-  return applyExitNow(...args);
+  const r = await applyExitNow(...args);
+  lastApplied = appliedExit(args[1], r);
+  return r;
 };
 
 /**
@@ -304,7 +308,7 @@ async function main() {
       const passesRan = records.filter((r) => r && !r.noRun && !r.decision).length;
       rebaseText = `; ${await rebaseExitLine(progress, issue, { cost, conflict: rebaseStage.conflict, passes: passesRan }, read)}`;
     }
-    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`);
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`, endStep({ issue, exit, reason, applied: lastApplied }));
     // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.
     stopWaiting();
     setOutput("exit", exit);
@@ -472,7 +476,7 @@ async function main() {
   // Automatic choice picked the account: a limit with no reset ends the stage, to move the Objective or Block (#332).
   LIMIT.moves = stageMoves({ local, limits, pinned: acct.pinned });
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
-  if (acct.note) await progress(acct.note);
+  if (acct.note) await progress(acct.note, { step: "setup", detail: acct.note });
   if (chosen.labels.length) log(`this Objective's labels choose ${chosen.labels.join(", ")}: ${inputs.harness}${inputs.model ? ` ${inputs.model}` : ""}`);
 
   // 2. Doctor's job checks, for the harness this Objective runs on: a misconfigured repository Blocks with one line, not a run.
@@ -714,12 +718,12 @@ async function main() {
   // setup so the bench does not count a one-time cost against every run (bench/lib/phases.mjs: firstSetup).
   const firstMs = Number(process.env.PENDULUM_LOCAL_FIRST_SETUP_MS);
   const first = Number.isFinite(firstMs) && firstMs >= 0;
-  if (first) await progress(`first-time setup: cloned in ${Math.round(firstMs / 1000)} s`);
+  if (first) await progress(`first-time setup: cloned in ${Math.round(firstMs / 1000)} s`, { step: "setup", first: true, cloneS: Math.round(firstMs / 1000) });
   // What already listens on loopback is no service of the setup's: Claude Code's commands reach only what it starts.
   if (inputs.harness === "claude" && access.agent) noteSetupStart();
   if (inputs.setup) {
     log(`setup: ${inputs.setup}`);
-    await progress("setup");
+    await progress("setup", { step: "setup" });
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
     // One that fails while this machine's network is down runs once more after it is back (checkout.mjs runSetup).
     const tree = access.agent ? await outbox.defaultTree() : checkout;
@@ -741,7 +745,7 @@ async function main() {
   let installNote = "";
   if (install) {
     log(`install: ${install}`);
-    await progress(first ? "install (first time on this machine)" : "install");
+    await progress(first ? "install (first time on this machine)" : "install", { step: "setup", first });
     const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt), tools: installTools(installTree, inputs.install) });
     if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
     const ended = installEnd(i, { continued: !!continued, command: install });
@@ -753,7 +757,7 @@ async function main() {
     }
     if (ended.note) {
       log(`${i.reason}; the continued pass finishes its dependency change on the kept checkout`);
-      await progress("install failed on the kept checkout; the continued pass finishes it");
+      await progress("install failed on the kept checkout; the continued pass finishes it", { step: "setup", detail: "install failed on the kept checkout; the continued pass finishes it" });
       installNote = ended.note;
     }
   }
@@ -838,11 +842,12 @@ async function main() {
       : restored
         ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason }
         : { resumed: false, from: null, reason: inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };
-  await progress(`re-entry: ${continued ? `continued the paused work pass from ${reentry.from} on its kept checkout, ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)}` : `fresh session (${reentry.reason})`}` : reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
+  const entered = continued ? `continued the paused work pass from ${reentry.from} on its kept checkout, ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)}` : `fresh session (${reentry.reason})`}` : reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`;
+  await progress(`re-entry: ${entered}`, { step: "setup", resume: entered, resumed: reentry.resumed ? restored.id.slice(0, 8) : null, continued: !!continued });
   const unpriced = unpricedCodex(inputs.harness, inputs.model, { gateway: !!inputs.codexGatewayKey });
   if (unpriced) {
     log(`warning: ${unpriced}`);
-    await progress(`unpriced: ${unpriced}`);
+    await progress(`unpriced: ${unpriced}`, { step: "setup", detail: `unpriced: ${unpriced}` });
   }
   const budgetLeft = () => (passCap() > 0 ? Math.max(0, passCap() - sumSpend(records).usd) : 0);
   let died = 0;
@@ -875,7 +880,7 @@ async function main() {
   if (rebaseMode && !rebaseConflict) rec = { ok: true, noRun: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
   for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
     log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${passCap()}`);
-    await progress(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""} attempt ${attempt}`);
+    await progress(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""} attempt ${attempt}`, { step: "work", harness: inputs.harness, model: inputs.model || null, attempt });
     await io.render();
     // The plan.md this pass wrote, read on the hand-off's tick: once it needs another repository, the harness is stopped there, so the Question costs the plan and not the work.
     // A repository a maintainer has replied about since the ask never stops it (`replied`), so the stop implies the end
@@ -934,7 +939,7 @@ async function main() {
     // A resumed session the CLI could not continue falls back to a fresh run with the full prompt.
     if (attempt === 1 && restored?.id) {
       log(`resumed session ${restored.id.slice(0, 8)} failed (${rec.error}); running fresh`);
-      await progress("re-entry: resume failed; running fresh");
+      await progress("re-entry: resume failed; running fresh", { step: "work", detail: "resume failed; running fresh" });
       restored = { ...restored, id: null, reason: "resume failed" };
       reentry = { ...reentry, resumed: false, from: restored.from ?? null, reason: "resume failed" };
       session.id = null;
@@ -975,7 +980,7 @@ async function main() {
   if (catchConflict() && remainingMs(deadlineAt) <= 0) rec.timedOut = true;
   if (catchConflict() && !planNeeds && !rec.budgetExceeded && !rec.timedOut && !rec.refusal) {
     log(`${defaultBranch} changed ${outbox.conflict.paths.join(", ")} during the run and ${branch} conflicts with it; the harness resolves the conflict`);
-    await progress(`conflict with ${defaultBranch}: harness ${inputs.harness} resolves it`);
+    await progress(`conflict with ${defaultBranch}: harness ${inputs.harness} resolves it`, { step: "conflict", base: defaultBranch });
     await outbox.feed();
     // The default branch's Git LFS media is in the checkout's store already (outbox.mjs push), so the harness's own merge
     // or rebase downloads nothing; what fell short is said here.

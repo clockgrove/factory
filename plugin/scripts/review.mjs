@@ -51,6 +51,8 @@ import { checkAnswers, listedFindings, namedTestRunner, openFindingCheck } from 
 import {
   TASK_CARD_TEMPLATE,
   applyExit as applyExitNow,
+  appliedExit,
+  endStep,
   openAccess,
   commitAuthor,
   gitIdentity,
@@ -271,7 +273,7 @@ export function reviewOverlap({ run, progress, head, conflicted = async () => fa
   let decide;
   const decided = new Promise((r) => (decide = r));
   const short = () => String(head() || "").slice(0, 7);
-  const phase = (line) => progress(reviewing && !reviewerEnded ? `during the reviewer: ${line}` : line);
+  const phase = (line, step = null) => progress(reviewing && !reviewerEnded ? `during the reviewer: ${line}` : line, step);
   const end = () => {
     ending = true;
     if (reviewing && !reviewerEnded) reviewer.abort();
@@ -287,7 +289,7 @@ export function reviewOverlap({ run, progress, head, conflicted = async () => fa
       settled = true;
       decide(false);
       if (!r.green && !r.held && !r.aborted) end();
-      if (reviewing && !reviewerEnded && !r.aborted) await progress(`required checks on ${short()} ${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer runs`);
+      if (reviewing && !reviewerEnded && !r.aborted) await progress(`required checks on ${short()} ${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer runs`, { step: "ci", sha: head() || null, detail: `${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer ran` });
       return r;
     },
     (e) => {
@@ -314,7 +316,7 @@ export function reviewOverlap({ run, progress, head, conflicted = async () => fa
     besideText: () => (settled ? "" : ` beside the required checks on ${short()}`),
     reviewerDone: async () => {
       reviewerEnded = true;
-      if (!settled) await progress(`waiting for required checks on ${short()} after the reviewer`);
+      if (!settled) await progress(`waiting for required checks on ${short()} after the reviewer`, { step: "ci", sha: head() || null, detail: "after the reviewer" });
       return done;
     },
     stop: () => ctl.abort(),
@@ -354,7 +356,7 @@ export async function thirdPartyGate({ repo, issue, pr, labels, names, own, skip
   const ended = await waitEnd({ repo, issue, prNumber: pr.number, labels, token: opts.token });
   if (ended.ok) return third;
   await clearWait({ repo, issue, prNumber: pr.number, token: opts.token });
-  await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`);
+  await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`, { step: "thirdParty", detail: `${ended.why}; going on without ${third.wait.missing.join(", ")}` });
   return { logins: third.logins, wait: null };
 }
 
@@ -838,11 +840,15 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
 // `beforeExit`: the stage's last read of its issue (stop.mjs confirmRunning), once its watch runs. A stop racing an exit
 // already being applied ends nothing (stop.mjs commitExit); a state label that exit put back is the dispatcher's to tidy.
 let beforeExit = null;
+// The exit the stage applied last (session.mjs appliedExit), for its exit line's "what to do" (endStep).
+let lastApplied = null;
 const applyExit = async (...args) => {
   await holdIfStopped();
   await beforeExit?.();
   if (!commitExit()) await parked();
-  return applyExitNow(...args);
+  const r = await applyExitNow(...args);
+  lastApplied = appliedExit(args[1], r);
+  return r;
 };
 
 async function main() {
@@ -1041,7 +1047,7 @@ async function main() {
       const line = stageSpendLine(usage);
       progress.spend(line.usd, line.parts, line.ledger);
     }
-    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`, endStep({ issue, exit, reason, applied: lastApplied }));
     // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.
     stopWaiting();
     setOutput("exit", exit);
@@ -1217,7 +1223,7 @@ async function main() {
   // Automatic choice picked the account: a limit with no reset ends the stage, to move the Objective or Block (#332).
   LIMIT.moves = stageMoves({ local, limits, pinned: acct.pinned });
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
-  if (acct.note) await progress(acct.note);
+  if (acct.note) await progress(acct.note, { step: "setup", detail: acct.note });
   // The chosen harness's credential (doctor.mjs credentialChecks), as the worker's job checks have it: a missing one Blocks
   // with its fix before anything is set up, never a crash at the first harness pass.
   const credFails = (await credentialChecks({ inputs })).filter((c) => c.status === "FAIL");
@@ -1315,7 +1321,7 @@ async function main() {
   // What already listens on loopback is no service of the setup's: Claude Code's commands reach only what it starts.
   if (inputs.harness === "claude" && access.agent) noteSetupStart();
   if (inputs.setup) {
-    await progress("setup");
+    await progress("setup", { step: "setup" });
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
     // One that fails while this machine's network is down runs once more after it is back (checkout.mjs runSetup).
     const tree = access.agent ? await outbox.defaultTree() : checkout;
@@ -1334,7 +1340,7 @@ async function main() {
   const installTree = access.agent ? pendulumTree : checkout;
   const install = installCommand(installTree, inputs.install);
   if (install) {
-    await progress("install");
+    await progress("install", { step: "setup" });
     // An install that failed or left a dependency missing is not a red for the branch: what validation would say after
     // it is no verdict on the PR. installDeps repairs it once; still broken, the stage Blocks naming the install.
     const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt), tools: installTools(installTree, inputs.install) });
@@ -1459,12 +1465,13 @@ async function main() {
   }
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
   reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: "resume policy is fresh" };
-  await progress(`re-entry: ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
+  const entered = reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`;
+  await progress(`re-entry: ${entered}`, { step: "setup", resume: entered, resumed: reentry.resumed ? restored.id.slice(0, 8) : null });
   for (const m of new Set([inputs.reviewerModel, inputs.model].filter(Boolean))) {
     const unpriced = unpricedCodex(inputs.harness, m, { gateway: !!inputs.codexGatewayKey });
     if (unpriced) {
       log(`warning: ${unpriced}`);
-      await progress(`unpriced: ${unpriced}`);
+      await progress(`unpriced: ${unpriced}`, { step: "setup", detail: `unpriced: ${unpriced}` });
     }
   }
 
@@ -1576,7 +1583,7 @@ async function main() {
   let queueFix = null;
   if (queued) {
     log(queued.line);
-    await progress(queued.line);
+    await progress(queued.line, { step: "queue", detail: queued.line });
     if (queued.state === "fixing") {
       heldRed = queued.red;
       queueFix = queued.record;
@@ -1615,7 +1622,7 @@ async function main() {
   if (!alreadyReviewed) {
     // The reviewer's effort is passed on its call: no harness applies its reviewer agent file's effort to this run.
     log(`reviewer on ${inputs.reviewerModel || `${inputs.harness}'s default model`} at ${inputs.reviewerEffort || `${inputs.harness}'s default effort`}`);
-    await progress(`reviewer ${inputs.reviewerModel || inputs.harness}${overlap ? overlap.besideText() : ""}`);
+    await progress(`reviewer ${inputs.reviewerModel || inputs.harness}${overlap ? overlap.besideText() : ""}`, { step: "review", model: inputs.reviewerModel || null, harness: inputs.harness, beside: !!overlap?.besideText() });
   }
   const reviewLive = alreadyReviewed ? null : liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
   const reviewRec = alreadyReviewed ? { ok: true, noRun: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
@@ -1704,7 +1711,7 @@ async function main() {
   let found = null;
   if (foundationDue) {
     log("foundation Objective: the foundation pass checks the shared contracts the diff changes against their callers");
-    await progress(`reviewer foundation pass${overlap ? overlap.besideText() : ""}`);
+    await progress(`reviewer foundation pass${overlap ? overlap.besideText() : ""}`, { step: "review", model: inputs.reviewerModel || null, harness: inputs.harness, foundation: true, beside: !!overlap?.besideText() });
     const foundationLive = liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
     found = await foundationReview({
       model: inputs.reviewerModel,
@@ -1866,7 +1873,7 @@ async function main() {
   judgeOnly = lastCheck.judgeOnly === true;
   const again = listedOpen.filter((c) => c.earlier && lastCheck.unjudged.some((id) => String(id) === String(c.id)));
   if (again.length) {
-    await progress(`finding check: judging again ${again.length} answer(s) the last stage got no verdict on`);
+    await progress(`finding check: judging again ${again.length} answer(s) the last stage got no verdict on`, { step: "check", again: again.length });
     await judgeAnswers(again, JSON.stringify(again.map((c) => ({ id: c.id, body: c.earlier }))));
   }
   const held = new Set([...unjudged.map((u) => String(u.id)), ...(lastCheck.judgeOnly ? again.map((c) => String(c.id)) : [])]);
@@ -1885,7 +1892,7 @@ async function main() {
   }
   const fromThirdParty = toAnswer.filter((c) => c.from).length;
   const redSaid = heldRed ? `the red required checks on ${String(heldRed.sha || "").slice(0, 7)}${heldRed.queue ? " (the merge queue's run)" : ""}` : "";
-  if (answering) await progress(toAnswer.length ? `answer pass: ${toAnswer.length} comment(s)${fromThirdParty ? ` (${fromThirdParty} from third-party reviewers)` : ""}${answerQuestion ? " and the maintainers' answer" : ""}${redSaid ? ` and ${redSaid}` : ""}` : afterPush.length ? `answer pass: ${afterPush.length} unread maintainer decision(s)${redSaid ? ` and ${redSaid}` : ""}` : answerQuestion ? `answer pass: the maintainers' answer to the question${redSaid ? ` and ${redSaid}` : ""}` : `answer pass: ${redSaid}`);
+  if (answering) await progress(toAnswer.length ? `answer pass: ${toAnswer.length} comment(s)${fromThirdParty ? ` (${fromThirdParty} from third-party reviewers)` : ""}${answerQuestion ? " and the maintainers' answer" : ""}${redSaid ? ` and ${redSaid}` : ""}` : afterPush.length ? `answer pass: ${afterPush.length} unread maintainer decision(s)${redSaid ? ` and ${redSaid}` : ""}` : answerQuestion ? `answer pass: the maintainers' answer to the question${redSaid ? ` and ${redSaid}` : ""}` : `answer pass: ${redSaid}`, { step: "answer", comments: toAnswer.length, thirdParty: fromThirdParty, decisions: toAnswer.length ? 0 : afterPush.length, question: !!answerQuestion, sha: heldRed?.sha || null, queue: !!heldRed?.queue });
 
   // One worker pass to answer, then validation again. Its exit record (JSON it writes, or answers
   // with) says whether it raised a question; the PR's draft state does not.
@@ -1953,7 +1960,7 @@ async function main() {
     if (answerFreshAfter(resumeAnswer, rec) && !mark(rec, rec).budgetExceeded) {
       records.push(rec);
       log(`resumed session ${resumeAnswer.slice(0, 8)} failed (${rec.error}); answering fresh`);
-      await progress("re-entry: resume failed; answering fresh");
+      await progress("re-entry: resume failed; answering fresh", { step: "answer", detail: "resume failed; answering fresh", pass: false });
       reentry = { ...(reentry || {}), resumed: false, reason: "resume failed" };
       session.id = null;
       rec = await runHarness(answerArgs(null));
@@ -1972,7 +1979,7 @@ async function main() {
       if (held.usage.length) out = io.files();
       if (held.question) {
         heldQuestion = true;
-        await progress(`answer-scope: put back and asked a Question: ${held.refused}`);
+        await progress(`answer-scope: put back and asked a Question: ${held.refused}`, { step: "scope", detail: `put back and asked a Question: ${held.refused}` });
       }
     }
     // Pendulum pushes the answer, updates the PR from pr.md, then posts the replies: only to the comments this pass was given.

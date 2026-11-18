@@ -115,7 +115,7 @@ import {
 import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, goTrust, labelTrust, objectiveReader, parked, requeuedIn, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { timelineOf } from "./lib/relaunch.mjs";
-import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
+import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, unlistedRule, waitEnd } from "./lib/third-party-review.mjs";
 import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
 import { useObjectiveZone, whenText } from "./lib/clock.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
@@ -1868,6 +1868,9 @@ async function main() {
   }
   // The reviewers outside Pendulum the answer pass handles: the named ones, and code scanning on every repository (#331).
   const thirdParty = answeredReviewers(third.logins);
+  // And, when the base's rules require every review conversation resolved, any other reviewer who can push or is an App
+  // (#595): its open thread would hold the merge, so the answer pass takes it too. Read only when such a thread exists.
+  const unlisted = unlistedRule(repo, defaultBranch, token);
   // Pendulum's placeholder (no finding of its own) still leaves a named reviewer's or code scanning's comments to answer.
   // The foundation pass posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open
   // comments too.
@@ -1897,7 +1900,7 @@ async function main() {
   };
   // Answers the last stage's check got no verdict on are judged again first, with no worker pass for them (a gateway
   // failure costs no answer round); one still without a verdict waits for the exit (session.mjs openFindingsExit).
-  const listedOpen = await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty });
+  const listedOpen = await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted });
   // The stage's findings record (#546): each open finding it lists, open until the finding check finds otherwise.
   await progress.findings({ pr: pr.number, items: listedFindings(listedOpen), listed: true });
   // A stage started only to judge them (no answer round: checkState judgeOnly) gives the worker none of them, so a gateway
@@ -1910,7 +1913,7 @@ async function main() {
     await judgeAnswers(again, againReplies(again));
   }
   const held = new Set([...unjudged.map((u) => String(u.id)), ...(lastCheck.judgeOnly ? again.map((c) => String(c.id)) : [])]);
-  const toAnswer = answerList(again.length ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty }) : listedOpen, { placeholder, first: scope.first }).filter((c) => !held.has(String(c.id)));
+  const toAnswer = answerList(again.length ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted }) : listedOpen, { placeholder, first: scope.first }).filter((c) => !held.has(String(c.id)));
   if (again.length) await progress.findings({ items: listedFindings(toAnswer), listed: true });
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
@@ -2079,7 +2082,7 @@ async function main() {
   // can merge; they stay visible on the PR. Not after a refused push: the answers never reached the branch.
   const resolvedThreads = outbox.failed
     ? 0
-    : await resolvePendulumThreads(repo, pr.number, issue, token, { thirdParty }).catch((e) => {
+    : await resolvePendulumThreads(repo, pr.number, issue, token, { thirdParty, unlisted }).catch((e) => {
         log(`threads: ${e.message.slice(0, 120)}`);
         return 0;
       });
@@ -2091,7 +2094,7 @@ async function main() {
   pr = after.pr;
   // A named reviewer's comment counts only when the answer pass was given it (third-party-review.mjs exitUnaddressed).
   // And one whose answer the finding check is still to judge.
-  const stillOpen = exitUnaddressed(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty }), [...toAnswer.map((c) => c.id), ...again.map((c) => c.id), ...unjudged.map((u) => u.id)]);
+  const stillOpen = exitUnaddressed(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted }), [...toAnswer.map((c) => c.id), ...again.map((c) => c.id), ...unjudged.map((u) => u.id)]);
   // The answer pass's own result counts: one that failed while applying maintainers' decisions Blocks even on green
   // validation (green proves the old code, not the change asked for); one that only answered findings is judged as
   // the worker's run is, where green validation outweighs a late harness error.
@@ -2197,7 +2200,7 @@ async function main() {
         recorded = true;
         const report = {};
         const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, commentCheck: () => openCommentCheck({ inputs, stage: decisionStage }), thirdParty, editCheck }, token);
-        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once no PR in the queue conflicts with it", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", "code-scanning": "code scanning commented after the answer pass; the review runs again to answer it", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", "text-edit": "the Objective's text changed since its plan and the edit could not be judged here; the review runs again to judge it", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
+        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once no PR in the queue conflicts with it", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", "answer-threads": "a review thread the answer pass takes is still open; the review runs again to answer it", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", "text-edit": "the Objective's text changed since its plan and the edit could not be judged here; the review runs again to judge it", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
         const why = mergeBlockReason(how, report);
         // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back to rebase
         // (dispatch.mjs, logic.mjs staleDecision), which Blocks only when rebasing cannot progress or at its bound.

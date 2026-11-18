@@ -47,7 +47,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, bootId, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, adoptLocal, hasLocalLabel, markLocalRoute, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, previousKeyDirProblem, localClaim, LOCAL_TOKEN_PERMISSIONS, cloneRepo, cloneTop, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim, noTokenLine, repoFromRemote, saveLocalToken } from "./lib/local.mjs";
-import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, spendText, queueHungMs, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
+import { JOB_TOKEN_LOGIN, REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, spendText, queueHungMs, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueState, queueTimeoutMin, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
@@ -3411,7 +3411,7 @@ export class Local {
           log(`#${issue}: a person took PR #${prNumber} out of the merge queue; Pendulum leaves it to them`);
           return false;
         }
-        if (how === "re-review" || how === "unread" || how === "code-scanning" || how === "queue-red" || how === "text-edit") return this.review(issue, prNumber, { wait: true }).then((r) => (r.exit === "paused" ? r : r.next ? "next" : r.exit === "delivered"));
+        if (how === "re-review" || how === "unread" || how === "answer-threads" || how === "queue-red" || how === "text-edit") return this.review(issue, prNumber, { wait: true }).then((r) => (r.exit === "paused" ? r : r.next ? "next" : r.exit === "delivered"));
         if (how === "conflict") {
           const sent = await this.sendBack(issue, prNumber, inputs);
           if (sent !== "retry") return sent;
@@ -4330,9 +4330,6 @@ export function handoverPrBody({ issue, url = "" }) {
     `The person who pushed this branch reviewed the workflow change before pushing it: \`pendulum handover ${issue}\` staged and showed it, and \`pendulum handover ${issue} --push\` committed and pushed it only once the staged change was exactly that hand-over.`,
   ].join("\n");
 }
-
-/** The job token's login on Actions: any workflow can post as it, so it never hands a workflow over. */
-const JOB_TOKEN_LOGIN = "github-actions[bot]";
 
 /**
  * The hand-over `pendulum handover` may apply, or a refusal (an Error whose message says why; nothing is changed then).

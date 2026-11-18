@@ -65,7 +65,7 @@ import { endCard } from "./finish-card.mjs";
 import { lineClock, logTime, timeZone, whenText } from "./clock.mjs";
 import { SHORT_DETAIL, progressBody, progressCard } from "./progress-card.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
-import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, latestRuns, answerableReviewer, answersComment, loginKey, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { REAP_NOW_MS, agentUser, atStop, exec, git, reapAgentNow, runnerCommand, trapStops } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -757,7 +757,10 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 
 /**
  * Reviewer findings still open. Line comments: the reviewer's root comments, and with `thirdParty` (third-party-review.mjs
- * logins) a named reviewer's, shaped and sanitised for the answer pass with `from` set (thirdPartyComment). One is
+ * logins) a named reviewer's, shaped and sanitised for the answer pass with `from` set (thirdPartyComment). A root
+ * comment by a reviewer nobody named that the answer pass may take (logic.mjs answerableReviewer: someone who can push,
+ * or an App but github-actions[bot]) is listed the same way, `from` its author, once `unlisted` (async, read at most once
+ * and only when there is such a comment) says the base's rules require every review conversation resolved (#595). One is
  * answered when a person answered it (a reply by someone who can push but one of Pendulum's marked comments, its answer or
  * the finding check's evidence, on the reviewer's comment: logic.mjs personAnswer, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
  * reviewer's, never on code scanning's), or when its thread is resolved: the finding check's yes on Pendulum's own
@@ -771,13 +774,17 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * the PR body, for a check again), and each carries `raisedOn`, the commit it was
  * raised on, and `raisedAt`, when, as far as GitHub gives them.
  */
-export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
+export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [], unlisted = async () => false }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const byId = new Map(comments.map((c) => [c.id, c]));
   // A named reviewer's comment is never Pendulum's own, even where the author filter stands in for the review ids.
   const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
   const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
-  const theirs = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty)) : [];
+  const named = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty)) : [];
+  // A reviewer nobody named, whose thread the base's rules require resolved: the answer pass takes it as a named one's.
+  const others = comments.filter((c) => !c.in_reply_to_id && !ours(c) && !namedReviewer(c, thirdParty) && answerableReviewer(c));
+  const theirs = others.length && (await unlisted()) ? [...named, ...others] : named;
+  const fromOf = (c) => namedReviewer(c, thirdParty) ?? loginKey(c.user?.login);
   const ourIds = new Set(roots.map((c) => c.id));
   const replies = comments.filter((c) => c.in_reply_to_id);
   // A person's answer, as ever; Pendulum's own answer, its latest per comment (the finding check's to judge).
@@ -790,7 +797,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   // `raisedAt`: when it was raised, which the finding check sets beside the decisions' times.
   // `earlierPrBody`: that answer said its fix is in the PR body (its marker's `:pr_body`, handoff.mjs postReplies, #584).
   const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)), ...(PR_BODY_REPLY.test(answer.get(c.id)) ? { earlierPrBody: true } : {}) } : {}) });
-  const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, namedReviewer(c, thirdParty)), ...earlier(c) }));
+  const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, fromOf(c)), ...earlier(c) }));
   // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
   const own = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r) && (reviewIds ? reviewIds.has(r.id) : !reviewerLogin || r.user?.login === reviewerLogin));
@@ -3864,7 +3871,7 @@ const RESOLVED_SETTLE_MS = 5_000;
 const THREADS_NAMED = 5;
 /**
  * The most answer rounds per re-entry: review stages started again for findings still open after an answer pass, by the
- * review stage itself (openFindingsExit) or by the merge pass for code scanning's comments (conversationsGate). A stage
+ * review stage itself (openFindingsExit) or by the merge pass for the threads it sends back (conversationsGate). A stage
  * started again only to judge answers the finding check got no verdict on is no answer round (FINDING_CHECK_TRIES).
  */
 export const ANSWER_ROUNDS = 2;
@@ -4016,26 +4023,44 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
 
 /**
  * The PR's review conversations just before a merge (#331), on every route's merge pass. Answered threads Pendulum
- * handles (its reviewer's, the named reviewers' and code scanning's: answeredReviewers, `thirdParty` the named ones) are
- * resolved now (`resolvedNow` counts them). Code scanning's open comment (unanswered, or answered and not resolved by
- * the finding check) is the answer pass's: the review label goes back on and this returns "code-scanning", within the
- * answer rounds per re-entry (takeAnswerRound); past them it Blocks ("threads") naming each open alert. Any other unresolved thread, when the base's rules require every
- * conversation resolved (branch protection, or an active ruleset's pull_request rule), returns "threads" with
- * `report.reason` naming each one: its author, file and line. Otherwise null: the merge goes on. Unreadable threads or
- * rules are null too, and GitHub's own rule decides the merge; an unreadable or unwritable round count is "pending".
+ * handles (its reviewer's, the named reviewers' and code scanning's: answeredReviewers, `thirdParty` the named ones; and,
+ * when the base's rules require every conversation resolved, those of the reviewers nobody named that the answer pass
+ * takes: reviewThreads "unlisted", #595) are resolved now (`resolvedNow` counts them). Code scanning's open comment
+ * (unanswered, or answered and not resolved by the finding check) is the answer pass's; so, when the base's rules require
+ * every conversation resolved (branch protection, or an active ruleset's pull_request rule), is a named reviewer's or an
+ * unlisted one's that no person answered. Then the review label goes back on and this returns "answer-threads", within
+ * the answer rounds per re-entry (takeAnswerRound); past them it Blocks ("threads") naming each one. Any other unresolved
+ * thread under that rule (a stranger's, github-actions[bot]'s, or one Pendulum could not resolve) returns "threads" with
+ * `report.reason` naming each one: its author, file and line; it never reaches a model. Otherwise null: the merge goes
+ * on. Unreadable threads or rules are null too, and GitHub's own rule decides the merge; an unreadable or unwritable
+ * round count is "pending".
  */
 async function conversationsGate(repo, ctx, report, opts) {
   const { issue, prNumber, base, thirdParty = [], objectiveLabel } = ctx;
   let read;
   try {
-    read = await reviewThreads(repo, prNumber, issue, opts, { thirdParty: answeredReviewers(thirdParty) });
+    read = await reviewThreads(repo, prNumber, issue, opts, { thirdParty: answeredReviewers(thirdParty), unlisted: true });
   } catch (e) {
     log(`#${issue}: PR #${prNumber}'s review threads are unreadable (${errCode(e)}); the merge goes on and GitHub's rules decide`);
     return null;
   }
+  // The base's rule, read once and only when a thread needs it; unreadable is none here, and GitHub's rule decides.
+  let rule;
+  const ruleOn = async () => {
+    if (rule !== undefined) return rule;
+    try {
+      rule = await resolutionRule(repo, base, opts);
+    } catch (e) {
+      log(`#${issue}: the rules on ${base} are unreadable (${errCode(e)}); the merge goes on and GitHub's rules decide`);
+      rule = null;
+    }
+    return rule;
+  };
   const open = [];
   for (const t of read) {
     if (t.resolved) continue;
+    // A reviewer nobody named is Pendulum's to answer only under a rule that requires its thread resolved.
+    if (t.by === "unlisted" && !(await ruleOn())) t.by = null;
     if (t.by && t.answered) {
       const done = await resolveThread(t.id, opts).then(
         () => true,
@@ -4048,8 +4073,12 @@ async function conversationsGate(repo, ctx, report, opts) {
     }
     open.push(t);
   }
-  const scans = open.filter((t) => t.author === CODE_SCANNING && !t.answered);
-  if (scans.length) {
+  const scanning = (t) => t.author === CODE_SCANNING;
+  if (open.some((t) => !scanning(t))) await ruleOn();
+  // The answer pass's: code scanning's open comment on every repository; under the rule, a named or unlisted reviewer's
+  // that no person answered (Pendulum's own answer the finding check did not resolve included).
+  const back = open.filter((t) => !t.answered && (scanning(t) || (rule && (t.by === "named" || t.by === "unlisted"))));
+  if (back.length) {
     let round;
     try {
       round = await takeAnswerRound(repo, { issue, prNumber, objectiveLabel }, opts);
@@ -4058,24 +4087,18 @@ async function conversationsGate(repo, ctx, report, opts) {
       return "pending";
     }
     if (!round.taken) {
-      report.reason = `code scanning still has ${scans.length} open alert(s) on PR #${prNumber} after ${round.rounds} answer rounds: ${listed(scans.map(placeOf))}. Fix them on the branch or resolve them on the PR, then ${RESUME}`;
+      report.reason = back.every(scanning)
+        ? `code scanning still has ${back.length} open alert(s) on PR #${prNumber} after ${round.rounds} answer rounds: ${listed(back.map(placeOf))}. Fix them on the branch or resolve them on the PR, then ${RESUME}`
+        : `${back.length} review thread(s) still open on PR #${prNumber} after ${round.rounds} answer rounds: ${listed(back.map((t) => `${t.author} on ${placeOf(t)}`))}. Fix them on the branch, or answer or resolve each on the PR, then ${RESUME}`;
       return "threads";
     }
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
     await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
-    log(`#${issue}: code scanning has open comments on PR #${prNumber} after its answer pass; the review runs again to answer them (round ${round.round} of ${ANSWER_ROUNDS})`);
-    return "code-scanning";
+    log(`#${issue}: ${back.length} review thread(s) open on PR #${prNumber} after its answer pass (${[...new Set(back.map((t) => t.author))].join(", ")}); the review runs again to answer them (round ${round.round} of ${ANSWER_ROUNDS})`);
+    return "answer-threads";
   }
-  if (!open.length) return null;
-  let rule;
-  try {
-    rule = await resolutionRule(repo, base, opts);
-  } catch (e) {
-    log(`#${issue}: the rules on ${base} are unreadable (${errCode(e)}); the merge goes on and GitHub's rules decide`);
-    return null;
-  }
-  if (!rule) return null;
-  const what = (t) => `${t.author ?? "a deleted account"} on ${placeOf(t)}${t.by === "named" && !t.answered ? " (posted after the answer pass)" : t.answered ? " (answered; Pendulum could not resolve it)" : ""}`;
+  if (!open.length || !rule) return null;
+  const what = (t) => `${t.author ?? "a deleted account"} on ${placeOf(t)}${t.answered ? " (answered; Pendulum could not resolve it)" : ""}`;
   report.reason = `PR #${prNumber} cannot merge: ${rule} on ${base} requires every review conversation resolved, and ${open.length} ${open.length === 1 ? "is" : "are"} open: ${listed(open.map(what))}. Answer or resolve each on the PR, then ${RESUME}`;
   return "threads";
 }
@@ -4138,9 +4161,10 @@ async function textEdit(repo, issue, prNumber, opts) {
  * head: the review label goes back on), "unread" (a maintainer's comment no pass has read that `commentCheck`, the
  * comment check this process can ask (comment-check.mjs openCommentCheck), did not read as asking nothing: the review
  * runs again to apply it),
- * "code-scanning" (code scanning commented after the answer pass: the review runs again to answer it), "threads" (an
- * unresolved review conversation the base's rules require resolved, read before the merge or after GitHub refused it:
- * conversationsGate, `thirdParty` the named reviewers whose answered threads it resolves; the caller Blocks),
+ * "answer-threads" (a review thread the answer pass takes is open after it, code scanning's, or under a rule that
+ * requires resolved conversations a named or unlisted reviewer's: the review runs again to answer it), "threads" (an
+ * unresolved review conversation the base's rules require resolved and no answer pass takes, read before the merge or
+ * after GitHub refused it: conversationsGate, `thirdParty` the named reviewers; the caller Blocks),
  * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title, body or harness and model labels
  * changed since its plan was made, read before any merge and while the PR waits in the queue, which it is taken out
  * of; the caller Blocks), "text-edit" (such an edit that `editCheck`, the edit check this process can ask (edit-check.mjs
@@ -4387,7 +4411,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     if (retry.drops || retry.cleared) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + (retry.cleared || 0) + 1})`);
   }
   // A review conversation the merge would be refused for, read structurally before the merge rather than from GitHub's
-  // refusal: code scanning's comment goes to the answer pass, any other Blocks naming it (conversationsGate).
+  // refusal: a thread the answer pass takes goes to it, any other Blocks naming it (conversationsGate).
   const conversations = { issue, prNumber, base: pr.base?.ref || "main", thirdParty, objectiveLabel };
   const held = await conversationsGate(repo, conversations, report, opts);
   if (held) return held;

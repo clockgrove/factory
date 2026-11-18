@@ -9,7 +9,7 @@
 // dispatcher's tick, on every route (the Action's, a cloud sandbox's, `serve`'s), puts the label back once that review
 // exists or the bound has passed (waitState), and the label starts the review stage again as it always does. That stage
 // finds Pendulum's own review already posted, so no reviewer pass runs again, and goes on to the answer pass.
-import { addLabels, listComments, objectiveLabeledAt, removeLabel, rest, setStateLabel } from "./github.mjs";
+import { addLabels, listComments, objectiveLabeledAt, removeLabel, resolutionRule, rest, setStateLabel } from "./github.mjs";
 import { sanitize } from "./handoff.mjs";
 import { THIRD_PARTY_WAIT_MAX_MINUTES, log } from "./inputs.mjs";
 import { clockText } from "./clock.mjs";
@@ -55,6 +55,22 @@ export { CODE_SCANNING };
  * the named ones (`names`, thirdPartyReviewers) and code scanning.
  */
 export const answeredReviewers = (names = []) => [...new Set([...thirdPartyReviewers(names).logins, CODE_SCANNING])];
+
+/**
+ * Whether the answer pass takes the open threads of reviewers nobody named on a PR into `base` (#595), as an async
+ * function that reads at most once: when the base's rules require every review conversation resolved before a merge
+ * (github.mjs resolutionRule), a thread by someone who can push or by an App (logic.mjs answerableReviewer) would hold
+ * the merge, so the answer pass takes it as a named reviewer's. Rules that cannot be read are none here: the merge pass
+ * reads them again, and GitHub's own rule decides the merge.
+ */
+export function unlistedRule(repo, base, opts) {
+  let read = null;
+  return () =>
+    (read ??= resolutionRule(repo, base, opts).then(
+      (rule) => !!rule,
+      (e) => (log(`third-party review: the rules on ${base} could not be read (${e?.status ?? e?.code ?? "error"}); the answer pass takes no unlisted reviewer's thread`), false),
+    ));
+}
 
 /** The named reviewer who wrote a review or comment (its `user.login`, matched exactly), or null. */
 export const namedReviewer = (item, logins = []) => (logins.length ? (logins.find((l) => l === key(item?.user?.login)) ?? null) : null);

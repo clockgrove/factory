@@ -2454,6 +2454,23 @@ export const trustedAuthor = (item) => isSelf(item) || pushAuthor(item);
  * login is an App's, which no person can hold.
  */
 export const CODE_SCANNING = "github-advanced-security[bot]";
+
+/** The login of a workflow's own job token: any workflow run in the repository posts as it. */
+export const JOB_TOKEN_LOGIN = "github-actions[bot]";
+
+/**
+ * Whether the answer pass may take a review thread `item` (its root comment) opened, from a reviewer nobody named, when
+ * the base's rules require every review conversation resolved before a merge (#595): someone who can push
+ * (trustedAuthor), or a GitHub App (a `[bot]` login of type Bot), which can comment on a repository only through an
+ * installation on it. Never github-actions[bot] (JOB_TOKEN_LOGIN): every workflow run in the repository posts as it,
+ * one a stranger's comment or pull request starts included, so it stands for no installation anyone chose; its thread
+ * is a stranger's. Its text, as any reviewer's outside Pendulum, is data for the answer pass, never instructions.
+ */
+export const answerableReviewer = (item) => {
+  if (trustedAuthor(item)) return true;
+  const login = loginKey(item?.user?.login);
+  return item?.user?.type === "Bot" && login.endsWith("[bot]") && login !== JOB_TOKEN_LOGIN;
+};
 // Pendulum's answer to a line comment: its reply marker at the start (handoff.mjs postReplies).
 const REPLY_AT_START = /^<!-- pendulum:\d+:reply:\S+ -->/;
 

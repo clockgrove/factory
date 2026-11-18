@@ -1373,7 +1373,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
     const cannotMerge = new Set(["red", "queue-red", "held", "threads", "edited", "dropped", "stopped"]);
     // A usage-limit hold slows a sibling only while it still needs a stage: Running, its review label on, or a merge-pass
     // answer that sends it back to review. A reviewed one waiting on its checks or the merge queue merges with no model.
-    const backToReview = new Set(["re-review", "unread", "code-scanning", "queue-red", "text-edit"]);
+    const backToReview = new Set(["re-review", "unread", "answer-threads", "queue-red", "text-edit"]);
     const needsStage = async (s) => stateOf(s, statuses[s.number] ?? null) === "Running" || backToReview.has(mergeHow[s.number]) || ((await (prOfTick ??= prFinder(repo, opts, prsSeen))(s.number))?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
     const mergesLate = async (s) => twoAccounts(s) || personHeld.has(s.number) || cannotMerge.has(mergeHow[s.number]) || ((!!localHold?.(s) || (await routeHeld(s))) && (await needsStage(s)));
     const sendOrder = dirty.length ? await sendBackOrder(repo, { dirty, issues, statuses, landed, held: new Set([...reviewHeld.map((h) => h.issue.number), ...holdDeferred]), released: holdReleased, stuck: mergesLate, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf(), waitMaxMs: siblingWait }, opts, { log }) : [];

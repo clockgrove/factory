@@ -38,7 +38,7 @@ async function withEnv(vars, fn) {
  * The stage's real reporter on a fake GitHub with a fake clock: `drive(p, clock)` writes its lines. Returns every body
  * written, its key line removed.
  */
-async function reporter(stage, drive, { start = "2026-11-18T04:41:10Z", runId = "1794976879130" } = {}) {
+async function reporter(stage, drive, { start = "2026-11-18T04:41:10Z", runId = "1794976879130", env = {} } = {}) {
   const real = globalThis.fetch;
   const realNow = Date.now;
   const posted = [];
@@ -55,7 +55,8 @@ async function reporter(stage, drive, { start = "2026-11-18T04:41:10Z", runId = 
   };
   try {
     await withEnv(ZONE, async () => {
-      const p = progressReporter(repoOf("acme/app"), 433, { token: () => "t" }, { stage, runId, harness: "claude", model: stage === "review" ? "claude-fable-5-2" : "claude-opus-5-5", soFar: null });
+      // The stage's own environment, given: an Actions stage of no workflow run, whatever runner runs this test.
+      const p = progressReporter(repoOf("acme/app"), 433, { token: () => "t" }, { stage, runId, harness: "claude", model: stage === "review" ? "claude-fable-5-2" : "claude-opus-5-5", soFar: null, env: { ...ZONE, ...env } });
       await drive(p, clock);
     });
   } finally {
@@ -451,4 +452,21 @@ test("newForm (the readers' fixture) is the reporter's form: key, card, Run deta
   const fresh = newForm(`${KEY}\n${OLD_435}`, "2026-11-18T04:41:00Z");
   assert.ok(fresh.startsWith(`${KEY}\n**✅ Review delivered**`));
   assert.ok(fresh.endsWith(`**Full log**\n\n${OLD_LOG}\n\n</details>\n${OLD_TAIL}`));
+});
+
+test("the run's link and place come from the stage's own environment, never from the process rendering it", async () => {
+  const run = async (env) => (await reporter("work", async (p) => p("setup", { step: "setup" }), { env })).at(-1);
+  const linked = await run({ GITHUB_RUN_ID: "77", GITHUB_SERVER_URL: "https://gh.test" });
+  assert.match(linked, /^Pendulum work \[run 1794976879130\]\(https:\/\/gh\.test\/acme\/app\/actions\/runs\/77\): started /m);
+  assert.match(linked, /^- \*\*Run:\*\* \[1794976879130\]\(https:\/\/gh\.test\/acme\/app\/actions\/runs\/77\) on GitHub Actions/m);
+  const saved = { ...process.env };
+  Object.assign(process.env, { GITHUB_RUN_ID: "1", GITHUB_SERVER_URL: "https://github.com" });
+  try {
+    const local = await run({ GITHUB_ACTIONS: undefined, PENDULUM_LOCAL: "1" });
+    assert.match(local, /^Pendulum work run 1794976879130: started /m, "the process's own run is not the stage's");
+    assert.match(local, /^- \*\*Run:\*\* 1794976879130 on this machine/m);
+  } finally {
+    for (const k of ["GITHUB_RUN_ID", "GITHUB_SERVER_URL"]) if (saved[k] === undefined) delete process.env[k];
+    else process.env[k] = saved[k];
+  }
 });

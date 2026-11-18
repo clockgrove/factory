@@ -1021,8 +1021,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let ended = null;
   // The running pass's activity (logic.mjs harnessActivity's snapshot) and its model, for the card's Now row (progress.live).
   let liveNow = null;
-  // Where the stage runs, as Run details names it.
-  const runWhere = process.env.GITHUB_ACTIONS === "true" ? "actions" : process.env.PENDULUM_STAGE_CLAIM ? "sandbox" : "local";
+  // Where the stage runs, as Run details names it: from the stage's own environment (`env`), as its route is.
+  const runWhere = env.GITHUB_ACTIONS === "true" ? "actions" : env.PENDULUM_STAGE_CLAIM ? "sandbox" : "local";
   // A merge pass's comment is a record that never runs: its card names no state.
   const live = stage !== "merge";
   const started = Date.now();
@@ -1054,7 +1054,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let rebaseShown = false;
   let stopHook = null;
   const clock = (t) => lineClock(t, { env });
-  const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
+  // The workflow run the header and Run details link, from the stage's own environment (`env`).
+  const runUrl = env.GITHUB_RUN_ID && env.GITHUB_SERVER_URL ? `${env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${env.GITHUB_RUN_ID}` : null;
   // Not final: the known dollars so far, and the runs of unknown cost (those still running among them).
   // The dollars by billing as the passes booked them when they ended (harness.mjs meterPass: each at its own, the
   // relayed key's as `api`); a reading with no split books the passes' at the credential's. A line written while the

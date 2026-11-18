@@ -86,7 +86,7 @@ async function endToEnd(rec, why, { harness, model }) {
   const { ledger, ...line } = stageSpendLine(usage);
   // Its per-pass ledger line beside it (#543) names the pass's run of unknown cost and why, never a figure for it.
   assert.match(ledger, new RegExp(`"q":1,"w":\\["${why}"\\]`), `${why}: ledger line`);
-  assert.deepEqual(line, { usd: knownUsd, parts: { usdUnknown: 1, usdUnknownWhy: [why], usdByPass: { work: { usd: knownUsd, usdUnknown: 1 } } } }, `${why}: spend line`);
+  assert.deepEqual(line, { usd: knownUsd, parts: { usdUnknown: 1, usdUnknownWhy: [why], usdByPass: { work: { usd: knownUsd, usdUnknown: 1 } }, exit: "delivered" } }, `${why}: spend line`);
   assert.match(usdText(usage), knownUsd ? /^2 plus 1 run of unknown cost \(/ : /^unknown \(/, `${why}: exit line`);
   assert.ok(usdText(usage).includes(UNKNOWN_WHY[why]), `${why}: the exit line says why`);
   // The cap compares the known dollars only: under it the stage goes on; the unknown run never fills it.

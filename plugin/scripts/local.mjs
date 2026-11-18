@@ -37,7 +37,7 @@ import { githubStatus } from "./lib/adapters/github-status.mjs";
 const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
-import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportModels, reportScope } from "./lib/report.mjs";
+import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, PARTIAL_CODES, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportModels, reportScope } from "./lib/report.mjs";
 import { ghLoginToken, activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
@@ -4406,8 +4406,10 @@ export async function reportCommand(flags, { out = (t) => process.stdout.write(t
   const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: main, fallback, localCopy: flags.app ? null : readLocalAppId(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId: flags.app ?? null, envAppId, self: flags.self ?? [], by: flags.by ? [flags.by] : [], stages: !!flags.rates, checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
   const report = buildReport(read, { by: flags.by ? [flags.by] : [], rates: flags.rates ? reportModels(flags.rates) : null, now: new Date(now).toISOString() });
   out(flags.json ? `${JSON.stringify(report, null, 2)}\n` : renderReport(report));
-  if (!report.source.complete) err(`pendulum report: ${report.source.missing[0].text}\n`);
-  return report.source.complete ? 0 : STOPPED_EXIT;
+  // A partial report says why on stderr; only a call budget stop exits STOPPED_EXIT (stages from before the rename, unread,
+  // are no stop: a narrower scope or a higher --max-calls reads them no more).
+  for (const m of report.source.missing.filter((x) => PARTIAL_CODES.includes(x.code))) err(`pendulum report: ${m.text}\n`);
+  return report.source.stoppedAt === null ? 0 : STOPPED_EXIT;
 }
 
 /**

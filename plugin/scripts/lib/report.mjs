@@ -25,6 +25,7 @@ import { costOf, coversLine, decisionSpendRecords, loadPrices, stageHarnessOf, s
 import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
 import { DEFAULTS } from "./inputs.mjs";
 import { appIdSetLine, appIdWhyText, readAppIdVariable } from "./app-id.mjs";
+import { PREVIOUS_NAME } from "./local.mjs";
 import { FINDING_OUTCOMES, STATE_LABELS, findingsOf, ledgerOfComment, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { finishMarker, labelTime, modellessStages, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, bareModel, codexRow, longShare, sumLong } from "./usage.mjs";
@@ -347,6 +348,23 @@ export function markerIssue(c) {
   const on = /\/issues\/(\d+)$/.exec(c.issue_url || "")?.[1];
   return on === m[1] ? Number(m[1]) : null;
 }
+
+/**
+ * A stage's progress comment from before the rename to Pendulum (#567): its head is exactly the progress marker the
+ * report reads (`<!-- pendulum:<n>:progress:<work|review>:<key> -->`) with the previous name (local.mjs PREVIOUS_NAME) in
+ * place of `pendulum`. The Objective it belongs to when the comment is on that issue, else null. The report reads no
+ * figure from it (no legacy reader): it says that such a stage is there and unread (`legacy-records`).
+ */
+const LEGACY_PROGRESS = new RegExp(`^<!-- ${PREVIOUS_NAME}:(\\d+):progress:(?:work|review):[A-Za-z0-9:-]{1,100} -->`);
+export function legacyIssue(c) {
+  const m = LEGACY_PROGRESS.exec(c?.body || "");
+  if (!m) return null;
+  const on = /\/issues\/(\d+)$/.exec(c.issue_url || "")?.[1];
+  return on === m[1] ? Number(m[1]) : null;
+}
+
+/** The `source.missing` codes that make a report partial (`source.complete` false); only `stopped` exits STOPPED_EXIT. */
+export const PARTIAL_CODES = Object.freeze(["stopped", "legacy-records"]);
 
 /**
  * Whose markers the report takes as Pendulum's own: its login here (the token's, logic.mjs isSelf) or its App by id
@@ -893,7 +911,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   const findingStages = [];
   const findingTotals = { findings: 0, outcomes: zeroOutcomes(), reviewStages: 0, cost: zeroCost(), unnamed: 0 };
   const trust = { own: 0, vouched: 0, ignored: 0 };
-  const missing = { noRecord: tally(), stopped: tally(), unattributed: tally(), noLedger: tally(), noVersion: tally(), noModel: tally(), modelStopped: tally(), unreadIssue: new Set(), commentsStopped: new Set() };
+  const missing = { legacy: tally(), noRecord: tally(), stopped: tally(), unattributed: tally(), noLedger: tally(), noVersion: tally(), noModel: tally(), modelStopped: tally(), unreadIssue: new Set(), commentsStopped: new Set() };
   // The merged Objectives read from their finish card's summary (readReport, summaryFor), unless `by` or `rates` needs
   // their stages.
   const summaries = rates || by.some((b) => STAGE_DETAIL.includes(b)) ? new Map() : read.summaries ?? new Map();
@@ -917,6 +935,18 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     list[who].push(c);
     byIssue.set(n, list);
   }
+
+  // The stages from before the rename to Pendulum (#567, legacyIssue) in the period, by Objective: a progress comment by
+  // anyone whose stage comment would count (Pendulum's own, someone who can push, or through another App), on an
+  // Objective the report covers. None of their figures is read; the Objectives are partial (`legacy-records`).
+  const legacy = new Map();
+  for (const c of comments || []) {
+    const n = legacyIssue(c);
+    if (n === null || !(mine(c) || pushed(c)) || !inWindow(c.created_at, scope)) continue;
+    if ((setScope(scope) && !issues?.has(n)) || (counted && !counted.has(n))) continue;
+    legacy.set(n, (legacy.get(n) ?? 0) + 1);
+  }
+  for (const [n, k] of legacy) missing.legacy.add(n, k);
 
   const numbers = [...new Set([...(issues?.keys() ?? []), ...byIssue.keys()])].sort((a, b) => a - b);
   for (const n of numbers) {
@@ -1016,7 +1046,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     const localRecs = local?.get(n) ?? new Map();
     // Each review stage's dollars and model, by its run key, for the findings it raised (#546).
     const reviewStages = new Map();
-    const row = { issue: n, title: typeof issue?.title === "string" ? issue.title : null, url: `https://github.com/${repo.full}/issues/${n}`, outcome: issue ? outcomeOf(issue, pulls, { pullsRead: source.pullsRead !== false && !source.pullsUnread?.has(n) }) : null, stages: { work: 0, rebase: 0, review: 0 }, passes: null, cost: zeroCost(), tokens: zeroTokens(), modelMinutes: null, usdPerModelMinute: null };
+    const row = { issue: n, title: typeof issue?.title === "string" ? issue.title : null, url: `https://github.com/${repo.full}/issues/${n}`, outcome: issue ? outcomeOf(issue, pulls, { pullsRead: source.pullsRead !== false && !source.pullsUnread?.has(n) }) : null, stages: { work: 0, rebase: 0, review: 0 }, passes: null, cost: zeroCost(), tokens: zeroTokens(), modelMinutes: null, usdPerModelMinute: null, legacyStages: legacy.get(n) ?? 0 };
     const minutes = { priced: 0, passes: 0, usd: zeroCost(), unpriced: 0, all: 0, untimed: 0 };
     let ledgered = 0;
     let unledgered = 0;
@@ -1422,6 +1452,7 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
     if (list.length) out.push({ code, count: list.length, counts: { objectives: list.length, stages: of instanceof Set ? null : of.stages }, issues: list, text });
   };
   if (source.stopped) out.push({ code: "stopped", count: 1, counts: none, issues: [], text: `the reads stopped at --max-calls ${calls.max} before ${source.stopped}: what is shown is partial` });
+  add("legacy-records", missing.legacy, `stages recorded before the rename to Pendulum, whose progress comments in the period carry the previous \`<!-- ${PREVIOUS_NAME}:<n>:progress:\` marker: the report reads none of them, so their dollars, tokens and passes are in no figure, and these Objectives' rows (\`legacyStages\`) leave them out`);
   if (!source.selfKnown) out.push({ code: "self-unknown", count: 1, counts: none, issues: [], text: "the login the token belongs to could not be read, so only Pendulum's App (--app) counts as Pendulum's own" });
   // No App id, whether or not a comment through an App was read (#564): unreadable (403) apart from not set (404).
   const unattributed = `so comments through a GitHub App or by another login that can push are not attributed to Pendulum (the count: those read, ${trust.vouched})`;
@@ -1452,7 +1483,8 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   if (source.artifacts.failed) out.push({ code: "artifact-failed", count: source.artifacts.failed, counts: none, issues: [], text: "usage artifacts that could not be downloaded" });
   if (source.artifacts.unreadable) out.push({ code: "artifacts-unreadable", count: source.artifacts.unreadable, counts: none, issues: [], text: "artifact lists the token may not read (it needs actions: read), or artifacts that name no workflow run" });
   return {
-    complete: !source.stopped,
+    // Partial when the call budget stopped the reads, or stages from before the rename went unread.
+    complete: !source.stopped && !missing.legacy.issues.size,
     stoppedAt: source.stopped ?? null,
     maxCalls: calls.max,
     calls: { planned: calls.planned, plannedAtLeast: !!calls.open, made: calls.made, byKind: { ...calls.byKind } },
@@ -1674,7 +1706,7 @@ export function renderReport(r) {
   const what = s.compare ? `issues labelled \`${s.compare[0]}\` against issues labelled \`${s.compare[1]}\`` : s.issues.length ? `issues ${s.issues.map((n) => `#${n}`).join(", ")}` : s.label ? `issues labelled \`${s.label}\`` : s.parent ? `the sub-issues of #${s.parent}` : "every Objective";
   const when = s.since || s.until ? ` with stages from ${s.since ?? "the start"} to ${s.until ?? "now"}${s.defaultPeriod ? " (the default period)" : ""}` : "";
   const out = [`# Pendulum cost report: ${r.repository}`, "", `${what}${when}. ${r.totals.objectives} Objective(s), ${r.totals.stages} stage(s). Made ${r.generatedAt} by Pendulum ${r.pendulum} (schema ${r.schema}).`];
-  if (!r.source.complete) out.push("", `**Partial:** ${r.source.missing.find((m) => m.code === "stopped").text}.`);
+  for (const m of r.source.missing.filter((x) => PARTIAL_CODES.includes(x.code))) out.push("", `**Partial:** ${m.text}${m.issues.length ? ` (${m.issues.map((n) => `#${n}`).join(", ")})` : ""}.`);
   if (r.comparison) {
     // Two arms: their figures side by side, and the source; no figure across both arms.
     out.push(...renderComparison(r.comparison, r.words));
@@ -1699,6 +1731,8 @@ export function renderReport(r) {
   view("Pendulum version", r.breakdowns.version, "Version");
   if (r.breakdowns.account) view("account", r.breakdowns.account, "Account");
   if (r.objectives.length) out.push("", "## Objectives", "", table(["Issue", "Outcome", "Work", "Rebase", "Review", ...COST_HEAD], r.objectives.map((o) => [`#${o.issue}`, o.outcome ?? "unread", o.stages.work, o.stages.rebase, o.stages.review, ...costCells(o.cost)])));
+  const older = r.objectives.filter((o) => o.legacyStages > 0);
+  if (older.length) out.push("", `- Partial, stages recorded before the rename to Pendulum not read: ${older.map((o) => `#${o.issue} (${o.legacyStages} stage(s))`).join(", ")}.`);
   const f = r.findings;
   if (f.totals.findings || f.totals.reviewStages) {
     const counts = (x) => [x.findings, ...f.outcomes.map((o) => x.outcomes[o])];

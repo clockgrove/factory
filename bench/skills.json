@@ -96,9 +96,9 @@
       }
     },
     "pendulum-report": {
-      "sha256": "ea04b5f3af159a87b586067592bf45051dde6746477269b35fcf1362d10e79a8",
+      "sha256": "5767d851ef914b1c49d378606eeda853014c817c3c9406bb019184fa53506406",
       "lines": 32,
-      "words": 694,
+      "words": 700,
       "files": {
         "proposals.md": {
           "sha256": "b3ddf3a532ea503e28aeeef5abcf6b926c1aa8eea8034949217f62f45e03353f",
@@ -106,9 +106,9 @@
           "words": 826
         },
         "reference.md": {
-          "sha256": "05b1989ef3d0e3f59e584c359ab45ef5f4aecee9b3ba2e9da4ab09d0bd6c282c",
+          "sha256": "7b3a4ceb17303818dccf54ec1f52e411aa2ddd8e63dec558c353be8d52be0a3a",
           "lines": 23,
-          "words": 596
+          "words": 606
         }
       }
     },

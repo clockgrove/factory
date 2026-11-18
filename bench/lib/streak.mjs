@@ -11,7 +11,9 @@
 // One still running, in review or waiting on a Question has not finished: it is listed as in flight, neither.
 // An External one (walkAway.bucket: its only stops were external Blocks, lib/objective.mjs walkAwayBucket) is listed
 // in the sequence as skipped: it neither extends nor breaks, and does not count as finished. A P1 escape found in its
-// merge makes it a break.
+// merge makes it a break. A walk-away merge labelled before the rename to Pendulum (bucket `unknown`: whether it was one
+// is not known) is skipped the same way, unless a P1 escape makes it a break; a miss or an External result seen after
+// its later label is scored as any other.
 // A workflow hand-over scored as an owner step (lib/objective.mjs HANDOVER_SCORING, the default) leaves the merge a
 // walk-away: it extends the streak, and its entry says it carries an owner step (`ownerStep`). Scored as input, it breaks.
 // A finished row whose harness is unknown (none recorded, or two on one Objective) is listed under "unknown", which is
@@ -34,8 +36,14 @@ export function endedAt(row) {
 /** One finished row's verdict for the streak: `{ok, why}`; an External row's is `{ok: null, external: true, why}`, skipped. */
 export function verdict(row) {
   const escapes = (row.quality?.escapes || []).filter(isP1);
+  // A walk-away merge labelled before the rename (bucket `unknown`): skipped, unless a P1 escape or an input source not
+  // read breaks it.
+  const unread = row.walkAway?.unseen === undefined ? ["input sources not recorded"] : row.walkAway.unseen;
+  if (row.walkAway?.bucket === "unknown" && unread.length) return { ok: false, why: `input not readable (${unread.join(", ")}): walk-away unproven` };
+  if (row.walkAway?.bucket === "unknown" && !escapes.length) return { ok: null, unknown: true, why: `walk-away unknown: ${row.walkAway.reason}` };
   if (row.walkAway?.bucket === "external" && !escapes.length) return { ok: null, external: true, why: `external: Blocked: ${[...new Set((row.walkAway.blocks || []).map((b) => b.cause))].join(", ")}` };
   if (!row.mergedAt) return { ok: false, why: `not merged (${row.exit})` };
+  if (escapes.length && row.walkAway?.bucket === "unknown") return { ok: false, why: `P1 escape: ${escapes.map((e) => (typeof e === "string" ? e : e.issue)).join(", ")}` };
   if (!row.walkAway?.value) return { ok: false, why: row.walkAway?.reason ?? "not walk-away" };
   // Undefined (a row from before the scorer recorded it) is as unread as a listed source.
   const unseen = row.walkAway.unseen === undefined ? ["input sources not recorded"] : row.walkAway.unseen;
@@ -95,6 +103,10 @@ export function streaks(rows, { from }) {
       h.sequence.push({ issue: r.issue, endedAt: end, ok: null, external: true, why: v.why });
       continue;
     }
+    if (v.unknown) {
+      h.sequence.push({ issue: r.issue, endedAt: end, ok: null, unknown: true, why: v.why });
+      continue;
+    }
     h.finished += 1;
     if (v.ok) {
       h.walkAway += 1;
@@ -114,7 +126,7 @@ export function streaks(rows, { from }) {
 }
 
 /** A sequence entry's verdict: yes, skipped (External) or no, with why. */
-const entryText = (x) => (x.external ? `skipped: ${cell(x.why)}` : x.ok ? (x.ownerStep ? `yes, owner step: ${cell(x.ownerStep)}` : "yes") : `no: ${cell(x.why)}`);
+const entryText = (x) => (x.external || x.unknown ? `skipped: ${cell(x.why)}` : x.ok ? (x.ownerStep ? `yes, owner step: ${cell(x.ownerStep)}` : "yes") : `no: ${cell(x.why)}`);
 
 const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
@@ -173,6 +185,10 @@ export function pooledStreak(rows, { from }) {
     if (v.external) {
       out.external += 1;
       out.sequence.push({ repository: r.repository, issue: r.issue, harness: r.harness ?? UNKNOWN, endedAt: end, ok: null, external: true, why: v.why });
+      continue;
+    }
+    if (v.unknown) {
+      out.sequence.push({ repository: r.repository, issue: r.issue, harness: r.harness ?? UNKNOWN, endedAt: end, ok: null, unknown: true, why: v.why });
       continue;
     }
     out.finished += 1;

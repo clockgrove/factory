@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { setSelf, setWriters } from "../scripts/lib/logic.mjs";
+import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
 import { badge, centsOf, finishData, finishMarker, gateChecks, objectiveRecords, renderFinishCard, withFinishBlock } from "../scripts/lib/finish-card.mjs";
 
 RETRY.sleep = async () => {};
@@ -680,4 +681,28 @@ test("finish card (#544): the summary marker carries the card's own figures, fro
   assert.equal(card.readSummary(body.replace('"v":1', '"v":2'), 3), null);
   assert.equal(card.readSummary(body.replace(/"usd":0\.35637/, '"usd":"0.35637"'), 3), null);
   assert.equal(card.readSummary(body.replace(/"kind":"build"/, '"kind":"magic"'), 3), null);
+});
+
+test("finish card (#567): an issue labelled before the rename to Pendulum has no wall clock: the card says so, never a figure that starts too late", async () => {
+  const { finishSummary } = await import("../scripts/lib/finish-card.mjs");
+  const plain = withSelf(() => data());
+  // GitHub keeps a renamed label's old name on its events: the Objective's first label, a day before the current one.
+  for (const name of [`${PREVIOUS_NAME}:objective`, `${PREVIOUS_NAME}:running`]) {
+    const timeline = [{ event: "labeled", label: { name }, actor: { login: "kirkmarple-clockgrove" }, created_at: "2026-11-16T02:00:00Z" }, ...real.timeline];
+    const d = withSelf(() => data({ timeline }));
+    const sum = finishSummary(d);
+    assert.deepEqual([sum.wallMs, sum.labelledWallMs], [null, null], name);
+    // Nothing else is read from that event: the clock's start and every other figure are as without it.
+    const rest = (x) => ({ ...x, pendulum: null, wallMs: null, labelledWallMs: null });
+    assert.deepEqual(rest(sum), rest(finishSummary(plain)));
+    const md = renderFinishCard(d);
+    assert.match(md, /<h3 align="center">Merged for [^<]*\. Its wall clock is not known: it was labelled before the rename to Pendulum\.<\/h3>/);
+    assert.match(md, /alt="wall clock: not known"/);
+    assert.match(md, /\| \*\*Total\*\* \| \*\*not known\*\* \|/);
+    assert.doesNotMatch(md, /Merged in /);
+  }
+  // A current label alone, or a label of another name that starts with it: the wall clock as before.
+  const other = withSelf(() => data({ timeline: [{ event: "labeled", label: { name: `${PREVIOUS_NAME}:objectives` }, created_at: "2026-11-16T02:00:00Z" }, ...real.timeline] }));
+  assert.equal(finishSummary(other).wallMs, finishSummary(plain).wallMs);
+  assert.ok(finishSummary(plain).wallMs > 0 && finishSummary(plain).labelledWallMs > 0);
 });

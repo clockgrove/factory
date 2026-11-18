@@ -1675,6 +1675,29 @@ test("report (#568): what no pass names stays under the stage's model by stage, 
     ["claude-opus-5-5", "pass", 1, ["unreported"]],
     ["claude-fable-5-2", "stage", 2, ["sandbox", "unreported"]],
   ]);
+  // Claude Code's per-model usage holds the stage's harness passes alone, never its decision calls: it is checked against
+  // them, and the decision record keeps its own booking (a model the ledger does not name: under the stage's, by stage).
+  const OPUS = "claude-opus-5-5";
+  const SONNET = "claude-sonnet-5-5";
+  const t = (input, output) => ({ input, output, cached: null, written: null });
+  const withDecision = modelParts({
+    model: OPUS,
+    recorded: OPUS,
+    cost: cost(1.01),
+    tokens: t(30, 3),
+    stages: 1,
+    ledger: [entry(OPUS, 0.7, { label: "work-1" }), entry(null, 0.01, { label: "decision", decision: true, calls: 2 }), entry(OPUS, 0.3, { label: "work-2" })],
+    published: [OPUS, SONNET, "claude-fable-5-2"],
+    usage: { models: { [OPUS]: { input: 15, cached: null, written: null, output: 1, usd: 0.9 }, [SONNET]: { input: 5, cached: null, written: null, output: 1, usd: 0.1 } } },
+    harness: "claude",
+    prices,
+  });
+  assert.deepEqual(withDecision.map((x) => [x.key, x.basis, x.stages, x.cost.usd.api, x.tokens.input]), [
+    [OPUS, "pass", 1, 0.9, 15],
+    [SONNET, "pass", 0, 0.1, 5],
+    [OPUS, "stage", 0, 0.01, 10],
+  ]);
+  assert.equal(Math.round(withDecision.reduce((n, x) => n + x.cost.usd.api, 0) * 1e6), 1_010_000, "the stage's dollars, exactly");
   // From local mode's own record, a pass's model counts only where the stage publishes it, as its ledger line would: a
   // Bedrock inference profile ARN (it names an AWS account) is no row; its pass stays under the stage's model.
   const ARN = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";

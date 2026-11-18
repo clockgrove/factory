@@ -923,28 +923,44 @@ function splitOf(cost, tokens, parts, n, unplaced = []) {
 
 /**
  * A Claude stage's dollars and tokens by model from Claude Code's own per-model usage (its local record's `models`, from
- * `modelUsage`, sub-agents included), each model's part `{key, cost, tokens}`; null unless it accounts for exactly the
- * passes of its `entries` (ledger entries read by ledgerPass): every model one the stage publishes (`named`), every pass's
- * dollars reported and all of one billing kind, and the models' dollars summing to the passes' to the records' rounding.
+ * `modelUsage`, sub-agents included): `{parts, unplaced}`, each model's part `{key, cost, tokens}`; null unless that usage
+ * accounts for exactly the ledger's harness passes (its `entries`, read by ledgerPass, but its decision records, whose
+ * calls Claude Code's usage never holds): every model one the stage publishes (`published`), every harness pass's
+ * dollars reported and all of one billing kind, and the models' dollars summing to the passes' to the records'
+ * rounding. Each decision record is booked as by passes: under the model its ledger names (`named`), else no part's, its
+ * reasons for runs of unknown cost in `unplaced`.
  */
-function claudeModelParts(usage, entries, named, prices) {
+function claudeModelParts(usage, entries, published, named) {
   const models = usage?.models && typeof usage.models === "object" && !Array.isArray(usage.models) ? Object.entries(usage.models) : [];
-  if (!models.length || entries.some(([, p]) => !p.priced || p.cost.unknownRuns)) return null;
-  const kinds = new Set(entries.flatMap(([, p]) => COST_KINDS.filter((k) => p.cost.usd[k] > 0)));
+  const passes = entries.filter(([, p]) => !p.decision);
+  if (!models.length || !passes.length || passes.some(([, p]) => !p.priced || p.cost.unknownRuns)) return null;
+  const kinds = new Set(passes.flatMap(([, p]) => COST_KINDS.filter((k) => p.cost.usd[k] > 0)));
   if (kinds.size > 1 || kinds.has("sandbox")) return null;
   const kind = [...kinds][0] ?? null;
   const parts = [];
   for (const [name, u] of models) {
-    const key = named(name);
+    const key = published(name);
     const usd = num(u?.usd);
     if (!key || usd === null || usd < 0 || (usd > 0 && !kind)) return null;
     const cost = zeroCost();
     if (kind) cost.usd[kind] = round6(usd);
     parts.push({ key, cost, tokens: { input: countSum(u.input, u.cached, u.written), output: num(u.output), cached: num(u.cached), written: num(u.written) } });
   }
-  const passes = entries.reduce((t, [, p]) => t + COST_KINDS.reduce((s, k) => s + micros(p.cost.usd[k]), 0), 0);
+  const ran = passes.reduce((t, [, p]) => t + COST_KINDS.reduce((s, k) => s + micros(p.cost.usd[k]), 0), 0);
   const total = parts.reduce((t, x) => t + COST_KINDS.reduce((s, k) => s + micros(x.cost.usd[k]), 0), 0);
-  return Math.abs(passes - total) <= Math.floor(0.5 * (entries.length + models.length)) ? parts : null;
+  if (Math.abs(ran - total) > Math.floor(0.5 * (passes.length + models.length))) return null;
+  const unplaced = [];
+  for (const [e, p] of entries.filter(([, x]) => x.decision)) {
+    const key = named(e.model);
+    if (!key) {
+      unplaced.push(...p.cost.unknownWhy);
+      continue;
+    }
+    const x = parts.find((y) => y.key === key) ?? parts[parts.push({ key, cost: zeroCost(), tokens: zeroTokens() }) - 1];
+    addCost(x.cost, p.cost);
+    addTokens(x.tokens, p.tokens);
+  }
+  return { parts, unplaced };
 }
 
 /**
@@ -986,11 +1002,11 @@ export function modelParts({ model, recorded = null, cost, tokens, stages, ledge
     return [...by.values()];
   };
   const n = (parts) => entries.length + parts.length;
-  const claude = harness === "claude" && usage ? claudeModelParts(usage, entries, publishedName, prices) : null;
+  const claude = harness === "claude" && usage ? claudeModelParts(usage, entries, publishedName, named) : null;
   const passes = byPass();
   // The reasons of the runs of unknown cost of the ledger entries no part took (a pass on a model the ledger does not name).
   const unplaced = entries.filter(([e]) => !named(e.model)).flatMap(([, p]) => p.cost.unknownWhy);
-  const split = (claude && splitOf(cost, tokens, withOwn(claude), n(claude))) || (passes.length ? splitOf(cost, tokens, withOwn(passes), n(passes), unplaced) : null);
+  const split = (claude && splitOf(cost, tokens, withOwn(claude.parts), n(claude.parts), claude.unplaced)) || (passes.length ? splitOf(cost, tokens, withOwn(passes), n(passes), unplaced) : null);
   if (!split) return whole;
   const out = split.parts.map((x, i) => ({ key: x.key, basis: "pass", stages: i === 0 ? stages : 0, cost: x.cost, tokens: x.tokens }));
   const { left } = split;

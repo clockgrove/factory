@@ -801,6 +801,8 @@ export function runnerMinutes(collected) {
  */
 /** Why a row labelled before the rename to Pendulum has no walk-away, operator minutes, waiting or wall clock (#567). */
 export const RENAMED_WHY = "not known: labelled before the rename to Pendulum, so the clock's start, and any input, Block, Question or stall before the later label, are not read";
+/** The note on a renamed row's miss: what was seen after the later label stands, from a window that starts late. */
+export const RENAMED_NOTE = "the window starts late: labelled before the rename to Pendulum";
 
 export function scoreObjective(collected, opts = {}) {
   const { prices, minutes: given, ownerMinutes = undefined, handover = HANDOVER_DEFAULT, baseline = null, bots = new Set(), label = OBJECTIVE_LABEL, clockAfter = null, checks = [], app = null, stallMinutes = STALL_MINUTES } = opts;
@@ -816,9 +818,10 @@ export function scoreObjective(collected, opts = {}) {
     missing.push("label event");
   }
   // Labelled before the rename to Pendulum (finish-card.mjs clockRenamed): GitHub keeps the old label name on those
-  // events, so the clock above starts at a later label. What is counted from the clock is then not known, never short:
-  // the wall clock, the walk-away (input, Blocks, Questions and stalls before it are unread), the operator minutes and
-  // the waiting; the row is in no walk-away count (bucket `unknown`; lib/streak.mjs skips it).
+  // events, so the clock above starts at a later label. Everything seen after it is a fact and is scored as read (a
+  // miss stays a miss, its Blocks, Question and human actions kept, with a note that the window starts late); only what
+  // the unread start could change is not known: a walk-away or External result (bucket `unknown`, in no walk-away
+  // count; lib/streak.mjs skips it), an asked-only yes, the operator minutes, the waiting and the wall clock.
   const renamed = clockRenamed(collected.issueTimeline);
   if (renamed) missing.push("clock start (labelled before the rename to Pendulum)");
   const pulls = branchPulls(collected);
@@ -903,11 +906,7 @@ export function scoreObjective(collected, opts = {}) {
           : `${stallReason}; no human action`;
   // Walk-away counting only what Pendulum asked for: a merge with no Blocked and no human action answering a request.
   // Unprompted actions (an owner's note, scope added after the label) are left out of this one, never out of `value`.
-  // Labelled before the rename: none of the above is known (`renamed`).
-  if (renamed) {
-    Object.assign(walkAway, { value: null, longestIdleMinutes: null, stall: null, firstHumanAction: null, humanActions: null, interventions: null, blocked: null, question: null, blocks: null, bucket: "unknown", reason: RENAMED_WHY });
-    walkAway.askedOnly = { value: null, reason: RENAMED_WHY };
-  } else walkAway.askedOnly = {
+  walkAway.askedOnly = {
     value: Boolean(merged) && !blocked && asked.length === 0 && !stall,
     reason: !merged
       ? walkAway.reason
@@ -921,6 +920,15 @@ export function scoreObjective(collected, opts = {}) {
             ? `merged; ${unprompted.length} unprompted human action(s), none asked for`
             : `merged with no human action after the label${ownerNote}`,
   };
+  // Labelled before the rename (`renamed`): a walk-away or External result, and an asked-only yes, are not known; a miss
+  // stays one, as read, noted.
+  if (renamed) {
+    walkAway.clockRenamed = true;
+    if (walkAway.bucket === "walk-away" || walkAway.bucket === "external") Object.assign(walkAway, { value: null, bucket: "unknown", reason: RENAMED_WHY });
+    else walkAway.reason = `${walkAway.reason} (${RENAMED_NOTE})`;
+    if (walkAway.askedOnly.value) walkAway.askedOnly = { value: null, reason: RENAMED_WHY };
+    else walkAway.askedOnly.reason = `${walkAway.askedOnly.reason} (${RENAMED_NOTE})`;
+  }
 
   // Every stage on every route, once: the usage artifacts (GitHub Actions, the cloud sandbox) and the spend lines in
   // Pendulum's own progress comments (local mode uploads no artifact), a line a record names left out (withLines). Beside
@@ -1010,7 +1018,7 @@ export function scoreObjective(collected, opts = {}) {
     waitingMinutes: renamed ? null : waiting.minutes,
     waitingBasis: renamed ? RENAMED_WHY : waiting.basis,
     workingMinutes: wall === null || waiting.minutes === null ? null : Math.max(0, Math.round((wall - waiting.minutes) * 10) / 10),
-    decisions: renamed ? null : decisionsOf(actions),
+    decisions: decisionsOf(actions),
     skills: opts.skills ?? null,
     missing,
     scoredAt: opts.now ?? new Date().toISOString(),

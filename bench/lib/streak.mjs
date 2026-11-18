@@ -12,7 +12,8 @@
 // An External one (walkAway.bucket: its only stops were external Blocks, lib/objective.mjs walkAwayBucket) is listed
 // in the sequence as skipped: it neither extends nor breaks, and does not count as finished. A P1 escape found in its
 // merge makes it a break. One labelled before the rename to Pendulum (bucket `unknown`: its walk-away is not known) is
-// skipped the same way, P1 escape or not.
+// skipped the same way when it merged, unless a P1 escape makes it a break; an unmerged end, or a miss seen after its
+// later label, stays a break.
 // A workflow hand-over scored as an owner step (lib/objective.mjs HANDOVER_SCORING, the default) leaves the merge a
 // walk-away: it extends the streak, and its entry says it carries an owner step (`ownerStep`). Scored as input, it breaks.
 // A finished row whose harness is unknown (none recorded, or two on one Objective) is listed under "unknown", which is
@@ -34,10 +35,12 @@ export function endedAt(row) {
 
 /** One finished row's verdict for the streak: `{ok, why}`; an External row's is `{ok: null, external: true, why}`, skipped. */
 export function verdict(row) {
-  if (row.walkAway?.bucket === "unknown") return { ok: null, unknown: true, why: `walk-away unknown: ${row.walkAway.reason}` };
   const escapes = (row.quality?.escapes || []).filter(isP1);
+  // Labelled before the rename (bucket `unknown`): a merge is skipped, unless a P1 escape breaks it; no merge is a break.
+  if (row.walkAway?.bucket === "unknown" && row.mergedAt && !escapes.length) return { ok: null, unknown: true, why: `walk-away unknown: ${row.walkAway.reason}` };
   if (row.walkAway?.bucket === "external" && !escapes.length) return { ok: null, external: true, why: `external: Blocked: ${[...new Set((row.walkAway.blocks || []).map((b) => b.cause))].join(", ")}` };
   if (!row.mergedAt) return { ok: false, why: `not merged (${row.exit})` };
+  if (escapes.length && row.walkAway?.bucket === "unknown") return { ok: false, why: `P1 escape: ${escapes.map((e) => (typeof e === "string" ? e : e.issue)).join(", ")}` };
   if (!row.walkAway?.value) return { ok: false, why: row.walkAway?.reason ?? "not walk-away" };
   // Undefined (a row from before the scorer recorded it) is as unread as a listed source.
   const unseen = row.walkAway.unseen === undefined ? ["input sources not recorded"] : row.walkAway.unseen;

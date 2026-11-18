@@ -764,7 +764,8 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * them out in the body of Pendulum's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one
  * is answered once a comment under Pendulum's resolved marker for it (finding-check.mjs) is on the PR. Pendulum's own
  * reviews and markers are those by Pendulum or someone who can push (trustedAuthor). An open finding Pendulum answered
- * before carries `earlier`, that answer's text, for the next answer pass, and each carries `raisedOn`, the commit it was
+ * before carries `earlier`, that answer's text, for the next answer pass (and `earlierPrBody` when it said its fix is in
+ * the PR body, for a check again), and each carries `raisedOn`, the commit it was
  * raised on, and `raisedAt`, when, as far as GitHub gives them.
  */
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
@@ -784,7 +785,8 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const resolved = candidates.length ? new Set((await reviewThreads(repo, prNumber, 0, { token })).filter((t) => t.resolved).map((t) => t.rootId)) : new Set();
   // `raisedOn`: the commit the finding was raised on, from which the finding check reads what changed since.
   // `raisedAt`: when it was raised, which the finding check sets beside the decisions' times.
-  const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)) } : {}) });
+  // `earlierPrBody`: that answer said its fix is in the PR body (its marker's `:pr_body`, handoff.mjs postReplies, #584).
+  const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)), ...(PR_BODY_REPLY.test(answer.get(c.id)) ? { earlierPrBody: true } : {}) } : {}) });
   const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, namedReviewer(c, thirdParty)), ...earlier(c) }));
   // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
@@ -794,7 +796,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const trusted = (await listComments(repo, prNumber, { token })).filter(trustedAuthor);
   const done = new Set(trusted.map((c) => BODY_RESOLVED.exec(c.body || "")?.[1]).filter(Boolean));
   const said = new Map(trusted.map((c) => [BODY_REPLY.exec(c.body || "")?.[1], c.body]).filter(([id]) => id));
-  return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)) } : f))];
+  return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)), ...(PR_BODY_REPLY.test(said.get(f.id)) ? { earlierPrBody: true } : {}) } : f))];
 }
 /** Pendulum's earlier answer as the next answer pass reads it: its marker and heading off, sanitised and cut. */
 const answerText = (body) =>
@@ -806,7 +808,9 @@ const answerText = (body) =>
     { max: 4000 },
   );
 const REVIEW_AT_START = /^<!-- pendulum:\d+:review -->/;
-const BODY_REPLY = /^<!-- pendulum:\d+:reply:(r\d+-\d+) -->/;
+const BODY_REPLY = /^<!-- pendulum:\d+:reply:(r\d+-\d+)(?::pr_body)? -->/;
+/** Pendulum's answer that said its fix is in the PR body (#584). */
+const PR_BODY_REPLY = /^<!-- pendulum:\d+:reply:\S+:pr_body -->/;
 const BODY_RESOLVED = /^<!-- pendulum:\d+:resolved:(r\d+-\d+) -->/;
 
 /**

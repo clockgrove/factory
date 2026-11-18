@@ -59,7 +59,7 @@ export const BODY_FINDING_QUESTION = Object.freeze({
   instructions:
     "A reviewer raised a finding on a pull request, and the pull request's author answered it with a reply saying the fix is in the pull request's body (its description), and possibly a code change. " +
     "Using the finding, the reply, what the pull request changed since the finding was raised (its code, then its body), the issue's acceptance entries, the repository's rules and the maintainers' recorded decisions, decide whether the answer resolves the finding. " +
-    "A change to the body alone never fixes a finding that asks for a change to the code or tests. " +
+    "A change to the body alone never fixes a finding that asks for a change to the code or tests, or says the code does not meet an acceptance entry or rule. " +
     FINDING_QUESTION.instructions.slice(FINDING_QUESTION.instructions.indexOf("Only the decisions part holds")),
   choices: FINDING_QUESTION.choices.map((c) => (c.value === "fixed" ? { ...c, description: "The change shown does what the finding asks: the defect it names is gone from the code, or, for a finding on what the pull request's body says, from the body." } : c)),
 });

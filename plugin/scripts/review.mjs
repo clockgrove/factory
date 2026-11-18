@@ -134,6 +134,12 @@ export const sinceBrief = (since, { judge = true } = {}) =>
  * from GitHub's record of the body's edits, read once per check and only for a reply that says its fix is in the body
  * (session.mjs bodyChanges, github.mjs prBodyHistory, #584).
  */
+/**
+ * The replies a check again judges (#368): Pendulum's earlier answers to the findings the last stage got no verdict on,
+ * as replies.json, each still saying its fix is in the PR body when it said so (`earlierPrBody`, #584).
+ */
+export const againReplies = (again) => JSON.stringify(again.map((c) => ({ id: c.id, body: c.earlier, ...(c.earlierPrBody ? { fixed: true, pr_body: true } : {}) })));
+
 export const findingReads = ({ git, base, head, repo, prNumber, token }) => ({
   diffOf: (from) => answerDiff(git, { base, from, head }),
   bodyDiffOf: bodyChanges(git, () => prBodyHistory(repo, prNumber, token)),
@@ -1877,7 +1883,7 @@ async function main() {
   const again = listedOpen.filter((c) => c.earlier && lastCheck.unjudged.some((id) => String(id) === String(c.id)));
   if (again.length) {
     await progress(`finding check: judging again ${again.length} answer(s) the last stage got no verdict on`);
-    await judgeAnswers(again, JSON.stringify(again.map((c) => ({ id: c.id, body: c.earlier }))));
+    await judgeAnswers(again, againReplies(again));
   }
   const held = new Set([...unjudged.map((u) => String(u.id)), ...(lastCheck.judgeOnly ? again.map((c) => String(c.id)) : [])]);
   const toAnswer = answerList(again.length ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty }) : listedOpen, { placeholder, first: scope.first }).filter((c) => !held.has(String(c.id)));

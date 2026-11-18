@@ -826,10 +826,13 @@ export async function postReplies(repo, prNumber, issue, text, allowed, opts) {
   const replies = parseReplies(text, allowed);
   let posted = 0;
   for (const r of replies) {
+    // A reply that says its fix is in the PR body carries that in its marker (`<id>:pr_body`), so a later stage that
+    // judges it again asks the body's question too (session.mjs unaddressedReviewComments `earlierPrBody`, #584).
+    const mark = marker(issue, "reply", r.prBody ? `${r.id}:pr_body` : r.id);
     // A finding in the review body has no thread: its answer is a PR comment under the reply marker, which is what
     // marks it answered (session.mjs unaddressedReviewComments).
-    if (isBodyFindingId(r.id)) await rest(`repos/${repo.full}/issues/${prNumber}/comments`, { ...opts, method: "POST", body: { body: `${marker(issue, "reply", r.id)}\nOn review finding ${r.id} (in the review body):\n\n${r.body}` } });
-    else await postReply(repo, prNumber, r.id, `${marker(issue, "reply", r.id)}\n${r.body}`, opts);
+    if (isBodyFindingId(r.id)) await rest(`repos/${repo.full}/issues/${prNumber}/comments`, { ...opts, method: "POST", body: { body: `${mark}\nOn review finding ${r.id} (in the review body):\n\n${r.body}` } });
+    else await postReply(repo, prNumber, r.id, `${mark}\n${r.body}`, opts);
     posted += 1;
   }
   return posted;

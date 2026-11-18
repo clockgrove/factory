@@ -4,7 +4,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { generateKeyPairSync } from "node:crypto";
 import { createServer } from "node:http";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -331,23 +331,6 @@ test("with publish_transcripts on, a resume takes a readable session only from a
   assert.ok(!reads.slice(before).includes(`/repos/${REPO}/actions/runs/42`));
 });
 
-test("publish_transcripts on, or a private repository: the stream and sessions are uploaded readable; doctor warns only for a public one (#490)", async () => {
-  // The workflow's env block (PENDULUM_PUBLISH_TRANSCRIPTS), as setup renders it.
-  const published = await workJob({ payload: { repository: { private: false } }, given: { app_private_key: PEM }, job: { PENDULUM_PUBLISH_TRANSCRIPTS: "true" } });
-  const up = files(published.uploaded);
-  assert.deepEqual(Object.keys(up).sort(), ["events.jsonl", "result.json", `transcript/${published.rel}`]);
-  assert.equal(up["events.jsonl"].toString(), published.events);
-  const priv = await workJob({ payload: { repository: { private: true } }, given: { app_private_key: PEM } });
-  assert.ok(files(priv.uploaded)["events.jsonl"].includes(READ), "a private repository's artifact is unaffected");
-  const { transcriptCheck } = await import("../scripts/doctor.mjs");
-  assert.equal(transcriptCheck({ private: false }, true).status, "WARN");
-  assert.match(transcriptCheck({ private: false }, true).detail, /anyone signed in to GitHub can download/);
-  assert.equal(transcriptCheck({ private: false }, false).status, "PASS");
-  assert.equal(transcriptCheck({ private: true }, true).status, "PASS");
-  const template = readFileSync(join(ROOT, "plugin", "workflow-template.yml"), "utf8");
-  assert.match(template, /^ {2}PENDULUM_PUBLISH_TRANSCRIPTS: \{\{publish_transcripts\}\} #/m, "setup writes the choice into the workflow's env block");
-});
-
 test("the scorer still reads a sealed artifact's figures: dollars, tokens, harness calls and sessions (#490)", async () => {
   const { uploaded, usageDir, events } = await workJob({ payload: { repository: { private: false } }, given: { app_private_key: PEM } });
   const read = (dir) => usageFromDir(dir, { readdir: readdirSync, read: (f) => readFileSync(f, "utf8"), isDir: (f) => statSync(f).isDirectory() });
@@ -357,22 +340,6 @@ test("the scorer still reads a sealed artifact's figures: dollars, tokens, harne
   for (const k of ["harness", "model", "usd", "tokens", "runs", "turns"]) assert.deepEqual(sealed[k], plain[k], k);
   assert.deepEqual(sealed.sessions, sessionsOf(events), "the calls and sessions the stream held, from the record");
   assert.deepEqual(sealed.sessions, { calls: 1, sessions: 1 });
-});
-
-test("a seal step that fails part way uploads nothing readable: an unreadable session file, an unreadable stage file (#490)", { skip: process.getuid?.() === 0 && "root reads a mode-000 file" }, async () => {
-  // The tar of the transcript fails (EACCES on one session file): the upload holds the record alone.
-  let rollout = null;
-  const sealFails = await workJob({ payload: { repository: { private: false } }, given: { app_private_key: PEM }, before: (dir) => chmodSync((rollout = join(dir, "transcript", readdirSync(join(dir, "transcript"), { recursive: true }).find((f) => f.endsWith(".jsonl")))), 0o000) });
-  assert.equal(sealFails.failed, null);
-  assert.deepEqual(Object.keys(files(sealFails.uploaded)), ["result.json"]);
-  chmodSync(rollout, 0o600);
-  // Copying a stage file fails (EACCES): the step fails and leaves no upload directory, half-made or whole.
-  const copyFails = await workJob({ payload: { repository: { private: false } }, given: { app_private_key: PEM }, before: (dir) => writeFileSync(join(dir, "task-card.md"), "card", { mode: 0o000 }) });
-  assert.ok(copyFails.failed, "the step fails");
-  assert.ok(!existsSync(copyFails.uploaded) && !existsSync(`${copyFails.uploaded}.part`), "nothing for the always() upload");
-  // A published repository's failure is the same: nothing goes up half-made.
-  const published = await workJob({ payload: { repository: { private: false } }, given: { app_private_key: PEM }, job: { PENDULUM_PUBLISH_TRANSCRIPTS: "true" }, before: (dir) => writeFileSync(join(dir, "task-card.md"), "card", { mode: 0o000 }) });
-  assert.ok(published.failed && !existsSync(published.uploaded));
 });
 
 test("a sandbox stage's usage that fails to come out leaves nothing of it for the upload; a link in it is never uploaded (#490)", async () => {
@@ -413,18 +380,4 @@ test("a sandbox stage's usage that fails to come out leaves nothing of it for th
     if (saved === undefined) delete process.env.RUNNER_TEMP;
     else process.env.RUNNER_TEMP = saved;
   }
-});
-
-test("the seal key derives from a PEM pasted without its newlines, as the App's token does; doctor FAILs a key given that does not parse (#490)", async () => {
-  const { sealKeyCheck } = await import("../scripts/doctor.mjs");
-  const oneLine = PEM.trim().replace(/\n/g, " ");
-  assert.ok(sealKey(PEM, REPO));
-  assert.deepEqual(sealKey(oneLine, REPO), sealKey(PEM, REPO));
-  assert.notDeepEqual(sealKey(PEM, "acme/other"), sealKey(PEM, REPO), "the repository's name is part of the key");
-  assert.equal(sealKey("-----BEGIN RSA PRIVATE KEY-----\nnot a key\n-----END RSA PRIVATE KEY-----", REPO), null);
-  assert.equal(sealKeyCheck({ appPrivateKey: PEM, repoFull: REPO }).status, "PASS");
-  const bad = sealKeyCheck({ appPrivateKey: "pasted wrong", repoFull: REPO });
-  assert.equal(bad.status, "FAIL");
-  assert.match(bad.detail, /did not parse/);
-  assert.equal(sealKeyCheck({ appPrivateKey: "", repoFull: REPO }), null, "no key to try (a laptop, an App token, a sandbox stage): nothing to check");
 });

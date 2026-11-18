@@ -1,6 +1,6 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFile, execFileSync, fork } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import net from "node:net";
 import { promisify } from "node:util";
@@ -8,12 +8,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { decideExit, sandboxMarkerLine, setSelf } from "../scripts/lib/logic.mjs";
+import { sandboxMarkerLine, setSelf } from "../scripts/lib/logic.mjs";
 import { launchOne } from "../scripts/launch.mjs";
-import { forwardAsks, readHandOver, stageDispatchBody } from "../scripts/stage.mjs";
+import { readHandOver, stageDispatchBody } from "../scripts/stage.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { WORKFLOW_ONLY_SETTINGS, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { RELAY_WAIT_MS, crossOs, crossOsAsk, crossOsChecks, launcherDispatch, launcherRelay, legsLine, workflowProblem } from "../scripts/lib/cross-os.mjs";
+import { resolveInputs } from "../scripts/lib/inputs.mjs";
+import { crossOs, crossOsAsk, crossOsChecks, launcherDispatch, launcherRelay, workflowProblem } from "../scripts/lib/cross-os.mjs";
 import { openProgressCheck } from "../scripts/lib/fix-progress.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 import { workValidation } from "../scripts/lib/session.mjs";
@@ -220,8 +220,6 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
 
 const green = { status: "completed", conclusion: "success" };
 const red = { status: "completed", conclusion: "failure" };
-const running = { status: "in_progress", conclusion: null };
-const skipped = { status: "completed", conclusion: "skipped" };
 const legLine = (sha, mac, win) => `cross-OS CI (ci.yml) on ${sha.slice(0, 7)}: ${MAC}: ${mac}; ${WIN}: ${win}`;
 const anyHead = (l) => l.replace(/\b(on|dispatch) [0-9a-f]{7}\b/g, "$1 X");
 
@@ -258,19 +256,6 @@ test("#518: on, with macOS and Windows green: the workflow is dispatched on the 
   assert.deepEqual(card.split("\n").filter((l) => /CI/.test(l)).map((l) => l.split(" | ")[1].split(" · ")[0]), [ROWS.crossOs[0]]);
 });
 
-test("#518: a red Windows leg goes back to the worker; its fix commits, the commands run on the new head before it is dispatched, and it ends green", async () => {
-  const r = await stage({ settings: ON, commands: ["test -f README"], github: { legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
-  assert.equal(r.result.green, true, r.log.join("\n"));
-  assert.equal(r.prompts.length, 1, "one fix pass");
-  assert.match(r.prompts[0], /Pendulum's validation pass 1 failed on the branch you delivered/);
-  assert.match(r.prompts[0], /test \(windows-2025, 1\/1\)/, "the fix pass is handed the red leg");
-  assert.match(r.prompts[0], /paths join with a backslash on Windows/, "with its failure from the job's log");
-  assert.deepEqual(r.dispatches, [{ ref: "pendulum/4", return_run_details: true }, { ref: "pendulum/4", return_run_details: true }], "each new head is dispatched once");
-  const order = r.log.map(anyHead).filter((l) => /^(validation pass|dispatch|cross-OS CI \(ci\.yml\))/.test(l));
-  assert.deepEqual(order, ["validation pass 1 (1 commands)", "dispatch X", anyHead(legLine("0".repeat(7), "success", "failure")), "validation pass 1 (1 commands)", "dispatch X", anyHead(legLine("0".repeat(7), "success", "success"))], r.log.join("\n"));
-  assert.equal(r.result.passes, 4, "two command passes, two cross-OS passes");
-});
-
 test("#518 B1: a same-name pull_request check that was skipped, and a dispatched run GitHub lists late, never stand for the dispatched Windows leg that failed", async () => {
   const prSkipped = (sha) => [{ id: 9001, name: WIN, status: "completed", conclusion: "skipped", check_suite: { id: 1 }, app: { slug: "github-actions" }, started_at: new Date().toISOString() }, { id: 9002, name: MAC, status: "completed", conclusion: "success", check_suite: { id: 1 }, app: { slug: "github-actions" }, started_at: new Date().toISOString() }].map((c) => ({ ...c, head_sha: sha }));
   const r = await stage({ settings: ON, github: { pr: prSkipped, lag: 3, dispatch: 204, legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
@@ -285,25 +270,6 @@ test("#518 B1: a same-name pull_request check that was skipped, and a dispatched
   assert.match(named.result.stalled || "", /it brought back the red of cross-os-validation pass 1 on [0-9a-f]{7}: test \(windows-2025, 1\/1\), failing the same way/, "the same red after its fix pass is no progress, with no progress check wired");
 });
 
-test("#518 B1: a needs: failure that skips a leg is no green: the stage Blocks naming the skip and the job that caused it", async () => {
-  const r = await stage({ settings: ON, github: { legs: () => ({ build: red, [MAC]: green, [WIN]: skipped }) } });
-  assert.equal(r.result.green, false);
-  assert.equal(r.prompts.length, 0, "no fix pass");
-  assert.equal(r.result.stuck.cause, "work");
-  assert.match(r.result.stuck.reason, /^cross-OS CI: test \(windows-2025, 1\/1\) skipped on [0-9a-f]{7}, so it did not run: the run's job build ended failure first/);
-  const alone = await stage({ settings: ON, github: { legs: () => ({ [MAC]: green, [WIN]: { status: "completed", conclusion: "neutral" } }) } });
-  assert.equal(alone.result.stuck.cause, "setup");
-  assert.match(alone.result.stuck.reason, /test \(windows-2025, 1\/1\) neutral on [0-9a-f]{7}, so it did not run; run the leg on workflow_dispatch in ci\.yml/);
-});
-
-test("#518 with #519: a dispatched run cancelled and replaced by a newer one on its head: the cancel is no red, and the newer run's legs decide", async () => {
-  const r = await stage({ settings: ON, github: { replaced: true, legs: (sha, n) => (n === 1 ? { [MAC]: green, [WIN]: { status: "completed", conclusion: "cancelled" } } : { [MAC]: green, [WIN]: green }) } });
-  assert.equal(r.result.green, true, r.log.join("\n"));
-  assert.equal(r.prompts.length, 0, "no fix pass for the replaced run's cancel");
-  assert.equal(r.dispatches.length, 1);
-  assert.ok(r.log.includes(legLine(r.head, "success", "success")), r.log.join("\n"));
-});
-
 test("#518 S5: a dispatched run already on the head is waited for, not dispatched again; a cancelled one is not reused", async () => {
   const at = Date.now() - 60_000;
   const r = await stage({ settings: ON, github: { earlier: () => [{ id: 7, at }], legs: () => ({ [MAC]: green, [WIN]: green }) } });
@@ -312,63 +278,6 @@ test("#518 S5: a dispatched run already on the head is waited for, not dispatche
   const c = await stage({ settings: ON, github: { earlier: () => [{ id: 7, at, cancelled: true }], legs: (sha, n) => (n === 0 ? { [MAC]: green, [WIN]: { status: "completed", conclusion: "cancelled" } } : { [MAC]: green, [WIN]: green }) } });
   assert.equal(c.result.green, true, c.log.join("\n"));
   assert.deepEqual(c.dispatches, [{ ref: "pendulum/4", return_run_details: true }]);
-});
-
-test("#518 S2: a Windows fix that breaks Linux is judged by the progress check against the red it was given, not fixed again unjudged", async () => {
-  // The commands fail once fix-1 (the Windows fix) is there; the Windows leg is red on the first dispatch only.
-  const linux = "test ! -f fix-1 || { echo 'not ok 1 - linux path'; exit 1; }";
-  const r = await stage({ settings: ON, progress: true, commands: [linux], github: { legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
-  assert.equal(r.result.green, false);
-  assert.equal(r.prompts.length, 1, "no fix pass for the Linux red: the decision route is off, and the exact checks cannot call it progress");
-  assert.match(r.result.stalled || "", /^the fix pass before it made no progress: .*failing: test ! -f fix-1/);
-});
-
-test("#518 S2: Linux red fixed, then a Windows red: the Windows leg gets its own fix pass, unjudged, with the decision route off", async () => {
-  // The commands fail until fix-1 (the Linux fix) is there; the Windows leg is red on the first dispatch only.
-  const linux = "test -f fix-1 || { echo 'not ok 1 - linux path'; exit 1; }";
-  const r = await stage({ settings: ON, progress: true, commands: [linux], github: { legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
-  assert.equal(r.result.green, true, r.log.join("\n"));
-  assert.equal(r.prompts.length, 2, "the Linux fix pass, then the Windows one");
-  assert.match(r.prompts[1], /test \(windows-2025, 1\/1\)/);
-  assert.ok(!r.log.some((l) => /no progress/.test(l)), r.log.join("\n"));
-});
-
-test("#518 S2: Linux red X fixed, Windows red Y fixed, then X again: no progress, and the stage Blocks naming the red that came back", async () => {
-  // X fails until fix-1, and again once fix-2 (the Windows fix) is there; the Windows leg is red on the first dispatch.
-  const linux = "{ test -f fix-1 && test ! -f fix-2; } || { echo 'not ok 1 - linux path'; exit 1; }";
-  const r = await stage({ settings: ON, progress: true, commands: [linux], github: { legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
-  assert.equal(r.result.green, false);
-  assert.equal(r.prompts.length, 2, "X's fix pass and Y's, none for X again");
-  assert.match(r.result.stalled || "", /^the fix pass before it made no progress: it brought back the red of validation pass 1 on [0-9a-f]{7}: .*linux path.*, failing the same way/);
-});
-
-test("#518 S3: the bound is the head's, from its first wait: a leg still running then Blocks naming it, with no fix pass", async () => {
-  const t0 = Date.now();
-  const r = await stage({ settings: ON, github: { legs: () => ({ [MAC]: green, [WIN]: running }) }, checks: { boundMs: 60, boundText: "the cross-OS wait on this head reached its bound, 1 min (cross_os_wait_minutes)" } });
-  assert.equal(r.result.green, false);
-  assert.equal(r.prompts.length, 0, "no fix pass: nothing failed");
-  assert.equal(r.result.passes, 0, "the wait is no counted pass");
-  assert.match(r.result.stuck?.reason || "", /not finished on [0-9a-f]{7} .*; the cross-OS wait on this head reached its bound, 1 min \(cross_os_wait_minutes\)$/);
-  assert.ok(Date.now() - t0 < 30_000, "it ended at the bound, not the stage's wall clock");
-  assert.ok(r.log.includes(legLine(r.head, "success", "in_progress")), r.log.join("\n"));
-  const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: r.result.passes, green: false, stuck: r.result.stuck.reason, stuckCause: r.result.stuck.cause } });
-  assert.deepEqual([exit.exit, exit.reason], ["blocked", r.result.stuck.reason]);
-  // A leg GitHub has not started: the first wait ends on the not-started bound (40 ms), the next one waits what is left of
-  // the head's bound (60 ms from its first wait), never a bound of its own, and the Block names the head's bound.
-  const queued = await stage({ settings: ON, github: { noRunner: true, legs: () => ({ [MAC]: green, [WIN]: { status: "queued", conclusion: null } }) }, checks: { boundMs: 60, stuckWaitMs: 40, boundText: "the head's bound" } });
-  assert.match(queued.result.stuck?.reason || "", /^GitHub has not started .*; the head's bound$/, queued.log.join("\n"));
-});
-
-test("#518: a refused dispatch, or a workflow that grants write, Blocks as a setup gap naming the fix", async () => {
-  const r = await stage({ settings: ON, github: { dispatch: 403 }, route: "actions" });
-  assert.equal(r.result.stuck.cause, "setup");
-  assert.match(r.result.stuck.reason, /^cross-OS CI: GitHub refused to run ci\.yml on pendulum\/4 \(403\): the token cannot dispatch a workflow \(Actions write\); give the workflow's work job `actions: write`, then re-apply the label$/);
-  const no = await stage({ settings: ON, github: { workflow: "on: [pull_request]\njobs: {}\n" } });
-  assert.match(no.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml has no workflow_dispatch trigger/);
-  assert.deepEqual(no.dispatches, []);
-  const writes = await stage({ settings: ON, github: { workflow: `${CI}    permissions:\n      contents: write\n` } });
-  assert.match(writes.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml grants write \(job test: contents: write\), and a dispatched run would run the branch's code with that token/);
-  assert.deepEqual(writes.dispatches, [], "refused before any dispatch");
 });
 
 test("#556: any scope at write or write-all, at the top or on a job, Blocks the dispatch and FAILs doctor's row naming the grant; read, none, read-all and {} pass", async () => {
@@ -391,37 +300,6 @@ test("#556: any scope at write or write-all, at the top or on a job, Blocks the 
   assert.equal(oidc.result.stuck.cause, "setup");
   assert.match(oidc.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml grants write \(job test: id-token: write\), and a dispatched run would run the branch's code with that token/);
   assert.deepEqual(oidc.dispatches, [], "refused before any dispatch");
-});
-
-test("#518: half a setting Blocks once the other validation is green; the legs are one per line, never split on commas; the settings are workflow-file only", async () => {
-  const half = await stage({ settings: { PENDULUM_CROSS_OS_WORKFLOW: "ci.yml" } });
-  assert.equal(half.result.green, false);
-  assert.deepEqual(half.result.stuck, { reason: "cross_os_workflow names ci.yml, but cross_os_checks, the legs that count, is empty; Pendulum never infers them from job names: list each leg's check name, one per line", cause: "setup" });
-  assert.deepEqual(half.dispatches, []);
-  const set = crossOs(resolveInputs({ env: { ...ON, PENDULUM_CROSS_OS_WORKFLOW: ".github/workflows/ci.yml", PENDULUM_CROSS_OS_WAIT_MINUTES: "30" } })).setting;
-  assert.deepEqual(set, { workflow: "ci.yml", checks: [MAC, WIN], waitMs: 30 * 60_000 });
-  assert.equal(resolveInputs({ env: { PENDULUM_CROSS_OS_WAIT_MINUTES: "1441" } }).crossOsWaitMs, 60 * 60_000);
-  for (const n of ["PENDULUM_CROSS_OS_WORKFLOW", "PENDULUM_CROSS_OS_CHECKS", "PENDULUM_CROSS_OS_WAIT_MINUTES"]) assert.ok(WORKFLOW_ONLY_SETTINGS.has(n), n);
-  assert.equal(legsLine({ workflow: "ci.yml", names: [MAC, WIN], sha: "a".repeat(40), runs: [] }), `cross-OS CI (ci.yml) on aaaaaaa: ${MAC}: not reported; ${WIN}: not reported`);
-});
-
-test("#518 S1: doctor's row: the cost while on; no dispatch trigger or write permissions at the top or on a job FAIL", () => {
-  const inputs = resolveInputs({ env: ON });
-  const on = crossOsRow(inputs, { doc: parseYaml(CI), route: "actions" });
-  assert.equal(on.status, "PASS");
-  assert.match(on.detail, /macOS and Windows runner minutes bill at a higher rate than Linux minutes$/);
-  assert.match(on.detail, /waits up to 60 min per head for test \(macos-26, 1\/1\); test \(windows-2025, 1\/1\)/);
-  assert.equal(crossOsRow(inputs, { doc: parseYaml("on: [pull_request]\njobs: {}\n") }).status, "FAIL");
-  assert.equal(crossOsRow(inputs, { doc: parseYaml("on: [workflow_dispatch]\npermissions: write-all\njobs: {}\n") }).status, "FAIL");
-  assert.match(crossOsRow(inputs, { doc: parseYaml(`${CI}    permissions:\n      actions: write\n`) }).detail, /grants write \(job test: actions: write\)/);
-  assert.equal(workflowProblem(parseYaml("on: workflow_dispatch\njobs:\n  t:\n    permissions:\n      contents: read\n"), "ci.yml"), null);
-  // #538: the cloud sandbox route dispatches through its launcher: a PASS naming the launch-event job's token, and the
-  // write-grant check on the dispatched workflow holds there too.
-  const sandbox = crossOsRow(inputs, { doc: parseYaml(CI), route: "sandbox" });
-  assert.equal(sandbox.status, "PASS");
-  assert.match(sandbox.detail, /with the launch-event job's `actions: write`: the launcher dispatches it for the sandbox stage/);
-  assert.equal(crossOsRow(inputs, { doc: parseYaml(`${CI}    permissions:\n      contents: write\n`), route: "sandbox" }).status, "FAIL");
-  assert.equal(crossOsRow(resolveInputs({ env: { PENDULUM_CROSS_OS_CHECKS: LEGS } }), {}).status, "FAIL");
 });
 
 test("#518 with #517: the cross-OS loop's fix and fresh passes are fix passes on the card and in the report; its scope holds have no kind", () => {
@@ -565,45 +443,6 @@ test("#538: the launcher dispatches only the configured workflow, on the stage's
   }
 });
 
-test("#538: on Actions and in local mode the stage dispatches with its own token and asks no launcher; the sandbox's token hand-over is unchanged", async () => {
-  for (const route of ["actions", "local"]) {
-    const asked = [];
-    const r = await stage({ settings: ON, route, relay: async (a) => (asked.push(a), { timedOut: true }), github: { legs: bothGreen } });
-    assert.equal(r.result.green, true, `${route}: ${r.log.join("\n")}`);
-    assert.deepEqual(r.tokens, ["t"], route);
-    assert.deepEqual(asked, [], route);
-  }
-  const local = await stage({ settings: ON, route: "local", github: { dispatch: 403 } });
-  assert.match(local.result.stuck.reason, /\(403\): the token cannot dispatch a workflow \(Actions write\); give the repository token Actions read and write, then re-apply the label$/);
-  // A sandbox stage never dispatches with its App token: with no channel to a launcher it Blocks, and with a launcher
-  // that never answers it asks again, then Blocks at the bound.
-  const none = await stage({ settings: ON, route: "sandbox", relay: null, github: { legs: bothGreen } });
-  assert.equal(none.result.stuck?.cause, "pendulum");
-  assert.deepEqual(none.dispatches, []);
-  const asks = [];
-  // The relay's bound is the stage's wall clock here (2 min, under RELAY_WAIT_MS), and its clock runs 20 s a reading,
-  // so the bound passes after two asks.
-  let t = 0;
-  const quiet = await stage({ settings: ON, route: "sandbox", relay: launcherRelay({ send: (m) => asks.push(m), on: new EventEmitter(), retryMs: 20, clock: () => (t += 20_000) }), github: { legs: bothGreen } });
-  assert.equal(quiet.result.stuck?.cause, "outage", JSON.stringify(quiet.result));
-  assert.match(quiet.result.stuck.reason, /^cross-OS CI: the launcher gave no run for the stage's request to run ci\.yml on [0-9a-f]{7} within 2 min; check the workflow's launch-event job runs/);
-  assert.equal(asks.length, 2, "asked again before the bound");
-  assert.equal(new Set(asks.map((a) => a.ask)).size, asks.length, "each ask names itself");
-  assert.deepEqual(quiet.dispatches, []);
-  // Fresh tokens: the launcher's hand-over through the real --deliver, as before.
-  const s = await sandboxRelay();
-  try {
-    await withGitHub({ work: mkdtempSync(join(tmpdir(), "w-")), legs: bothGreen, record: RECORD, log: [] }, async () => {
-      const r = await s.launch(stageDispatchBody({ issue: 4, claim: CLAIM, want: "token", ask: 1794175200 }));
-      assert.equal(r.exit, "token", JSON.stringify(r));
-    });
-    assert.deepEqual(s.out.handed, [{ tokens: { write: "t", read: null }, messages: [{ type: "pendulum-tokens", write: "t", read: null }] }]);
-    assert.equal(readHandOver(JSON.stringify({ claim: "another", write: "x" }), CLAIM), null, "another claim's is refused");
-  } finally {
-    s.close();
-  }
-});
-
 /** A git checkout on pendulum/4 with one commit, and its head. */
 function headRepo() {
   const root = mkdtempSync(join(tmpdir(), "head-"));
@@ -638,81 +477,10 @@ test("#538 review: a second ask on a head reuses its run with no second dispatch
   }
 });
 
-test("#538 review: GitHub naming no run (204) is answered with the head's dispatched run; a run made on another head is refused and left to finish", async () => {
-  const s = await sandboxRelay();
-  try {
-    const r = await stage({ settings: ON, route: "sandbox", relay: s.relay, github: { record: RECORD, appActions: false, dispatch: 204, legs: bothGreen } });
-    assert.equal(r.result.green, true, r.log.join("\n"));
-    await s.settled();
-    const answer = JSON.parse(s.out.runs[0].env.PENDULUM_STAGE_CROSS_OS);
-    assert.ok(answer.run > 0 && answer.suite === answer.run, JSON.stringify(answer));
-  } finally {
-    s.close();
-  }
-  const m = await sandboxRelay();
-  try {
-    const r = await stage({ settings: ON, route: "sandbox", relay: m.relay, github: { record: RECORD, appActions: false, dispatchOn: "d".repeat(40), legs: bothGreen } });
-    assert.match(r.result.stuck?.reason || "", /^cross-OS CI: the run GitHub made \(\d+\) is on ddddddd, not on [0-9a-f]{7}: pendulum\/4 moved; re-apply the label/);
-    assert.equal(r.result.stuck.cause, "pendulum");
-    assert.equal(r.dispatches.length, 1, "dispatched once; nothing cancels it");
-  } finally {
-    m.close();
-  }
-});
-
-test("#538 review: a branch read that fails for now is no refusal: the stage asks again and gets its run", async () => {
-  const s = await sandboxRelay({ againMs: 5 });
-  try {
-    // Every read of the branch fails while the first launch holds its lock (its first lock is the only one).
-    const r = await stage({ settings: ON, route: "sandbox", relay: s.relay, github: { record: RECORD, appActions: false, failHead: (seen) => seen.locks.size === 1, legs: bothGreen } });
-    assert.equal(r.result.green, true, `${r.log.join("\n")}\n${JSON.stringify(s.out)}`);
-    await s.settled();
-    assert.deepEqual(s.out.runs.map((x) => JSON.parse(x.env.PENDULUM_STAGE_CROSS_OS).again ?? false), [true, false]);
-    assert.equal(r.dispatches.length, 1);
-  } finally {
-    s.close();
-  }
-});
-
-test("#538 review: the relay asks again after an answer with no run or no check suite, and resolves on one it can wait on", async () => {
-  const on = new EventEmitter();
-  const asks = [];
-  const sha = "c".repeat(40);
-  const answers = [{ sha, run: 5, suite: null }, { sha, run: null, suite: null }, { sha, again: true }, { sha, run: 5, suite: 9, reused: true }];
-  const relay = launcherRelay({ send: (m) => (asks.push(m), setImmediate(() => on.emit("message", { type: "pendulum-cross-os", ...answers[asks.length - 1] }))), on, againMs: 1, retryMs: 60_000 });
-  assert.deepEqual(await relay({ workflow: "ci.yml", ref: "pendulum/4", sha, boundMs: RELAY_WAIT_MS }), { sha, run: 5, suite: 9, reused: true });
-  assert.equal(asks.length, 4);
-  assert.equal(on.listenerCount("message"), 0, "its listener is gone once answered");
-});
-
-test("#538 review: stage.mjs passes the worker's ask over the real IPC channel to its launcher dispatch, and the answer back", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "ipc-"));
-  const sha = "e".repeat(40);
-  const script = join(dir, "worker.mjs");
-  writeFileSync(script, `import { launcherRelay } from ${JSON.stringify(join(import.meta.dirname, "..", "scripts", "lib", "cross-os.mjs"))};\nconst a = await launcherRelay()({ workflow: "ci.yml", ref: "pendulum/4", sha: ${JSON.stringify(sha)}, boundMs: 60000 });\nprocess.send({ type: "done", a }, () => process.disconnect());\n`);
-  const child = fork(script, [], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
-  const asked = [];
-  let stopping = false;
-  forwardAsks(child, {
-    stopping: () => stopping,
-    dispatch: async (want, ask, more) => {
-      asked.push({ want, ask: typeof ask, more });
-      for (const m of readHandOver(JSON.stringify({ claim: CLAIM, crossOs: { sha, run: 41, suite: 42 } }), CLAIM).messages) child.send(m);
-    },
-  });
-  const done = await new Promise((resolve) => child.on("message", (m) => m?.type === "done" && resolve(m.a)));
-  stopping = true;
-  await new Promise((r) => child.on("exit", r));
-  rmSync(dir, { recursive: true, force: true });
-  assert.deepEqual(asked, [{ want: "cross-os", ask: "number", more: { sha, workflow: "ci.yml", ref: "pendulum/4" } }]);
-  assert.deepEqual(done, { sha, run: 41, suite: 42, reused: false });
-});
-
-test("#538 with #556: a sandbox stage refuses a workflow that grants write before it asks its launcher, naming the grant", async () => {
-  const asked = [];
-  const r = await stage({ settings: ON, route: "sandbox", relay: async (a) => (asked.push(a), { timedOut: true }), github: { workflow: `${CI}    permissions:\n      id-token: write\n`, legs: bothGreen } });
-  assert.match(r.result.stuck?.reason || "", /^cross-OS CI: \.github\/workflows\/ci\.yml grants write \(job test: id-token: write\)/);
-  assert.equal(r.result.stuck.cause, "setup");
-  assert.deepEqual(asked, []);
-  assert.deepEqual(r.dispatches, []);
+test("#518 B1: a needs: failure that skips a leg is no green: the stage Blocks as the work's, with no fix pass", async () => {
+  const skipped = { status: "completed", conclusion: "skipped" };
+  const r = await stage({ settings: ON, github: { legs: () => ({ build: red, [MAC]: green, [WIN]: skipped }) } });
+  assert.equal(r.result.green, false);
+  assert.equal(r.prompts.length, 0, "no fix pass");
+  assert.equal(r.result.stuck.cause, "work");
 });

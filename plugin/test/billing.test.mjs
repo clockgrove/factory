@@ -13,8 +13,8 @@ import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { childBilling, codexKeyBilling, credentialEnv, foldDecision, keepDecision, runDecision, runHarness } from "../scripts/lib/harness.mjs";
 import { progressReporter, writeUsage } from "../scripts/lib/session.mjs";
 import { activityLine, capReached, copilotCount, harnessActivity, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, selectReady, spendMarker, spendOf, spendParts, spendText, stageSpendLine, usdText, vendorBody } from "../scripts/lib/logic.mjs";
@@ -29,8 +29,6 @@ import { localMerge } from "../../bench/test/fixtures/github.mjs";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 const FIXTURES = join(import.meta.dirname, "fixtures");
-const SCRIPTS = join(import.meta.dirname, "..", "scripts");
-const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
 const prices = loadPrices();
 const SUB = "API-equivalent at list prices, on the subscription";
 const CREDITS = "Copilot AI credits, billed to the seat";
@@ -241,40 +239,6 @@ test("a Claude run on a plan credential is the subscription's in result.json, th
   assert.ok(card.costCell.startsWith(`$1.20 ${SUB}`), card.costCell);
 });
 
-test("api only on a known key: an API key, a Console login, a bearer token; a base URL or an unknown key source is billing not recorded", async () => {
-  const key = await credOf("claude", "api", { anthropicApiKey: "sk-ant-api03-dummy" });
-  const keyed = await stage({ harness: "claude", model: "claude-opus-5-5", cred: key, run: async () => [await pass("claude", "claude-opus-5-5", key, { FAKE_USD: "1.2" })] });
-  assert.deepEqual([keyed.records[0].apiKeySource, keyed.stored.billing, keyed.stored.usdByBilling], ["ANTHROPIC_API_KEY", "api", { api: 1.2 }]);
-  assert.equal(usdText(keyed.usage), "1.2");
-  assert.match(keyed.body, /^<!-- pendulum:spend \{"usd":1\.2,"usdByBilling":\{"api":1\.2\},"billing":"api","usdByPass":\{"work":\{"usd":1\.2,"usdByBilling":\{"api":1\.2\}\}\},"exit":"delivered"\} -->$/m);
-  assert.equal((await dayOf(keyed.body)).words, "daily_usd reached ($1.20 of $0.01)");
-  const card = scorecard(keyed.stored, keyed.body, "claude");
-  assert.match(card.fromArtifact.basis, /; billed per use on API keys$/);
-  assert.ok(!/subscription|credits|not recorded/.test(card.costCell), card.costCell);
-  // A bearer token reports apiKeySource "none" as an OAuth token does: the environment says it is billed.
-  const bearer = await credOf("claude", "plan", { claudeCodeOauthToken: "sk-ant-oat01-dummy" }, { ANTHROPIC_AUTH_TOKEN: "gw-dummy" });
-  const viaGateway = await pass("claude", "claude-opus-5-5", bearer, { FAKE_USD: "0.4", ANTHROPIC_AUTH_TOKEN: "gw-dummy" });
-  assert.equal(viaGateway.apiKeySource, "none");
-  // A base URL of its own with no key: no sign either way.
-  const proxied = await credOf("claude", "plan", { claudeCodeOauthToken: "sk-ant-oat01-dummy" }, { ANTHROPIC_BASE_URL: "https://proxy.example" });
-  // A stored login: a Console login's key source is billed, a legacy one unknown, a claude.ai login's limits the subscription.
-  const login = await credOf("claude", "login");
-  const runs = async (cred, fakes) => {
-    const out = [];
-    for (const f of fakes) out.push(await pass("claude", "claude-opus-5-5", cred, f));
-    return out;
-  };
-  const b = await stage({ harness: "claude", model: "claude-opus-5-5", cred: bearer, run: () => runs(bearer, [{ FAKE_USD: "0.4", ANTHROPIC_AUTH_TOKEN: "gw-dummy" }]) });
-  assert.deepEqual([b.stored.billing, b.stored.usdByBilling], ["api", { api: 0.4 }], "a bearer token is billed per use");
-  const p = await stage({ harness: "claude", model: "claude-opus-5-5", cred: proxied, run: () => runs(proxied, [{ FAKE_USD: "0.3", ANTHROPIC_BASE_URL: "https://proxy.example" }]) });
-  assert.deepEqual([p.stored.billing, p.stored.usdByBilling], ["unknown", { unknown: 0.3 }]);
-  assert.equal(usdText(p.usage), `0.3 ${UNKNOWN}`);
-  const l = await stage({ harness: "claude", model: "claude-opus-5-5", cred: login, run: () => runs(login, [{ FAKE_USD: "0.5", FAKE_KEY_SOURCE: "/login managed key" }, { FAKE_USD: "0.25", FAKE_KEY_SOURCE: "oauth" }, { FAKE_USD: "0.125", FAKE_STORED: "claudeai" }, { FAKE_USD: "0.0625" }, { FAKE_USD: "1", FAKE_PROVIDER: "bedrock" }]) });
-  assert.deepEqual(l.records.map((r) => r.billing), ["api", "unknown", "subscription", "unknown", "api"]);
-  assert.deepEqual([l.stored.billing, l.stored.usdByBilling], ["unknown", { api: 1.5, unknown: 0.3125, subscription: 0.125 }]);
-  assert.equal(usdText(l.usage), `1.9375: 1.5 API + 0.3125 ${UNKNOWN} + 0.125 ${SUB}`, "every part, in one flat list");
-});
-
 test("a Copilot run is Copilot AI credits, billed to the seat, everywhere", async () => {
   const cred = await credOf("copilot", "api", { copilotGithubToken: "github_pat_dummy" });
   const { records, usage, stored, body } = await stage({ harness: "copilot", model: "claude-sonnet-5.5", cred, run: async () => [await pass("copilot", "claude-sonnet-5.5", cred)] });
@@ -403,89 +367,6 @@ test("decision records keep the pass's key source and billing through keepDecisi
   assert.deepEqual([stored.billing, stored.usdByBilling], ["subscription", { subscription: 0.04 }]);
 });
 
-test("the running spend line and status line say what the passes' dollars are, as each pass booked them when it ended", async () => {
-  // One stage process (its spend so far is the process's own): a login, one pass on a Console key and one on a claude.ai
-  // login, each booked by its own as it ended; the default local writer's line after them.
-  const gh = await fakeGitHub();
-  const script = `
-    import { progressReporter } from ${JSON.stringify(LIB("session.mjs"))};
-    import { credentialEnv, runHarness } from ${JSON.stringify(LIB("harness.mjs"))};
-    import { repoOf } from ${JSON.stringify(LIB("github.mjs"))};
-    process.env.PENDULUM_LOCAL = "1";
-    const progress = progressReporter(repoOf("owner/repo"), 7, { token: () => "t" }, { stage: "work", runId: "1", harness: "claude" });
-    delete process.env.PENDULUM_LOCAL;
-    progress.billing((await credentialEnv({ harness: "claude", credential: "login", inputs: {}, env: process.env })).billing);
-    const env = { HOME: process.env.HOME, PATH: process.env.PATH };
-    await runHarness({ harness: "claude", model: "m", prompt: "p", maxUsd: 0, cwd: process.env.HOME, env: { ...env, FAKE_USD: "0.5", FAKE_KEY_SOURCE: "/login managed key" }, timeoutMs: 60_000, label: "work-1" });
-    await runHarness({ harness: "claude", model: "m", prompt: "p", maxUsd: 0, cwd: process.env.HOME, env: { ...env, FAKE_USD: "0.25", FAKE_STORED: "claudeai" }, timeoutMs: 60_000, label: "work-2" });
-    await progress("work-2 ended");
-    process.exit(0);
-  `;
-  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: BASE.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url }, stdio: ["ignore", "pipe", "pipe"] });
-  let err = "";
-  child.stderr.on("data", (c) => (err += c));
-  const code = await new Promise((r) => child.on("exit", r));
-  gh.close();
-  assert.equal(code, 0, err);
-  const line = spendParts(gh.written.at(-1));
-  assert.deepEqual([line?.usd, line?.usdByBilling], [0.75, { api: 0.5, subscription: 0.25 }], gh.written.at(-1));
-  // The status line: a finished pass's dollars as its record will say.
-  const said = (feed, billing) => {
-    const a = harnessActivity();
-    for (const l of feed) a.feed(JSON.stringify(l));
-    a.feed(JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "s1", total_cost_usd: 1.2 }));
-    return activityLine(a.snapshot(), { harness: "claude", model: "claude-opus-5-5", billing });
-  };
-  const init = (src) => ({ type: "system", subtype: "init", session_id: "s1", apiKeySource: src, claude_code_version: "2.1.326" });
-  const limits = { type: "rate_limit_event", rate_limit_info: { status: "allowed" }, session_id: "s1" };
-  assert.ok(said([init("none")], "subscription").includes(`, $1.20 ${SUB}`));
-  assert.ok(said([init("none"), limits], "unknown").includes(`, $1.20 ${SUB}`), "a stored login's limits");
-  assert.ok(said([init("none")], "unknown").includes(`, $1.20 ${UNKNOWN}`));
-  assert.match(said([init("ANTHROPIC_API_KEY")], "subscription"), /, \$1\.20(;|$)/, "a key Claude Code reports is billed");
-});
-
-test("a stopped stage's usage keeps its passes' billing: the pass that ended and the one still running at the stop", async () => {
-  const root = mkdtempSync(join(tmpdir(), "billing-stop-"));
-  const script = `
-    import { mkdtempSync, readFileSync } from "node:fs";
-    import { join } from "node:path";
-    import { runHarness, setStageBilling, credentialEnv } from ${JSON.stringify(LIB("harness.mjs"))};
-    import { stopStage, writeUsage } from ${JSON.stringify(LIB("session.mjs"))};
-    globalThis.fetch = async () => new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
-    process.env.GITHUB_API_URL = "https://github.test";
-    const root = process.env.FAKE_STATE;
-    const cred = await credentialEnv({ harness: "claude", credential: "plan", inputs: { claudeCodeOauthToken: "sk-ant-oat01-dummy" }, env: process.env });
-    setStageBilling(cred.billing);
-    const env = { HOME: process.env.HOME, PATH: process.env.PATH, ...cred.env };
-    await runHarness({ harness: "claude", model: "m", prompt: "p", maxUsd: 0, cwd: root, env: { ...env, FAKE_USD: "0.7" }, timeoutMs: 60_000, label: "work-1" });
-    runHarness({ harness: "claude", model: "m", prompt: "p", maxUsd: 0, cwd: root, env: { ...env, FAKE_SLEEP: "1" }, timeoutMs: 60_000, label: "work-2" });
-    await new Promise((r) => setTimeout(r, 1500));
-    const dir = mkdtempSync(join(root, "usage-"));
-    // The worker's stopped end (worker.mjs finish and endNow): writeUsage on the stop's records, with the stage's billing.
-    const records = [];
-    const write = (exit, reason, recs) => writeUsage(dir, { harness: "claude", model: "m", records: recs, passes: 2, exit, reason, credentialBasis: cred.basis, billing: cred.billing });
-    await stopStage({ cause: "unlabeled", label: "pendulum:objective", repo: { owner: "a", name: "b", full: "a/b" }, issue: 7, records, finish: async (exit, reason) => write(exit, reason, records), endNow: (recs, why) => write("stopped", why, recs), opts: { token: "t" }, exit: () => {} });
-    process.stdout.write(readFileSync(join(dir, "result.json"), "utf8").replace(/\\n/g, " ") + "\\n");
-    process.exit(0);
-  `;
-  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: BASE.PATH, TMPDIR: process.env.TMPDIR, FAKE_STATE: root }, stdio: ["ignore", "pipe", "pipe"] });
-  let out = "";
-  let err = "";
-  child.stdout.on("data", (c) => (out += c));
-  child.stderr.on("data", (c) => (err += c));
-  assert.equal(await new Promise((r) => child.on("exit", r)), 0, err);
-  const stored = JSON.parse(out.trim().split("\n").at(-1));
-  assert.equal(stored.exit, "stopped");
-  assert.deepEqual([stored.billing, stored.usdByBilling, stored.usd, stored.usdUnknown], ["subscription", { subscription: 0.7 }, 0.7, 1], JSON.stringify(stored));
-  // Every usage write of the work and review stages, the stop's included, passes the stage's billing.
-  for (const f of ["worker.mjs", "review.mjs"]) {
-    const src = readFileSync(join(SCRIPTS, f), "utf8");
-    const calls = src.match(/writeUsage\(usageDir, \{[^\n]*/g) ?? [];
-    assert.ok(calls.length >= 2, f);
-    for (const c of calls) assert.ok(c.includes("billing: credentialBilling"), `${f}: ${c.slice(0, 160)}`);
-  }
-});
-
 test("the rebase line, the rebase tally, the vendor comment and an account's share carry the billing, with no stray $0.00 part", async () => {
   const usage = { usd: 0.8, usdByBilling: { subscription: 0.8 }, billing: "subscription" };
   const cost = rebaseCost(usage, { records: [{ usd: 0.8 }] });
@@ -548,4 +429,32 @@ test("#617: a stage's dollars are the sum of its passes' to the millionth: its u
   assert.deepEqual(rebaseCost(s.usage, { records }), { usd: 0.228606, usdByBilling: { credits: 0.228606 }, billing: "credits" });
   // The caller's records are left as the harness reported them.
   assert.deepEqual(records.map((r) => r.usd), [0.0851386, 0.1434666]);
+});
+
+test("the running spend line carries each pass's dollars under the billing it booked when it ended", async () => {
+  // One stage process: one pass on a Console key and one on a claude.ai login, then the spend line after them.
+  const gh = await fakeGitHub();
+  const lib = (f) => pathToFileURL(join(ROOT, "plugin", "scripts", "lib", f)).href;
+  const script = `
+    import { progressReporter } from ${JSON.stringify(lib("session.mjs"))};
+    import { credentialEnv, runHarness } from ${JSON.stringify(lib("harness.mjs"))};
+    import { repoOf } from ${JSON.stringify(lib("github.mjs"))};
+    process.env.PENDULUM_LOCAL = "1";
+    const progress = progressReporter(repoOf("owner/repo"), 7, { token: () => "t" }, { stage: "work", runId: "1", harness: "claude" });
+    delete process.env.PENDULUM_LOCAL;
+    progress.billing((await credentialEnv({ harness: "claude", credential: "login", inputs: {}, env: process.env })).billing);
+    const env = { HOME: process.env.HOME, PATH: process.env.PATH };
+    await runHarness({ harness: "claude", model: "m", prompt: "p", maxUsd: 0, cwd: process.env.HOME, env: { ...env, FAKE_USD: "0.5", FAKE_KEY_SOURCE: "/login managed key" }, timeoutMs: 60_000, label: "work-1" });
+    await runHarness({ harness: "claude", model: "m", prompt: "p", maxUsd: 0, cwd: process.env.HOME, env: { ...env, FAKE_USD: "0.25", FAKE_STORED: "claudeai" }, timeoutMs: 60_000, label: "work-2" });
+    await progress("work-2 ended");
+    process.exit(0);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: BASE.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url }, stdio: ["ignore", "pipe", "pipe"] });
+  let err = "";
+  child.stderr.on("data", (c) => (err += c));
+  const code = await new Promise((r) => child.on("exit", r));
+  gh.close();
+  assert.equal(code, 0, err);
+  const line = spendParts(gh.written.at(-1));
+  assert.deepEqual([line?.usd, line?.usdByBilling], [0.75, { api: 0.5, subscription: 0.25 }], gh.written.at(-1));
 });

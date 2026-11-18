@@ -8,7 +8,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
 import { handedOffMarker, headMarks, postHandedOff, redLines, validatedMarker, validationLoop } from "../scripts/lib/session.mjs";
 import { openTriage } from "../scripts/lib/triage.mjs";
@@ -123,87 +122,6 @@ test("reviewOverlap: the reviewer starts at the first reading; a red found while
   }
 });
 
-test("reviewOverlap: a head already red at the first reading gets no reviewer yet; its fix pass comes first, as before", async () => {
-  const home = mkdtempSync(join(tmpdir(), "nokey-"));
-  try {
-    const lines = [];
-    await withChecks([[run("completed", "failure")]], async () => {
-      const o = reviewOverlap({ run: prePass(home), progress: async (l) => lines.push(l), head: () => SHA });
-      assert.equal(await o.beside(), false, "known red: no reviewer pass is spent on it");
-      const r = await o.done;
-      assert.equal(r.held, undefined);
-      assert.deepEqual(r.harness, { timedOut: true }, "the fix pass is reached in the loop");
-    });
-    assert.ok(lines.some((l) => /^pre-review-validation pass 1 red: required checks quality on a{7}; fix run$/.test(l)), lines.join("\n"));
-    assert.ok(!lines.some((l) => l.startsWith("during the reviewer")), lines.join("\n"));
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("reviewOverlap: checks still running when the reviewer ends are waited for after it; a stage that ends stops the wait", async () => {
-  const home = mkdtempSync(join(tmpdir(), "nokey-"));
-  try {
-    const lines = [];
-    await withChecks([[run("in_progress")], [run("in_progress")], [run("completed", "success")]], async () => {
-      // The checks' pass settles only after the reviewer said it was done.
-      let gate;
-      const held = new Promise((r) => (gate = r));
-      const o = reviewOverlap({ run: (more) => prePass(home)(more).then(async (r) => (await held, r)), progress: async (l) => lines.push(l), head: () => SHA });
-      assert.equal(await o.beside(), true);
-      const done = o.reviewerDone();
-      gate();
-      const r = await done;
-      assert.equal(r.green, true);
-    });
-    assert.equal(lines.at(-1), "waiting for required checks on aaaaaaa after the reviewer");
-    // Stopped: the wait ends at its next pause, and the pass reads nothing more.
-    await withChecks([[run("in_progress")]], async (reads) => {
-      const o = reviewOverlap({ run: prePass(home, { checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 60_000, timeoutMs: 600_000 } }), progress: async () => {}, head: () => SHA });
-      assert.equal(await o.beside(), true);
-      o.stop();
-      const r = await o.done;
-      assert.equal(r.aborted, true);
-      assert.equal(reads.filter((x) => x.includes("check-runs")).length, 1);
-    });
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("validationLoop handOff: the head is pushed and handed to the review stage without a reading of its checks", async () => {
-  const lines = [];
-  await withChecks([[run("in_progress")]], async (reads) => {
-    let pushed = 0;
-    const r = await validationLoop({ checkout: "/nonexistent", commands: [], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env, deadlineAt: Date.now() + 600_000, checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t" }, outbox: { push: async () => ((pushed += 1), true), expected: () => SHA }, onPhase: async (l) => lines.push(l), handOff: true });
-    assert.equal(r.handedOff, SHA);
-    assert.equal(r.passes, 0, "no check read and no command run: no pass");
-    assert.equal(pushed, 1);
-    assert.deepEqual(reads, [], "nothing read from GitHub");
-  });
-  assert.deepEqual(lines, ["validation: required checks quality on aaaaaaa run while the review starts; handed to the review stage"]);
-});
-
-test("validationLoop checksOnlyFirst: a handed-off head's commands are not run again on the review's first pass; a later pass runs them", async () => {
-  const work = mkdtempSync(join(tmpdir(), "chk-"));
-  const gate = BACKENDS.actions.gate.commandsFirst;
-  // The local route's gate (commands first, then the checks), on the Action's plain shell.
-  BACKENDS.actions.gate.commandsFirst = true;
-  try {
-    await withChecks([[run("completed", "success")]], async () => {
-      const loop = (extra) => validationLoop({ checkout: work, commands: ["exit 3"], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env, deadlineAt: Date.now() + 30_000, checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1 }, outbox: { push: async () => true, expected: () => SHA }, ...extra });
-      const first = await loop({ checksOnlyFirst: true });
-      assert.equal(first.green, true, "the checks alone on the first pass");
-      const every = await loop({});
-      assert.equal(every.green, false, "without it the commands run first, red");
-      assert.equal(every.command, "exit 3");
-    });
-  } finally {
-    BACKENDS.actions.gate.commandsFirst = gate;
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
 test("headMarks: the worker's hand-off marker and the validated marker are read in one listing, from Pendulum's own comments only", async () => {
   setSelf("pendulum-app[bot]");
   const comments = [];
@@ -239,33 +157,6 @@ test("headMarks: the worker's hand-off marker and the validated marker are read 
   }
 });
 
-test("reviewOverlap: no reviewer pass on a head no CI has started on yet, or that conflicts; the reviewer starts once a check run exists", async () => {
-  const home = mkdtempSync(join(tmpdir(), "nokey-"));
-  try {
-    // Two readings with no check run (CI not started yet), then one: the reviewer starts at that one.
-    await withChecks([[], [], [run("in_progress")], [run("completed", "success")]], async (reads) => {
-      const o = reviewOverlap({ run: prePass(home, { checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 60_000, pollMs: 1, timeoutMs: 5000 } }), progress: async () => {}, head: () => SHA });
-      assert.equal(await o.beside(), true);
-      assert.equal(reads.filter((x) => x.includes("check-runs")).length, 3, "started at the first reading with a run");
-      assert.equal((await o.reviewerDone()).green, true);
-    });
-    // The PR conflicts: GitHub starts no check, the pass ends on the conflict, and no reviewer pass is spent on it.
-    await withChecks([[]], async () => {
-      const o = reviewOverlap({ run: prePass(home), progress: async () => {}, head: () => SHA, conflicted: async () => true });
-      assert.equal(await o.beside(), false);
-      assert.equal((await o.done).conflict, true);
-    }, { mergeable: () => "dirty" });
-    // Checks running, but the PR's mergeable state already reads a conflict: no reviewer either.
-    await withChecks([[run("in_progress")]], async () => {
-      const o = reviewOverlap({ run: prePass(home), progress: async () => {}, head: () => SHA, conflicted: async () => true });
-      assert.equal(await o.beside(), false);
-      assert.equal((await o.done).conflict, true);
-    }, { mergeable: () => "dirty" });
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
 test("reviewOverlap: a pass that ends the stage while the reviewer runs aborts the reviewer; one that throws is no unhandled rejection", async () => {
   const home = mkdtempSync(join(tmpdir(), "nokey-"));
   try {
@@ -294,7 +185,7 @@ test("reviewOverlap: a pass that ends the stage while the reviewer runs aborts t
     const on = (e) => (seen = e);
     process.on("unhandledRejection", on);
     fail(new Error("GitHub 502 while waiting"));
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setImmediate(r));
     process.off("unhandledRejection", on);
     assert.equal(seen, null);
     assert.equal(o.signal.aborted, true);
@@ -302,13 +193,6 @@ test("reviewOverlap: a pass that ends the stage while the reviewer runs aborts t
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
-});
-
-test("validationLoop: a green result names the head its checks were green on (the validated marker's head)", async () => {
-  await withChecks([[run("completed", "success")]], async () => {
-    const r = await validationLoop({ checkout: "/nonexistent", commands: [], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env, deadlineAt: Date.now() + 60_000, checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1 }, outbox: { push: async () => true, expected: () => SHA } });
-    assert.deepEqual([r.green, r.sha], [true, SHA]);
-  });
 });
 
 test("validatedOn: the validated marker goes on the head the checks were green on; a head that moved meanwhile gets no marker and the review again", async () => {

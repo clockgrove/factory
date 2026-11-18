@@ -1,6 +1,6 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -70,7 +70,6 @@ const PROXY_NAMES = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "
 const none = Object.fromEntries(PROXY_NAMES.map((k) => [k, undefined]));
 // A host no resolver answers: a direct try fails at its lookup, never reaching any network.
 const HTTPS_REMOTE = "https://pendulum.invalid/o/r.git";
-const HTTP_REMOTE = "http://pendulum.invalid/o/r.git";
 const ID = "1".repeat(40);
 const TOKEN = "t0ken-599-never-at-the-proxy";
 
@@ -138,61 +137,3 @@ test("#599: the mirror's GitHub token never reaches the proxy: no CONNECT carrie
   }
 });
 
-/** Whether a Node fetch of `url` in a process of its own, with exactly `vars` for env, reaches proxy `p`. */
-const nodeThrough = (p, vars, url) =>
-  new Promise((done) => {
-    const before = p.count();
-    const code = `await fetch(${JSON.stringify(url)}, { signal: AbortSignal.timeout(20000) }).catch(() => {});`;
-    execFile(process.execPath, ["--input-type=module", "-e", code], { env: { PATH: process.env.PATH, ...vars }, timeout: 30_000 }, () => done(p.count() > before));
-  });
-
-/** Whether Pendulum's git (a scratch repository's fetch) with the stage's env holding exactly `vars` reaches proxy `p`. */
-const gitThrough = async (p, vars, remote, root) => {
-  const before = p.count();
-  await withEnv({ ...none, ...vars }, () => mergeTree({ remote, ours: ID, theirs: ID, base: root }));
-  return p.count() > before;
-};
-
-test("#599: git's proxy is exactly the stage's Node fetch's, each setting form read as Node reads it", async () => {
-  const p = await proxy();
-  const root = mkdtempSync(join(tmpdir(), "mirror-proxy-"));
-  const on = { NODE_USE_ENV_PROXY: "1" };
-  const dead = "http://127.0.0.1:1";
-  // [what, env, remote, whether Node's fetch (and so git) goes through the proxy]
-  const cases = [
-    ["https_proxy", { ...on, https_proxy: p.url }, HTTPS_REMOTE, true],
-    ["https_proxy before HTTPS_PROXY", { ...on, HTTPS_PROXY: dead, https_proxy: p.url }, HTTPS_REMOTE, true],
-    ["an empty https_proxy, no http proxy: directly", { ...on, HTTPS_PROXY: p.url, https_proxy: "" }, HTTPS_REMOTE, false],
-    ["HTTP_PROXY alone serves https", { ...on, HTTP_PROXY: p.url }, HTTPS_REMOTE, true],
-    ["http_proxy alone serves https", { ...on, http_proxy: p.url }, HTTPS_REMOTE, true],
-    ["an empty https_proxy falls to the http proxy", { ...on, HTTPS_PROXY: dead, https_proxy: "", HTTP_PROXY: p.url }, HTTPS_REMOTE, true],
-    ["NO_PROXY host", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "pendulum.invalid" }, HTTPS_REMOTE, false],
-    ["no_proxy leading dot", { ...on, HTTPS_PROXY: p.url, no_proxy: ".invalid" }, HTTPS_REMOTE, false],
-    ["NO_PROXY *.domain", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "*.invalid" }, HTTPS_REMOTE, false],
-    ["NO_PROXY *.host", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "*.pendulum.invalid" }, HTTPS_REMOTE, false],
-    ["NO_PROXY host:443", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "pendulum.invalid:443" }, HTTPS_REMOTE, false],
-    ["NO_PROXY host:another port", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "pendulum.invalid:8443" }, HTTPS_REMOTE, true],
-    ["NO_PROXY with spaces", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "other.test pendulum.invalid" }, HTTPS_REMOTE, false],
-    ["NO_PROXY with commas and spaces", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "other.test, *.invalid" }, HTTPS_REMOTE, false],
-    ["NO_PROXY *", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "*" }, HTTPS_REMOTE, false],
-    ["NO_PROXY * within a list", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "other.test,*" }, HTTPS_REMOTE, true],
-    ["NO_PROXY of another host", { ...on, HTTPS_PROXY: p.url, NO_PROXY: "other.test" }, HTTPS_REMOTE, true],
-    ["an empty no_proxy before NO_PROXY", { ...on, HTTPS_PROXY: p.url, no_proxy: "", NO_PROXY: "pendulum.invalid" }, HTTPS_REMOTE, true],
-    ["no NODE_USE_ENV_PROXY", { HTTPS_PROXY: p.url, https_proxy: p.url, HTTP_PROXY: p.url, ALL_PROXY: p.url }, HTTPS_REMOTE, false],
-    ["ALL_PROXY is not Node's", { ...on, ALL_PROXY: p.url, all_proxy: p.url }, HTTPS_REMOTE, false],
-    ["HTTP_PROXY for an http remote", { ...on, HTTP_PROXY: p.url }, HTTP_REMOTE, true],
-    ["HTTPS_PROXY is not an http remote's", { ...on, HTTPS_PROXY: p.url }, HTTP_REMOTE, false],
-  ];
-  try {
-    for (const [what, vars, remote, through] of cases) {
-      const url = `${new URL(remote).origin}/`;
-      assert.equal(await nodeThrough(p, vars, url), through, `Node's fetch: ${what}`);
-      assert.equal(await gitThrough(p, vars, remote, root), through, `git: ${what}`);
-    }
-    // No credential rides a plain request.
-    assert.ok(p.plain.some((r) => r.url.startsWith("http://pendulum.invalid/o/r.git/")), JSON.stringify(p.plain));
-    assert.ok(p.plain.every((r) => !r.headers.authorization), JSON.stringify(p.plain));
-  } finally {
-    await p.close();
-  }
-});

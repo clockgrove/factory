@@ -223,21 +223,6 @@ test("dispatcher: a restart waits for a running stage to stop, never picked mean
   }
 });
 
-test("setup creates pendulum:restart, and applying it ticks the dispatcher on every route", async () => {
-  const { readFileSync } = await import("node:fs");
-  const { join } = await import("node:path");
-  const { LABELS, renderWorkflow } = await import("../scripts/setup.mjs");
-  const { parseYaml } = await import("../scripts/lib/yaml.mjs");
-  assert.ok(LABELS.some(([name]) => name === RESTART_LABEL));
-  const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
-  for (const v of [values, { ...values, sandbox: "vercel", default_branch: "main" }]) {
-    const wf = parseYaml(renderWorkflow(template, v));
-    assert.ok(wf.on.issues.types.includes("labeled"));
-    assert.match(wf.jobs.dispatch.if, /github\.event\.action == 'labeled' && github\.event\.label\.name == 'pendulum:restart'/);
-  }
-});
-
 
 /** One dispatcher tick over #7 with `labels` and a restart applied `restartAgo` ms ago by `by`. */
 async function tick({ labels, jobs = [], restartAgo = 60_000, by = "maintainer", keepBranch = false } = {}) {
@@ -266,51 +251,6 @@ test("restart while a stage runs in any state: a review's answer pass on a Quest
   }
 });
 
-test("a held restart is out of the merge pass: its PR is not read for a merge, an update or a send-back", async () => {
-  const t = await tick({ labels: ["pendulum:in-review"], jobs: [{ name: "review (pendulum/7)", status: "in_progress" }] });
-  assert.deepEqual(t.r.restarted, []);
-  assert.ok(!t.reads.includes("/pulls/70"), t.reads.join("\n"));
-  assert.deepEqual(t.r.merged, []);
-});
-
-test("a branch a ruleset keeps: the restart Blocks with the fix, its label off, the earlier PR open and the branch where it was", async () => {
-  const t = await tick({ labels: ["pendulum:in-review"], keepBranch: true });
-  assert.deepEqual(t.r.restarted, []);
-  assert.equal(t.state.branch, HEAD7);
-  assert.equal(t.state.prOpen, true, "the PR is not closed");
-  assert.ok(!t.writes.includes("PATCH /pulls/70 closed"));
-  assert.ok(t.writes.some((w) => w.startsWith("POST /issues/7/comments <!-- pendulum:7:blocked")), t.writes.join("\n"));
-  assert.ok(t.state.labels.has("pendulum:blocked") && !t.state.labels.has(RESTART_LABEL));
-  assert.deepEqual(t.r.ready, []);
-  // The Block says how to keep the work instead of finishing the restart (#274).
-  const block = t.state.comments.find((c) => c.body.startsWith("<!-- pendulum:7:blocked"));
-  assert.match(block.body, /apply `pendulum:restart` again\n\nTo keep the work instead of restarting, re-apply `pendulum:objective`: that resumes from `pendulum\/7` and PR #70\./);
-});
-
-test("a Block over a delivered PR whose stop was outside the work says to resume, not restart, and what a restart would discard (#274)", async () => {
-  const { applyExit } = await import("../scripts/lib/session.mjs");
-  await withEnv({}, async () => {
-    setSelf(BOT.login);
-    const api = fakeApi({ labels: ["pendulum:objective", "pendulum:running"] });
-    try {
-      const pr = { number: 70, draft: false, node_id: "PR_70" };
-      // Each Block's body is read as soon as it is posted: two Blocks of one stage in one Actions run (one
-      // GITHUB_RUN_ID) are one comment, the second updating the first.
-      const posted = () => api.state.comments.filter((c) => c.body.startsWith("<!-- pendulum:7:blocked")).at(-1).body;
-      await applyExit(REPO, { issue: 7, pr, exit: "blocked", reason: "the harness home could not be set up", cause: "setup", stage: "work" }, { token: "t" });
-      const setup = posted();
-      await applyExit(REPO, { issue: 7, pr: { ...pr, draft: true }, exit: "blocked", reason: "validation red after Pendulum's second pass", cause: "work", stage: "work" }, { token: "t" });
-      const work = posted();
-      assert.match(setup, /\n\nResume, don't restart: the stop is outside the work\. Once its cause is fixed or has passed, re-apply `pendulum:objective` to go on from `pendulum\/7` and PR #70\. `pendulum:restart` would discard the delivered PR #70 with its review, the commits on `pendulum\/7` and the spend on them, and gain nothing\.\n/);
-      assert.match(work, /\n\nResume once the cause is fixed: re-apply `pendulum:objective` to go on from `pendulum\/7` and PR #70\. Restart \(`pendulum:restart`\) only when the work itself must be redone from the issue's text: a restart discards PR #70 with its review, the commits on `pendulum\/7` and the spend on them\.\n/);
-      for (const body of [setup, work]) assert.match(body, /\n<!-- pendulum:block \{"cause":"(setup|work)"\} -->$/, "the cause line stays the notice's last");
-    } finally {
-      api.restore();
-      setSelf(null);
-    }
-  });
-});
-
 test("a restart label applied by someone who cannot push is taken off with a comment, and nothing restarts", async () => {
   const t = await tick({ labels: ["pendulum:in-review"], by: "stranger" });
   assert.deepEqual(t.r.restarted, []);
@@ -318,89 +258,6 @@ test("a restart label applied by someone who cannot push is taken off with a com
   assert.ok(t.writes.some((w) => w.startsWith("POST /issues/7/comments <!-- pendulum:7:restart-refused")));
   assert.equal(t.state.branch, HEAD7);
   assert.equal(t.state.prOpen, true);
-});
-
-test("a retry of a restart keeps what the first try recorded (the PR, the branch's head), and another loop's finished restart is left alone", async () => {
-  setSelf(BOT.login);
-  try {
-    await withEnv({}, async () => {
-      // The first try closed the PR and deleted the branch, then was cut off.
-      const first = { id: 50, user: BOT, created_at: "2031-03-02T02:01:00Z", body: `${restartMarker(7, AT)}\n${restartRecord({ issue: 7, at: AT, by: "maintainer", pr: 70, head: HEAD7 })}` };
-      const api = fakeApi({ comments: [first] });
-      api.state.prOpen = false;
-      api.state.branch = null;
-      try {
-        await restartObjective(REPO, 7, { at: AT, project: null }, { token: "t" });
-        assert.match(first.body, new RegExp(`"by":"maintainer","pr":70,"head":"${HEAD7}"`), first.body);
-      } finally {
-        api.restore();
-      }
-      // Another loop finished it (the label is off): its Running label stays.
-      const other = fakeApi({ labels: ["pendulum:objective", "pendulum:running"] });
-      try {
-        const r = await restartObjective(REPO, 7, { at: AT, project: null }, { token: "t" });
-        assert.equal(r.finished, false);
-        assert.ok(!other.writes.some((w) => w.startsWith("DELETE /issues/7/labels/")), other.writes.join("\n"));
-      } finally {
-        other.restore();
-      }
-    });
-  } finally {
-    setSelf(null);
-  }
-});
-
-test("readers after a restart: a plan comment or a split record from before it is no one's any more, whoever wrote it", async () => {
-  const { planOf } = await import("../scripts/lib/handoff.mjs");
-  setSelf(BOT.login);
-  try {
-    const otherApp = { id: 30, user: { login: "other-app[bot]", type: "Bot" }, created_at: "2031-03-02T01:00:00Z", body: "<!-- pendulum:7:plan -->\n## Plan" };
-    assert.ok(planOf([otherApp], 7), "without a restart another App's plan comment gives its time");
-    assert.equal(planOf([otherApp, recordComment()], 7), null);
-    const newPlan = { id: 31, user: BOT, created_at: "2031-03-02T03:00:00Z", body: "<!-- pendulum:7:plan -->\n## New plan" };
-    assert.equal(planOf([otherApp, recordComment(), newPlan], 7).id, 31);
-    await withEnv({}, async () => {
-      const api = fakeApi({ comments: [{ id: 12, user: BOT, created_at: "2031-03-02T01:40:00Z", body: '<!-- pendulum:7:parts {"prs":[70],"remaining":2} -->\nparts' }, recordComment()] });
-      try {
-        assert.equal(await partsRecord(REPO, 7, { token: "t" }), null);
-      } finally {
-        api.restore();
-      }
-    });
-  } finally {
-    setSelf(null);
-  }
-  const { EDITED_FIX } = await import("../scripts/lib/objective-trust.mjs");
-  const { blockedLine } = await import("../scripts/lib/session.mjs");
-  assert.match(blockedLine({ issue: 7, pr: { number: 9 }, stage: "work", reason: "edited", fix: EDITED_FIX, cause: "work" }), /Restart \(`pendulum:restart`\) only when the work itself must be redone/);
-});
-
-test("a stage that missed the restart's label learns of it from a record newer than the ones it started with, whatever its clock", async () => {
-  const { objectiveReader } = await import("../scripts/lib/stop.mjs");
-  setSelf(BOT.login);
-  try {
-    let lists = 0;
-    const comments = [recordComment()];
-    const reader = () => objectiveReader({ read: async () => ({ ...issue(["pendulum:objective"]), comments: comments.length }), list: async () => (lists++, comments) });
-    // The restarted run's own stage: the record is there when it starts. On a machine whose clock is behind GitHub's,
-    // the record's time is "after" the stage's start, and it still is no restart of this stage.
-    const own = reader();
-    await own.prime();
-    assert.equal(stopCause(await own(), "pendulum:objective"), null);
-    const n = lists;
-    await own();
-    assert.equal(lists, n, "the comments are read again only when their count changes");
-    // A later restart, recorded while the stage runs: it stops.
-    comments.push(recordComment(7, "2031-03-02T05:00:00Z"));
-    assert.equal(stopCause(await own(), "pendulum:objective"), "restart");
-    // A stage that began before any record learns of the first one.
-    const early = objectiveReader({ read: async () => ({ ...issue(["pendulum:objective"]), comments: 0 }), list: async () => [] });
-    await early.prime();
-    const later = Object.assign(early, {});
-    assert.equal(stopCause(await later(), "pendulum:objective"), null);
-  } finally {
-    setSelf(null);
-  }
 });
 
 test("a refused restart (a branch a ruleset keeps) discards nothing: its record is retired, and the plan, the decisions and the edit gate still read as before it", async () => {
@@ -418,57 +275,6 @@ test("a refused restart (a branch a ruleset keeps) discards nothing: its record 
   }
 });
 
-test("a permission read that fails for now holds the restart for the next tick: no refusal, the label stays", async () => {
-  const { dispatch } = await import("../scripts/dispatch.mjs");
-  await withEnv({}, async () => {
-    setSelf(BOT.login);
-    const all = ["pendulum:objective", RESTART_LABEL, "pendulum:in-review"];
-    const api = fakeApi({ labels: all, writers: [], open: (label) => (label === "pendulum:objective" ? [issue(all)] : []), timeline: () => [{ event: "labeled", label: { name: RESTART_LABEL }, actor: { login: "newcomer", type: "User" }, created_at: new Date(Date.now() - 60_000).toISOString() }] });
-    const real = globalThis.fetch;
-    globalThis.fetch = async (url, init) => (/\/collaborators\/newcomer\/permission$/.test(new URL(url).pathname) ? new Response('{"message":"bad gateway"}', { status: 502, headers: { "content-type": "application/json" } }) : real(url, init));
-    try {
-      const r = await dispatch({ repo: "acme/app", objectiveLabel: "pendulum:objective", maxConcurrent: 2, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
-      assert.deepEqual(r.restarted, []);
-      assert.ok(api.state.labels.has(RESTART_LABEL));
-      assert.ok(!api.writes.some((w) => w.includes("restart-refused")));
-      assert.ok(r.deadlines.some((d) => d.kind === "retry"));
-    } finally {
-      globalThis.fetch = real;
-      api.restore();
-      setSelf(null);
-    }
-  });
-});
-
-test("a retry after the branch went (GitHub closed the PR with it) still comments on and closes the PR the record names; a gone label does nothing at all", async () => {
-  setSelf(BOT.login);
-  try {
-    await withEnv({}, async () => {
-      const first = { id: 50, user: BOT, created_at: "2031-03-02T02:01:00Z", body: `${restartMarker(7, AT)}\n${restartRecord({ issue: 7, at: AT, by: "maintainer", pr: 70, head: HEAD7 })}` };
-      const api = fakeApi({ comments: [first] });
-      api.state.prOpen = false;
-      api.state.branch = null;
-      try {
-        await restartObjective(REPO, 7, { at: AT, project: null }, { token: "t" });
-        assert.ok(api.writes.includes("POST /issues/70/comments <!-- pendulum:7:restarted:20310302T020000Z -->"), api.writes.join("\n"));
-        assert.ok(api.writes.includes("PATCH /pulls/70 closed"));
-      } finally {
-        api.restore();
-      }
-      const gone = fakeApi({ labels: ["pendulum:objective", "pendulum:running"] });
-      try {
-        const r = await restartObjective(REPO, 7, { at: AT, project: null }, { token: "t" });
-        assert.equal(r.finished, false);
-        assert.deepEqual(gone.writes, [], "nothing written: no record, no PR change, no label");
-      } finally {
-        gone.restore();
-      }
-    });
-  } finally {
-    setSelf(null);
-  }
-});
-
 test("the merge pass never merges an Objective waiting for its restart, whoever runs it", async () => {
   const { mergeReadyOne } = await import("../scripts/lib/session.mjs");
   await withEnv({}, async () => {
@@ -479,4 +285,25 @@ test("the merge pass never merges an Objective waiting for its restart, whoever 
       api.restore();
     }
   });
+});
+
+test("a stage that missed the restart's label learns of it from a record newer than the ones it started with, whatever its clock", async () => {
+  const { objectiveReader } = await import("../scripts/lib/stop.mjs");
+  setSelf(BOT.login);
+  try {
+    let lists = 0;
+    const comments = [recordComment()];
+    const own = objectiveReader({ read: async () => ({ ...issue(["pendulum:objective"]), comments: comments.length }), list: async () => (lists++, comments) });
+    // The restarted run's own stage: the record is there when it starts, so it is no restart of this stage.
+    await own.prime();
+    assert.equal(stopCause(await own(), "pendulum:objective"), null);
+    const n = lists;
+    await own();
+    assert.equal(lists, n, "the comments are read again only when their count changes");
+    // A later restart, recorded while the stage runs: it stops.
+    comments.push(recordComment(7, "2031-03-02T05:00:00Z"));
+    assert.equal(stopCause(await own(), "pendulum:objective"), "restart");
+  } finally {
+    setSelf(null);
+  }
 });

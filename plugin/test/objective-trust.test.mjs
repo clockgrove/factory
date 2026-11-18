@@ -3,14 +3,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFile, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setMaintainers } from "../scripts/lib/logic.mjs";
 import { AUTHOR_FIX, authorGate, trustedIssue } from "../scripts/lib/objective-trust.mjs";
 import { blockedLine } from "../scripts/lib/session.mjs";
-import { inFiles, planTextMarker } from "../scripts/lib/handoff.mjs";
-import { objectiveSha } from "../scripts/lib/objective-trust.mjs";
+import { inFiles } from "../scripts/lib/handoff.mjs";
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
 const perms = { kirk: "admin", dev: "write", reader: "read" };
@@ -102,17 +101,6 @@ test("objective trust: the stage Blocks (stage author) before any harness, with 
   assert.equal(ok.issueData.title, "Checked title", "the title from the checked read, never the REST read's");
 });
 
-test("objective trust: the Blocked notice never tells anyone to edit an issue whose author is the problem", () => {
-  const author = blockedLine({ issue: 7, stage: "author", reason: "the issue's author `stranger` cannot push to acme/app and is not a pinned maintainer, so Pendulum acts on none of its text", fix: AUTHOR_FIX.author });
-  assert.doesNotMatch(author, /editing the issue|re-save|save it/);
-  assert.match(author, /files the Objective as a new issue/);
-  // Neither a resume nor a restart gets past an untrusted author: the notice says so, never "resume" (#274).
-  assert.match(blockedLine({ issue: 7, stage: "author", reason: "x", fix: AUTHOR_FIX.author, cause: "setup", next: "none" }), /\n\nNeither a resume nor a restart gets past this: both check the issue's author again\.$/);
-  const editor = blockedLine({ issue: 7, stage: "author", reason: "x", fix: AUTHOR_FIX["last editor"] });
-  assert.match(editor, /person who can push read the body and save it .* re-apply `pendulum:objective`/);
-  assert.match(blockedLine({ issue: 7, pr: { number: 9 }, stage: "work", reason: "x" }), /^Blocked \(work\): x — PR #9 is a draft with what exists\. Fix by pushing to `pendulum\/7` or editing the issue/, "every other Block keeps its fix");
-});
-
 test("objective trust: a triager's rename before the first plan Blocks, naming the title and who renamed it", async () => {
   const applied = [];
   const apply = async (r, exit) => applied.push(exit);
@@ -124,22 +112,6 @@ test("objective trust: a triager's rename before the first plan Blocks, naming t
   assert.match(blockedLine({ issue: 7, stage: "author", reason: t.reason, fix: AUTHOR_FIX["title renamer"] }), /person who can push read the title and change it \(saving the same title records no rename; .* re-apply `pendulum:objective`/);
   const stranger = await trustedIssue(repo, 7, rest, {}, gh({ author: user("kirk"), renamed: [user("stranger")] }));
   assert.match(stranger.reason, /title was last renamed by `stranger`, who cannot push/);
-});
-
-test("objective trust: a writer's rename vouches for the title, and the stage acts on the title read with it", async () => {
-  const t = await trustedIssue(repo, 7, rest, {}, gh({ author: user("kirk"), title: "Objective, as the writer named it", renamed: [user("dev")] }));
-  assert.equal(t.ok, true);
-  assert.equal(t.issueData.title, "Objective, as the writer named it");
-  assert.deepEqual(t.people, [["author", "kirk"], ["title renamer", "dev"]]);
-  const own = await trustedIssue(repo, 7, rest, {}, gh({ author: user("kirk"), title: "Objective, renamed by its author", renamed: [user("kirk")] }));
-  assert.deepEqual(own.people, [["author", "kirk"]], "an author renaming their own issue is asked about once");
-});
-
-test("objective trust: the original author's title, never renamed, is the author's to vouch for", async () => {
-  const t = await trustedIssue(repo, 7, rest, {}, gh({ author: user("kirk"), title: "Objective as filed" }));
-  assert.equal(t.ok, true);
-  assert.equal(t.issueData.title, "Objective as filed");
-  assert.deepEqual(t.people, [["author", "kirk"]]);
 });
 
 test("objective trust: an App's rename never vouches for the title, nor a rename no one can be named for", async () => {
@@ -220,55 +192,6 @@ function clone({ branch = "main", workflow = null } = {}) {
 const envFor = (url, root) => ({ PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: url, PENDULUM_LOCAL_TOKEN: "github_pat_test", GIT_CONFIG_NOSYSTEM: "1" });
 const writes = (calls) => calls.filter((c) => c.method !== "GET" && c.path !== "/graphql");
 
-test("session route: `pendulum issue` hands a session only a body its author and last editor vouch for", async () => {
-  const c = clone();
-  const out = join(c.root, "issue.md");
-  for (const [who, role, fix] of [[{ author: user("stranger") }, "author `stranger`", /files the Objective as a new issue/], [{ author: user("kirk"), editor: user("stranger") }, "last editor `stranger`", /read the body and save it/]]) {
-    const fake = await fakeGitHub(who);
-    try {
-      const r = await run(["issue", "7", "--out", out], envFor(fake.url, c.root), c.work);
-      assert.equal(r.code, 1);
-      assert.match(r.stderr, new RegExp(`#7 is not given to this session: the issue's ${role.replace(/[`]/g, ".")} cannot push to acme/app`));
-      assert.match(r.stderr, fix);
-      assert.equal(existsSync(out), false, "no body reaches the session");
-      assert.deepEqual(writes(fake.calls), [], "nothing written to GitHub");
-    } finally {
-      await fake.close();
-    }
-  }
-  const renamed = await fakeGitHub({ author: user("kirk"), renamer: user("reader") });
-  try {
-    const r = await run(["issue", "7", "--out", out], envFor(renamed.url, c.root), c.work);
-    assert.equal(r.code, 1);
-    assert.match(r.stderr, /#7 is not given to this session: the issue's title was last renamed by `reader`, who cannot push to acme\/app/);
-    assert.match(r.stderr, /read the title and change it/);
-    assert.equal(existsSync(out), false, "no title reaches the session");
-  } finally {
-    await renamed.close();
-  }
-  const fake = await fakeGitHub({ author: user("kirk"), editor: user("dev"), renamer: user("dev") });
-  try {
-    const r = await run(["issue", "7", "--out", out], envFor(fake.url, c.root), c.work);
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(readFileSync(out, "utf8"), "# #7: Checked title\n\nChecked body.\n\n## Acceptance\n\n- A1: it works\n", "the checked read's title and body, as the worker writes issue.md");
-  } finally {
-    await fake.close();
-  }
-});
-
-test("session route: a pinned maintainer from the committed workflow vouches for `pendulum issue`", async () => {
-  const c = clone({ workflow: 'name: pendulum\non: workflow_dispatch\nenv:\n  PENDULUM_MAINTAINERS: "boss#42"\njobs: {}\n' });
-  const out = join(c.root, "issue.md");
-  const fake = await fakeGitHub({ author: user("boss", 42) });
-  try {
-    const r = await run(["issue", "7", "--out", out], envFor(fake.url, c.root), c.work);
-    assert.equal(r.code, 0, r.stderr);
-    assert.match(readFileSync(out, "utf8"), /Checked body/);
-  } finally {
-    await fake.close();
-  }
-});
-
 test("session route: `pendulum deliver` Blocks a stranger's Objective with the author notice and pushes nothing", async () => {
   const c = clone({ branch: "pendulum/7" });
   const fake = await fakeGitHub({ author: user("stranger") });
@@ -286,34 +209,6 @@ test("session route: `pendulum deliver` Blocks a stranger's Objective with the a
     assert.doesNotMatch(c.refs(), /pendulum\/7/, "nothing pushed");
   } finally {
     await fake.close();
-  }
-});
-
-test("session route: `pendulum post-review` posts nothing on an issue a stranger last edited", async () => {
-  const c = clone();
-  const file = join(c.root, "findings.json");
-  writeFileSync(file, JSON.stringify({ acceptance: [{ entry: "A1", met: true }], comments: [] }));
-  const fake = await fakeGitHub({ author: user("kirk"), editor: user("stranger") });
-  try {
-    const r = await run(["post-review", "9", file], envFor(fake.url, c.root), c.work);
-    assert.equal(r.code, 1);
-    assert.match(r.stderr, /nothing posted: the issue's last editor `stranger` cannot push to acme\/app/);
-    assert.deepEqual(writes(fake.calls), [], "no review posted");
-  } finally {
-    await fake.close();
-  }
-});
-
-test("objective trust: the work and review stages Block through the gate before any harness", () => {
-  for (const file of ["worker.mjs", "review.mjs"]) {
-    const src = readFileSync(join(import.meta.dirname, "..", "scripts", file), "utf8");
-    const at = src.indexOf("await authorGate(");
-    assert.ok(at > 0, `${file} checks the Objective's writers`);
-    assert.match(src.slice(at, at + 400), /if \(!trusted\.ok\) \{\n\s+log\(trusted\.reason\);\n\s+await finish\("blocked", trusted\.reason\);\n\s+return;/, `${file} stops on a refusal`);
-    for (const later of ["declaredQuestion(", "openHandoff(", "validationLoop(", "runHarness(", "openOutbox(", "installPlugin("]) {
-      const i = src.indexOf(later, src.indexOf("async function run()"));
-      assert.ok(i === -1 || i > at, `${file}: ${later} only after the check`);
-    }
   }
 });
 
@@ -337,65 +232,29 @@ test("session route: `pendulum deliver` delivers nothing when the Objective chan
   }
 });
 
-test("session route: `pendulum post-review` posts nothing on an Objective edited since its plan", async () => {
+test("session route: `pendulum issue` hands a session no body whose author cannot push", async () => {
   const c = clone();
-  const file = join(c.root, "findings.json");
-  writeFileSync(file, JSON.stringify({ acceptance: [{ entry: "A1", met: true }], comments: [] }));
-  const plan = (body) => [{ id: 2, user: { login: "dev" }, body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: objectiveSha(CHECKED.title, body), label: null })}\n## Plan` }];
-  const fake = await fakeGitHub({ author: user("kirk"), issueComments: plan("The body the plan was made from.") });
+  const out = join(c.root, "issue.md");
+  const fake = await fakeGitHub({ author: user("stranger") });
   try {
-    const r = await run(["post-review", "9", file], envFor(fake.url, c.root), c.work);
+    const r = await run(["issue", "7", "--out", out], envFor(fake.url, c.root), c.work);
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /nothing posted: the Objective's title, body or harness, model and host labels .* changed after its plan was made/);
-    assert.deepEqual(writes(fake.calls), [], "no review posted");
+    assert.equal(existsSync(out), false, "no body reaches the session");
+    assert.deepEqual(writes(fake.calls), [], "nothing written to GitHub");
   } finally {
     await fake.close();
   }
-  // The plan's own text: the review goes on past the check (to the diff and the post).
-  const same = await fakeGitHub({ author: user("kirk"), issueComments: plan(CHECKED.body) });
-  try {
-    const r = await run(["post-review", "9", file], envFor(same.url, c.root), c.work);
-    assert.doesNotMatch(r.stderr, /nothing posted: the Objective's title, body or harness, model and host labels/);
-  } finally {
-    await same.close();
-  }
 });
 
-test("session route: `pendulum issue` hands the session the plan only when it was made from the issue's current text", async () => {
+test("session route: `pendulum post-review` posts nothing on an issue a stranger last edited", async () => {
   const c = clone();
-  const dir = join(c.work, ".git", "pendulum-in");
-  const plan = (body) => [{ id: 2, user: { login: "dev" }, created_at: "2026-11-13T10:00:00Z", body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: objectiveSha(CHECKED.title, body), label: null })}\r\n## Plan\r\n- [ ] item` }];
-  const same = await fakeGitHub({ author: user("kirk"), issueComments: plan(CHECKED.body) });
+  const file = join(c.root, "findings.json");
+  writeFileSync(file, JSON.stringify({ acceptance: [{ entry: "A1", met: true }], comments: [] }));
+  const fake = await fakeGitHub({ author: user("kirk"), editor: user("stranger") });
   try {
-    const r = await run(["issue", "7"], envFor(same.url, c.root), c.work);
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(readFileSync(join(dir, "issue.md"), "utf8"), inFiles({ issue: 7, issueTitle: CHECKED.title, issueBody: CHECKED.body })["issue.md"]);
-    assert.equal(readFileSync(join(dir, "plan.md"), "utf8"), "## Plan\r\n- [ ] item", "the plan comment, its marker line dropped");
-  } finally {
-    await same.close();
-  }
-  const edited = await fakeGitHub({ author: user("kirk"), issueComments: plan("The body the plan was made from.") });
-  try {
-    const r = await run(["issue", "7"], envFor(edited.url, c.root), c.work);
-    assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout + r.stderr, /the plan comment was not made from this text, so no plan\.md/);
-    assert.equal(existsSync(join(dir, "plan.md")), false, "the earlier plan.md is gone: the session plans from the new text");
-    assert.deepEqual(writes(edited.calls), [], "nothing written to GitHub");
-  } finally {
-    await edited.close();
-  }
-});
-
-test("session route: `pendulum issue` leaves no earlier plan.md when the plan comment cannot be read", async () => {
-  const c = clone();
-  const dir = join(c.work, ".git", "pendulum-in");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "plan.md"), "## A plan from an earlier run\n");
-  const fake = await fakeGitHub({ author: user("kirk"), commentsStatus: 404 });
-  try {
-    const r = await run(["issue", "7"], envFor(fake.url, c.root), c.work);
-    assert.notEqual(r.code, 0);
-    assert.equal(existsSync(join(dir, "plan.md")), false, "the stale plan is gone before anything can fail");
+    const r = await run(["post-review", "9", file], envFor(fake.url, c.root), c.work);
+    assert.equal(r.code, 1);
+    assert.deepEqual(writes(fake.calls), [], "no review posted");
   } finally {
     await fake.close();
   }

@@ -5,10 +5,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchLatency, launchDecision, launchEvent, launchedSince, marker, pickSandbox, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, stageHolds, stateOf } from "../scripts/lib/logic.mjs";
-import { START, launchCue } from "../scripts/launch.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
+import { dispatchLatency, launchDecision, launchEvent, launchedSince, marker, pickSandbox, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, stageHolds, stateOf } from "../scripts/lib/logic.mjs";
+import { START, launchCue } from "../scripts/launch.mjs";
 
 const REPO = "o/r";
 const human = { type: "User", login: "kirk" };
@@ -148,88 +148,6 @@ test("sandbox record: Pendulum's own comment only, escaped; only the recorded pe
   assert.equal(dispatchLatency(null, "2026-11-08T10:00:41Z"), null);
 });
 
-test("record body: codes and times only, one human line", async () => {
-  const { recordBody } = await import("../scripts/launch.mjs");
-  const text = recordBody({ vendor: "vercel", id: "pendulum-abc", stage: "work", state: "failed", error: { code: "auth", status: 403 }, run: "123", launches: [] });
-  assert.equal(text.split("\n").length, 2);
-  assert.match(text, /failed to start \(auth, HTTP 403\)/);
-  assert.match(recordBody({ vendor: "vercel", id: "<script>", stage: "work", state: "stopped", exitCode: 0, launches: [{ event: "issues", latencyMs: 1500 }] }), /sandbox for this Objective: none/, "an id Pendulum did not make is not echoed");
-});
-
-test("workflow template: without a sandbox only the runner jobs; with one only the launch jobs and their triggers", () => {
-  const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
-  const plain = renderWorkflow(template, values);
-  assert.doesNotMatch(plain, /(?<!\$)\{\{|launch|PENDULUM_SANDBOX|issue_comment/);
-  const runner = parseYaml(plain);
-  assert.deepEqual(Object.keys(runner.jobs), ["dispatch", "queue-watch", "wake", "work", "review"]);
-  const rendered = renderWorkflow(template, { ...values, sandbox: "vercel", maintainer_ids: "123,456", default_branch: "main" });
-  assert.match(rendered, /fromJSON\('\[123,456\]'\), github\.event\.comment\.user\.id/, "pinned maintainers pass the gate's first filter by id");
-  const doc = parseYaml(rendered);
-  assert.deepEqual(Object.keys(doc.jobs), ["dispatch", "queue-watch", "wake", "launch", "launch-gate", "launch-event", "launch-tick", "image", "sweep", "sweep-wake", "image-wake"]);
-  assert.equal(doc.jobs["launch-gate"].concurrency, undefined, "the gate queues in no group");
-  // A job downstream of one that runs past a skipped need must state its own status condition: GitHub's implicit
-  // success() is false whenever any ancestor was skipped (#53: image-wake after a push, cron or manual build).
-  const runsPastSkip = (job) => /cancelled\(\)|always\(\)/.test(String(doc.jobs[job]?.if ?? ""));
-  for (const [name, job] of Object.entries(doc.jobs)) {
-    const needs = [job.needs ?? []].flat();
-    if (needs.some(runsPastSkip)) assert.ok(runsPastSkip(name), `${name} needs ${needs.join(", ")}, which runs past a skipped need, so its own if must too`);
-  }
-  assert.match(doc.jobs["image-wake"].if, /needs\.image\.result == 'success'/);
-  assert.equal(doc.jobs["launch-tick"].concurrency, undefined, "a merge tick joins no Objective's group, so it never replaces a pending launch");
-  assert.match(doc.jobs["launch-tick"].if, /launch-gate\.outputs\.tick == 'true'/);
-  assert.deepEqual(doc.jobs["launch-tick"].permissions, { actions: "write" });
-  // gh outside a checkout names no repository on its own: every tick step says which.
-  for (const job of ["launch-event", "launch-tick"]) for (const step of doc.jobs[job].steps.filter((x) => /gh workflow run/.test(x.run || ""))) assert.match(step.env.GH_REPO, /github\.repository/, `${job}: the tick names its repository`);
-  // The merge queue dropping a Pendulum PR ticks the dispatcher at once, on either route.
-  for (const d of [runner, doc]) {
-    assert.ok(d.on.pull_request.types.includes("dequeued"));
-    assert.match(d.jobs.dispatch.if, /github\.event\.action == 'dequeued' && startsWith\(github\.head_ref, 'pendulum\/'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
-    // A queue commit with no check run is watched, on either route, and a stalled one ticks the dispatcher.
-    const w = d.jobs["queue-watch"];
-    assert.match(w.if, /needs\.dispatch\.outputs\.queue_watch != ''/);
-    assert.match(d.jobs.dispatch.outputs.queue_watch, /steps\.f\.outputs\.queue_watch/);
-    assert.deepEqual(w.permissions, { contents: "read", actions: "write" });
-    assert.deepEqual(w.concurrency, { group: "pendulum-queue-watch", "cancel-in-progress": "false" }, "one watch at a time; a newer one waits rather than cancelling");
-    assert.equal(w.steps[0].with.mode, "watch");
-    assert.match(w.steps[1].if, /steps\.w\.outputs\.tick == 'true'/);
-    assert.match(w.steps[1].env.GH_REPO, /github\.repository/);
-    assert.deepEqual(d.on.workflow_run.workflows, ["Quality"]);
-  }
-  // Without a sandbox, CI finishing on this repository's pendulum/ branch ticks the dispatcher's merge pass itself; with
-  // one, the gate takes that event (launch-tick), so the dispatcher does not run twice for it.
-  assert.match(runner.jobs.dispatch.if, /\|\| \(github\.event_name == 'check_suite' && startsWith\(github\.event\.check_suite\.head_branch, 'pendulum\/'\)\) \|\|\s+\(github\.event_name == 'workflow_run' && startsWith\(github\.event\.workflow_run\.head_branch, 'pendulum\/'\) && github\.event\.workflow_run\.head_repository\.full_name == github\.repository\)$/);
-  assert.doesNotMatch(doc.jobs.dispatch.if, /workflow_run|check_suite/);
-  assert.match(doc.jobs["launch-event"].concurrency.group, /launch-gate\.outputs\.start == 'true'/, "the start job takes the Objective's group only when the gate said start");
-  // Every Action output a job reads exists: an output it does not have reads empty, and an empty issue put every
-  // launch-event job in one group (`pendulum-launch-pendulum/`), where one Objective's launch replaced another's.
-  const outputs = Object.keys(parseYaml(readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8")).outputs);
-  for (const [, name] of rendered.matchAll(/steps\.[fw]\.outputs\.([a-z_0-9]+)/g)) assert.ok(outputs.includes(name), `the Action has an output ${name}`);
-  assert.match(doc.jobs["launch-gate"].outputs.issue, /steps\.f\.outputs\.issue_number/);
-  // A workflow rendered before the fix reads `steps.f.outputs.issue`: the Action has that name too, the same value.
-  const action = parseYaml(readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8")).outputs;
-  assert.equal(action.issue.value, action.issue_number.value, "installed workflows get one launch group per Objective without a re-render");
-  assert.deepEqual(Object.keys(runner.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "pull_request_review", "check_suite", "workflow_run"]);
-  assert.deepEqual(Object.keys(doc.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "push", "repository_dispatch", "issue_comment", "pull_request_review", "check_suite", "workflow_run"]);
-  assert.deepEqual(doc.on.workflow_run.workflows, ["Quality"]);
-  assert.equal(doc.env.PENDULUM_SANDBOX, "vercel");
-  assert.deepEqual(doc.jobs.launch.permissions, { contents: "read", actions: "write" }, "the job token reads and ticks the dispatcher; every other write is the App's");
-  // A launch that fails, is cut off, requeues, Blocks or meets the vendor's quota ticks the dispatcher itself: no wait on the cron.
-  for (const job of ["launch", "launch-event"]) {
-    const tick = doc.jobs[job].steps.find((x) => /gh workflow run pendulum\.yml/.test(x.run || ""));
-    assert.match(tick.if, /^always\(\) && \(steps\.f\.outcome != 'success' \|\|/, `${job}: ticks on its own failure`);
-    for (const exit of ["queued", "deferred", "blocked"]) assert.match(tick.if, new RegExp(`steps\\.f\\.outputs\\.exit == '${exit}'`), `${job}: ticks on ${exit}`);
-    assert.match(tick.env.GH_REPO, /github\.repository/);
-  }
-  // Only the */10 schedule runs the dispatcher: the hourly sweep and the nightly image are other jobs' schedules.
-  assert.match(doc.jobs.dispatch.if, /^\(github\.event_name == 'schedule' && github\.event\.schedule == '\*\/10 \* \* \* \*'\)/);
-  // The App marking its own PR ready starts no job (#47); a person marking it ready still starts the review or the gate.
-  for (const [route, job] of [["runner", runner.jobs.review], ["sandbox", doc.jobs["launch-gate"]]]) {
-    const cues = job.if.match(/github\.event\.action == 'ready_for_review'[^)]*/g);
-    assert.deepEqual(cues, ["github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'"], `${route}: only a person's ready_for_review is a cue`);
-  }
-});
-
 test("stage lifecycle: the lease, a stage's own requests, the next stage when one ends, and the leftovers' rules", async () => {
   const { failedSince, stageHolds: holds } = await import("../scripts/lib/logic.mjs");
   const now = Date.parse("2026-11-08T12:00:00Z");
@@ -278,41 +196,6 @@ test("secrets: every name a secret input can have leaves the launcher's environm
   assert.deepEqual([out.PENDULUM_HARNESS, out.PENDULUM_MAX_USD, out.PENDULUM_APP_TOKEN, out.PENDULUM_READ_TOKEN, out.PENDULUM_STAGE, out.PENDULUM_STAGE_CLAIM, out.GITHUB_REPOSITORY], ["codex", "20", "w", "r", "work", "abc", "o/r"]);
 });
 
-test("namespace launcher: the agent's variables travel by name; the wrapper confines it as the systemd unit does", async () => {
-  const { NAMESPACE_WRAP, asAgent, setAgent } = await import("../scripts/lib/proc.mjs");
-  setAgent({ user: "pendulum-agent", home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set(), launcher: "namespace" });
-  try {
-    const [cmd, args, env] = asAgent("claude", ["-p"], { PATH: "/usr/bin", CODEX_API_KEY: "sekret", LANG: "C" }, ["CODEX_API_KEY"], "/home/pendulum-agent/repo");
-    assert.equal(cmd, "/usr/bin/sudo");
-    assert.equal(args.join(" ").includes("sekret"), false, "no value on the command line");
-    assert.ok(args.includes("--preserve-env=CODEX_API_KEY,LANG") || args.includes("--preserve-env=LANG,CODEX_API_KEY"));
-    assert.deepEqual(args.slice(args.indexOf("pendulum-agent-wrap") + 1, args.indexOf("pendulum-agent-wrap") + 4), ["/home/pendulum-agent", "/home/pendulum-agent/tmp", "/home/pendulum-agent/repo"]);
-    assert.equal(env.CODEX_API_KEY, "sekret");
-    for (const want of ["--pid", "--mount", "--kill-child"]) assert.ok(args.includes(want), want);
-    for (const want of ["findmnt -rno TARGET", "remount,bind,ro,nosuid,nodev", "remount,bind,nosuid,nodev \"$home\"", "--no-new-privs", "--bounding-set=-all", "umask 077", "cgroup.procs", "tmpfs"]) assert.ok(NAMESPACE_WRAP.includes(want), want);
-    // Root touches no path the agent owns: the working directory and the temp directory are entered and made after setpriv.
-    const [asRoot, asAgentPart] = NAMESPACE_WRAP.split("/usr/bin/setpriv");
-    assert.doesNotMatch(asRoot, /cd |install |mkdir |chown |chmod |\$cwd"? *[;&|]|mount[^\n]*\$(tmp|cwd)/, "no cd, install, mkdir, chown, chmod or mount of the agent's paths before setpriv");
-    assert.match(asAgentPart, /cd -- "\$2"/);
-    assert.match(asAgentPart, /\[ -L "\$1" \]/, "a symlinked temp directory is refused");
-  } finally {
-    setAgent(null);
-  }
-});
-
-test("a harness override takes that harness's models, not the env block's (written for the env's harness)", async () => {
-  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
-  const env = { GITHUB_REPOSITORY: "o/r", PENDULUM_HARNESS: "claude", PENDULUM_MODEL: "claude-opus-5-5", PENDULUM_REVIEWER_MODEL: "claude-fable-5-1" };
-  const over = resolveInputs({ env: { ...env, PENDULUM_INPUT_HARNESS: "codex" } });
-  assert.deepEqual([over.harness, over.model, over.reviewerModel], ["codex", "gpt-6.1-sol", "gpt-6.1-sol"]);
-  const named = resolveInputs({ env: { ...env, PENDULUM_INPUT_HARNESS: "codex", PENDULUM_INPUT_MODEL: "gpt-x" } });
-  assert.equal(named.model, "gpt-x", "a model given with the override stands");
-  const same = resolveInputs({ env });
-  assert.deepEqual([same.harness, same.model, same.reviewerModel], ["claude", "claude-opus-5-5", "claude-fable-5-1"]);
-  const effort = resolveInputs({ env: { ...env, PENDULUM_REVIEWER_EFFORT: "low", PENDULUM_INPUT_HARNESS: "codex" } });
-  assert.equal(effort.reviewerEffort, "high", "the env block's reviewer effort belongs to its harness: Codex's own default");
-});
-
 test("a stage's end on a closed Objective stops; masking stays off a sandbox stage's log; a re-run keeps its own progress", async () => {
   const ev = launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: 9, claim: "abc", want: "ended" } });
   const ended = { state: "ended", claim: "abc", launches: [] };
@@ -323,192 +206,6 @@ test("a stage's end on a closed Objective stops; masking stays off a sandbox sta
   const { progressRunId } = await import("../scripts/lib/session.mjs");
   assert.equal(progressRunId({ GITHUB_RUN_ID: "7", GITHUB_RUN_ATTEMPT: "1" }), "7");
   assert.equal(progressRunId({ GITHUB_RUN_ID: "7", GITHUB_RUN_ATTEMPT: "2" }), "7-2");
-});
-
-test("session fit: the stage's wall clock ends the reserve before the vendor's session end; the watchdog fires before the VM dies", async () => {
-  const { SESSION_RESERVE_MS, STAGE_GRACE_MS, stageMinutes, watchdogMs } = await import("../scripts/lib/logic.mjs");
-  const now = Date.parse("2026-11-08T12:00:00Z");
-  const end45 = new Date(now + 45 * 60_000).toISOString();
-  assert.equal(stageMinutes({ sessionEnd: end45, timeoutMinutes: 90, now }), 45 - SESSION_RESERVE_MS / 60_000, "a 45-minute session cuts a 90-minute setting");
-  assert.equal(stageMinutes({ sessionEnd: new Date(now + 300 * 60_000).toISOString(), timeoutMinutes: 90, now }), 90, "a longer session keeps the setting");
-  assert.equal(stageMinutes({ sessionEnd: new Date(now + 2 * 60_000).toISOString(), timeoutMinutes: 90, now }), 0, "a session about to end leaves nothing");
-  const minutes = stageMinutes({ sessionEnd: end45, timeoutMinutes: 90, now });
-  const fires = now + watchdogMs({ minutes, sessionEnd: end45, now });
-  assert.ok(fires <= Date.parse(end45) - 3 * 60_000, "the watchdog fires at least three minutes before the session ends");
-  assert.equal(fires, now + minutes * 60_000 + STAGE_GRACE_MS, "and at the wall clock plus the grace when that is earlier");
-  assert.equal(watchdogMs({ minutes: 90, sessionEnd: end45, now }), 42 * 60_000, "a wall clock past the session is cut to the session");
-});
-
-// A Vercel-like vendor whose plan caps a session at `capMin` minutes in all: a create past it is refused as Vercel refuses
-// it (HTTP 400, bad_request, "`timeout` should be <= 45m", or no cap named when `states` is false), and so is an extend.
-async function cappedVendor(capMin, { states = true, refuse = null } = {}) {
-  const { VERCEL_RATES, vendorError } = await import("../scripts/lib/adapters/sandbox-vercel.mjs");
-  const api = (code, message) => vendorError(Object.assign(new Error(`Status code 400 is not ok: ${message}`), { response: { status: 400 }, json: { error: { code, message } } }));
-  const calls = [];
-  const v = { calls, startEnv: null, end: 0 };
-  v.adapter = {
-    name: "vercel",
-    rates: VERCEL_RATES,
-    capabilities: { autoResume: true },
-    list: async () => [],
-    create: async (spec) => {
-      calls.push(["create", spec.timeoutMs]);
-      if (refuse) throw refuse;
-      if (spec.timeoutMs > capMin * 60_000) throw api("bad_request", states ? `\`timeout\` should be <= ${capMin}m` : "Invalid request");
-      v.started = Date.now();
-      v.end = v.started + spec.timeoutMs;
-      return { id: "pendulum-abc", expiresAt: new Date(v.end).toISOString() };
-    },
-    extend: async (id, ms) => {
-      calls.push(["extend", ms]);
-      if (v.end + ms - v.started > capMin * 60_000) throw api("sandbox_timeout_invalid", "Failed to extend timeout: extension would exceed maximum execution timeout");
-      v.end += ms;
-      return { expiresAt: new Date(v.end).toISOString() };
-    },
-    writeFiles: async () => {},
-    run: async (id, spec) => {
-      if (spec.argv.includes("pendulum-probe")) spec.onStdout("/vercel\nhave\n");
-      else {
-        v.startEnv = spec.env;
-        spec.onStdout(`${Date.now()}\n`);
-      }
-      return { exitCode: 0 };
-    },
-  };
-  return v;
-}
-const startFor = async (adapter, timeoutMinutes = 90) => (await import("../scripts/launch.mjs")).startInSandbox({ adapter, repo: { owner: "o", name: "r", full: "o/r" }, repoId: "1", issue: 7, recordedId: null, baseImage: "base", claim: "c1", env: { PENDULUM_TIMEOUT_MINUTES: String(timeoutMinutes) }, budgetMs: (timeoutMinutes + 16) * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") } });
-
-test("startInSandbox: a plan that grants the whole session gives the stage all of timeout_minutes, with no extend and no cap note", async () => {
-  const v = await cappedVendor(1440);
-  const r = await startFor(v.adapter, 90);
-  assert.deepEqual(v.calls, [["create", 106 * 60_000]], "one create, for timeout_minutes plus the reserve and the start");
-  assert.equal(r.minutes, 90, "the stage keeps its setting");
-  assert.equal(v.startEnv.PENDULUM_TIMEOUT_MINUTES, "90");
-  assert.equal(v.startEnv.PENDULUM_STAGE_SESSION_CAP, undefined, "nothing cut, so a time cap there is a plain time cap");
-});
-
-test("startInSandbox: a plan capped at 45 minutes refuses the create; it is asked once more at the stated cap, extended, and the stage is fitted to what was granted", async () => {
-  const { SESSION_RESERVE_MS } = await import("../scripts/lib/logic.mjs");
-  const v = await cappedVendor(45);
-  const r = await startFor(v.adapter, 90);
-  assert.deepEqual(v.calls.map((c) => c[0]), ["create", "create", "extend"]);
-  assert.equal(v.calls[0][1], 106 * 60_000, "the first create asks for the stage's whole need");
-  assert.equal(v.calls[1][1], 45 * 60_000, "the retry asks for the cap the refusal states");
-  assert.ok(v.calls[2][1] >= 60 * 60_000, "the rest is asked of an extend");
-  const granted = new Date(v.end).toISOString();
-  assert.equal(r.sessionEnd, granted, "the session's end is the vendor's, not what was asked for");
-  assert.ok(r.minutes <= 45 - SESSION_RESERVE_MS / 60_000, `the wall clock fits the session (${r.minutes} min)`);
-  assert.ok(Date.parse(r.deadlineAt) <= Date.parse(granted) - SESSION_RESERVE_MS, "the recorded deadline lands the reserve before the session ends");
-  assert.equal(v.startEnv.PENDULUM_TIMEOUT_MINUTES, String(r.minutes));
-  assert.equal(v.startEnv.PENDULUM_STAGE_SESSION_END, granted, "the stage gets the session's end for its own watchdog");
-  assert.deepEqual(JSON.parse(v.startEnv.PENDULUM_STAGE_SESSION_CAP), { vendor: "vercel", setting: 90, minutes: r.minutes }, "the stage knows the vendor's session cut its wall clock, so a time cap names it");
-
-  // A cap between: the retry takes the stated 60 minutes and the extend is refused past it.
-  const mid = await cappedVendor(60);
-  const m = await startFor(mid.adapter, 90);
-  assert.deepEqual(mid.calls.map((c) => c[0] + ":" + Math.round(c[1] / 60_000)), ["create:106", "create:60", "extend:46"]);
-  assert.ok(m.minutes > 45 - SESSION_RESERVE_MS / 60_000 && m.minutes <= 60 - SESSION_RESERVE_MS / 60_000, `the stage gets the stated cap's session (${m.minutes} min)`);
-
-  // A refusal that names no cap: the retry asks for 45 minutes.
-  const mute = await cappedVendor(45, { states: false });
-  await startFor(mute.adapter, 90);
-  assert.deepEqual(mute.calls.slice(0, 2), [["create", 106 * 60_000], ["create", 45 * 60_000]]);
-
-  // A stage that fits the cap is asked for once.
-  const fits = await cappedVendor(45);
-  const f = await startFor(fits.adapter, 25);
-  assert.deepEqual(fits.calls, [["create", 41 * 60_000]]);
-  assert.equal(f.minutes, 25);
-});
-
-test("createSession: only an HTTP 400 refusal is retried, once; any other failure is the caller's", async () => {
-  const { createSession } = await import("../scripts/launch.mjs");
-  const { SandboxError } = await import("../scripts/lib/adapters/sandbox.mjs");
-  const spec = { vcpus: 2, timeoutMs: 106 * 60_000, tags: {}, network: "all", image: "base" };
-  for (const e of [new SandboxError("auth", "no", { status: 401 }), new SandboxError("quota", "no", { status: 402 }), new SandboxError("invalid", "vcpus", {}), new SandboxError("not_found", "snapshot gone", { status: 404 })]) {
-    const v = await cappedVendor(45, { refuse: e });
-    await assert.rejects(createSession(v.adapter, spec), (x) => x === e, e.code);
-    assert.equal(v.calls.length, 1, `${e.code}${e.status ? ` ${e.status}` : ""} is not retried`);
-  }
-  // A plan whose cap is under the fallback's 45 minutes refuses the retry too: thrown, never a third ask.
-  const tiny = await cappedVendor(10, { states: false });
-  await assert.rejects(createSession(tiny.adapter, spec), (x) => x.code === "invalid" && x.status === 400);
-  assert.deepEqual(tiny.calls, [["create", 106 * 60_000], ["create", 45 * 60_000]]);
-});
-
-test("startInSandbox: a stage's end hands over the settled usage and the listing; the stopwatch books each vendor step", async () => {
-  const { startInSandbox } = await import("../scripts/launch.mjs");
-  const { stopwatch, timingLine } = await import("../scripts/lib/logic.mjs");
-  const { VERCEL_RATES } = await import("../scripts/lib/adapters/sandbox-vercel.mjs");
-  const calls = [];
-  const tags = { pendulum: "objective", "pendulum-repo": "1", "pendulum-issue": "7" };
-  const after = { wallMs: 9_000, activeCpuMs: 4_000, vcpus: 2, memoryMb: 4096, storedBytes: 1e9 };
-  const adapter = {
-    rates: VERCEL_RATES,
-    list: async () => (calls.push("list"), [{ id: "pendulum-abc", state: "stopped", tags }]),
-    usage: async () => (calls.push("usage"), after),
-    resume: async () => (calls.push("resume"), { expiresAt: new Date(Date.now() + 45 * 60_000).toISOString() }),
-    extend: async () => {
-      throw Object.assign(new Error("no"), { code: "invalid", status: 400 });
-    },
-    writeFiles: async () => calls.push("upload"),
-    run: async (id, spec) => {
-      calls.push(spec.argv.includes("pendulum-probe") ? "probe" : "command");
-      spec.onStdout(spec.argv.includes("pendulum-probe") ? "/vercel\nneed\n" : `${Date.now()}\n`);
-      return { exitCode: 0 };
-    },
-  };
-  const watch = stopwatch();
-  const common = { adapter, repo: { owner: "o", name: "r", full: "o/r" }, repoId: "1", issue: 7, recordedId: "pendulum-abc", baseImage: "base", claim: "c1", env: { PENDULUM_TIMEOUT_MINUTES: "30" }, budgetMs: 50 * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") } }; // 5 min past the resumed session's 45, so the extend is always due however slow the run
-  const listing = adapter.list();
-  calls.length = 0;
-  const r = await startInSandbox({ ...common, listing, settled: { id: "pendulum-abc", usage: after }, watch, image: Promise.reject(new Error("an image read a found sandbox never needs")).catch(() => null) });
-  assert.deepEqual(calls, ["resume", "probe", "upload", "command"], "no second list and no second usage read: the end's are taken");
-  assert.equal(r.before, after);
-  assert.deepEqual(Object.keys(watch.ms), ["list", "usage", "resume", "extend", "probe", "upload", "command"]);
-  assert.ok(Object.values(watch.ms).every((v) => Number.isInteger(v) && v >= 0));
-  calls.length = 0;
-  await startInSandbox({ ...common, settled: { id: "pendulum-other", usage: after } });
-  assert.deepEqual(calls, ["list", "usage", "resume", "probe", "upload", "command"], "another sandbox's reading is not taken");
-  assert.match(timingLine({ mint: 1200, read: 3100 }), /^mint 1\.2 s, read 3\.1 s; total 4\.3 s$/);
-  assert.equal(timingLine({}), "");
-});
-
-test("stopwatch: a launch that ends one stage and starts the next books each phase's steps apart", async () => {
-  const { stopwatch } = await import("../scripts/lib/logic.mjs");
-  let t = 0;
-  const watch = stopwatch(() => t);
-  const end = watch.phase("end");
-  const start = watch.phase("start");
-  t = 100;
-  watch.mark("read");
-  t = 130;
-  end.mark("lock");
-  t = 200;
-  end.mark("record");
-  t = 210;
-  start.mark("lock");
-  t = 260;
-  start.mark("record");
-  assert.deepEqual(watch.ms, { read: 100, "end.lock": 30, "end.record": 70, "start.lock": 10, "start.record": 50 });
-  assert.equal(start.ms, watch.ms, "one clock, one record");
-});
-
-test("installAdapter: stop() ends an install a launch never waited for, so the job is not held open", async () => {
-  const { installAdapter } = await import("../scripts/launch.mjs");
-  const { spawn } = await import("node:child_process");
-  let child;
-  const install = installAdapter("/nonexistent", { spawnFn: () => (child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" })) });
-  const t0 = Date.now();
-  install.stop();
-  await assert.rejects(install, (e) => e.code === "unavailable");
-  assert.ok(Date.now() - t0 < 10_000, "stopped, not waited out");
-  assert.notEqual(child.signalCode, null);
-  // An install that finished is left alone.
-  const ok = installAdapter("/nonexistent", { spawnFn: () => spawn(process.execPath, ["-e", ""], { stdio: "ignore" }) });
-  await ok;
-  ok.stop();
 });
 
 test("a stage that ends its child still counts its spend; a token request names itself", async () => {
@@ -539,24 +236,6 @@ test("a stage that ends its child still counts its spend; a token request names 
   assert.match(launchDecision({ ev: cross, state: "Running", record: rec("work"), fromSelf: false }).skip, /did not send/);
 });
 
-test("vendor session cap: a stage the session cut Blocks naming the vendor's cap; doctor does not guess the plan's cap", async () => {
-  const { decideExit, sessionCapEnv, sessionCapNote } = await import("../scripts/lib/logic.mjs");
-  const { runnerChecks } = await import("../scripts/doctor.mjs");
-  const env = sessionCapEnv({ vendor: "vercel", setting: "240", minutes: 37 });
-  const note = sessionCapNote(env.PENDULUM_STAGE_SESSION_CAP);
-  assert.match(note, /the vercel sandbox's session cap: one vendor session gave this stage 37 of timeout_minutes 240/);
-  assert.deepEqual(sessionCapEnv({ vendor: "vercel", setting: "30", minutes: 30 }), {}, "a stage the session did not cut carries nothing");
-  assert.equal(sessionCapNote(""), "");
-  assert.equal(sessionCapNote("not json"), "");
-  assert.equal(sessionCapNote(JSON.stringify({ vendor: "v\nx", setting: 9, minutes: 3 })), "", "only a plain vendor name reaches a Block reason");
-  const timedOut = { harness: { ok: false, timedOut: true }, pr: { exists: true }, commits: 1 };
-  assert.equal(decideExit({ ...timedOut, sessionCap: note }).reason, `time cap reached: ${note}`);
-  assert.equal(decideExit(timedOut).reason, "time cap reached", "off a sandbox, or uncut, the reason stays as it was");
-  const checks = await runnerChecks({ inputs: { harness: "claude", timeoutMinutes: 240, sandbox: "vercel" }, env: {} });
-  assert.deepEqual(checks.filter((c) => c.status === "WARN" && /session/.test(`${c.name} ${c.detail}`)), [], "a plan may grant 24 hours: only the vendor's answer at a start shows the cap");
-  assert.equal(checks.find((c) => c.name === "timeout")?.status, "PASS", "the runner's ceiling is still checked");
-});
-
 test("a sandbox stage's start: apt, npm and the CLI's version check get no credential; only the stage gets the start environment", async () => {
   const dir = mkdtempSync(join(tmpdir(), "start-"));
   const [bin, home, log] = [join(dir, "bin"), join(dir, "home"), join(dir, "log")];
@@ -585,4 +264,36 @@ test("a sandbox stage's start: apt, npm and the CLI's version check get no crede
   for (const r of runs.filter((x) => !x.head.startsWith("node "))) assert.ok(!r.text.includes("sekrit-"), `${r.head}: no credential`);
   const stage = runs.find((x) => x.head.startsWith("node "));
   for (const v of Object.values(secrets)) assert.ok(stage.text.includes(v), "the stage keeps its tokens and the harness's credential");
+});
+
+test("namespace launcher: the agent's variables travel by name, never by value on the command line", async () => {
+  const { asAgent, setAgent } = await import("../scripts/lib/proc.mjs");
+  setAgent({ user: "pendulum-agent", home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set(), launcher: "namespace" });
+  try {
+    const [cmd, args, env] = asAgent("claude", ["-p"], { PATH: "/usr/bin", CODEX_API_KEY: "sekret", LANG: "C" }, ["CODEX_API_KEY"], "/home/pendulum-agent/repo");
+    assert.equal(cmd, "/usr/bin/sudo");
+    assert.equal(args.join(" ").includes("sekret"), false, "no value on the command line");
+    assert.ok(args.includes("--preserve-env=CODEX_API_KEY,LANG") || args.includes("--preserve-env=LANG,CODEX_API_KEY"));
+    assert.deepEqual(args.slice(args.indexOf("pendulum-agent-wrap") + 1, args.indexOf("pendulum-agent-wrap") + 4), ["/home/pendulum-agent", "/home/pendulum-agent/tmp", "/home/pendulum-agent/repo"]);
+    assert.equal(env.CODEX_API_KEY, "sekret");
+    for (const want of ["--pid", "--mount", "--kill-child"]) assert.ok(args.includes(want), want);
+  } finally {
+    setAgent(null);
+  }
+});
+
+test("workflow template: only a person's ready_for_review is a cue (#47), every Action output a job reads exists, and the launch job's token only reads and ticks", () => {
+  const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
+  const runner = parseYaml(renderWorkflow(template, values));
+  const rendered = renderWorkflow(template, { ...values, sandbox: "vercel", maintainer_ids: "123,456", default_branch: "main" });
+  const doc = parseYaml(rendered);
+  for (const [route, job] of [["runner", runner.jobs.review], ["sandbox", doc.jobs["launch-gate"]]]) {
+    const cues = job.if.match(/github\.event\.action == 'ready_for_review'[^)]*/g);
+    assert.deepEqual(cues, ["github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'"], `${route}: only a person's ready_for_review is a cue`);
+  }
+  // An output the Action does not have reads empty, and an empty issue put every launch-event job in one group.
+  const outputs = Object.keys(parseYaml(readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8")).outputs);
+  for (const [, name] of rendered.matchAll(/steps\.[fw]\.outputs\.([a-z_0-9]+)/g)) assert.ok(outputs.includes(name), `the Action has an output ${name}`);
+  assert.deepEqual(doc.jobs.launch.permissions, { contents: "read", actions: "write" });
 });

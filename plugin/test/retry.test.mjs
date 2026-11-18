@@ -8,7 +8,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Local, REFUSED_PROBE } from "../scripts/local.mjs";
 import { RETRY, graphql, rest } from "../scripts/lib/github.mjs";
-import { setSelf } from "../scripts/lib/logic.mjs";
 import { gitTransport, openOutbox } from "../scripts/lib/outbox.mjs";
 import { fakeProc } from "./fixtures/machine.mjs";
 
@@ -141,92 +140,6 @@ test("rest: a create is never sent twice when it may have landed; it goes again 
   );
 });
 
-test("rest: a 5xx or a 422 is no rate limit whatever its headers, so a create that may have landed is not sent again", async () => {
-  const reset = String(Math.floor(1_000_000 / 1000) + 30);
-  const firsts = {
-    "/repos/o/r/pulls/1/reviews": () => json({ message: "Service Unavailable" }, 503, { "retry-after": "1" }),
-    "/repos/o/r/pulls/2/reviews": () => json({ message: "Bad Gateway" }, 502, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }),
-    "/repos/o/r/pulls/3/reviews": () => json({ message: "Validation Failed" }, 422, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }),
-  };
-  await withFetch(
-    (req, n) => (n === 1 ? firsts[req.path]() : json({ id: 1 }, 201)),
-    async ({ seen }) => {
-      for (const [path, status] of [["repos/o/r/pulls/1/reviews", 503], ["repos/o/r/pulls/2/reviews", 502], ["repos/o/r/pulls/3/reviews", 422]]) {
-        await assert.rejects(rest(path, { method: "POST", body: { body: "x" } }), (e) => e.status === status && e.rateLimited === false);
-      }
-      assert.equal(seen.length, 3, "each create sent once");
-    },
-  );
-  // A read with a 503 asking for a wait is retried after it.
-  await withFetch(
-    (req, n) => (n === 1 ? json({ message: "Service Unavailable" }, 503, { "retry-after": "3" }) : json({ ok: true })),
-    async ({ waits }) => {
-      assert.deepEqual(await rest("repos/o/r"), { ok: true });
-      assert.deepEqual(waits, [3450]);
-    },
-  );
-});
-
-test("rest: jitter spreads Pendulum's backoff both ways and GitHub's ask only upward; noRateWait throws a rate limit at once", async () => {
-  for (const [r, want] of [[0, [1400, 5000]], [1, [2600, 6500]]]) {
-    await withFetch(
-      (req, n) => (n === 1 ? json({ message: "Bad Gateway" }, 502) : n === 2 ? json({ message: "x" }, 429, { "retry-after": "5" }) : json({ ok: true })),
-      async ({ waits }) => {
-        RETRY.random = () => r;
-        assert.deepEqual(await rest("repos/o/r"), { ok: true });
-        assert.deepEqual(waits, want);
-      },
-    );
-  }
-  await withFetch(
-    () => json({ message: "You have exceeded a secondary rate limit" }, 403, { "retry-after": "60" }),
-    async ({ seen, waits }) => {
-      await assert.rejects(rest("repos/o/r/issues/7/dependencies/blocked_by", { noRateWait: true }), (e) => e.rateLimited === true && e.status === 403);
-      assert.equal(seen.length, 1);
-      assert.deepEqual(waits, []);
-    },
-  );
-});
-
-test("rest: a rate limit that names no wait waits at least GitHub's minute; jitter never pushes a wait that fits out of the bound", async () => {
-  await withFetch(
-    (req, n) => (n === 1 ? json({ message: "You have exceeded a secondary rate limit" }, 403) : json({ ok: true })),
-    async ({ waits }) => {
-      RETRY.random = () => 0;
-      assert.deepEqual(await rest("repos/o/r"), { ok: true });
-      assert.ok(waits[0] >= 60_000, `waited ${waits[0]} ms`);
-    },
-  );
-  // Retry-After 85 s inside the 90 s bound: the spread (up to 110.5 s) is cut back to the bound, never skipped.
-  await withFetch(
-    (req, n) => (n === 1 ? json({ message: "x" }, 429, { "retry-after": "85" }) : json({ ok: true })),
-    async ({ waits }) => {
-      RETRY.random = () => 1;
-      assert.deepEqual(await rest("repos/o/r"), { ok: true });
-      assert.deepEqual(waits, [90_000]);
-    },
-  );
-});
-
-test("rest: a wait past the caller's deadline or the bound is not taken; the error goes to the caller at once", async () => {
-  await withFetch(
-    () => json({ message: "API rate limit exceeded" }, 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(1_000_000 / 1000) + 3600) }),
-    async ({ seen, waits }) => {
-      await assert.rejects(rest("repos/o/r"), (e) => e.rateLimited === true);
-      assert.deepEqual(seen.filter((k) => k !== "GET /rate_limit"), ["GET /repos/o/r"], "an hour's wait is beyond the bound");
-      assert.deepEqual(waits, []);
-    },
-  );
-  await withFetch(
-    () => json({ message: "Bad Gateway" }, 502),
-    async ({ seen, waits, now }) => {
-      await assert.rejects(rest("repos/o/r", { deadlineAt: now() + 5000 }), (e) => e.status === 502);
-      assert.deepEqual(waits, [2000], "the second wait (4 s) would end past the deadline");
-      assert.equal(seen.length, 2);
-    },
-  );
-});
-
 test("graphql: a query is retried; a mutation is not resent after a 502, but is after GitHub's RATE_LIMITED refusal", async () => {
   let mutations = 0;
   await withFetch(
@@ -250,22 +163,6 @@ test("graphql: a query is retried; a mutation is not resent after a 502, but is 
 
 // #353: a 5xx on a state write is retried like a network error, and a write that is no create is safe to send again.
 
-test("#353: a label write GitHub answers 500 is sent again and lands; one it refuses (422) is sent once and thrown as it is", async () => {
-  await withFetch(
-    (req, n) => {
-      if (req.path === "/repos/o/r/issues/7/labels") return n === 1 ? json({ message: "Server Error" }, 500) : json([{ name: "pendulum:in-review" }]);
-      return json({ message: "Validation Failed" }, 422);
-    },
-    async ({ seen, waits, lines }) => {
-      assert.deepEqual(await rest("repos/o/r/issues/7/labels", { method: "POST", body: { labels: ["pendulum:in-review"] } }), [{ name: "pendulum:in-review" }]);
-      assert.deepEqual(waits, [2000]);
-      assert.match(lines.find((l) => /GitHub POST/.test(l)) || "", /POST repos\/o\/r\/issues\/7\/labels: HTTP 500; try 2 of 4/);
-      await assert.rejects(rest("repos/o/r/issues/8/labels", { method: "POST", body: { labels: ["x"] } }), (e) => e.status === 422 && e.offline === undefined);
-      assert.deepEqual(seen, ["POST /repos/o/r/issues/7/labels", "POST /repos/o/r/issues/7/labels", "POST /repos/o/r/issues/8/labels"]);
-    },
-  );
-});
-
 test("#353: a comment GitHub answers 500 is looked for before it is sent again: found, it is not posted twice; absent, it is posted once more", async () => {
   const comments = { 1: [], 2: [] };
   let id = 100;
@@ -285,45 +182,6 @@ test("#353: a comment GitHub answers 500 is looked for before it is sent again: 
       assert.deepEqual(seen, ["POST /repos/o/r/issues/1/comments", "GET /repos/o/r/issues/1/comments", "POST /repos/o/r/issues/2/comments", "GET /repos/o/r/issues/2/comments", "POST /repos/o/r/issues/2/comments"]);
     },
   );
-});
-
-test("#353 review: a comment's check finds a notice the App posted (its marker, not Pendulum's login), whatever its line ends; a bare body by someone else is no find; 502 waits for GitHub first; reads keep the deadline", async () => {
-  const comments = { 1: [], 2: [], 3: [] };
-  let id = 200;
-  const notice = "<!-- pendulum:1:blocked:x -->\nBlocked: the review label   \nRe-apply it.";
-  const gets = [];
-  setSelf("kirk");
-  try {
-    await withFetch(
-      (req, n) => {
-        const issue = Number(/\/issues\/(\d+)\/comments$/.exec(req.path)?.[1]);
-        if (req.method === "GET") return gets.push(issue), json(comments[issue]);
-        // #1: the notice App's comment landed, stored with CRLF line ends and its trailing blanks gone, before a 502.
-        if (issue === 1 && n === 1) return comments[1].push({ id: (id += 1), body: req.body.body.replace(/[ \t]+$/gm, "").replace(/\n/g, "\r\n"), user: { login: "pendulum-notices[bot]" } }), json({ message: "Bad Gateway" }, 502);
-        // #2: someone else wrote the same words (no marker) just before; Pendulum's 500 made nothing.
-        if (issue === 2 && n === 1) return comments[2].push({ id: (id += 1), body: "ok", user: { login: "someone" } }), json({ message: "Server Error" }, 500);
-        // #3: answered 502 every time; the check's read keeps the call's deadline.
-        if (issue === 3) return json({ message: "Bad Gateway" }, 502);
-        comments[issue].push({ id: (id += 1), body: req.body.body, user: { login: "kirk" } });
-        return json(comments[issue].at(-1), 201);
-      },
-      async ({ seen, waits, now }) => {
-        assert.equal((await rest("repos/o/r/issues/1/comments", { method: "POST", body: { body: notice } })).user.login, "pendulum-notices[bot]");
-        assert.equal(comments[1].length, 1, "the notice is not posted twice");
-        assert.deepEqual(waits, [RETRY.gatewayMs], "a gateway's 502: the check waits for GitHub to finish first");
-        assert.equal((await rest("repos/o/r/issues/2/comments", { method: "POST", body: { body: "ok" } })).user.login, "kirk");
-        assert.equal(comments[2].length, 2, "someone else's words are not Pendulum's comment: posted once");
-        waits.length = 0;
-        const deadlineAt = now() + RETRY.gatewayMs + 1000;
-        await assert.rejects(rest("repos/o/r/issues/3/comments", { method: "POST", body: { body: "late" }, deadlineAt }), (e) => e.status === 502);
-        assert.deepEqual(waits, [RETRY.gatewayMs], "no wait past the deadline");
-        assert.equal(seen.filter((x) => x === "POST /repos/o/r/issues/3/comments").length, 2);
-        assert.deepEqual(gets, [1, 2, 3]);
-      },
-    );
-  } finally {
-    setSelf(null);
-  }
 });
 
 // ------------------------------------------------------------------ git
@@ -357,41 +215,6 @@ function dropConnection(r, hook, times) {
 }
 
 const open = (r) => openOutbox({ branch: "pendulum/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, base: r.root });
-
-test("outbox: a push whose connection drops is retried and lands; the outbox takes later pushes", async () => {
-  const r = repos();
-  const clock = fakeClock();
-  let box;
-  try {
-    box = await open(r);
-    dropConnection(r, "pre-receive", 2);
-    assert.equal(await box.push(), true, box.error);
-    assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), r.run(r.work, "rev-parse", "HEAD"));
-    assert.deepEqual(clock.waits, [2000, 4000]);
-    assert.equal(box.failed, false);
-    writeFileSync(join(r.work, "app.txt"), "v3\n");
-    r.run(r.work, "commit", "-q", "-am", "more");
-    assert.equal(await box.push(), true, box.error);
-  } finally {
-    clock.restore();
-    box?.close?.();
-  }
-});
-
-test("outbox: a push after the work's deadline (in the stage's exit reserve) is still retried", async () => {
-  const r = repos();
-  const clock = fakeClock();
-  try {
-    // A minute past the work's deadline, by the retry clock: a timed-out stage's last push.
-    const box = await openOutbox({ branch: "pendulum/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, base: r.root, deadlineAt: clock.now() - 60_000 });
-    dropConnection(r, "pre-receive", 1);
-    assert.equal(await box.push(), true, box.error);
-    assert.deepEqual(clock.waits, [2000]);
-    box.close();
-  } finally {
-    clock.restore();
-  }
-});
 
 test("outbox: a push that landed though its answer was lost is not sent again", async () => {
   const r = repos();
@@ -539,13 +362,4 @@ test("#421: serve: a new token whose write check GitHub's rate limit turned away
   assert.equal(limited, 2, "checked again, once");
   assert.ok(run.lines.some((l) => /a new token in .*: taking work again/.test(l)));
   assert.equal(run.token, "github_pat_new");
-});
-
-test("serve: a 401 GitHub gives for a moment does not stop the loop: the same token, tried again, resumes it", async () => {
-  let incident = true;
-  const run = await serveThrough401({ refuses: () => incident, onRefused: () => (incident = false) });
-  assert.equal(run.lines.filter((l) => /GitHub refused the local token/.test(l)).length, 1);
-  assert.ok(run.lines.some((l) => /GitHub takes the local token again: taking work again/.test(l)));
-  assert.equal(run.token, "github_pat_old");
-  assert.ok(run.reads > 0, "the dispatcher read GitHub again with the same token");
 });

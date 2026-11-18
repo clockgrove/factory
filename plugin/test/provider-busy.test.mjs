@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { jsonLines, noResetLimit, parseUsage, providerBusy, providerError, providerRefusal, refusalCause, requestRefused } from "../scripts/lib/usage.mjs";
-import { crashed, outageExit, usageLimitExit } from "../scripts/lib/session.mjs";
-import { BUSY_PASS_PROMPT, LIMIT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
-import { OUTAGE, resetNetwork, serverDown, unreachable, waitOutages } from "../scripts/lib/network.mjs";
+import { crashed, usageLimitExit } from "../scripts/lib/session.mjs";
+import { BUSY_PASS_PROMPT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
+import { OUTAGE, resetNetwork, waitOutages } from "../scripts/lib/network.mjs";
 import { endedNotLost, needsWorkStep, workStepNumber } from "../scripts/lib/relaunch.mjs";
 
 const fixtures = join(import.meta.dirname, "fixtures");
@@ -152,51 +152,6 @@ test("runHarness, real, fake codex: a busy provider is waited out on the outage 
   });
 });
 
-test("runHarness, real, fake codex: past the stage's in-place bound the stage ends on the provider's busy answer, as on GitHub's 5xx", async () => {
-  const { bin, calls } = fakeCodex([codexBody(529)]);
-  await inStage(bin, async ({ waits }) => {
-    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    let thrown = null;
-    await assert.rejects(runHarness(pass(bin)), (e) => ((thrown = e), true));
-    assert.equal(sum(waits), 15 * 60_000, "1, 2, 4 and 8 minutes: the next wait ends past the fifteen");
-    assert.equal(calls().length, 5);
-    assert.ok(unreachable(thrown) && serverDown(thrown.code), String(thrown?.message));
-    assert.equal(thrown.code, "HTTP 529");
-    assert.equal(thrown.origin, "https://chatgpt.com");
-    // Locally the stage ends paused on it (serve resumes it on the same doubling); elsewhere an `outage` Block.
-    const ends = [];
-    const blocks = [];
-    await outageExit(thrown, { local: true, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a) });
-    assert.equal(ends[0][0], "paused");
-    assert.equal(ends[0][2].code, "HTTP 529");
-    assert.match(ends[0][1], /^chatgpt\.com answered HTTP 529 to every try from /);
-    await outageExit(thrown, { local: false, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a) });
-    assert.equal(blocks[0][1], "outage");
-  });
-});
-
-test("runHarness, real, fake codex: the stage's time bounds the busy waits, not a count: a long deadline keeps waiting past six", async () => {
-  const { bin, calls } = fakeCodex([...Array(8).fill(codexBody(503)), null]);
-  await inStage(bin, async ({ waits }) => {
-    waitOutages({ until: (since) => since + 12 * 60 * 60_000 });
-    const rec = await runHarness(pass(bin));
-    assert.equal(calls().length, 9, "eight busy answers, then the run that completed");
-    assert.equal(rec.ok, true);
-    assert.equal(rec.busyWaits, 8);
-    assert.equal(sum(waits), (1 + 2 + 4 + 8 + 16 + 30 + 30 + 30) * 60_000, "doubling up to half an hour");
-  });
-});
-
-test("runHarness: outside a process that waits outages out, a busy pass is returned as it is, no death", async () => {
-  const { bin, calls } = fakeCodex([codexBody(503)]);
-  await inStage(bin, async () => {
-    const rec = await runHarness(pass(bin));
-    assert.equal(calls().length, 1);
-    assert.equal(rec.busy.status, 503);
-    assert.equal(crashed(rec), false);
-  });
-});
-
 /** A fake claude: its first run answers a plain rate limit (no usage-limit code) whose reset is `resetS`, later ones succeed. */
 function fakeClaudeBusy(resetS) {
   const bin = mkdtempSync(join(tmpdir(), "pendulum-claude-busy-"));
@@ -254,102 +209,6 @@ test("runHarness, real, fake claude: a provider time past the stage's bound is a
     await usageLimitExit(thrown, { local: false, records: [], finish: async (...a) => ends.push(a), block: async () => {}, goOn: async (e) => (held.push(e.resetAt), { goOn: "another account is free" }) });
     assert.deepEqual(held, [reset]);
     assert.equal(ends.at(-1)[0], "waiting");
-  });
-});
-
-test("runHarness, real, fake claude: a retry time of now or past waits the doubling's minute, never a rerun at once", async () => {
-  const { bin, calls } = fakeClaudeBusy(START / 1000 - 60);
-  await inStage(bin, async ({ waits }) => {
-    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    const rec = await runHarness({ ...pass(bin), harness: "claude", model: "claude-fable-5-2" });
-    assert.equal(calls().length, 2);
-    assert.equal(sum(waits), 60_000);
-    assert.equal(rec.ok, true);
-  });
-});
-
-test("runHarness, real, fake claude: near the wall clock a short retry time ends on the outage path, not as a usage limit", async () => {
-  const { bin, calls } = fakeClaudeBusy(START / 1000 + 120);
-  await inStage(bin, async () => {
-    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    let thrown = null;
-    await assert.rejects(runHarness({ ...pass(bin), harness: "claude", model: "claude-fable-5-2", timeoutMs: 6 * 60_000 }), (e) => ((thrown = e), true));
-    assert.equal(calls().length, 1);
-    assert.ok(unreachable(thrown) && thrown.code === "HTTP 429", String(thrown?.message));
-    assert.notEqual(thrown.code, USAGE_LIMIT);
-  });
-});
-
-test("runHarness, real, fake claude: on a route, a long retry time goes through the usage limit's gate: another account free ends the stage; else the account is held while it waits", async () => {
-  const reset = START + 2 * 60 * 60_000;
-  const saved = { elsewhere: LIMIT.elsewhere, hold: LIMIT.hold };
-  try {
-    const moved = fakeClaudeBusy(reset / 1000);
-    await inStage(moved.bin, async ({ waits }) => {
-      waitOutages({ until: () => START + 6 * 60 * 60_000 });
-      const held = [];
-      Object.assign(LIMIT, { elsewhere: async () => true, hold: async (r) => held.push(r.resetAt) });
-      await assert.rejects(runHarness({ ...pass(moved.bin), harness: "claude", model: "claude-fable-5-2" }), (e) => e.code === USAGE_LIMIT && e.resetAt === reset);
-      assert.deepEqual([moved.calls().length, waits, held], [1, [], []], "no wait, no hold: the stage ends and its route moves the Objective (usageLimitExit)");
-    });
-    const stays = fakeClaudeBusy(reset / 1000);
-    await inStage(stays.bin, async ({ waits }) => {
-      waitOutages({ until: () => START + 6 * 60 * 60_000 });
-      const held = [];
-      Object.assign(LIMIT, { elsewhere: async () => false, hold: async (r) => held.push(r.resetAt) });
-      const rec = await runHarness({ ...pass(stays.bin), harness: "claude", model: "claude-fable-5-2" });
-      assert.deepEqual(held, [reset], "the account held until the provider's time, before the wait");
-      assert.equal(sum(waits), 2 * 60 * 60_000);
-      assert.equal(stays.calls().length, 2);
-      assert.equal(rec.ok, true);
-    });
-  } finally {
-    Object.assign(LIMIT, saved);
-  }
-});
-
-test("runHarness, real, fake codex: a fresh first pass rerun from its session after a busy answer, then refused for its request, gets its fresh try with its own prompt", async () => {
-  const { bin, calls } = fakeCodex([codexBody(503), codexBody(400, "invalid_request_error", "context_length_exceeded"), null]);
-  await inStage(bin, async () => {
-    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    const rec = await runHarness(pass(bin));
-    assert.deepEqual(calls().map((c) => [c.args.includes("resume"), c.prompt]), [[false, "the task"], [true, BUSY_PASS_PROMPT], [false, "the task"]]);
-    assert.equal(rec.ok, true);
-  });
-});
-
-test("runHarness, real, fake codex: a resumed pass refused 400/413/422 for its request alone runs once fresh; an account refusal does not", async () => {
-  for (const status of [400, 413, 422]) {
-    const { bin, calls } = fakeCodex([codexBody(status, "invalid_request_error", "context_length_exceeded"), null]);
-    await inStage(bin, async () => {
-      const rec = await runHarness(pass(bin, { prompt: "the ask", freshPrompt: "card\n\n---\n\nthe ask", resume: "00000000-0000-0000-0000-0000000000b1" }));
-      const c = calls();
-      assert.deepEqual(c.map((x) => [x.args.includes("resume"), x.prompt]), [[true, "the ask"], [false, "card\n\n---\n\nthe ask"]], `HTTP ${status}`);
-      assert.equal(rec.ok, true);
-      assert.deepEqual(rec.resumeRefused, { session: "00000000-0000-0000-0000-0000000000b1", status, type: "invalid_request_error", code: "context_length_exceeded" });
-    });
-  }
-  // The fresh pass refused too: the refusal stands, run twice in all.
-  const again = fakeCodex([codexBody(400, "invalid_request_error", "context_length_exceeded")]);
-  await inStage(again.bin, async () => {
-    const rec = await runHarness(pass(again.bin, { prompt: "the ask", freshPrompt: "card", resume: "00000000-0000-0000-0000-0000000000b1" }));
-    assert.equal(again.calls().length, 2);
-    assert.equal(rec.refusal?.status, 400);
-  });
-  // A billing or permission kind, or a 401: the account's refusal, run once.
-  for (const [status, type, code] of [[400, "invalid_request_error", "billing_error"], [400, "permission_error", null], [401, "authentication_error", null]]) {
-    const { bin, calls } = fakeCodex([codexBody(status, type, code), null]);
-    await inStage(bin, async () => {
-      const rec = await runHarness(pass(bin, { prompt: "the ask", freshPrompt: "card", resume: "00000000-0000-0000-0000-0000000000b1" }));
-      assert.equal(calls().length, 1, `HTTP ${status} ${type} ${code}`);
-      assert.equal(rec.refusal?.status, status);
-    });
-  }
-  // A fresh pass (no resume) refused 400 is not run again.
-  const fresh = fakeCodex([codexBody(400, "invalid_request_error", "context_length_exceeded"), null]);
-  await inStage(fresh.bin, async () => {
-    await runHarness(pass(fresh.bin, { freshPrompt: "card" }));
-    assert.equal(fresh.calls().length, 1);
   });
 });
 

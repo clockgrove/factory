@@ -2142,6 +2142,8 @@ export function bodyAt(history, at) {
   if (!history || !Number.isFinite(t)) return null;
   const lf = (s) => String(s).replace(/\r\n?/g, "\n");
   if (!history.revisions.length) return history.complete ? lf(history.now) : null;
+  // GitHub's times are to the second. A version edited in the very second the finding was raised counts as before it:
+  // the body's change then leaves that edit out, so an edit made in that second never counts as the answer's (fails closed).
   const v = history.revisions.find((r) => Date.parse(r.at) <= t);
   return v && typeof v.body === "string" ? lf(v.body) : null;
 }
@@ -2159,7 +2161,8 @@ export async function bodyDiff(mgit, before, now, { maxBytes = 256 * 1024 } = {}
   };
   const [a, b] = [await blob(before), await blob(now)];
   if (!a || !b) return null;
-  const d = await mgit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", a, b], { maxBytes });
+  // One line of context: a body is mostly long table rows, and the finding check's cap is for the change.
+  const d = await mgit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U1", a, b, "--"], { maxBytes });
   if (d.code !== 0 && !d.truncated) return null;
   const text = String(d.stdout);
   const hunk = text.search(/^@@ /m);

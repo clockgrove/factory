@@ -909,7 +909,7 @@ const THREAD_PAGES = 10;
 
 /**
  * The PR body's history (#584), from GitHub's own record of its edits: `{now, revisions, complete}`. `now` is the body
- * as it stands; `revisions`, each `{at, body}` newest first, every version the body has had (its first one at the PR's
+ * as it stands; `revisions`, each `{at, body}` newest first (sorted by `at`, whatever order GitHub gives), every version the body has had (its first one at the PR's
  * opening), with `body` null for a version a person deleted from the history; none when the body was never edited.
  * `complete`: the revisions reach back to the first one (BODY_EDIT_PAGES pages at most).
  */
@@ -928,11 +928,13 @@ export async function prBodyHistory(repo, number, opts) {
     if (page === 0) now = String(pr.body ?? "");
     const got = pr.userContentEdits;
     revisions.push(...(got?.nodes || []).map((e) => ({ at: e.editedAt, body: e.deletedAt || typeof e.diff !== "string" ? null : e.diff })));
-    if (!got?.pageInfo?.hasNextPage || !got.pageInfo.endCursor) return { now, revisions, complete: true };
+    if (!got?.pageInfo?.hasNextPage || !got.pageInfo.endCursor) return { now, revisions: newestFirst(revisions), complete: true };
     after = got.pageInfo.endCursor;
   }
-  return { now, revisions, complete: false };
+  return { now, revisions: newestFirst(revisions), complete: false };
 }
+/** Versions by their edit time, newest first; one with no time readable last. */
+const newestFirst = (list) => list.map((r) => ({ r, t: Date.parse(r.at) })).sort((a, b) => (Number.isFinite(b.t) ? b.t : -Infinity) - (Number.isFinite(a.t) ? a.t : -Infinity) || 0).map((x) => x.r);
 /** The most pages of 20 body versions prBodyHistory reads. */
 const BODY_EDIT_PAGES = 10;
 

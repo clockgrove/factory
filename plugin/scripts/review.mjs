@@ -128,6 +128,18 @@ export const sinceBrief = (since, { judge = true } = {}) =>
   `Pendulum's reviewer already reviewed this PR at ${since.slice(0, 7)}, and commits were written after that review. This pass reviews those changes: the diff below is the PR's head against that reviewed head's change replayed on the current default branch, so neither the code reviewed then nor the default branch's changes are in it. Comment only on what this diff adds or changes; read the rest of the PR in the checkout as you need to${judge ? ", and still judge every acceptance entry on the PR as it now stands" : ""}.`;
 
 /**
+ * What the finding check reads each answer against (finding-check.mjs checkAnswers), in Pendulum's mirror (`git`, the
+ * outbox's): `diffOf(from)`, what the PR changed from the commit a finding was raised on to `head` without the default
+ * branch's changes (session.mjs answerDiff), and `bodyDiffOf(at)`, what the PR body changed since a finding was raised,
+ * from GitHub's record of the body's edits, read once per check and only for a reply that says its fix is in the body
+ * (session.mjs bodyChanges, github.mjs prBodyHistory, #584).
+ */
+export const findingReads = ({ git, base, head, repo, prNumber, token }) => ({
+  diffOf: (from) => answerDiff(git, { base, from, head }),
+  bodyDiffOf: bodyChanges(git, () => prBodyHistory(repo, prNumber, token)),
+});
+
+/**
  * The reviewer's prompt: the skill does the work; the JSON shape is what the job
  * parses. Claude and Copilot run as the pinned reviewer agent (--agent); Codex has
  * no such flag, so the prompt names the definition file. The issue's acceptance
@@ -814,7 +826,7 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
     ? `${red.queue ? `The merge queue's run of the required checks on its integrated commit ${String(red.sha || "").slice(0, 7)} (this PR on top of the default branch and the PRs queued ahead of it) failed in this PR's own change, and Pendulum took the PR out of the queue.` : `Pendulum's validation found the required checks red on the head the reviewer read (${String(red.sha || "").slice(0, 7)}).`} Fix that cause in the code too (never weaken, skip or delete a test unless the issue asks) and update the Validation section of \`$PENDULUM_OUT/pr.md\`; the failures are below, each whole output in \`$PENDULUM_IN/checks/\`. A failing policy check is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy.`
     : "";
   const ask = comments.length
-    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$PENDULUM_IN/review-comments.json\`). Load the $pendulum-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$PENDULUM_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}], adding "fixed": true to a reply whose fix is in the code${namedTests ? ` and, when a test fails without the fix and passes with it, "test": {"command": "<one validation command, exactly as the task card lists it>", "args": ["<what makes it run only that test>"]}; Pendulum runs that test without the fix and with it before it spends another round on the finding` : ""}; Pendulum posts them.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}${red ? ` ${redAsk}` : ""}`
+    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$PENDULUM_IN/review-comments.json\`). Load the $pendulum-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$PENDULUM_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}], adding "fixed": true to a reply whose fix is in the code, or "fixed": true and "pr_body": true to one whose fix is in the PR body (pr.md)${namedTests ? ` and, when a test fails without the fix and passes with it, "test": {"command": "<one validation command, exactly as the task card lists it>", "args": ["<what makes it run only that test>"]}; Pendulum runs that test without the fix and with it before it spends another round on the finding` : ""}; Pendulum posts them.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}${red ? ` ${redAsk}` : ""}`
     : afterPush
       ? `A maintainer commented on PR #${prNumber} after the last pass read the decisions (new or edited comments). Apply the decisions below to the branch: they are the specification where they differ from the code or your assumptions. If a decision asks for nothing to change, change nothing for it.${red ? ` ${redAsk}` : ""}`
       : question
@@ -1843,15 +1855,13 @@ async function main() {
   };
   // A reply that says fixed and names a test has it run without the fix and with it by the validation command it names,
   // through the stage's own validation path (runValidation, its sandbox and env), before any answer round is spent (#516).
-  // What the PR body changed since each finding was raised comes from GitHub's record of the body's edits, read once per
-  // check and only when a reply goes to the decision model (#584).
   const judgeAnswers = async (findings, repliesText) => {
     const head = outbox.expected() || pr.head.sha;
     // The commit a finding was raised on counts as the code without the fix only when it was green: Pendulum's validated
     // marker is on it and it is no red the stage held (heldRed), which the answer pass may have fixed beside the finding.
     const beforeGreen = async (sha) => sha !== heldRed?.sha && (await isValidated(repo, pr.number, issue, sha, token));
     const runTest = namedTestRunner({ checkout, commands: inputs.validation, env: passEnv, head, beforeGreen, timeoutMs: () => remainingMs(deadlineAt) });
-    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, runTest, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), bodyDiffOf: bodyChanges(outbox.git, () => prBodyHistory(repo, pr.number, token)), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [], found: [] }));
+    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, runTest, ...findingReads({ git: outbox.git, base: outbox.base, head, repo, prNumber: pr.number, token }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [], found: [] }));
     unjudged.push(...r.unjudged);
     checkFound.push(...(r.found || []));
   };

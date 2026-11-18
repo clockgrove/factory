@@ -243,7 +243,8 @@ export function namedTest(test) {
  * replies.json as the replies Pendulum posts: one per comment id in `allowed`, the first for each id, bodies sanitised.
  * An id is a line comment's number, or the string id of a finding in a review body (logic.mjs bodyFindingId). A reply
  * with `"fixed": true` says the finding is fixed in the code, and carries the test it names (`test`, namedTest), if any,
- * for the finding check (finding-check.mjs).
+ * for the finding check (finding-check.mjs); `"pr_body": true` beside it says the fix is in the PR body (pr.md), so the
+ * check shows the body's change (`prBody`, #584).
  */
 export function parseReplies(text, allowed) {
   let list;
@@ -261,7 +262,7 @@ export function parseReplies(text, allowed) {
     if (id === undefined || seen.has(id) || typeof r.body !== "string" || !r.body.trim()) continue;
     seen.add(id);
     const test = r.fixed === true ? namedTest(r.test) : null;
-    out.push({ id, body: sanitize(r.body.trim()), ...(r.fixed === true ? { fixed: true } : {}), ...(test ? { test } : {}) });
+    out.push({ id, body: sanitize(r.body.trim()), ...(r.fixed === true ? { fixed: true } : {}), ...(r.fixed === true && r.pr_body === true ? { prBody: true } : {}), ...(test ? { test } : {}) });
   }
   return out;
 }

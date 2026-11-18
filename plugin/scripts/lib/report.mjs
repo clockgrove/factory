@@ -14,7 +14,8 @@
 // an estimate, a bound or a counterfactual. Totals stay split by billing kind (usage.mjs BILLING) and the sandbox
 // vendor's cost, never blended. Markers count only from Pendulum's own login or App (finish-card.mjs pendulumOwn), or a
 // login `--self` names that can push; a stage comment by someone else who can push, or through another App, is a run of
-// unknown cost; anyone else's counts nothing. An artifact a fork's run uploaded is never read (github.mjs ownRunArtifact).
+// unknown cost; anyone else's counts nothing. A MEMBER or COLLABORATOR author can push only on their own permission read
+// (writerBy), as the finish card counts them; one not read is never trusted (unverifiedBy). An artifact a fork's run uploaded is never read (github.mjs ownRunArtifact).
 // No reason, Block text, task card, transcript or credential reaches the report, and no account unless asked for.
 
 import { pendulumBuild } from "./release.mjs";
@@ -22,11 +23,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { costOf, coversLine, decisionSpendRecords, loadPrices, stageHarnessOf, stageOf, stageSpendRecords, withLines, ACCOUNT } from "./cost-join.mjs";
-import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
+import { WRITE_PERMISSIONS, collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
 import { DEFAULTS } from "./inputs.mjs";
 import { appIdSetLine, appIdWhyText, readAppIdVariable } from "./app-id.mjs";
 import { PREVIOUS_NAME } from "./local.mjs";
-import { FINDING_OUTCOMES, STATE_LABELS, decisionSpendEntries, findingsOf, ledgerOfComment, loginKey, publishedModels, claimedPushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
+import { FINDING_OUTCOMES, MEMBER_ASSOCIATIONS, STATE_LABELS, decisionSpendEntries, findingsOf, ledgerOfComment, loginKey, publishedModels, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { ASKED, CHURN, clockRenamed, finishMarker, labelTime, markChurn, modellessStages, pendulumOwn, readSummary, reportStageKind, spendBreakdown, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, CLAUDE_MODELS, UNKNOWN_WHY, codexRow, longShare, modelName, passKind, sumLong } from "./usage.mjs";
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
@@ -364,13 +365,41 @@ export function legacyIssue(c) {
 export const PARTIAL_CODES = Object.freeze(["stopped", "legacy-records"]);
 
 /**
- * Whose markers the report takes as Pendulum's own: its login here (the token's, logic.mjs isSelf) or its App by id
- * (finish-card.mjs pendulumOwn), and a login `self` names (`--self`) only on a comment by someone who can push.
+ * Whether a comment's author can push, by the permission reads readReport made (`authors`, by login: true for write,
+ * maintain or admin; false for less, or for no access): the repository's owner by association, or a MEMBER or COLLABORATOR
+ * author a read found a writer. The association alone says only that a person belongs to the organization or was added
+ * to the repository (logic.mjs MEMBER_ASSOCIATIONS), as the finish card counts them (logic.mjs pushAuthor).
  */
-export function ownPredicate(appId = null, self = []) {
+export const writerBy = (authors) => (c) => c?.author_association === "OWNER" || authors?.get(loginKey(c?.user?.login)) === true;
+/**
+ * Why a MEMBER or COLLABORATOR author's permission was not read (readReport `authors`): `unchecked`, the call budget
+ * stopped the report first; `unverifiable`, the token may not read it (403).
+ */
+export const UNVERIFIED = Object.freeze(["unchecked", "unverifiable"]);
+/** Whether a comment is by a MEMBER or COLLABORATOR author whose permission was not read (UNVERIFIED). */
+export const unverifiedBy = (authors) => (c) => MEMBER_ASSOCIATIONS.has(c?.author_association) && UNVERIFIED.includes(authors?.get(loginKey(c?.user?.login)));
+/**
+ * Whose stage comments, when not Pendulum's own, are runs of unknown cost (`unattributed`), never their figures: someone
+ * who can push (writerBy), a MEMBER or COLLABORATOR author whose permission was not read (unverifiedBy: never trusted,
+ * so never a figure of theirs), or a comment through a GitHub App other than Actions (finish-card.mjs throughApp).
+ * Anyone else's counts nothing.
+ */
+export function pushedBy(authors) {
+  const writer = writerBy(authors);
+  const unverified = unverifiedBy(authors);
+  return (c) => writer(c) || unverified(c) || throughApp(c);
+}
+
+/**
+ * Whose markers the report takes as Pendulum's own: its login here (the token's, logic.mjs isSelf) or its App by id
+ * (finish-card.mjs pendulumOwn), and a login `self` names (`--self`) only on a comment by someone who can push
+ * (writerBy, by the permission reads in `authors`).
+ */
+export function ownPredicate(appId = null, self = [], authors = null) {
   const app = pendulumOwn(appId);
   const named = new Set((self || []).map(loginKey));
-  return (c) => app(c) || (named.has(loginKey(c?.user?.login)) && claimedPushAuthor(c));
+  const writer = writerBy(authors);
+  return (c) => app(c) || (named.has(loginKey(c?.user?.login)) && writer(c));
 }
 
 /**
@@ -397,7 +426,7 @@ export function lastCard(n, own) {
  * a merge (#589: Blocked, a Question, closed unmerged) carries no merged summary (readSummary): its stages are read. A card with no stage is none.
  * Anyone else's card, or a summary that does not read, is none: the stages are read. Returns {comment, summary}.
  */
-export function summaryFor(n, comments, scope, { mine, pushed = (c) => claimedPushAuthor(c) || throughApp(c), by = [], stages = false } = {}) {
+export function summaryFor(n, comments, scope, { mine, pushed = pushedBy(null), by = [], stages = false } = {}) {
   if (stages || (by || []).some((b) => STAGE_DETAIL.includes(b))) return null;
   const on = (comments || []).filter((c) => markerIssue(c) === n);
   let found = null;
@@ -448,9 +477,9 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
   // The merged Objectives read from their finish card's summary (summaryFor), from the comments read so far.
   const readSummaries = () => {
     summaries.clear();
-    const mine = ownPredicate(app, self);
+    const mine = ownPredicate(app, self, authors);
     for (const n of new Set([...issues.keys(), ...comments.map(markerIssue).filter((x) => x !== null)])) {
-      const found = summaryFor(n, comments, scope, { mine, by, stages });
+      const found = summaryFor(n, comments, scope, { mine, pushed: pushedBy(authors), by, stages });
       if (found) summaries.set(n, found);
     }
   };
@@ -496,6 +525,32 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
     source.threadsWhole.add(n);
   };
   let app = appId;
+  // Each MEMBER or COLLABORATOR author's push access, by login (writerBy, UNVERIFIED): read for the authors of the
+  // comments with a marker (markerIssue, legacyIssue) that are not Pendulum's own login or App and not through another
+  // App, since the association alone says only that they belong to the organization or were added to the repository
+  // (#607). Each login once, all of a read's new ones planned before their reads; a 403 leaves one `unverifiable`, and a
+  // BudgetStop leaves each not read `unchecked` (below, after the reads).
+  const authors = new Map();
+  const unread = () => {
+    const own = pendulumOwn(app);
+    const voices = comments.filter((c) => (markerIssue(c) !== null || legacyIssue(c) !== null) && MEMBER_ASSOCIATIONS.has(c?.author_association) && !own(c) && !throughApp(c));
+    return [...new Set(voices.map((c) => loginKey(c.user?.login)).filter((l) => l && !authors.has(l)))].sort();
+  };
+  const vouch = async () => {
+    const want = unread();
+    if (!want.length) return;
+    budget.plan(want.length, `the permission of ${want.length} comment author(s) with a marker whose association says only that they belong to the organization or were added to the repository`);
+    for (const login of want) {
+      budget.take("permissions");
+      try {
+        authors.set(login, WRITE_PERMISSIONS.has(await collaboratorPermission(repo, login, opts)));
+      } catch (e) {
+        // A token that may not read collaborators' permissions: this author cannot be verified, and that is said.
+        if (e?.status !== 403) throw e;
+        authors.set(login, "unverifiable");
+      }
+    }
+  };
   try {
     // What is known before any read: Pendulum's own login and App, the set, the comments, the Objectives' issues and PRs.
     const first = 1 + (app === null ? 1 : 0) + (named ? scope.issues.length * 3 : (scope.label ? 1 : 0) + (scope.parent ? 1 : 0) + (scope.compare?.length ?? 0) + 1 + (setMode ? 0 : 1) + 1);
@@ -540,7 +595,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       }
       if (stop) throw stop;
     }
-    const mine = ownPredicate(app, self);
+    const mine = ownPredicate(app, self, authors);
     const isIssue = (i) => i && !i.pull_request && Number.isSafeInteger(i.number);
     if (named) {
       // Each named issue, its own comments (planned from its comment count) and its own branch's PRs: no repository-wide read.
@@ -561,6 +616,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
         reading = null;
         source.threadsWhole.add(n);
       }
+      await vouch();
       for (const n of issues.keys()) pulls.push(...(await paged(`${base}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${n}`)}`, budget, "pulls", opts)));
       source.pullsRead = true;
     } else {
@@ -587,6 +643,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       reading = { n: null };
       await paged(`${base}/issues/comments${floor ? `?since=${encodeURIComponent(floor)}` : ""}`, budget, "comments", opts, { into: comments });
       reading = null;
+      await vouch();
       // The period's Objectives: the labelled ones touched since its start, and each other issue with a stage of Pendulum's in it.
       if (!setMode) {
         for (const i of await paged(`${base}/issues?labels=${encodeURIComponent(objectiveLabel)}&state=all${floor ? `&since=${encodeURIComponent(floor)}` : ""}`, budget, "issues", opts)) if (isIssue(i)) issues.set(i.number, i);
@@ -608,18 +665,19 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       // the floor, so the thread is read page by page until a comment written at or after it, each kept once.
       threadsLeft = new Set();
       if (floor) {
-        const pushed = (c) => mine(c) || claimedPushAuthor(c) || throughApp(c);
-        const recorded = new Set(comments.filter(pushed).map(markerIssue).filter((n) => n !== null));
+        const pushed = pushedBy(authors);
+        const recorded = new Set(comments.filter((c) => mine(c) || pushed(c)).map(markerIssue).filter((n) => n !== null));
         const begun = [...issues.values()].filter((i) => recorded.has(i.number) && !(ms(i.created_at) >= ms(floor))).map((i) => i.number).sort((a, b) => a - b);
         threadsLeft = new Set(begun);
         if (begun.length) budget.plan(begun.length, `the comments from before ${floor} of ${begun.length} Objective(s) with a record since (a thread's first page each, each further page planned as it is reached)`, { atLeast: true });
         for (const n of begun) await readThread(n);
+        await vouch();
       }
       // The PRs on pendulum/<n> branches, newest first, until they are older than the comments read.
       let early = false;
       pulls.push(...(await paged(`${base}/pulls?state=all&sort=updated&direction=desc`, budget, "pulls", opts, { stop: (items) => (early = !!floor && ms(items.at(-1)?.updated_at) < ms(floor)) })));
       source.pullsRead = true;
-      if (early) await olderPulls({ base, repo, floor, issues, pulls, comments, mine, setMode, budget, opts, source });
+      if (early) await olderPulls({ base, repo, floor, issues, pulls, comments, mine, pushed: pushedBy(authors), setMode, budget, opts, source });
       // Each Objective merged in the period whose thread from before the floor is still unread (#570 V5: the per-merged
       // figures count every stage of it): read as above, planned the same way, so no merged Objective counts as $0.
       if (floor) {
@@ -628,6 +686,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
         for (const n of merged) threadsLeft.add(n);
         if (merged.length) budget.plan(merged.length, `the comments from before ${floor} of ${merged.length} Objective(s) merged in the period (a thread's first page each, each further page planned as it is reached)`, { atLeast: true });
         for (const n of merged) await readThread(n);
+        await vouch();
       } else for (const n of issues.keys()) source.threadsWhole.add(n);
     }
     source.comments = comments.length;
@@ -719,6 +778,8 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
   // comments after those read (the repository-wide read, or a named issue's own, cut short); `earlier`, those from before
   // the floor (its thread unread, or an issue not read that may be older than the floor).
   if (source.stopped) {
+    // The authors whose permission the budget stopped the report before reading: never trusted (unverifiedBy).
+    for (const login of unread()) authors.set(login, "unchecked");
     for (const n of new Set(comments.map(markerIssue).filter((x) => x !== null))) {
       const later = !!reading && (reading.n === null || reading.n === n);
       const earlier = !!floor && (threadsLeft ? threadsLeft.has(n) : !(ms(issues.get(n)?.created_at) >= ms(floor)));
@@ -731,7 +792,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
   readSummaries();
   for (const n of issues.keys()) localOf(n);
   source.localRecords = [...local.values()].reduce((s, m) => s + m.size, 0);
-  return { repo, scope, appId: app, self: [...new Set((self || []).map(loginKey))], issues, pulls, comments, artifacts, summaries, local, renamed, timelines, ...(arms.length ? { arms, started } : {}), source: { ...source, calls: budget } };
+  return { repo, scope, appId: app, self: [...new Set((self || []).map(loginKey))], authors, issues, pulls, comments, artifacts, summaries, local, renamed, timelines, ...(arms.length ? { arms, started } : {}), source: { ...source, calls: budget } };
 }
 
 /**
@@ -776,8 +837,8 @@ async function clockTimelines(repo, { issues, comments, mine, budget, opts, rena
  * push or through another App, which counts as unknown cost); a stranger's paste reads no PR. `source.pullsUnread` keeps those whose read
  * the call budget stopped (their outcome is then null).
  */
-async function olderPulls({ base, repo, floor, issues, pulls, comments, mine, setMode, budget, opts, source }) {
-  const marked = new Set(comments.filter((c) => mine(c) || claimedPushAuthor(c) || throughApp(c)).map(markerIssue).filter((n) => n !== null));
+async function olderPulls({ base, repo, floor, issues, pulls, comments, mine, pushed, setMode, budget, opts, source }) {
+  const marked = new Set(comments.filter((c) => mine(c) || pushed(c)).map(markerIssue).filter((n) => n !== null));
   const decided = (i) => (i.labels || []).some((l) => ["Blocked", "Question"].includes(STATE_LABELS[typeof l === "string" ? l : l?.name]));
   const want = [...issues.values()]
     .filter((i) => i.state === "closed" && !decided(i) && ms(i.created_at) < ms(floor) && (setMode || marked.has(i.number)) && !(ms(newestPull(i.number, pulls)?.created_at) >= ms(floor)))
@@ -1306,8 +1367,8 @@ function breakdown() {
  */
 export function buildReport(read, { prices = loadPrices(), by = [], rates = null, tables = rateTables(prices), now = new Date().toISOString(), wholePass = false } = {}) {
   const { repo, scope, issues, pulls, comments, artifacts, local, source } = read;
-  const mine = ownPredicate(read.appId ?? null, read.self ?? []);
-  const pushed = (c) => claimedPushAuthor(c) || throughApp(c);
+  const mine = ownPredicate(read.appId ?? null, read.self ?? [], read.authors);
+  const pushed = pushedBy(read.authors);
   const totals = zeroCost();
   const totalTokens = zeroTokens();
   const unknownItems = [];
@@ -1339,7 +1400,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   const findingStages = [];
   const findingTotals = { findings: 0, outcomes: zeroOutcomes(), reviewStages: 0, cost: zeroCost(), unnamed: 0 };
   const trust = { own: 0, vouched: 0, ignored: 0 };
-  const missing = { legacy: tally(), noRecord: tally(), stopped: tally(), unattributed: tally(), noLedger: tally(), noVersion: tally(), noModel: tally(), modelStopped: tally(), unreadIssue: new Set(), routeUnrecorded: tally(), commentsStopped: new Set() };
+  const missing = { legacy: tally(), noRecord: tally(), stopped: tally(), unattributed: tally(), noLedger: tally(), noVersion: tally(), noModel: tally(), modelStopped: tally(), unreadIssue: new Set(), routeUnrecorded: tally(), commentsStopped: new Set(), authorUnchecked: new Set(), authorUnverifiable: new Set() };
   // The merged Objectives read from their finish card's summary (readReport, summaryFor), unless `by` or `rates` needs
   // their stages.
   const summaries = rates || by.some((b) => STAGE_DETAIL.includes(b)) ? new Map() : read.summaries ?? new Map();
@@ -1388,6 +1449,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     const summary = summaries.get(n)?.summary ?? null;
     // An Objective read from its summary: the summary stands for its stage comments, Pendulum's and anyone's who can push.
     const { own: ownAll = [], vouched: vouchedAll = [] } = byIssue.get(n) ?? {};
+    // Records by an author whose permission was not read (unverifiedBy): runs of unknown cost at most, and said why.
+    for (const c of vouchedAll.filter(unverifiedBy(read.authors))) missing[read.authors.get(loginKey(c.user?.login)) === "unchecked" ? "authorUnchecked" : "authorUnverifiable"].add(n);
     const isStage = (c) => new RegExp(`^<!-- pendulum:${n}:(?:progress|vendor):`).test(c.body || "");
     const own = summary ? ownAll.filter((c) => !isStage(c)) : ownAll;
     const vouched = summary ? vouchedAll.filter((c) => !isStage(c)) : vouchedAll;
@@ -2020,14 +2083,15 @@ const round2 = (n) => Math.round(n * 100) / 100;
  */
 function perMergedOf(read, objectives, opts) {
   const { scope, issues, pulls, source, comments } = read;
-  const mine = ownPredicate(read.appId ?? null, read.self ?? []);
+  const mine = ownPredicate(read.appId ?? null, read.self ?? [], read.authors);
   const rowOf = new Map(objectives.map((o) => [o.issue, o]));
   const merged = (n) => (rowOf.has(n) ? rowOf.get(n).outcome : issues?.get(n) ? outcomeOf(issues.get(n), pulls, { pullsRead: source.pullsRead !== false && !source.pullsUnread?.has(n) }) : null) === "merged";
   const ns = [...new Set([...rowOf.keys(), ...(issues?.keys() ?? [])])].filter((n) => merged(n) && inWindow(mergedAt(n, comments, pulls, mine), scope)).sort((a, b) => a - b);
   // The Objectives with a record of cost among the comments read, Pendulum's own or one it counts as unknown cost: a
   // stage's progress or vendor comment, a decision-spend line, or a finish card with a summary. Any other marker (a
   // plan, a notice) is no record of cost: a merged Objective with only that is `no-records`, never $0.
-  const pushed = (c) => mine(c) || claimedPushAuthor(c) || throughApp(c);
+  const theirs = pushedBy(read.authors);
+  const pushed = (c) => mine(c) || theirs(c);
   const costed = (c) => {
     const n = markerIssue(c);
     const body = c.body || "";
@@ -2221,6 +2285,8 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   add("issue-unread", missing.unreadIssue, "issues with Pendulum's markers that could not be read: no outcome or title for them");
   // The vetted labels (#545): an issue whose label's last applier cannot push is not counted, nor one whose was not read.
   const arms = read.arms ?? [];
+  add("author-unchecked", missing.authorUnchecked, "Objectives with records by an organization member or collaborator whose permission on the repository the call budget stopped the report before reading: never trusted, so their stage comments are runs of unknown cost and add no figure of theirs");
+  add("author-unverifiable", missing.authorUnverifiable, "Objectives with records by an organization member or collaborator whose permission on the repository the token may not read (403): never trusted, so their stage comments are runs of unknown cost and add no figure of theirs");
   add("label-untrusted", new Set(arms.flatMap((a) => a.untrusted)), `issues whose ${arms.map((a) => `\`${a.label}\``).join(" or ")} label was last applied by someone who cannot push (or by a bot or an App), or by no one the timeline names: not counted for it`);
   add("label-unverifiable", new Set(arms.flatMap((a) => a.unverifiable)), "issues whose label's last applier's permission the token may not read (403): not vouched for, so not counted for it");
   add("label-unchecked", new Set(arms.flatMap((a) => a.listed.filter((n) => !checked(a, n)))), "issues whose label's applier the call budget stopped the report before reading: not counted");

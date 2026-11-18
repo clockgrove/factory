@@ -2512,13 +2512,6 @@ export function unverifiedAuthors(repoFull, items) {
  * MEMBER_ASSOCIATIONS).
  */
 export const pushAuthor = (item) => item?.author_association === "OWNER" || knownWriter(item?.user?.login) === true || pinnedMaintainer(item?.user) || verifiedWriter(item?.user?.login) === true;
-/**
- * Whether an item's author can push by what GitHub shows of them alone: pushAuthor, or a MEMBER or COLLABORATOR
- * association, unverified. Only for reading spend and stage records into a summary (the finish card, finish-card.mjs,
- * and the report, report.mjs, which reads the same records as the card and no permission per author): neither acts on
- * what it reads. Never for a decision Pendulum acts on.
- */
-export const claimedPushAuthor = (item) => MEMBER_ASSOCIATIONS.has(item?.author_association) || pushAuthor(item);
 
 /**
  * The login Pendulum itself writes as in this process: the App's `<slug>[bot]` on Actions, the token's owner in local

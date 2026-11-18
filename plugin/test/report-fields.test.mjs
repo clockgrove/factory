@@ -71,6 +71,9 @@ function fakeGitHub(w) {
       return i ? json({ ...i, comments: w.comments.filter((c) => c.issue_url === issueUrl(i.number)).length }) : json({ message: "Not Found" }, 404);
     }
     if (p === "/issues") return json(w.issues);
+    // Each comment author's permission (`w.permissions`; the teammate is a writer unless it says otherwise): none, a 404.
+    m = /^\/collaborators\/([^/]+)\/permission$/.exec(p);
+    if (m) return (w.permissions ?? { teammate: "write" })[decodeURIComponent(m[1])] ? json({ permission: (w.permissions ?? { teammate: "write" })[decodeURIComponent(m[1])] }) : json({ message: "Not Found" }, 404);
     if (p === "/pulls") {
       const head = u.searchParams.get("head");
       return json(w.pulls.filter((x) => !head || `${REPO.owner}:${x.head?.ref}` === head));

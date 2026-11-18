@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RETRY } from "../scripts/lib/github.mjs";
+import { RETRY, listComments } from "../scripts/lib/github.mjs";
 import { FINDINGS_MAX, decisionSpendMarker, findingsMarker, findingsOf, harnessMarker, ledgerMarker, ledgerOfComment, rebaseCostMarker, setSelf, spendMarker, stageSpendLine } from "../scripts/lib/logic.mjs";
 import { pendulumBuild } from "../scripts/lib/release.mjs";
 import { progressTail, writeUsage } from "../scripts/lib/session.mjs";
@@ -123,7 +123,9 @@ function world() {
 /**
  * A fake GitHub over `w`, answering the reads a report makes as GitHub does: page by page, with a Link header naming the
  * next and last pages; `w.appVariable` the PENDULUM_APP_ID repository variable (404 without one; a function of the token
- * gives it per token, {status} a refusal). `calls` lists every request.
+ * gives it per token, {status} a refusal); `w.permissions` each comment author's permission on the repository (a
+ * status to refuse with; a login it does not name has none, a 404), by default the teammate's alone, a writer's. `calls`
+ * lists every request.
  */
 function fakeGitHub(w) {
   const calls = [];
@@ -173,6 +175,12 @@ function fakeGitHub(w) {
     if (p === "/pulls") {
       const head = u.searchParams.get("head");
       return page(w.pulls.filter((x) => !head || `${REPO.owner}:${x.head?.ref}` === head), u);
+    }
+    m = /^\/collaborators\/([^/]+)\/permission$/.exec(p);
+    if (m) {
+      const answer = (w.permissions ?? { teammate: "write" })[decodeURIComponent(m[1])];
+      if (typeof answer === "number") return json({ message: "Must have push access to view repository collaborators." }, answer);
+      return answer ? json({ permission: answer }) : json({ message: "Not Found" }, 404);
     }
     if (p === "/actions/artifacts") return page((u.searchParams.has("name") ? w.artifacts[u.searchParams.get("name")] || [] : Object.values(w.artifacts).flat()).map(({ record, ...a }) => a), u, (artifacts, total) => ({ total_count: total, artifacts }));
     return json({ message: "Not Found" }, 404);
@@ -701,6 +709,86 @@ test("report (S2): --self trusts an exact login only on a comment by someone who
   assert.equal(s.source.read.ignoredComments, 2);
 });
 
+test("report (#607): a read-only member's forged spend comment changes no figure, on the stage path and on the card's; a writer's record still counts", async () => {
+  // A member with read access alone: MEMBER by association, "read" by the permission read.
+  const READER = { login: "reader-607", type: "User" };
+  const forge = (w) => {
+    w.permissions = { teammate: "write", [READER.login]: "read" };
+    w.comments.push(
+      progress(7, "work", "local-f1", { user: READER, association: "MEMBER", at: "2026-11-17T04:55:00Z", spend: { usd: 999, parts: { usdByBilling: { api: 999 }, billing: "api" } } }),
+      comment(7, `<!-- pendulum:7:vendor:work:local-f2 -->\nx\n${spendMarker(99, { vendorUsd: 99 })}`, { user: READER, association: "COLLABORATOR", at: "2026-11-17T04:56:00Z" }),
+      comment(5, `<!-- pendulum:5:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 9, usd: 9 })}`, { user: READER, association: "MEMBER", at: "2026-11-17T03:30:00Z" }),
+    );
+    return w;
+  };
+  const base = await report(world(), { since: "2026-11-17" });
+  const forged = await report(forge(world()), { since: "2026-11-17" });
+  assert.deepEqual(figures(forged.json), figures(base.json), "no figure moves");
+  assert.equal(forged.json.source.read.ignoredComments, base.json.source.read.ignoredComments + 3);
+  // Each author's permission read once, planned: the planned calls are the calls made.
+  assert.deepEqual(forged.calls.filter((c) => c.includes("/permission")).sort(), [`GET /collaborators/${READER.login}/permission`, "GET /collaborators/teammate/permission"]);
+  assert.equal(forged.json.source.calls.planned, forged.json.source.calls.made);
+  // --self names neither into Pendulum's own: the reader cannot push.
+  const named = await report(forge(world()), { issue: 7, self: READER.login });
+  assert.equal(usd(byIssue(named.json, 7)).api, 1.55);
+  // The writer's stage comment still counts: a run of unknown cost, and with --self its dollars.
+  assert.ok(byIssue(forged.json, 7).cost.unknownWhy.includes("unattributed"));
+  assert.equal(usd(byIssue((await report(forge(world()), { issue: 7, self: "teammate" })).json, 7)).unknown, 50);
+
+  // The card's path: #3's finish card, built from comments read as the card reads them, with the reader's forged stage in
+  // its run, counts nothing of it; the report reads #3 from that card and says what its stages say without the forgery.
+  const carded = (extra) => {
+    const w = world();
+    w.permissions = { teammate: "write", [READER.login]: "read" };
+    w.comments.push(...extra);
+    return w;
+  };
+  const fake = [progress(3, "review", "local-f3", { user: READER, association: "MEMBER", at: "2026-11-17T02:26:00Z", spend: { usd: 999, parts: { usdByBilling: { api: 999 }, billing: "api" } } })];
+  const plain = carded([]);
+  plain.comments.push(await finishCard3(plain));
+  const withForgery = carded(fake);
+  const card = await finishCard3(withForgery);
+  withForgery.comments.push(card);
+  assert.equal(card.body, plain.comments.at(-1).body, "the card is the same as without the forgery");
+  const viaCard = await report(withForgery, { issue: 3 });
+  assert.equal(viaCard.json.source.read.summaries, 1, "the forged comment is none the card left out: the card is read");
+  assert.deepEqual(clockless(viaCard.json), clockless((await report(carded([]), { issue: 3 })).json));
+});
+
+test("report (#607): the call budget stops during the permission reads: those authors are never trusted, their stages are runs of unknown cost, and source.missing says why", async () => {
+  const w = () => {
+    const x = world();
+    x.comments.push(progress(7, "work", "local-g1", { user: { login: "second-607", type: "User" }, association: "COLLABORATOR", at: "2026-11-17T04:52:00Z", spend: { usd: 7, parts: { usdByBilling: { api: 7 }, billing: "api" } } }));
+    x.permissions = { teammate: "write", "second-607": "write" };
+    return x;
+  };
+  // --issue 7: the login, the issue, its comments; then the two permissions, planned at once, and the budget ends after one.
+  const { code, json: r, calls } = await report(w(), { issue: 7, self: ["teammate", "second-607"], "max-calls": 4 });
+  assert.equal(code, STOPPED_EXIT);
+  assert.equal(calls.filter((c) => c.includes("/permission")).length, 1);
+  assert.match(r.source.stoppedAt, /permissions/);
+  // second-607 is read first (by login), a writer: its $7 is Pendulum's own under --self, beside #7's local stages' $0.65
+  // (its Actions build's artifact is not reached); the teammate's is not read, so its stage is a run of unknown cost,
+  // never its $50.
+  assert.equal(usd(byIssue(r, 7)).api, 7.65);
+  assert.equal(usd(byIssue(r, 7)).unknown, 0, "never the unchecked author's dollars");
+  assert.ok(byIssue(r, 7).cost.unknownWhy.includes("unattributed"));
+  assert.deepEqual(r.source.missing.find((m) => m.code === "author-unchecked")?.issues, [7]);
+  assert.deepEqual(r.source.trusted.logins, ["kirkmarple-clockgrove", "teammate", "second-607"]);
+  // A stop before any permission read: every such author unchecked.
+  const early = await report(w(), { issue: 7, "max-calls": 3 });
+  assert.equal(early.calls.filter((c) => c.includes("/permission")).length, 0);
+  assert.deepEqual(early.json.source.missing.find((m) => m.code === "author-unchecked")?.issues, [7]);
+  // A token that may not read a permission (403): that author is never trusted either, and said so.
+  const refused = w();
+  refused.permissions.teammate = 403;
+  const { code: ok, json: f } = await report(refused, { issue: 7, self: "teammate" });
+  assert.equal(ok, 0);
+  assert.equal(usd(byIssue(f, 7)).unknown, 0);
+  assert.deepEqual(f.source.missing.find((m) => m.code === "author-unverifiable")?.issues, [7]);
+  assert.equal(f.source.calls.planned, f.source.calls.made);
+});
+
 test("report (S3): only a PR from the repository itself counts, and an open issue is open whatever its PRs", () => {
   const pr = (over) => ({ number: 70, head: { ref: "pendulum/7", repo: { id: 1 } }, base: { repo: { id: 1 } }, created_at: "2026-11-17T04:20:00Z", merged_at: "2026-11-17T05:00:00Z", ...over });
   const closed = { number: 7, state: "closed", labels: [] };
@@ -713,8 +801,8 @@ test("report (S3): only a PR from the repository itself counts, and an open issu
 });
 
 test("report (S4): stopped before the PRs and the artifacts: outcomes are null unless a label or an open issue decides them, and the stages not reached are `stopped`", async () => {
-  // The login, the comments and the labelled issues; then the budget ends before the PRs.
-  const { code, json: r } = await report(world(), { since: "2026-11-17", "max-calls": 3 });
+  // The login, the comments, the teammate's permission and the labelled issues; then the budget ends before the PRs.
+  const { code, json: r } = await report(world(), { since: "2026-11-17", "max-calls": 4 });
   assert.equal(code, STOPPED_EXIT);
   assert.equal(byIssue(r, 3).outcome, null);
   assert.equal(byIssue(r, 8).outcome, null);
@@ -1088,14 +1176,15 @@ test("report (#546, #543): a review stage's progress comment carries its ledger 
 
 /**
  * #3's finish card as Pendulum's App posts it, built by the real card (finish-card.mjs finishData and finishCardBody)
- * from #3's own comments and the usage records the card reads (those of the stages with no spend line, or whose model
- * only the record names: unlinedStages, modellessStages) in `w`; `edit` changes its body (a forger's figures).
+ * from #3's own comments, read as the card reads them (github.mjs listComments, its authors' permissions verified, from
+ * the fake over `w`), and the usage records the card reads (those of the stages with no spend line, or whose model only
+ * the record names: unlinedStages, modellessStages) in `w`; `edit` changes its body (a forger's figures).
  */
 async function finishCard3(w, { user = BOT, association, app, edit = (b) => b } = {}) {
   // Through the module's namespace, so the suite loads on a tree without the summary and these tests alone fail there.
   const card = await import("../scripts/lib/finish-card.mjs");
   const mine = card.pendulumOwn(APP.id);
-  const comments = w.comments.filter((c) => c.issue_url === issueUrl(3));
+  const comments = await over(fakeGitHub(w), () => listComments(REPO, 3, { token: "t" }));
   const want = new Set([...card.unlinedStages(comments, 3, mine), ...card.modellessStages(comments, 3, mine)].map((x) => x.key));
   const records = [{ ...w.recs.work, artifact: "pendulum-usage-3" }, { ...w.recs.review, artifact: "pendulum-usage-3-review" }].filter((r) => want.has(r.progressRun));
   const d = card.finishData({ repo: REPO.full, issue: real.issue, timeline: real.timeline, comments, pulls: [{ pr: real.pr, timeline: real.prTimeline, reviews: real.reviews, reviewComments: real.reviewComments }], checks: real.checks, records, mine });

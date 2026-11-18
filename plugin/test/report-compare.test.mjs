@@ -73,7 +73,7 @@ function objective(w, n, { arms = [], labeller = ME, kind = "api", work = [["wor
  * #24 labelled through another App). Every figure below is chosen so each median and quartile is exact.
  */
 function experiment() {
-  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", [OUTSIDER.login]: "triage" } };
+  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", [OUTSIDER.login]: "triage", teammate: "write" } };
   objective(w, 11, { arms: [FAST], work: [["work-1", 1, 10]], wall: 60 });
   objective(w, 12, { arms: [FAST], work: [["work-1", 1.5, 15], ["validation-fix-1", 0.5, 5]], reviews: [[["review", 0.5, 5]]], wall: 90 });
   objective(w, 13, { arms: [FAST], work: [["work-1", 4, 30]], reviews: [[["review", 0, 1]], [["review", 0, 1]]], wall: 180 });
@@ -383,7 +383,7 @@ test("report --compare: an issue counts only when every arm that lists it was ch
 });
 
 test("report --compare: with no billing kind holding dollars, one dollar row still gives n and the Objectives left out", async () => {
-  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin" } };
+  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", teammate: "write" } };
   objective(w, 31, { arms: [FAST], work: [["work-1", 0, 5]], unknown: true, wall: 10 });
   objective(w, 41, { arms: [SLOW], work: [["work-1", 0, 5]], wall: 20 });
   const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
@@ -392,7 +392,7 @@ test("report --compare: with no billing kind holding dollars, one dollar row sti
 
 test("report --compare: a per-pass ledger read from the progress comment counts for the model minutes and fix passes; an unattributed stage still leaves its Objective out", async () => {
   // Arm fast on local stages whose ledger rides on the progress comment (#543); arm slow on Actions, as before.
-  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin" } };
+  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", teammate: "write" } };
   objective(w, 51, { arms: [FAST], route: "comment", work: [["work-1", 1, 10]], wall: 60 });
   objective(w, 52, { arms: [FAST], route: "comment", work: [["work-1", 1.5, 15], ["validation-fix-1", 0.5, 5]], reviews: [[["review", 0.5, 5]]], wall: 90 });
   objective(w, 53, { arms: [FAST], route: "comment", work: [["work-1", 4, 30]], reviews: [[["review", 0, 1]], [["review", 0, 1]]], wall: 180 });

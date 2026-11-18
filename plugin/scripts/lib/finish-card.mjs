@@ -20,7 +20,7 @@ import { clockText, objectiveZone, timeZone, zoneDay, zoneOffsetMs } from "./clo
 import { stageHarnessOf } from "./cost-join.mjs";
 import { addTokens, isAnswer, isFix, stagePassFigures, zeroTokens } from "./pass-figures.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
-import { RUNNING_LABEL, STATE_LABELS, blockCauseOf, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, claimedPushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
+import { RUNNING_LABEL, STATE_LABELS, blockCauseOf, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
 import { sanitize } from "./handoff.mjs";
 import { BASIS, BASIS_NOTE, COLORS, basisText, billingBasis, billingWords, causeSentences, cellCost, centsOf, costChart, costText, durationText, ganttChart, kindsOf, many, modelId, modelName, plainText, tableCell } from "./card-kit.mjs";
@@ -174,7 +174,7 @@ export const artifactStage = (name) => (typeof name !== "string" ? null : /(^|[-
  * Pendulum cannot attribute (sandboxWhy), whose stage kinds are `foreignVendors`, one per comment (a vendor comment of a
  * stage that has a progress comment, Pendulum's or not, is that stage's).
  */
-export function objectiveStages({ issue: n, comments = [], records = [], mine = isSelf, pushed = (c) => claimedPushAuthor(c) || throughApp(c), inRun = () => true, partOf = () => 1 }) {
+export function objectiveStages({ issue: n, comments = [], records = [], mine = isSelf, pushed = (c) => pushAuthor(c) || throughApp(c), inRun = () => true, partOf = () => 1 }) {
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
   // Stage comments by someone who can push, or through another App, that Pendulum cannot attribute to itself (another
   // route's login or App): each is a run of unknown cost. A stranger's paste counts nothing.
@@ -398,11 +398,12 @@ function holdsOf(n, own, stages) {
  *  end          an end other than a merge (#589): {kind (ENDS), at (when: the Blocked or Question notice, the close),
  *               reason, form (a Question's: issue or pr)}; read only when no PR merged. `pulls` then holds the newest PR on
  *               the Objective's branch, whatever its state, if it has one
- *  pushed       whose comments are by someone who can push (logic.mjs claimedPushAuthor) or came through a GitHub App other than
+ *  pushed       whose comments are by someone who can push (logic.mjs pushAuthor: a MEMBER or COLLABORATOR author only once a
+ *               permission read verified it, github.mjs verifyAuthors) or came through a GitHub App other than
  *               Actions (throughApp): a progress or vendor comment of theirs that is not Pendulum's is a stage of unknown
  *               cost (its time shown, never its figures)
  */
-export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf, pushed = (c) => claimedPushAuthor(c) || throughApp(c), end = null }) {
+export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf, pushed = (c) => pushAuthor(c) || throughApp(c), end = null }) {
   const n = issue.number;
   // An end other than a merge (#589: Blocked, a Question, closed without merging) is the caller's, at its recorded time,
   // and wins: a split Objective's earlier part, merged before this run's Block, is no merge of this run.

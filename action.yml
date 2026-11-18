@@ -113,6 +113,9 @@ inputs:
   budget_command:
     description: The test-budget command named in the task card, if the repository has one.
     required: false
+  regenerate:
+    description: 'The command that writes the repository''s generated files, for a repository that declares them: each generated path carries the `pendulum-generated` attribute in `.gitattributes` on the default branch (for example `test/golden/*.json pendulum-generated`). When a send-back''s rebase conflicts on such a path, the conflict pass takes the default branch''s version of it with no hunk judged, and runs this command. In every stage, before each validation of a head whose change touches a declared path, Pendulum runs it itself, from the repository root with a validation command''s environment, after removing the declared files that change touches. It must exit 0 and write the declared files in place. A non-zero exit, such a file not written again, a change to any path that is not declared, or a generated file not committed as the command writes it is a validation red for the fix pass. Only the workflow file sets it, never a repository variable or the branch. Empty: no path counts as generated.'
+    required: false
   protected_paths:
     description: Repository-specific paths added to Pendulum's protected list (.github/, CODEOWNERS, .agents/skills/, .claude/, .codex/); commits touching them are refused. A directory ends with `/` and matches from the root; a file name matches at any depth unless it starts with `/`, which matches it at the root only.
     required: false
@@ -491,6 +494,7 @@ runs:
         PENDULUM_INPUT_INSTALL: ${{ inputs.install }}
         PENDULUM_INPUT_VALIDATION: ${{ inputs.validation }}
         PENDULUM_INPUT_BUDGET_COMMAND: ${{ inputs.budget_command }}
+        PENDULUM_INPUT_REGENERATE: ${{ inputs.regenerate }}
         PENDULUM_INPUT_PROTECTED_PATHS: ${{ inputs.protected_paths }}
         PENDULUM_INPUT_TOOLCHAIN_PATHS: ${{ inputs.toolchain_paths }}
         PENDULUM_INPUT_CI_CHECKS: ${{ inputs.ci_checks }}

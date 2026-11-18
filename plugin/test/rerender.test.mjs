@@ -60,7 +60,7 @@ test("the real case: the scratch repository's workflow at 96ce800 keeps its vali
   const text = readFileSync(join(PLUGIN, "test/fixtures/scratch-96ce800.yml"), "utf8");
   const r = render({}, { text });
   // Every setting the file states stays; one the template gained since the file was written comes in at its default.
-  assert.deepEqual(r.after.env, { ...r.before.env, PENDULUM_IMAGE_MAX_AGE_DAYS: "7", PENDULUM_PUBLISH_TRANSCRIPTS: "false", PENDULUM_MAX_OBJECTIVE_USD: "", PENDULUM_TIME_ZONE: "" });
+  assert.deepEqual(r.after.env, { ...r.before.env, PENDULUM_IMAGE_MAX_AGE_DAYS: "7", PENDULUM_PUBLISH_TRANSCRIPTS: "false", PENDULUM_MAX_OBJECTIVE_USD: "", PENDULUM_TIME_ZONE: "", PENDULUM_REGENERATE: "" });
   for (const [k, v] of Object.entries({
     PENDULUM_VALIDATION: "npm run check, npm test, npm run test:db",
     PENDULUM_SETUP: "scripts/ci/setup.sh",
@@ -84,7 +84,7 @@ test("the real case: the scratch repository's workflow at 96ce800 keeps its vali
     `kept ${Object.keys(r.before.env).join(", ")}, launch gate maintainer ids, CI workflow`,
     `changed action "clockgrove/pendulum@v0.7.106" -> "clockgrove/pendulum@${LATEST}" (the newest release: the template is that release's); third-party actions actions/checkout v7 -> 3d3c42e5aac5 (v7.0.1), actions/upload-artifact v7 -> cf430e030ddb (v7.0.2) (the release's pins: the template is that release's)`,
     // A setting the template gained shows on a re-render at its default: the transcripts' choice (#490) among them.
-    'new in this template PENDULUM_MAX_OBJECTIVE_USD="", PENDULUM_PUBLISH_TRANSCRIPTS="false", PENDULUM_TIME_ZONE="", PENDULUM_IMAGE_MAX_AGE_DAYS="7"',
+    'new in this template PENDULUM_MAX_OBJECTIVE_USD="", PENDULUM_PUBLISH_TRANSCRIPTS="false", PENDULUM_REGENERATE="", PENDULUM_TIME_ZONE="", PENDULUM_IMAGE_MAX_AGE_DAYS="7"',
   ]);
 });
 

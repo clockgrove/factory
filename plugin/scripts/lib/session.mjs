@@ -1453,8 +1453,10 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
  * - `checksOnlyFirst`: the first pass reads the required checks only, the commands not run again (a head the worker
  *   handed off ran them). `onRead(state)`: each reading of the checks as awaitChecks makes it. `signal` (an AbortSignal)
  *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
+ * `regeneration` (checkout.mjs openRegeneration, with a `regenerate` command): the regeneration check, first on every
+ *   pass, before the commands and before any push for the checks: its red is the pass's red, like a failed command's.
  */
-export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null, handed: handedIn = null, returnAfterFix = false, recurOnFirst = false }) {
+export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null, handed: handedIn = null, returnAfterFix = false, recurOnFirst = false, regeneration = null }) {
   // The decision calls' spend during this loop (triage and the rest: decisionSpend) is taken off what is left too; the
   // drift advisory's is not, since its reserve is no part of `maxUsd` here (harness.mjs passMaxUsd).
   const passDecisions = () => decisionSpend() - reservedSpend();
@@ -1511,7 +1513,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // pushed and the named checks are awaited, instead of re-running serially what CI runs in
   // parallel. The commands stay the harness's own tool (the task card names them).
   const byChecks = !!(checks && checks.names?.length && checks.prNumber);
-  if (!byChecks && !commands.length) return { green: true, passes: 0, lastOutput: "", usage, skipped: "no validation commands" };
+  if (!byChecks && !commands.length && !regeneration) return { green: true, passes: 0, lastOutput: "", usage, skipped: "no validation commands" };
   // The backend's gate: locally the heavy suites run on the box, not in CI (the commands first, then the checks).
   const localFirst = byChecks && commands.length && backend().gate.commandsFirst;
   // The pass's first line, once its head is known: a head a fix pass left unchanged is no pass (said where it is caught).
@@ -1528,6 +1530,15 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all). A failed command's output stays in
     // memory and reaches the fix run in $PENDULUM_IN/checks/; the prompt carries each one's tail.
     if (!byChecks || commandsNow) await begin();
+    // The regeneration check (checkout.mjs openRegeneration): on a head whose change touches a declared generated path
+    // and that it has not passed yet; null when it has nothing to check.
+    if (regeneration) {
+      const g = await regeneration.check(checkout, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
+      if (g && !g.green) {
+        if (byChecks && !commandsNow) await begin();
+        return g;
+      }
+    }
     if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
     if (commandsNow) {
       const local = await runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });

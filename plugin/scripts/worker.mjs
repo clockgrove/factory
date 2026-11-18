@@ -16,17 +16,17 @@ import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, openRegeneration, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, listReviews, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { useObjectiveZone } from "./lib/clock.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, appliedExit, endStep, stateCard, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, workValidation, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, appliedExit, endStep, stateCard, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, workValidation, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
 import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
-import { openOutbox } from "./lib/outbox.mjs";
+import { GENERATED_ATTR, openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
 import { routeInputs, stageMoves } from "./lib/accounts.mjs";
@@ -62,9 +62,19 @@ import { flushDecisionSpend } from "./lib/decision-spend.mjs";
  * The conflict pass: the task card, then the rebase to make. `cause` says why the branch fell behind: a sibling
  * merging (a send-back), or the default branch changing a workflow file during the run (outbox.mjs catchUp).
  */
-export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "after a sibling merged" }) {
+export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "after a sibling merged", regenerate = null }) {
   const here = `Your branch ${branch} fell behind ${defaultBranch} ${cause}, and \`git rebase origin/${defaultBranch}\` conflicts. Rebase it onto origin/${defaultBranch} (Pendulum has fetched it; never fetch or pull), resolve each conflict keeping both the default branch's change and this Objective's intent.`;
-  return `${prompt.trimEnd()}\n\n---\n\n${here} Run the validation commands, commit, and stop: Pendulum pushes the branch. Do not ask questions.`;
+  return `${prompt.trimEnd()}\n\n---\n\n${here}${regenerate ? ` ${regenerateStep({ ...regenerate, defaultBranch })}` : ""} Run the validation commands, commit, and stop: Pendulum pushes the branch. Do not ask questions.`;
+}
+
+/**
+ * The conflict pass's step for declared generated files (`command`: the repository's `regenerate` setting; `paths`: the
+ * declared ones among the conflicts Pendulum's own rebase met): the default branch's version at each conflict, then the
+ * command, whose output Pendulum checks exactly (checkout.mjs runRegeneration).
+ */
+export function regenerateStep({ command, paths = [], defaultBranch }) {
+  const known = paths.length ? ` (among the conflicts so far: ${paths.join(", ")})` : "";
+  return `Generated files are the exception: a path origin/${defaultBranch} gives the \`${GENERATED_ATTR}\` attribute (\`git check-attr --source=origin/${defaultBranch} ${GENERATED_ATTR} -- <path>\` says \`set\`)${known} is never merged by hand. At each conflict on one, take origin/${defaultBranch}'s version (\`git checkout origin/${defaultBranch} -- <path>\`, or \`git rm <path>\` where it has none). Once the rebase is finished, run \`${command}\` from the repository root: it writes the generated files in place from the merged sources. Commit those files exactly as it leaves them, and nothing else it wrote. Pendulum then removes those files and runs the command again before the validation: a non-zero exit, a file it does not write again, a change outside the declared paths, or a generated file not committed as the command writes it is a red.`;
 }
 
 /**
@@ -77,10 +87,14 @@ export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "aft
  * `limited()`: the stage harness's usage limit that stopped the check's questions (kept.mjs). Then nothing is pushed and
  * it throws UsageLimitReached: the stage ends as a pass meeting the limit does (paused locally until the reset, held or
  * Blocked `provider-quota` elsewhere), and an unanswered question never reads as a change not kept.
+ * `regenerate` (the repository has a regeneration command): {paths, check}. A declared generated path is not judged
+ * here (outbox.mjs rebaseLeft); instead, before anything is pushed, `check(paths)` answers for the declared paths the
+ * conflict met (`paths`) and those the pass left other than the branch's (outbox.regenerated): why they are not the
+ * command's output, or "". So no head with the default branch's side of a generated file goes out unchecked.
  */
-export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null, limited = null, issue = null }) {
+export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null, limited = null, issue = null, regenerate = null }) {
   if (!onto) return "";
-  const left = await outbox.rebaseLeft({ from: onto.from, onto: onto.base, judge });
+  let left = await outbox.rebaseLeft({ from: onto.from, onto: onto.base, judge, regenerate: !!regenerate });
   const limit = limited?.() ?? null;
   if (limit) {
     const why = `the rebase check met ${limit.harness}'s usage limit; nothing of the send-back's conflict pass was pushed, and it is checked again after the reset`;
@@ -96,6 +110,10 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
     } catch (e) {
       log(`rebase note: ${String(e?.message || e).slice(0, 120)}`);
     }
+  }
+  if (!left && regenerate?.check) {
+    const met = [...new Set([...(regenerate.paths || []), ...(outbox.regenerated || [])])];
+    if (met.length) left = await regenerate.check(met);
   }
   if (!left) return "";
   // Local mode keeps what the pass left in the Objective's clone (outbox.mjs setAside), and the Block says how to deliver it.
@@ -683,6 +701,15 @@ async function main() {
   let rebasedTo = null;
   // The default branch's head a conflicting rebase was made onto, and the files that conflicted.
   let rebaseOnto = null;
+  // With a `regenerate` command, on such a conflict: the command and the declared generated files among `files`.
+  let rebaseRegenerate = null;
+  // The stage's regeneration check (checkout.mjs openRegeneration): on every head it validates whose change touches a
+  // declared generated path, read against the base a conflicting rebase was onto, else the default branch as fetched.
+  const regenerateAt = () => rebaseOnto?.base || outbox.base;
+  // The declared paths a conflict pass of this stage took the default branch's side of: checked though the head no
+  // longer differs from the default branch there.
+  let regenerateMet = [];
+  const regeneration = inputs.regenerate ? openRegeneration({ command: inputs.regenerate, generated: (paths) => outbox.generated(paths, regenerateAt()), touched: () => outbox.touched(regenerateAt()), also: () => regenerateMet }) : null;
   // Only the dispatcher's send-back (its rebase marker on the PR) means "rebase and nothing else";
   // a relabel after a Question or Blocked exit brings new decisions and runs the harness.
   // Pendulum's own marker only (isSelf): a writer's pasted one is no send-back.
@@ -715,6 +742,9 @@ async function main() {
         // The record of this rebase on the PR (logic.mjs ontoRecord): once this pass pushes, the dispatcher reads the
         // same conflict on the same base as no progress, and a new base as a new send-back.
         rebaseOnto = { from: outbox.expected(), base: outbox.base, files: outbox.conflicts };
+        // Declared generated files (the reviewed workflow's `regenerate` command, the default branch's .gitattributes):
+        // their conflicts take the base's side and the command writes them again, no hunk judged (outbox.mjs rebaseLeft).
+        if (inputs.regenerate) rebaseRegenerate = { command: inputs.regenerate, paths: [...(await outbox.generated(outbox.conflicts, outbox.base))] };
         await prComment(repo, openPr.number, ontoRecord(issue, { ...rebaseOnto, defaultBranch }), token).catch((e) => log(`rebase record: ${String(e.message).slice(0, 120)}`));
       }
     }
@@ -872,7 +902,7 @@ async function main() {
   let fedDecisions = false;
   // The plan.md the mid-run stop read (the hand-off tick), when it stopped the harness.
   let stoppedPlan = null;
-  const conflictPrompt = conflictPassPrompt({ prompt, branch, defaultBranch });
+  const conflictPrompt = conflictPassPrompt({ prompt, branch, defaultBranch, regenerate: rebaseRegenerate });
   // A continued pause: its resumed session is told where it stands and the new hand-off folders; a fresh session on the
   // kept checkout gets the task card and what the checkout holds (lib/continue.mjs).
   const workPrompt = continued ? keptPrompt(prompt, { note: installNote }) : prompt;
@@ -980,13 +1010,26 @@ async function main() {
   const needs = needsOf(io.plan()).reason || !stoppedPlan ? needsOf(io.plan()) : needsOf(stoppedPlan);
   const planNeeds = needs.reason || "";
   if (planNeeds) log(`plan-time Question: ${planNeeds}`);
+  // The conflict pass's generated files, before the push: the regeneration check on those paths, its red handed to fix
+  // passes as a validation red is; still red, the pass is unresolved and nothing goes out.
+  const regenerateFirst = async (met) => {
+    regenerateMet = met;
+    const g = await validationLoop({ onPhase: progress, progress, outbox, checkout, commands: [], checks: null, regeneration, harness: inputs.harness, effort: inputs.effort, model: inputs.model, maxUsd: passCap(), spentUsd: sumSpend(records).usd, session, taskCard: prompt, env: harnessEnv, deadlineAt, eventsFile, io, drift, progressCheck: openProgressCheck({ inputs, stage: decisionStage }) });
+    records.push(...g.usage);
+    passes += g.passes || 0;
+    if (g.died) died += 1;
+    if (g.harness?.timedOut) rec.timedOut = true;
+    if (g.harness?.budgetExceeded) rec.budgetExceeded = true;
+    if (g.harness?.refusal) rec.refusal = g.harness.refusal;
+    return g.green ? "" : `the generated files it left (${met.join(", ")}) are not what the regeneration command \`${inputs.regenerate}\` writes on the rebased branch`;
+  };
   // A send-back's conflict pass that left the checkout not the branch rebased onto the base Pendulum's rebase conflicted
   // on (outbox.mjs rebaseLeft: a rebase left in progress, the base not taken, a change of the branch missing from it):
   // nothing of it is pushed, whatever ended the pass. Blocked naming the files and the changes, with no validation run;
   // a cap, death or refusal that ended it stays the reason (decideExit puts those first). A file not exactly the
   // branch's is judged by the decision model when there is a key (kept.mjs); without one the commits are matched.
   const keptCheck = rebaseOnto ? openKeptCheck({ inputs, stage: decisionStage }) : null;
-  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress, limited: keptCheck?.limited ?? null, issue });
+  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress, limited: keptCheck?.limited ?? null, issue, regenerate: rebaseRegenerate && { ...rebaseRegenerate, check: regenerateFirst } });
   let pushed = await outbox.push();
   // The default branch changed a workflow file during the run and the new branch conflicts with Pendulum's merge of it
   // (outbox.mjs catchUp): GitHub would refuse the branch as it is, so the harness resolves the conflict once, as a
@@ -1068,6 +1111,7 @@ async function main() {
       ? { problem: crossSet.problem, checks: crossSet.setting ? crossOsChecks({ setting: crossSet.setting, repo, issue, prNumber: pr.number, branch, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall }) : null }
       : null;
     validation = await workValidation({
+      regeneration,
       onPhase: progress,
       progress,
       checks: inputs.ciChecks.length && pr ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null,
@@ -1098,7 +1142,7 @@ async function main() {
       handOff: !!rec.ok && !rebaseMode && !!pr,
     }, cross);
     records.push(...validation.usage);
-    passes = validation.passes;
+    passes += validation.passes;
     if (validation.died) died += 1;
     if (validation.usage.length) {
       await outbox.push();

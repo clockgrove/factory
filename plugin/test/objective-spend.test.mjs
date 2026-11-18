@@ -519,7 +519,7 @@ test("#565 W5: a stage that ran no pass of a kind records it, in result.json and
   // The review stage of a real run that did nothing for 33 s: {"usd":0}.
   const idle = write([]);
   assert.equal(idle.noPass, true);
-  assert.deepEqual(line(idle), { usd: 0, modelUsd: null, vendorUsd: null, noPass: true });
+  assert.deepEqual(line(idle), { usd: 0, modelUsd: null, vendorUsd: null, noPass: true, exit: "delivered" });
   // Only decision calls (a finding check) and a pass that never ran: no round either.
   const judged = write([{ harness: null, decider: "ai-gateway", model: "perplexity/pplx-decider-v1.2", label: "decision", decision: true, calls: 2, usd: 0.0001, billing: "api", tokens: {}, ok: true }, { harness: "claude", model: "m", label: "review", noRun: true, usd: null, tokens: {}, ok: true }]);
   assert.equal(judged.noPass, true);

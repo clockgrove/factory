@@ -48,6 +48,10 @@ export const DEVELOPER_ENV = [
   // (GITHUB_RUN_ATTEMPT 2) keys no progress comment or usage record differently from the first run.
   "GITHUB_RUN_ID",
   "GITHUB_RUN_ATTEMPT",
+  // Whether the process runs on GitHub Actions or in a cloud sandbox: a stage records its route from them (backend.mjs
+  // stageRoute), so a test that wants one sets its own, and the suite runs the same in CI as on a laptop.
+  "GITHUB_ACTIONS",
+  "PENDULUM_STAGE_SANDBOX",
 ];
 /** PENDULUM_LOCAL and every PENDULUM_LOCAL_* variable. */
 export const DEVELOPER_ENV_PREFIX = /^PENDULUM_LOCAL(_|$)/;

@@ -9,7 +9,7 @@
 // write: it asks its launcher job to dispatch the run (launcherRelay, stage.mjs, launch.mjs relayCrossOs), as it asks
 // for fresh tokens, and the launcher dispatches exactly the configured workflow on the stage's own branch and head with
 // its job token (launcherDispatch), then hands the run's id back.
-import { backend } from "./backend.mjs";
+import { stageRoute } from "./backend.mjs";
 import { githubNow, rest } from "./github.mjs";
 import { BLOCK_CAUSES } from "./logic.mjs";
 import { parseYaml, workflowEvents, writeGrants } from "./yaml.mjs";
@@ -37,7 +37,7 @@ export function crossOs(inputs = {}) {
  * Where this stage runs: `local`, `sandbox` (a cloud sandbox stage, whose launcher dispatches the run) or `actions`;
  * it also names a refused dispatch's fix.
  */
-export const crossOsRoute = (env = process.env) => (backend(env).name === "local" ? "local" : env.PENDULUM_STAGE_SANDBOX === "1" ? "sandbox" : "actions");
+export const crossOsRoute = (env = process.env) => stageRoute(env) ?? "actions";
 
 /**
  * A refused workflow dispatch (`e`, rest's error) as the stage's Block: {reason, cause}. A 403 is the token's missing

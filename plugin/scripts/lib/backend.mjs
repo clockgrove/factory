@@ -6,7 +6,7 @@
 import { getIssue } from "./github.mjs";
 import { CLAIM_PAUSE_MS, GitRefusal, checkGitState, clearHarnessConfig, gitDirChanged, pinGitState, hasLocalLabel, isLocal, localClaim, localSandbox } from "./local.mjs";
 import { agentUser, asAgent, exec, reapAgent } from "./proc.mjs";
-import { deniedHostsFix } from "./logic.mjs";
+import { ROUTES, deniedHostsFix } from "./logic.mjs";
 import { input } from "./inputs.mjs";
 import { openedStageHosts, runnerDomains } from "./local.mjs";
 
@@ -256,3 +256,13 @@ export const backend = (env = process.env) => (isLocal(env) || env.PENDULUM_LOCA
  * objectiveRecords).
  */
 export const spendInProgress = () => true;
+
+/**
+ * The route the stage `env` describes runs on, one of logic.mjs ROUTES, as its usage record and spend line record it
+ * (#570): `local` (local mode's backend, whatever else is set), `sandbox` (a cloud sandbox stage: stage.mjs sets
+ * PENDULUM_STAGE_SANDBOX beside GITHUB_ACTIONS) or `actions` (a GitHub Actions job); null when it names none.
+ */
+export const stageRoute = (env) => {
+  const route = backend(env).name === "local" ? "local" : env.PENDULUM_STAGE_SANDBOX === "1" ? "sandbox" : env.GITHUB_ACTIONS === "true" ? "actions" : null;
+  return ROUTES.includes(route) ? route : null;
+};

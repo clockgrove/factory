@@ -7,7 +7,7 @@ import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { backend, spendInProgress } from "./backend.mjs";
+import { backend, spendInProgress, stageRoute } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
 import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, reservedSpend, openPasses, passesRunning, runHarness, seedSessionTotal, setStageBilling, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
 import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
@@ -993,7 +993,9 @@ export const PROGRESS_LEDGER_ROOM = 60_000;
  * harness's group already killed) writes it into the comment one last time, within STOP_WRITE_MS, when it differs from
  * what the comment's line shows, so a pass that ended before the next status write is not left at the last line's figure.
  */
-export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null, soFarNow = soFar === stageSpendSoFar ? stageSpendNow : null }) {
+export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null, soFarNow = soFar === stageSpendSoFar ? stageSpendNow : null, env = process.env }) {
+  // The route the stage runs on (backend.mjs stageRoute), known from its start: every spend line it writes records it.
+  const route = stageRoute(env);
   const lines = [];
   const links = [];
   const started = Date.now();
@@ -1031,11 +1033,12 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   // relayed key's as `api`); a reading with no split books the passes' at the credential's. A line written while the
   // stage runs says so (`running: true`, #565) with how many of its unknown runs are still open (`usdRunning`), so a
   // reader takes those as in flight; the stage's final line, and the last one of a stage stopped by a signal
-  // (`stopped`: its harness killed, nothing open any more), carries neither.
+  // (`stopped`: its harness killed, nothing open any more), carries neither. Each records the stage's route (#570); only
+  // the final line, from the stage's usage record (logic.mjs stageSpendLine), records its exit.
   const interimOf = (live, { stopped = false } = {}) => {
     const byBilling = live.byBilling ? addBilling(live.byBilling) : addBilling(billing ? { [billing]: Math.max(0, live.usd - (live.keyUsd ?? 0)) } : {}, live.keyUsd > 0 ? { api: live.keyUsd } : {});
     const open = Number.isInteger(live.running) && live.running > 0 ? Math.min(live.running, live.unknown) : 0;
-    const parts = { ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...(live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : {}), ...(stopped ? {} : { running: true, ...(open ? { usdRunning: open } : {}) }) };
+    const parts = { ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...(live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : {}), ...(stopped ? {} : { running: true, ...(open ? { usdRunning: open } : {}) }), ...(route ? { route } : {}) };
     return { spend: live.usd, spendParts: Object.keys(parts).length ? parts : null };
   };
   const bodyOf = (interim) => {
@@ -2230,7 +2233,7 @@ export function gatewayDecisionFields(records) {
   return { gatewayDecisionUsd: priced.length ? Math.round(priced.reduce((s, r) => s + Math.max(0, r.usd), 0) * 1e6) / 1e6 : null, gatewayDecisionCalls: recs.reduce((s, r) => s + (Number(r.calls) || 0), 0) };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false, rerun = null, judgeOnly = false }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false, rerun = null, judgeOnly = false, env = process.env }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
   // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
@@ -2288,6 +2291,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once;
     // null when the stage had none (a stage the network ended before its comment, a local key only its reporter knows).
     progressRun: typeof progressRun === "string" && progressRun ? progressRun : null,
+    // The route the stage ran on (backend.mjs stageRoute, from `env`, the stage's environment), which its spend line
+    // records for the report (#570).
+    ...(stageRoute(env) ? { route: stageRoute(env) } : {}),
     // A record Pendulum wrote for a stage whose own process wrote none (killed before it could): the stage's progress
     // comment, when there is one, is the better record of it, and a scorer given both keeps the comment's (withLines).
     ...(standIn ? { standIn: true } : {}),

@@ -225,7 +225,7 @@ test("a Claude run on a plan credential is the subscription's in result.json, th
   assert.deepEqual([stored.billing, stored.usdByBilling], ["subscription", { subscription: 1.2 }], "result.json");
   assert.equal(usdText(usage), `1.2 ${SUB}`, "the exit line");
   assert.ok(body.includes(`exit: delivered; usd 1.2 ${SUB}`), body);
-  assert.match(body, /^<!-- pendulum:spend \{"usd":1\.2,"usdByBilling":\{"subscription":1\.2\},"billing":"subscription","usdByPass":\{"work":\{"usd":1\.2,"usdByBilling":\{"subscription":1\.2\}\}\}\} -->$/m, "the spend line");
+  assert.match(body, /^<!-- pendulum:spend \{"usd":1\.2,"usdByBilling":\{"subscription":1\.2\},"billing":"subscription","usdByPass":\{"work":\{"usd":1\.2,"usdByBilling":\{"subscription":1\.2\}\}\},"exit":"delivered"\} -->$/m, "the spend line");
   assert.equal(capReached(1.2, records), true, "max_usd compares the figure");
   const { day, words, log, stepSummary } = await dayOf(body);
   assert.deepEqual([day.spentToday, day.billingToday], [1.2, { subscription: 1.2 }], "daily_usd's total");
@@ -246,7 +246,7 @@ test("api only on a known key: an API key, a Console login, a bearer token; a ba
   const keyed = await stage({ harness: "claude", model: "claude-opus-5-5", cred: key, run: async () => [await pass("claude", "claude-opus-5-5", key, { FAKE_USD: "1.2" })] });
   assert.deepEqual([keyed.records[0].apiKeySource, keyed.stored.billing, keyed.stored.usdByBilling], ["ANTHROPIC_API_KEY", "api", { api: 1.2 }]);
   assert.equal(usdText(keyed.usage), "1.2");
-  assert.match(keyed.body, /^<!-- pendulum:spend \{"usd":1\.2,"usdByBilling":\{"api":1\.2\},"billing":"api","usdByPass":\{"work":\{"usd":1\.2,"usdByBilling":\{"api":1\.2\}\}\}\} -->$/m);
+  assert.match(keyed.body, /^<!-- pendulum:spend \{"usd":1\.2,"usdByBilling":\{"api":1\.2\},"billing":"api","usdByPass":\{"work":\{"usd":1\.2,"usdByBilling":\{"api":1\.2\}\}\},"exit":"delivered"\} -->$/m);
   assert.equal((await dayOf(keyed.body)).words, "daily_usd reached ($1.20 of $0.01)");
   const card = scorecard(keyed.stored, keyed.body, "claude");
   assert.match(card.fromArtifact.basis, /; billed per use on API keys$/);
@@ -321,7 +321,7 @@ test("a stage mixing the subscription's figure and a relayed AI Gateway key's bi
   });
   assert.deepEqual([stored.billing, stored.usdByBilling], ["subscription", { subscription: 1.2, api: 0.3 }]);
   assert.equal(usdText(usage), `1.5: 1.2 ${SUB} + 0.3 API; harness 1.2, worker key 0.3`);
-  assert.match(body, /^<!-- pendulum:spend \{"usd":1\.5,"workerKeyUsd":0\.3,"usdByBilling":\{"subscription":1\.2,"api":0\.3\},"billing":"subscription","usdByPass":\{"work":\{"usd":1\.5,"usdByBilling":\{"subscription":1\.2,"api":0\.3\}\}\}\} -->$/m);
+  assert.match(body, /^<!-- pendulum:spend \{"usd":1\.5,"workerKeyUsd":0\.3,"usdByBilling":\{"subscription":1\.2,"api":0\.3\},"billing":"subscription","usdByPass":\{"work":\{"usd":1\.5,"usdByBilling":\{"subscription":1\.2,"api":0\.3\}\}\},"exit":"delivered"\} -->$/m);
   const { words, summary } = await dayOf(body);
   assert.equal(words, `daily_usd reached ($1.50: $1.20 ${SUB} + $0.30 API of $0.01)`);
   assert.deepEqual(summary.spent_today_by_billing, { subscription: 1.2, api: 0.3 });
@@ -501,7 +501,7 @@ test("the rebase line, the rebase tally, the vendor comment and an account's sha
   assert.ok(!/\$0\.00/.test(spendText({ usd: tally.usd, unknown: 0, byBilling: tally.byBilling })), spendText({ usd: tally.usd, unknown: 0, byBilling: tally.byBilling }));
   // A sandbox stage with no progress comment: the vendor comment carries the model's billing; the vendor's dollars none.
   const body = vendorBody({ line: "- 00:00Z sandbox", vendorUsd: 0.1, modelUsd: 0.8, modelBilling: usage });
-  assert.deepEqual(spendParts(body), { usd: 0.9, modelUsd: 0.8, vendorUsd: 0.1, usdByBilling: { subscription: 0.8 }, billing: "subscription" });
+  assert.deepEqual(spendParts(body), { usd: 0.9, modelUsd: 0.8, vendorUsd: 0.1, usdByBilling: { subscription: 0.8 }, billing: "subscription", route: "sandbox" });
   assert.equal(spendText(spendOf(body)), `$0.90: $0.80 ${SUB} + $0.10`, "the vendor's dollars a bare part");
   // An account's share in the Harness cell, summed from 1/100-cent figures: no stray part either.
   const use = accountUse([{ account: "alpha", usd: 0.3333, usdByBilling: { subscription: 0.333333 } }, { account: "alpha", usd: 0.3333, usdByBilling: { subscription: 0.333333 } }]);

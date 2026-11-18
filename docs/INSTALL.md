@@ -91,15 +91,15 @@ A generated file (a golden file, a snapshot, a lockfile-like index) that the def
 The command's contract:
 
 - It runs from the repository root, with a validation command's environment.
-- It exits 0 and writes the declared generated files in place. A command that writes its output elsewhere (`*.actual.json`) promotes it itself.
+- It exits 0 and writes the declared generated files in place, every time: Pendulum removes the declared files the branch's change touches before it runs, so a command that skips a file it thinks fresh fails. A command that writes its output elsewhere (`*.actual.json`) promotes it itself.
 - It changes no path that is not declared. Ignored files do not count.
 
-What Pendulum does with it, when a send-back's rebase conflicts:
+What Pendulum does with it:
 
-- **The conflict pass.** The worker is told to take the default branch's version of each declared path at a conflict, finish the rebase, run the command and commit the generated files as it leaves them. The rebase check judges no hunk of a declared path.
-- **The regeneration check.** Before the repository's validation, Pendulum runs the command itself on the rebased head and reads the result on git's trees. It is green only when the command exits 0, changes nothing outside the declared paths, and leaves every declared path as committed: the committed generated files are then exactly what the command writes from the merged sources. Anything else is a validation red naming the paths, and goes to a fix pass like any red.
+- **The conflict pass.** When a send-back's rebase conflicts, the worker is told to take the default branch's version of each declared path at a conflict, finish the rebase, run the command and commit the generated files as it leaves them. The rebase check judges no hunk of a declared path. Before that rebased branch is pushed, the regeneration check (below) runs on the declared paths the pass took the default branch's side of: a red goes to a fix pass, and one that stays red Blocks with nothing pushed.
+- **The regeneration check.** In every stage, work or review, whenever the branch's change against the default branch touches a declared path, Pendulum runs the command itself before each validation of a head it has not passed yet (a conflict pass's, a fix pass's, an answer pass's), and reads the result on git's trees. It is green only when the command exits 0, writes again every declared file the branch's change touches, changes nothing outside the declared paths, and leaves every declared path as committed: the committed generated files are then exactly what the command writes from the merged sources. Anything else is a validation red naming the paths, and goes to a fix pass like any red.
 
-A conflicting file that is not declared is judged like any text file, and one whose hunk is over the rebase check's 64 KiB limit Blocks, naming this step as the fix. Doctor's `regenerate` row checks the command as it checks a validation command, and warns when the command is set and no tracked path is declared, or paths are declared and no command is set.
+A conflicting file that is not declared is judged like any text file, and one whose hunk is over the rebase check's 64 KiB limit Blocks, naming this step as the fix. Doctor's `regenerate` row checks the command as it checks a validation command, and warns when the command is set and the default branch declares no path, or paths are declared and no command is set.
 
 ## Claude on your subscription
 

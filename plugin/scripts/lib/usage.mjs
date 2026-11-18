@@ -278,7 +278,7 @@ export function addBilling(...maps) {
  * The kinds of harness pass a stage's spend is broken down by (#517), each from the label the pass ran under, never
  * from its words: `work` (the worker's prompt, `work-<n>`), `review` (the reviewer, its retry, fallback and foundation
  * pass), `answer` (the answer pass and its scope hold), `fix` (a validation loop's fix and fresh passes, `<loop>-fix-<n>`
- * and `<loop>-fresh-<n>`, the work stage's cross-OS loop, `cross-os-validation`, and its regeneration check, `regeneration`, included) and `conflict` (the work stage's catch-up pass after the default branch changed a workflow).
+ * and `<loop>-fresh-<n>`, the work stage's cross-OS loop, `cross-os-validation`, included) and `conflict` (the work stage's catch-up pass after the default branch changed a workflow).
  * They are the pendulum report's answer and fix passes too (report.mjs passLabel, isAnswer, isFix), so the card and the
  * report never name one pass two ways. Any other pass (a fix pass's scope hold, the exit record, a decision call) has no
  * kind here: its dollars stay in its stage.
@@ -290,7 +290,7 @@ export function passKind(label) {
   if (l === "conflict") return "conflict";
   if (/^review(?:-foundation)?(?:-retry|-fallback)?$/.test(l)) return "review";
   if (l === "answer" || l === "answer-scope") return "answer";
-  if (/^(?:validation|pre-review-validation|review-validation|cross-os-validation|regeneration)-(?:fix|fresh)-\d+$/.test(l)) return "fix";
+  if (/^(?:validation|pre-review-validation|review-validation|cross-os-validation)-(?:fix|fresh)-\d+$/.test(l)) return "fix";
   return null;
 }
 

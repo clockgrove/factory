@@ -93,7 +93,6 @@ test("every pass label the code runs a harness under is a pass kind, or named he
     "review-validation": ["review-validation-fix-3", "fix"],
     // The work stage's cross-OS loop (session.mjs workValidation, #518).
     "cross-os-validation": ["cross-os-validation-fresh-2", "fix"],
-    regeneration: ["regeneration-fix-1", "fix"],
     '${label}-${fresh ? "fresh" : "fix"}-${red.passes}': ["review-validation-fresh-1", "fix"],
     // A fix pass's scope hold has no kind: the report's passes count it as neither an answer nor a fix pass either.
     '${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}': ["validation-fresh-scope-1", null],

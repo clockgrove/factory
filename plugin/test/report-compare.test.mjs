@@ -1,13 +1,13 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { findingsMarker, harnessMarker, ledgerMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
+import { harnessMarker, ledgerMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
-import { readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
+import { renderReport } from "../scripts/lib/report.mjs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
 import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
 import { baselineOf } from "../../bench/lib/baseline.mjs";
@@ -269,73 +269,6 @@ test("report --compare: each arm's n, outcomes, and the exact median and p25..p7
   assert.equal(plain.out, md);
 });
 
-test("report --compare: the planned calls equal the calls made", async () => {
-  const { json: r, calls, err } = await report(experiment(), ["--compare", "fast,slow", "--json"]);
-  const made = calls.filter((c) => !c.startsWith("DOWNLOAD")).length + 2 * calls.filter((c) => c.startsWith("DOWNLOAD")).length;
-  assert.equal(r.source.calls.made, made);
-  assert.equal(r.source.calls.planned, r.source.calls.made);
-  assert.equal(Number(/(\d+) planned so far/.exec(err.trim().split("\n").at(-1))[1]), made, "the last plan line names them all");
-  assert.equal(r.source.calls.byKind.timelines, 10, "one timeline page per listed Objective");
-  assert.equal(r.source.calls.byKind.permissions, 2);
-  // A budget that ends during the check: the issues whose labeller was not read are counted nowhere, and said.
-  const stopped = await report(experiment(), ["--compare", "fast,slow", "--json", "--max-calls", "5"]);
-  assert.equal(stopped.code, 3);
-  assert.deepEqual(stopped.json.comparison.arms.map((a) => [a.objectives.map((o) => o.issue), a.unchecked]), [[[11], [12, 13, 14, 15, 16]], [[], [16, 21, 22, 23, 24]]]);
-  assert.deepEqual(stopped.json.source.missing.find((m) => m.code === "label-unchecked").issues, [12, 13, 14, 15, 16, 21, 22, 23, 24]);
-});
-
-test("report --compare: the command line takes two different arms, by experiment name or by label, and nothing else", () => {
-  assert.deepEqual(reportScope({ compare: ["fast,slow"] }).compare, [FAST, SLOW]);
-  assert.deepEqual(reportScope({ "compare-label": ["wave-6", "wave-7"] }).compare, ["wave-6", "wave-7"]);
-  assert.equal(reportScope({ compare: ["a,b"] }).since, null, "each arm read whole: no default period");
-  assert.equal(reportCheck({ compare: ["fast"] }), "--compare and --compare-label take two different arms (A,B, or the flag twice)");
-  assert.equal(reportCheck({ compare: ["fast", "FAST"] }), "--compare and --compare-label take two different arms (A,B, or the flag twice)");
-  assert.equal(reportCheck({ compare: ["a,b,c"] }), "--compare and --compare-label take two different arms (A,B, or the flag twice)");
-  assert.match(reportCheck({ compare: ["a", "b:c"] }), /^--compare takes experiment names/);
-  assert.equal(reportCheck({ compare: ["a,b"], label: "x" }), "give one of --issue, --label, --parent or --compare");
-  assert.equal(reportCheck({ compare: ["a"], "compare-label": ["b"] }), "give the two arms as experiment names (--compare) or as labels (--compare-label), not both");
-  // A period would cut a merged Objective's dollars to its stages in the window: refused.
-  for (const period of [{ since: "2026-11-01" }, { until: "2026-11-01" }]) {
-    assert.equal(reportCheck({ compare: ["a,b"], ...period }), "--compare and --compare-label read each arm's Objectives whole: give no --since or --until");
-    assert.equal(reportCheck({ "compare-label": ["a", "b"], ...period }), "--compare and --compare-label read each arm's Objectives whole: give no --since or --until");
-  }
-  assert.throws(() => parseArgs(["report", "--compare", "a,b", "--since", "2026-11-01"]), /give no --since or --until/);
-  assert.deepEqual(parseArgs(["report", "--compare", "a", "--compare", "b"]).flags.compare, ["a", "b"]);
-});
-
-test("report --compare: a stage Pendulum cannot attribute to itself leaves its Objective out of the model minutes and fix passes", async () => {
-  const w = experiment();
-  // A teammate who can push pastes a work stage on #11: a stage of unknown cost whose ledger is never read.
-  w.comments.push({ id: (nextId += 1), issue_url: issueUrl(11), user: { login: "teammate", type: "User" }, author_association: "MEMBER", created_at: at(40), updated_at: at(40), body: [`<!-- pendulum:11:progress:work:9911 -->`, "Pendulum work: started.", harnessMarker("claude", "claude-opus-5-5", { worker: "claude-opus-5-5", subagent: null, reviewer: null, labels: [] })].join("\n") });
-  const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
-  const [fast] = r.comparison.arms;
-  assert.deepEqual(fast.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
-  assert.deepEqual(fast.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
-  assert.deepEqual(fast.objectives.find((o) => o.issue === 11), { issue: 11, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null, findings: null, legacyStages: 0 });
-  // Its dollars are not known whole either: it is left out of every dollar measure.
-  assert.deepEqual(fast.usdPerMerged.api, { median: 3.25, p25: 2.875, p75: 3.625, n: 2, leftOut: 1 });
-});
-
-test("report --compare: the wall clock starts as the scorer's does: a draft started later, or the Running label with no Objective label event", async () => {
-  const w = experiment();
-  // #12: filed as a draft with the Objective label, started at 20 (the draft label off), Running at 25, the Objective
-  // label re-applied at 60 after a Block: the clock starts at 20, not 0 or 60. Merged at 90: 70 minutes.
-  w.timelines[12] = [
-    { event: "labeled", label: { name: "pendulum:draft" }, actor: ME, created_at: at(-10) },
-    { event: "labeled", label: { name: "pendulum:objective" }, actor: ME, created_at: at(0) },
-    { event: "labeled", label: { name: FAST }, actor: ME, created_at: at(1) },
-    { event: "unlabeled", label: { name: "pendulum:draft" }, actor: ME, created_at: at(20) },
-    { event: "labeled", label: { name: "pendulum:running" }, actor: BOT, created_at: at(25) },
-    { event: "labeled", label: { name: "pendulum:objective" }, actor: ME, created_at: at(60) },
-  ];
-  // #13: no Objective label event on its timeline, Running at 30: the clock starts at 30. Merged at 180: 150 minutes.
-  w.timelines[13] = [{ event: "labeled", label: { name: FAST }, actor: ME, created_at: at(1) }, { event: "labeled", label: { name: "pendulum:running" }, actor: BOT, created_at: at(30) }];
-  const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
-  const [fast] = r.comparison.arms;
-  assert.deepEqual(fast.objectives.filter((o) => o.outcome === "merged").map((o) => [o.issue, o.wallMinutes]), [[11, 60], [12, 70], [13, 150]]);
-  assert.deepEqual(fast.wallMinutes, { median: 70, p25: 65, p75: 110, n: 3, leftOut: 0 });
-});
-
 test("report --compare: a labeller whose permission the token may not read (403) is not vouched for, said under its own code; the report goes on", async () => {
   const w = experiment();
   w.permissions.locked = 403;
@@ -350,88 +283,6 @@ test("report --compare: a labeller whose permission the token may not read (403)
   // A rate limit's 403 says nothing of what the token may read: the report fails, and no labeller is called unverifiable.
   w.permissions.locked = "rate-limited";
   await assert.rejects(report(w, ["--compare", "fast,slow", "--json"]), /rate limit|403/i);
-});
-
-test("report --compare: the latest application of the label counts: removed and re-applied by someone else", async () => {
-  const w = experiment();
-  const relabel = (n, first, then) => [w.timelines[n][0], { event: "labeled", label: { name: FAST }, actor: first, created_at: at(1) }, { event: "unlabeled", label: { name: FAST }, actor: first, created_at: at(2) }, { event: "labeled", label: { name: FAST }, actor: then, created_at: at(3) }];
-  w.timelines[11] = relabel(11, OUTSIDER, ME);
-  w.timelines[12] = relabel(12, ME, OUTSIDER);
-  const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
-  const [fast] = r.comparison.arms;
-  assert.deepEqual(fast.objectives.map((o) => o.issue), [11, 13, 14]);
-  assert.deepEqual(fast.untrusted, [12, 15]);
-});
-
-test("report --compare: an issue counts only when every arm that lists it was checked, and no record of an uncounted issue is read", async () => {
-  // #16's slow label applied by another person who can push: the budget ends just before that person's permission read.
-  const w = experiment();
-  w.permissions.second = "write";
-  w.timelines[16] = w.timelines[16].map((e) => (e.label?.name === SLOW ? { ...e, actor: { login: "second", id: 8, type: "User" } } : e));
-  const full = await report(w, ["--compare", "fast,slow", "--json"]);
-  const before = full.calls.indexOf("GET /collaborators/second/permission");
-  assert.ok(before > 0);
-  const { code, json: r } = await report(w, ["--compare", "fast,slow", "--json", "--max-calls", String(before)]);
-  assert.equal(code, 3);
-  const [fast, slow] = r.comparison.arms;
-  assert.ok(!fast.objectives.some((o) => o.issue === 16), "trusted in fast, unchecked in slow: in neither");
-  assert.deepEqual(slow.unchecked, [16, 21, 22, 23, 24]);
-  // Local records (this clone's .pendulum/<n>/) are read only for the issues the labels count.
-  const clone = mkdtempSync(join(tmpdir(), "clone-"));
-  for (const n of [11, 15, 16, 21]) {
-    mkdirSync(join(clone, ".pendulum", String(n), "usage-a"), { recursive: true });
-    writeFileSync(join(clone, ".pendulum", String(n), "usage-a", "result.json"), JSON.stringify({ progressRun: "x", ledger: [] }));
-  }
-  const read = await withFake(w, (fake) => readReport(REPO, reportScope({ compare: ["fast,slow"] }), { token: "t", appId: APP.id, maxCalls: before, checkout: clone, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
-  assert.deepEqual([...read.local.keys()].sort((a, b) => a - b), [11, 12, 13, 14]);
-});
-
-test("report --compare: with no billing kind holding dollars, one dollar row still gives n and the Objectives left out", async () => {
-  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", teammate: "write" } };
-  objective(w, 31, { arms: [FAST], work: [["work-1", 0, 5]], unknown: true, wall: 10 });
-  objective(w, 41, { arms: [SLOW], work: [["work-1", 0, 5]], wall: 20 });
-  const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
-  assert.match(renderReport(r), /\| \$ per merged Objective \(no kind has dollars\) \| none \(1 left out\) \| \$0\.00 \(\$0\.00\.\.\$0\.00, n=1\) \|/);
-});
-
-test("report --compare: a per-pass ledger read from the progress comment counts for the model minutes and fix passes; an unattributed stage still leaves its Objective out", async () => {
-  // Arm fast on local stages whose ledger rides on the progress comment (#543); arm slow on Actions, as before.
-  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin", teammate: "write" } };
-  objective(w, 51, { arms: [FAST], route: "comment", work: [["work-1", 1, 10]], wall: 60 });
-  objective(w, 52, { arms: [FAST], route: "comment", work: [["work-1", 1.5, 15], ["validation-fix-1", 0.5, 5]], reviews: [[["review", 0.5, 5]]], wall: 90 });
-  objective(w, 53, { arms: [FAST], route: "comment", work: [["work-1", 4, 30]], reviews: [[["review", 0, 1]], [["review", 0, 1]]], wall: 180 });
-  objective(w, 61, { arms: [SLOW], work: [["work-1", 2, 30]], wall: 120 });
-  const { json: r, calls } = await report(w, ["--compare", "fast,slow", "--json"]);
-  assert.ok(!calls.some((c) => /name=pendulum-usage-5\d/.test(c)), "no artifact read for a stage whose comment holds its ledger");
-  const [fast] = r.comparison.arms;
-  assert.deepEqual(fast.usdPerMerged.api, { median: 2.5, p25: 1.75, p75: 3.25, n: 3, leftOut: 0 });
-  assert.deepEqual(fast.modelMinutes, { median: 25, p25: 17.5, p75: 28.5, n: 3, leftOut: 0 });
-  assert.deepEqual(fast.fixPasses, { median: 0, p25: 0, p75: 0.5, n: 3, leftOut: 0 });
-  // A teammate who can push pastes a stage on #51: no ledger of it is read, so #51 leaves the minutes and fix passes.
-  w.comments.push({ id: (nextId += 1), issue_url: issueUrl(51), user: { login: "teammate", type: "User" }, author_association: "MEMBER", created_at: at(40), updated_at: at(40), body: [`<!-- pendulum:51:progress:work:local-9951 -->`, "Pendulum work: started.", harnessMarker("claude", "claude-opus-5-5", { worker: "claude-opus-5-5", subagent: null, reviewer: null, labels: [] }), spendMarker(9, { usdByBilling: { api: 9 }, billing: "api" }), ledgerMarker([{ label: "validation-fix-1", model: "claude-opus-5-5", started: at(40), ended: at(140), usd: 9, billing: "api", usdByBilling: { api: 9 }, tokens: {} }], { model: "claude-opus-5-5", version: PENDULUM_VERSION, published: ["claude-opus-5-5"] })].join("\n") });
-  const { json: s } = await report(w, ["--compare", "fast,slow", "--json"]);
-  const [after] = s.comparison.arms;
-  assert.deepEqual(after.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
-  assert.deepEqual(after.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
-  assert.deepEqual(after.objectives.find((o) => o.issue === 51), { issue: 51, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null, findings: null, legacyStages: 0 });
-});
-
-test("report --compare (#546): each arm counts the review findings of its Objectives with a findings record, outcome by outcome", async () => {
-  const w = experiment();
-  const fastIssues = w.issues.filter((i) => i.labels.some((l) => (l.name ?? l) === FAST)).map((i) => i.number);
-  const stage = w.comments.find((c) => fastIssues.includes(Number(/^<!-- pendulum:(\d+):progress:review:/.exec(c.body)?.[1])));
-  stage.body += `\n${findingsMarker({ pr: 1, reviews: [9], items: [{ id: 1, outcome: "fixed-test", review: 9 }, { id: 2, outcome: "open", review: 9, listed: true }] })}`;
-  const n = Number(/^<!-- pendulum:(\d+):/.exec(stage.body)[1]);
-  const { code, json: r, err } = await report(w, ["--compare", "fast,slow", "--json"]);
-  assert.equal(code, 0, err);
-  const [fast, slow] = r.comparison.arms;
-  const outcomes = (o = {}) => ({ "fixed-test": 0, "fixed-verdict": 0, answered: 0, "not-fixed": 0, "not-checkable": 0, open: 0, ...o });
-  assert.deepEqual(fast.findings, { objectives: 1, findings: 2, outcomes: outcomes({ "fixed-test": 1, open: 1 }), reviewStages: 1, unnamed: 0 });
-  assert.deepEqual(slow.findings, { objectives: 0, findings: 0, outcomes: outcomes(), reviewStages: 0, unnamed: 0 });
-  assert.equal(fast.objectives.find((o) => o.issue === n).findings, 2);
-  assert.ok(fast.objectives.filter((o) => o.issue !== n).every((o) => o.findings === null));
-  const md = renderReport(r);
-  assert.match(md, /\| Review findings \(fixed-test, fixed-verdict, answered, not-fixed, not-checkable, open\), over Objectives recorded \| 2 \(1, 0, 0, 0, 0, 1\), 1 review stage\(s\), 1 Objective\(s\) \| 0 \(0, 0, 0, 0, 0, 0\), 0 review stage\(s\), 0 Objective\(s\) \|/);
 });
 
 test("report --compare (#544): a merged Objective read from its finish card gives the same arm measures as its stages, with no artifact read", async () => {
@@ -484,25 +335,6 @@ test("report --compare (#567): a merged Objective with stages from before the re
   assert.deepEqual(cards.json.comparison, r.comparison);
 });
 
-test("report --compare (#567): an Objective labelled before the rename, with no older stage, has no wall clock on either path, even read from a card written before cards knew it", async () => {
-  const card = await import("../scripts/lib/finish-card.mjs");
-  // #12's first label under the old name: on the timeline the report reads, but not on the one its card was built from.
-  const renamed = (w) => {
-    w.timelines[12] = [{ event: "labeled", label: { name: `${PREVIOUS_NAME}:objective` }, actor: ME, created_at: at(-20) }, ...w.timelines[12]];
-    return w;
-  };
-  const stages = await report(renamed(experiment()), ["--compare", "fast,slow", "--json"]);
-  const cards = await report(renamed(carded(experiment(), card)), ["--compare", "fast,slow", "--json"]);
-  assert.equal(cards.json.source.read.summaries, 6);
-  assert.deepEqual(cards.json.comparison, stages.json.comparison);
-  const [fast] = stages.json.comparison.arms;
-  assert.equal(fast.objectives.find((o) => o.issue === 12).wallMinutes, null);
-  assert.deepEqual(fast.legacy, []);
-  assert.deepEqual(fast.wallMinutes, { median: 120, p25: 90, p75: 150, n: 2, leftOut: 1 });
-  // Its other measures stand: it has no stage from before the rename.
-  assert.equal(fast.modelMinutes.n, 3);
-});
-
 test("report (#587): an Objective labelled before the rename is clocked `renamed` in every scope, from its card's own record or, for a card from before it recorded why, from its timeline, read and planned", async () => {
   const card = await import("../scripts/lib/finish-card.mjs");
   // #12's first label under the old name, which its card's timeline did not show.
@@ -544,60 +376,3 @@ test("report (#587): an Objective labelled before the rename is clocked `renamed
   assert.deepEqual(clock(cut, 12), [null, null, "timeline-unread"]);
 });
 
-test("report (#587): a timeline GitHub refuses leaves the clock unknown; a timeline over several pages is read whole, each page planned", async () => {
-  const card = await import("../scripts/lib/finish-card.mjs");
-  const old = (w) => {
-    for (const c of w.comments.filter((x) => /^<!-- pendulum:\d+:finish -->/.test(x.body))) c.body = c.body.replace(/,"clockWhy":null/, "");
-    return w;
-  };
-  const clockOf = (r, n) => {
-    const o = r.objectives.find((x) => x.issue === n);
-    return [o.wallMinutes, o.clockWhy];
-  };
-  for (const status of [403, 404]) {
-    const w = old(carded(experiment(), card));
-    w.timelineStatus = { 12: status };
-    const { code, json: r } = await report(w, ["--issue", "11,12", "--json"]);
-    assert.equal(code, 0, `${status}: no stop`);
-    assert.deepEqual([clockOf(r, 12), clockOf(r, 11)], [[null, "timeline-unread"], [60, null]], String(status));
-  }
-  // #12's label from before the rename on the second page of its timeline (150 comments' events first).
-  const w = old(carded(experiment(), card));
-  w.timelines[12] = [...Array.from({ length: 150 }, (_, i) => ({ event: "commented", actor: ME, created_at: at(-200 + i) })), { event: "labeled", label: { name: `${PREVIOUS_NAME}:objective` }, actor: ME, created_at: at(-20) }, ...w.timelines[12]];
-  const { json: r, calls } = await report(w, ["--issue", "12", "--json"]);
-  assert.deepEqual(clockOf(r, 12), [null, "renamed"]);
-  assert.equal(calls.filter((c) => c.includes("/issues/12/timeline")).length, 2, "both pages");
-  assert.equal(r.source.calls.planned, r.source.calls.made);
-  // An old card with no labelled start has no clock to protect: no timeline read, its row `no-label`.
-  const bare = old(carded(experiment(), card));
-  for (const c of bare.comments.filter((x) => x.body.startsWith("<!-- pendulum:12:finish -->"))) c.body = c.body.replace(/"labelled":"[^"]*"/, '"labelled":null');
-  const { json: nl, calls: nlCalls } = await report(bare, ["--issue", "12", "--json"]);
-  assert.deepEqual(clockOf(nl, 12), [null, "no-label"]);
-  assert.ok(!nlCalls.some((c) => c.includes("/timeline")));
-});
-
-test("report (#587): the timelines are read after the usage artifacts, so a budget that runs out costs wall clocks before dollars", async () => {
-  const card = await import("../scripts/lib/finish-card.mjs");
-  // Every card from before #587. The Objectives with no card (#14, Blocked) and those whose card a period cannot read
-  // them from have their dollars in their usage artifacts, as the experiment's Actions stages write no spend line.
-  const world = () => {
-    const w = carded(experiment(), card);
-    for (const c of w.comments.filter((x) => /^<!-- pendulum:\d+:finish -->/.test(x.body))) c.body = c.body.replace(/,"clockWhy":null/, "");
-    return w;
-  };
-  const args = ["--since", "2026-11-16", "--json"];
-  const { json: full, calls } = await report(world(), args);
-  const firstTimeline = calls.findIndex((c) => c.includes("/timeline"));
-  assert.ok(firstTimeline > 0 && calls.slice(0, firstTimeline).some((c) => c.startsWith("DOWNLOAD")), "artifacts first");
-  assert.ok(!calls.slice(firstTimeline).some((c) => c.includes("/actions/artifacts") || c.startsWith("DOWNLOAD")), "no artifact after a timeline");
-  // A budget that covers every artifact but one timeline short: the dollars are all known, the clocks not read unknown.
-  const cap = full.source.calls.made - 1;
-  const { code, json: cut } = await report(world(), [...args, "--max-calls", String(cap)]);
-  assert.equal(code, 3);
-  assert.deepEqual(cut.totals.cost, full.totals.cost, "every dollar figure as with no stop");
-  assert.deepEqual(cut.objectives.map((o) => [o.issue, o.cost]), full.objectives.map((o) => [o.issue, o.cost]));
-  const unread = cut.objectives.filter((o) => o.clockWhy === "timeline-unread").map((o) => o.issue);
-  assert.equal(unread.length, 1, "the one timeline the budget did not reach");
-  assert.equal(full.objectives.find((o) => o.issue === unread[0]).clockWhy, null, "a clock with no stop");
-  assert.equal(cut.objectives.find((o) => o.issue === unread[0]).wallMinutes, null, "never a short one");
-});

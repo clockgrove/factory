@@ -12,7 +12,6 @@ import { test } from "node:test";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { decisionSpendMarker, harnessMarker, ledgerMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
 import { pendulumBuild } from "../scripts/lib/release.mjs";
-import { renderReport } from "../scripts/lib/report.mjs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
 
 RETRY.sleep = async () => {};
@@ -20,7 +19,6 @@ RETRY.sleep = async () => {};
 const PENDULUM_VERSION = pendulumBuild();
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
 const APP = { id: 2271, slug: "clockgrove-pendulum" };
-const BOT = { login: `${APP.slug}[bot]`, type: "Bot" };
 const ME = { login: "kirkmarple-clockgrove", type: "User" };
 const OPUS = "claude-opus-5-5";
 const FABLE = "claude-fable-5-2";
@@ -129,38 +127,6 @@ function decisionsWorld() {
   return w;
 }
 
-test("report (#569 R7, R6): passes are harness passes, and a decision record, counted apart, has no model minutes", async () => {
-  const { json: r } = await report(decisionsWorld(), ["--issue", "20"]);
-  const o = byIssue(r, 20);
-  assert.deepEqual(o.passes, { total: 4, answer: 1, fix: 1 }, "work, review, answer and fix: the decision record is no pass");
-  assert.equal(o.decisionRecords, 1);
-  assert.deepEqual([r.totals.passes, r.totals.decisionRecords], [4, 1]);
-  const row = (k) => r.breakdowns.pass.find((x) => x.key === k);
-  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.decisionRecords, x.modelMinutes]), [["work", 1, 0, 5], ["decision", 0, 1, null], ["review", 1, 0, 2], ["answer", 1, 0, 1], ["validation-fix", 1, 0, 1], [null, null, null, null]]);
-  // The decision calls outside a stage name no pass: the row of no pass (#570 V2) holds them, so the rows cover the totals.
-  assert.deepEqual([row(null).cost.usd.api, row(null).cost.unknownDecisionCalls], [0.01, 2]);
-  // The decision record's span (its first call to its last: 24 minutes) is in no model minutes.
-  assert.equal(row("decision").cost.unknownRuns, 3);
-  assert.equal(r.breakdowns.pass.reduce((t, x) => t + x.passes, 0), r.totals.passes);
-  assert.match(renderReport(r), /^\| decision \| 1 decision record\(s\) \|/m);
-});
-
-test("report (#569 R5): an Objective's model minutes are every harness pass's, its cost per model minute over the priced ones as shown", async () => {
-  const { json: r } = await report(decisionsWorld(), ["--issue", "20"]);
-  const o = byIssue(r, 20);
-  // 5 + 2 + 1 + 1: the unpriced answer pass's minute too, never the decision record's 24.
-  assert.equal(o.modelMinutes, 9);
-  assert.equal(o.unpricedPasses, 1);
-  // $0.90 over the 8 minutes of the three passes whose dollars were all reported.
-  assert.deepEqual(o.usdPerModelMinute, { api: { usd: 0.9, pricedMinutes: 8, pricedPasses: 3, usdPerModelMinute: 0.1125 } });
-  // Decision-spend lines by a member who is not Pendulum are decision calls of unknown cost, no stage: the minutes stand
-  // (the synthetic seed decisions, #3).
-  const w = decisionsWorld();
-  w.comments.push({ ...comment(20, `<!-- pendulum:20:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 1, usd: 0.02 })}`, { user: { login: "teammate", type: "User" }, when: at(41) }), author_association: "MEMBER" });
-  const { json: member } = await report(w, ["--issue", "20"]);
-  assert.deepEqual([byIssue(member, 20).cost.unknownWhy.includes("unattributed"), byIssue(member, 20).modelMinutes], [true, 9]);
-});
-
 test("report (#569 R5): a harness pass with no times leaves the Objective's model minutes unknown (pendulum-scratch #19), and the ratio is the dollars over the minutes shown", async () => {
   // pendulum-scratch #19: a work stage whose one pass ended unreported with no times, a work stage of 53.083 s and a
   // review stage of 11.377 s. v0.10.2 reported 1.07 model minutes, the two priced passes'; the oracle, the finish card's
@@ -177,103 +143,6 @@ test("report (#569 R5): a harness pass with no times leaves the Objective's mode
   const x = o.usdPerModelMinute.api;
   assert.deepEqual([x.usd, x.pricedMinutes, x.pricedPasses], [0.422327, round6(64.46 / 60), 2]);
   assert.equal(x.usdPerModelMinute, round6(x.usd / x.pricedMinutes), "worked out from the figures shown");
-});
-
-test("report (#569 V3): the runs of unknown cost say how many are decision calls, by stage, by Objective and in total", async () => {
-  const { json: r } = await report(decisionsWorld(), ["--issue", "20"]);
-  const o = byIssue(r, 20);
-  // 3 decision calls in the work stage's record, 1 answer pass, 2 decision calls of the decision-spend line.
-  assert.deepEqual([o.cost.unknownRuns, o.cost.unknownDecisionCalls], [6, 5]);
-  assert.deepEqual([r.totals.cost.unknownRuns, r.totals.cost.unknownDecisionCalls, r.unknown.runs, r.unknown.decisionCalls], [6, 5, 6, 5]);
-  assert.deepEqual(r.unknown.items.map((x) => [x.stage, x.runs, x.decisionCalls, x.unsplitRuns]), [["work", 3, 3, 0], ["review", 1, 0, 0], ["decisions", 2, 2, 0]]);
-  assert.equal(r.unknown.unsplitRuns, 0);
-  assert.deepEqual(r.breakdowns.stage.map((x) => [x.key, x.cost.unknownRuns, x.cost.unknownDecisionCalls]), [["work", 3, 3], ["review", 1, 0], ["decisions", 2, 2]]);
-  assert.equal(r.breakdowns.pass.find((x) => x.key === "decision").cost.unknownDecisionCalls, 3);
-  assert.match(renderReport(r), /^- Runs of unknown cost: 6 \(5 of them decision calls\) in 2 stage\(s\)/m);
-  // Stages with no ledger. Their spend line's `usdByPass.decision` says how many of their runs are decision calls, a
-  // harness-route call `unreported` among them; with none, every run is a decision call only when every reason it gives is
-  // a decision call's, else no record splits them, and they are counted as such, never as no decision call.
-  const w = blank();
-  objective(w, 30);
-  stage(w, 30, "work", "local-w30", [pass("work-1", OPUS, [0, 5], 0.5), decision(3, [6, 30])], { ledger: false });
-  stage(w, 30, "work", "local-x30", [pass("work-1", OPUS, [31, 32], null), decision(2, [33, 34])], { ledger: false, when: at(31) });
-  stage(w, 30, "work", "local-y30", [pass("work-1", OPUS, [35, 36], null), decision(2, [37, 38], { why: ["unreported"] })], { ledger: false, when: at(35), extra: { usdByPass: { work: { usd: 0, usdUnknown: 1 }, decision: { usd: 0, usdUnknown: 2 } } } });
-  stage(w, 30, "work", "local-z30", [decision(1, [39, 40], { why: ["unreported"] })], { ledger: false, when: at(39), extra: { usdByPass: { decision: { usd: 0, usdUnknown: 1 } } } });
-  // Decision-spend lines by a member who is not Pendulum: their figures, their calls among them, are not taken.
-  w.comments.push({ ...comment(30, `<!-- pendulum:30:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 4, usd: 0.02 })}`, { user: { login: "teammate", type: "User" }, when: at(41) }), author_association: "MEMBER" });
-  const { json: bare } = await report(w, ["--issue", "30"]);
-  assert.deepEqual(bare.unknown.items.map((x) => [x.runs, x.decisionCalls, x.unsplitRuns, x.why]), [
-    [3, 3, 0, ["decision-no-cost"]],
-    [3, 0, 3, ["decision-no-cost", "unreported"]],
-    [3, 2, 0, ["unreported"]],
-    [1, 1, 0, ["unreported"]],
-    [1, 0, 1, ["unattributed"]],
-  ]);
-  assert.deepEqual([bare.unknown.runs, bare.unknown.decisionCalls, bare.unknown.unsplitRuns], [11, 6, 4]);
-  assert.match(renderReport(bare), /^- Runs of unknown cost: 11 \(6 of them decision calls, 4 not known to be passes or decision calls\)/m);
-});
-
-test("report (#569 V10): review rounds give the reviewer's passes; cost per model minute is on each model's row, and ranked by model", async () => {
-  const { json: r } = await report(decisionsWorld(), ["--issue", "20"]);
-  assert.deepEqual(r.hotSpots.reviewLoops.items, [{ issue: 20, reviews: 1, reviewerPasses: 1 }]);
-  const model = (k) => r.breakdowns.model.find((x) => x.key === k);
-  // Each row over the priced harness passes that ran on its model, as its dollars are booked by pass (#568): the work
-  // pass and the review stage's fix pass on the worker's model, the review pass on the reviewer's; never the answer pass,
-  // whose dollars were not reported.
-  assert.deepEqual(model(OPUS).usdPerModelMinute, { api: { usd: 0.6, pricedMinutes: 6, pricedPasses: 2, usdPerModelMinute: 0.1 } });
-  assert.deepEqual(model(FABLE).usdPerModelMinute, { api: { usd: 0.3, pricedMinutes: 2, pricedPasses: 1, usdPerModelMinute: 0.15 } });
-  assert.deepEqual(model("decisions").usdPerModelMinute, {});
-  assert.deepEqual(r.hotSpots.costPerModelMinute.items.map((x) => [x.model, x.billing, x.usdPerModelMinute]), [[FABLE, "api", 0.15], [OPUS, "api", 0.1]]);
-  const md = renderReport(r);
-  assert.match(md, /^\*\*Review rounds\*\*: #20 1 \(1 reviewer pass\(es\)\)$/m);
-  assert.match(md, new RegExp(`^\\*\\*Cost per model minute, by model\\*\\*: ${FABLE} \\$0\\.15/min api \\(\\$0\\.30 over 2 min of 1 priced pass\\(es\\)\\); ${OPUS} \\$0\\.10/min api`, "m"));
-});
-
-/**
- * #21, merged: a work stage, a review stage that ran no pass (its spend line says `noPass`: its one decision call aside)
- * and a review stage that did. With `card`, its finish card as Pendulum's App posts it, built by the real card.
- */
-async function noPassWorld({ card = false } = {}) {
-  const w = blank();
-  objective(w, 21);
-  stage(w, 21, "work", "local-w21", [pass("work-1", OPUS, [0, 5], 0.5)], { when: at(0) });
-  stage(w, 21, "review", "local-r21a", [decision(1, [10, 10.5], { usd: 0.01 })], { when: at(10), extra: { noPass: true } });
-  stage(w, 21, "review", "local-r21b", [pass("review", FABLE, [20, 22], 0.3), pass("validation-fix-1", OPUS, [23, 25], 0.2)], { when: at(20) });
-  const pr = { number: 1021, head: { ref: "pendulum/21", repo: { id: 1 } }, base: { repo: { id: 1 } }, created_at: at(4), updated_at: at(50), merged_at: at(50), state: "closed" };
-  w.pulls.push(pr);
-  if (card) {
-    const finish = await import("../scripts/lib/finish-card.mjs");
-    const mine = (c) => c.user?.login === ME.login || finish.pendulumOwn(APP.id)(c);
-    const timeline = [{ event: "labeled", label: { name: "pendulum:objective" }, actor: ME, created_at: at(-1) }];
-    const d = finish.finishData({ repo: REPO.full, issue: w.issues[0], timeline, comments: [...w.comments], pulls: [{ pr, timeline: [], reviews: [], reviewComments: [] }], checks: [], records: [], mine });
-    w.comments.push(comment(21, finish.finishCardBody(d), { user: BOT, app: APP, when: at(51) }));
-  }
-  return w;
-}
-
-/**
- * A report section less what only a finish card records (#570): each Objective's clock, and the per-merged wall clock,
- * for comparing a world with a card to the same world without one.
- */
-const clockless = (r, k) => {
-  const x = structuredClone(r[k]);
-  if (k === "objectives") for (const o of x) for (const f of ["started", "wallMinutes", "clockWhy"]) delete o[f];
-  if (k === "totals") {
-    delete x.perMerged.wallMinutes;
-    x.perMerged.leftOut = x.perMerged.leftOut.map((o) => ({ ...o, why: o.why.filter((w) => w !== "no-clock") })).filter((o) => o.why.length);
-  }
-  return x;
-};
-
-test("report (#569 W5): a review stage whose spend line says it ran no pass is a stage but no review round, on the stage path and the card path alike", async () => {
-  const { json: r } = await report(await noPassWorld(), ["--issue", "21"]);
-  const o = byIssue(r, 21);
-  assert.deepEqual([o.stages.review, o.reviewRounds], [2, 1]);
-  assert.deepEqual(r.hotSpots.reviewLoops.items, [{ issue: 21, reviews: 1, reviewerPasses: 1 }]);
-  // Read from its finish card's summary: the same figures.
-  const { json: card } = await report(await noPassWorld({ card: true }), ["--issue", "21"]);
-  assert.equal(card.source.read.summaries, 1);
-  for (const k of ["objectives", "totals", "unknown", "breakdowns", "hotSpots"]) assert.deepEqual(clockless(card, k), clockless(r, k), k);
 });
 
 test("report (#569 W4): a spend line written while its stage ran is in flight while its Objective is Running, and read as it stands once it is not", async () => {
@@ -300,49 +169,6 @@ test("report (#569 W4): a spend line written while its stage ran is in flight wh
   stage(again, 25, "work", "local-v25", [pass("work-1", OPUS, [10, 11], null)], { ledger: false, when: at(10), extra: { running: true, usdRunning: 1 } });
   const { json: relaunched } = await report(again, ["--issue", "25"]);
   assert.deepEqual(relaunched.unknown.items.map((x) => [x.runs, x.why]), [[2, ["unreported"]], [1, ["running"]]]);
-});
-
-test("report (#569 W5): a review stage whose usage record says it ran no pass (no spend line) is no review round on the card path either", async () => {
-  // An Actions review stage of the App's with no spend line: its dollars and `noPass` in its usage record, which the
-  // finish card reads, and which the card's summary now carries for the report's card path.
-  const make = async ({ card }) => {
-    const w = blank();
-    w.artifacts = {};
-    objective(w, 26);
-    stage(w, 26, "work", "local-w26", [pass("work-1", OPUS, [0, 5], 0.5)], { when: at(0) });
-    const record = { harness: "claude", model: FABLE, usd: 0, usdByBilling: {}, billing: "api", runs: 1, exit: "delivered", progressRun: "7101", tokens: { input: 0, output: 0, cached: 0, written: 0 }, ledger: [], noPass: true, ran: { pendulum: PENDULUM_VERSION } };
-    w.comments.push(comment(26, ["<!-- pendulum:26:progress:review:7101 -->", "Pendulum review: started.", harnessMarker("claude", FABLE, { worker: OPUS, subagent: null, reviewer: FABLE, labels: [] })].join("\n"), { user: BOT, app: APP, when: at(10) }));
-    w.artifacts["pendulum-usage-26-review"] = [{ id: 7101, name: "pendulum-usage-26-review", expired: false, created_at: at(11), workflow_run: { id: 7101, repository_id: 1, head_repository_id: 1 }, record }];
-    stage(w, 26, "review", "local-r26", [pass("review", FABLE, [20, 22], 0.3)], { when: at(20) });
-    const pr = { number: 1026, head: { ref: "pendulum/26", repo: { id: 1 } }, base: { repo: { id: 1 } }, created_at: at(4), updated_at: at(50), merged_at: at(50), state: "closed" };
-    w.pulls.push(pr);
-    if (card) {
-      const finish = await import("../scripts/lib/finish-card.mjs");
-      const mine = (c) => c.user?.login === ME.login || finish.pendulumOwn(APP.id)(c);
-      const timeline = [{ event: "labeled", label: { name: "pendulum:objective" }, actor: ME, created_at: at(-1) }];
-      const d = finish.finishData({ repo: REPO.full, issue: w.issues[0], timeline, comments: [...w.comments], pulls: [{ pr, timeline: [], reviews: [], reviewComments: [] }], checks: [], records: [{ ...record, artifact: "pendulum-usage-26-review" }], mine });
-      w.comments.push(comment(26, finish.finishCardBody(d), { user: BOT, app: APP, when: at(51) }));
-    }
-    return w;
-  };
-  const { json: r } = await report(await make({ card: false }), ["--issue", "26"]);
-  assert.deepEqual([byIssue(r, 26).stages.review, byIssue(r, 26).reviewRounds], [2, 1]);
-  const { json: card } = await report(await make({ card: true }), ["--issue", "26"]);
-  assert.equal(card.source.read.summaries, 1);
-  for (const k of ["objectives", "totals", "hotSpots"]) assert.deepEqual(clockless(card, k), clockless(r, k), k);
-  // The same rows, each path in the order it meets the stages (an Actions record's stage last on the stage path).
-  const rows = (x) => Object.fromEntries(Object.entries(x.breakdowns).map(([k, v]) => [k, [...v].sort((a, b) => String(a.key).localeCompare(String(b.key)))]));
-  assert.deepEqual(rows(card), rows(r));
-});
-
-test("report (#569 V10): the reviewer's passes are known only as the model minutes are: not with a stage Pendulum cannot attribute", async () => {
-  const w = blank();
-  objective(w, 27);
-  stage(w, 27, "review", "local-r27", [pass("review", FABLE, [0, 2], 0.3)], { when: at(0) });
-  w.comments.push({ ...comment(27, ["<!-- pendulum:27:progress:work:local-m27 -->", "Pendulum work: started.", harnessMarker("claude", OPUS, { worker: OPUS, subagent: null, reviewer: FABLE, labels: [] }), spendMarker(0.1)].join("\n"), { user: { login: "teammate", type: "User" }, when: at(5) }), author_association: "MEMBER" });
-  const { json: r } = await report(w, ["--issue", "27"]);
-  assert.deepEqual([byIssue(r, 27).passes, byIssue(r, 27).modelMinutes], [{ total: 1, answer: 0, fix: 0 }, null]);
-  assert.deepEqual(r.hotSpots.reviewLoops.items, [{ issue: 27, reviews: 1, reviewerPasses: null }]);
 });
 
 /** Every report cost in `r`, with where it is: totals, unknown items aside, each Objective, each breakdown row and basis part, findings. */

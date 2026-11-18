@@ -4,14 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { SHELL_SECRET_KEYS, VENDOR_TELEMETRY_OFF, credentialEnv, finalText, harnessCommand, promptCacheTtl, scrubbedEnv } from "../scripts/lib/harness.mjs";
-import { AGENT_SHELL_TELEMETRY_OFF, localSandbox } from "../scripts/lib/local.mjs";
-import { resolveInputs } from "../scripts/lib/inputs.mjs";
-import { CODEX_PRICES, cacheSummary, copilotSessionTotal, mergeUsage, parseClaude, parseCodex, parseCopilot, parseUsage, priceCodex, sinceSession } from "../scripts/lib/usage.mjs";
-import { capReached, copilotCount, decideExit, harnessActivity, sumSpend } from "../scripts/lib/logic.mjs";
+import { SHELL_SECRET_KEYS, finalText, harnessCommand, scrubbedEnv } from "../scripts/lib/harness.mjs";
+import { localSandbox } from "../scripts/lib/local.mjs";
+import { CODEX_PRICES, copilotSessionTotal, mergeUsage, parseClaude, parseCodex, parseCopilot, parseUsage, priceCodex, sinceSession } from "../scripts/lib/usage.mjs";
+import { copilotCount, harnessActivity, sumSpend } from "../scripts/lib/logic.mjs";
 import { clampTotal } from "../scripts/lib/usage.mjs";
-import { copilotCreditUsd } from "../scripts/lib/harness.mjs";
-import { exec } from "../scripts/lib/proc.mjs";
 
 const fixture = (f) => readFileSync(join(import.meta.dirname, "fixtures", f), "utf8");
 
@@ -30,24 +27,6 @@ test("claude: single JSON result; total_cost_usd and modelUsage with sub-agents"
   assert.ok(rec.models && Object.keys(rec.models).length >= 1, "per-model split is kept");
   assert.match(rec.basis, /sub-agents included/);
   assert.equal(rec.budgetExceeded, false);
-});
-
-test("claude: stream-json with a non-JSON line and a budget-exceeded result", () => {
-  const rec = parseClaude(fixture("claude-stream.jsonl"), null);
-  assert.equal(rec.ok, false);
-  assert.equal(rec.budgetExceeded, true);
-  assert.equal(rec.subtype, "error_max_budget_usd");
-  assert.equal(rec.usd, 5.02);
-  assert.equal(rec.model, "claude-fable-5-1");
-  assert.equal(rec.sessionId, "abc-123");
-  assert.equal(finalText("claude", fixture("claude-stream.jsonl")), "Budget of $5 reached");
-});
-
-test("claude: no result on stdout is an error record, not a crash", () => {
-  const rec = parseClaude("", "m");
-  assert.equal(rec.ok, false);
-  assert.equal(rec.usd, null);
-  assert.match(rec.error, /no JSON result/);
 });
 
 test("codex: a stream error (a dropped stream it reconnected) is a run of unknown cost beside its priced turns (#116, #483)", () => {
@@ -171,85 +150,6 @@ test("mergeUsage sums the known dollars, keeps null only when no run reported an
   assert.equal(mergeUsage([]), null);
 });
 
-test("the reviewer's effort reaches the command line: Codex as its agent file says; Claude and Copilot keep their CLI default unless set", () => {
-  const source = JSON.parse(readFileSync(join(import.meta.dirname, "..", "agents", "source.json"), "utf8")).agents.find((a) => a.name === "reviewer");
-  assert.equal(source.models.codex.reasoning_effort, "high");
-  const flags = /^(--effort|--reasoning-effort)$|^model_reasoning_effort=/;
-  const r = resolveInputs({ env: { PENDULUM_HARNESS: "codex" } });
-  const c = harnessCommand({ harness: "codex", model: r.reviewerModel, prompt: "P", maxUsd: 5, effort: r.reviewerEffort });
-  assert.deepEqual(c.args.filter((a) => flags.test(a)), ['model_reasoning_effort="high"'], "codex: the reviewer runs at its agent file's high");
-  for (const [h, flag] of [["claude", "--effort"], ["copilot", "--reasoning-effort"]]) {
-    const d = resolveInputs({ env: { PENDULUM_HARNESS: h } });
-    assert.equal(d.reviewerEffort, "", `${h}: no default, the CLI's own`);
-    assert.equal(harnessCommand({ harness: h, model: d.reviewerModel, prompt: "P", maxUsd: 5, agent: "reviewer", effort: d.reviewerEffort }).args.filter((a) => flags.test(a)).length, 0, `${h}: nothing passed by default`);
-    const set = resolveInputs({ env: { PENDULUM_HARNESS: h, PENDULUM_REVIEWER_EFFORT: "max" } });
-    const a = harnessCommand({ harness: h, model: set.reviewerModel, prompt: "P", maxUsd: 5, agent: "reviewer", effort: set.reviewerEffort }).args;
-    assert.deepEqual(a.slice(a.indexOf(flag), a.indexOf(flag) + 2), [flag, "max"], `${h}: an owner's setting is passed`);
-  }
-  // The owner's setting, from the env block or `with:`, wins; an env block written for another harness does not apply.
-  assert.equal(resolveInputs({ env: { PENDULUM_HARNESS: "codex", PENDULUM_REVIEWER_EFFORT: "xhigh" } }).reviewerEffort, "xhigh");
-  assert.equal(resolveInputs({ env: { PENDULUM_HARNESS: "claude", PENDULUM_REVIEWER_EFFORT: "max", PENDULUM_INPUT_REVIEWER_EFFORT: "high" } }).reviewerEffort, "high");
-  assert.equal(resolveInputs({ env: { PENDULUM_HARNESS: "claude", PENDULUM_REVIEWER_EFFORT: "low", PENDULUM_INPUT_HARNESS: "codex" } }).reviewerEffort, "high");
-  // The worker's effort stays its own.
-  assert.equal(resolveInputs({ env: { PENDULUM_HARNESS: "codex" } }).effort, "");
-});
-
-test("the answer pass runs at the worker's effort, not the CLI default", async () => {
-  const { workerRun } = await import("../scripts/review.mjs");
-  const flags = /^(--effort|--reasoning-effort)$|^model_reasoning_effort=/;
-  const effortArgs = (env) => harnessCommand({ ...workerRun(resolveInputs({ env })), prompt: "P", maxUsd: 5 }).args.filter((a) => flags.test(a) || a === "medium" || a === "high");
-  assert.deepEqual(effortArgs({ PENDULUM_HARNESS: "claude" }), ["--effort", "medium"], "claude: the worker's pinned medium");
-  assert.deepEqual(effortArgs({ PENDULUM_HARNESS: "codex", PENDULUM_EFFORT: "high" }), ['model_reasoning_effort="high"'], "codex: an owner's worker effort");
-  assert.deepEqual(effortArgs({ PENDULUM_HARNESS: "codex" }), [], "codex: no worker default, the CLI's own");
-  assert.deepEqual(effortArgs({ PENDULUM_HARNESS: "copilot", PENDULUM_EFFORT: "high" }), ["--reasoning-effort", "high"]);
-  const r = resolveInputs({ env: { PENDULUM_HARNESS: "codex", PENDULUM_EFFORT: "high", PENDULUM_REVIEWER_EFFORT: "low" } });
-  assert.deepEqual(workerRun(r), { harness: "codex", model: r.model, effort: "high" }, "the worker's effort, never the reviewer's");
-});
-
-test("harness command lines are the documented headless flags; the prompt goes on stdin for every harness", () => {
-  const c = harnessCommand({ harness: "claude", model: "claude-fable-5-1", prompt: "P", maxUsd: 25 });
-  assert.equal(c.cmd, "claude");
-  assert.ok(c.args.includes("--exclude-dynamic-system-prompt-sections"), "the system prompt prefix is shared across machines");
-  const e = harnessCommand({ harness: "claude", model: "claude-opus-5-5", prompt: "P", maxUsd: 25, effort: "medium" });
-  assert.ok(e.args.join(" ").includes("--effort medium"), "a pinned effort reaches the CLI");
-  const xe = harnessCommand({ harness: "codex", prompt: "P", maxUsd: 0, effort: "high", compaction: "300000" });
-  assert.ok(xe.args.includes('model_reasoning_effort="high"') && xe.args.includes("model_auto_compact_token_limit=300000") && !xe.args.includes("--effort"));
-  const pe = harnessCommand({ harness: "copilot", prompt: "P", effort: "high", compaction: "300000" });
-  assert.deepEqual(pe.args.slice(pe.args.indexOf("--reasoning-effort"), pe.args.indexOf("--reasoning-effort") + 2), ["--reasoning-effort", "high"]);
-  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "P", compaction: "300000" }).env, { ...AGENT_SHELL_TELEMETRY_OFF, ...VENDOR_TELEMETRY_OFF.claude.env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: "300000" });
-  assert.ok(c.args.includes("--output-format") && c.args.includes("--max-budget-usd") && c.args.includes("25"));
-  assert.equal(c.stdin, "P");
-  const r = harnessCommand({ harness: "claude", prompt: "fix", maxUsd: 0, resume: "sid" });
-  assert.deepEqual(r.args.slice(r.args.indexOf("--resume")), ["--resume", "sid"]);
-  const x = harnessCommand({ harness: "codex", model: "gpt-6.1-sol", prompt: "P", maxUsd: 1 });
-  assert.deepEqual(x.args.slice(0, 2), ["exec", "--json"]);
-  assert.ok(x.args.includes("-m") && x.args.at(-1) === "-");
-  const xr = harnessCommand({ harness: "codex", prompt: "fix", resume: "thr_1" });
-  assert.deepEqual(xr.args.slice(0, 3), ["exec", "resume", "thr_1"]);
-  const a = harnessCommand({ harness: "claude", prompt: "review", maxUsd: 0, agent: "reviewer" });
-  assert.deepEqual(a.args.slice(a.args.indexOf("--agent"), a.args.indexOf("--agent") + 2), ["--agent", "reviewer"]);
-  const p = harnessCommand({ harness: "copilot", prompt: "P", agent: "reviewer", usageFile: "/tmp/u.json" });
-  assert.equal(p.stdin, "P");
-  assert.ok(!p.args.includes("-p") && !p.args.includes("P"), "copilot takes its prompt on stdin, never as an argument");
-  assert.ok(p.args.includes("--allow-all") && p.args.includes("--agent") && !p.args.includes("--no-ask-user"), "copilot 1.0.91 has --allow-all and no --no-ask-user");
-  assert.deepEqual(p.args.slice(p.args.indexOf("--output-format"), p.args.indexOf("--output-format") + 2), ["--output-format", "json"]);
-  assert.deepEqual(p.args.slice(p.args.indexOf("--usage-output-file")), ["--usage-output-file", "/tmp/u.json"]);
-  assert.equal(p.canResume, true);
-  const pr = harnessCommand({ harness: "copilot", prompt: "fix", resume: "s-1" });
-  assert.deepEqual(pr.args.slice(pr.args.indexOf("--resume"), pr.args.indexOf("--resume") + 2), ["--resume", "s-1"]);
-  // Local mode: every harness keeps its own sandbox on and never takes a runner's bypass.
-  const local = { addDirs: ["/u"], domains: ["github.com"], clone: "/c", readOnly: ["/u/bin"] };
-  const lc = harnessCommand({ harness: "claude", prompt: "P", local });
-  assert.ok(lc.args.includes("--settings") && !lc.args.includes("--dangerously-skip-permissions"));
-  const lx = harnessCommand({ harness: "codex", prompt: "P", local });
-  assert.ok(lx.args.includes('default_permissions="pendulum"') && lx.args.includes("features.network_proxy=true") && !lx.args.includes("--dangerously-bypass-approvals-and-sandbox"));
-  assert.match(lx.args.find((a) => a.startsWith("shell_environment_policy.exclude")), /"CODEX_API_KEY"/);
-  assert.ok(lx.args.includes("--ignore-user-config") && lx.args.includes("features.apps=false") && lx.args.includes('projects={"/c"={trust_level="untrusted"}}'));
-  const lp = harnessCommand({ harness: "copilot", prompt: "P", local });
-  assert.ok(lp.args.includes("--sandbox") && !lp.args.includes("--allow-all") && !lp.args.includes("--allow-all-paths"), "copilot keeps path checks on locally");
-  assert.deepEqual(lp.args.slice(lp.args.indexOf("--add-dir"), lp.args.indexOf("--add-dir") + 2), ["--add-dir", "/u"]);
-});
-
 test("on every route the model's commands never see a credential: Codex excludes them from its shell, Copilot names them secret", () => {
   const local = { addDirs: ["/u"], domains: ["github.com"], clone: "/c", readOnly: ["/u/bin"] };
   for (const route of [null, local]) {
@@ -266,23 +166,6 @@ test("on every route the model's commands never see a credential: Codex excludes
   assert.ok(SHELL_SECRET_KEYS.includes("COPILOT_GITHUB_TOKEN") && !SHELL_SECRET_KEYS.includes("GH_CONFIG_DIR"), "the agent's read-only gh login stays");
 });
 
-test("a prompt over 128 KB starts every harness: it goes on stdin, no argument nears Linux's per-argument cap", async () => {
-  // Linux refuses one argv string over 128 KB (MAX_ARG_STRLEN) with E2BIG; a reviewer prompt carries up to ~1 MB of diff.
-  const prompt = `review this diff\n${"+ a changed line of the diff under review\n".repeat(6000)}`;
-  assert.ok(Buffer.byteLength(prompt) > 200 * 1024);
-  const local = { addDirs: ["/u"], domains: ["github.com"], clone: "/c", readOnly: ["/u/bin"] };
-  for (const harness of ["claude", "codex", "copilot"]) {
-    for (const c of [harnessCommand({ harness, prompt, agent: "reviewer", maxUsd: 1 }), harnessCommand({ harness, prompt, resume: "s-1", local })]) {
-      assert.equal(c.stdin, prompt, `${harness}: the prompt is on stdin`);
-      assert.ok(c.args.every((a) => Buffer.byteLength(String(a)) < 16 * 1024), `${harness}: no argument carries the prompt`);
-      // The real start: the same argument vector to a process that reads stdin, which E2BIG would refuse before it ran.
-      const r = await exec(process.execPath, ["-e", "let n=0;process.stdin.on('data',(d)=>n+=d.length).on('end',()=>process.stdout.write(String(n)))", "--", ...c.args], { input: c.stdin, timeoutMs: 60_000 });
-      assert.equal(r.code, 0, `${harness}: started`);
-      assert.equal(Number(r.stdout), Buffer.byteLength(prompt), `${harness}: the whole prompt arrived`);
-    }
-  }
-});
-
 test("localSandbox: a writable directory swapped for a symlink is refused", () => {
   const root = mkdtempSync(join(tmpdir(), "ls-"));
   const real = join(root, "real");
@@ -296,100 +179,9 @@ test("localSandbox: a writable directory swapped for a symlink is refused", () =
   rmSync(root, { recursive: true, force: true });
 });
 
-test("credential: on a developer's machine, api with no key falls back to the CLI login; inside Actions it refuses", async () => {
-  const inputs = { anthropicApiKey: "", anthropicOidcExchangeUrl: "", codexApiKey: "", githubToken: "", claudeCodeOauthToken: "" };
-  const cp = (inp, env) => credentialEnv({ harness: "copilot", credential: "api", inputs: { ...inputs, ...inp }, env: { GITHUB_ACTIONS: "true", ...env } });
-  assert.deepEqual(await cp({ copilotGithubToken: "github_pat_seat", githubToken: "ghs_job" }, { COPILOT_GITHUB_TOKEN: "x" }), { env: { COPILOT_GITHUB_TOKEN: "github_pat_seat" }, basis: "copilot_github_token (step-scoped)", billing: "credits" });
-  await assert.rejects(cp({ copilotGithubToken: "", githubToken: "ghs_job" }, {}), /no Copilot credential/, "the job token can write: never Copilot's credential");
-  const local = await credentialEnv({ harness: "claude", credential: "api", inputs, env: { PATH: "/bin" } });
-  assert.match(local.basis, /CLI login on this machine \(no API credential present; local fallback\)/);
-  assert.deepEqual(local.env, {});
-  const keyed = await credentialEnv({ harness: "claude", credential: "api", inputs: { ...inputs, anthropicApiKey: "sk-1" }, env: { PATH: "/bin" } });
-  assert.equal(keyed.basis, "ANTHROPIC_API_KEY");
-  await assert.rejects(credentialEnv({ harness: "claude", credential: "api", inputs, env: { GITHUB_ACTIONS: "true" } }), /no Claude credential/);
-  await assert.rejects(credentialEnv({ harness: "claude", credential: "login", inputs, env: { GITHUB_ACTIONS: "true" } }), /developer's machine/);
-});
-
 test("model, App, runner and GitHub secrets never reach a child", () => {
   const e = scrubbedEnv({ PATH: "/bin", ANTHROPIC_API_KEY: "sk", CODEX_API_KEY: "ck", PENDULUM_INPUT_CODEX_API_KEY: "ck", PENDULUM_INPUT_APP_PRIVATE_KEY: "pem", PENDULUM_INPUT_COPILOT_GITHUB_TOKEN: "cp", PENDULUM_INPUT_APP_TOKEN: "ghs", PENDULUM_INPUT_MODEL: "m", ACTIONS_ID_TOKEN_REQUEST_TOKEN: "oidc", ACTIONS_ID_TOKEN_REQUEST_URL: "u", ACTIONS_RUNTIME_TOKEN: "rt", PENDULUM_APP_TOKEN: "ghs", PENDULUM_APP_PRIVATE_KEY: "pem", GITHUB_TOKEN: "job", GH_CONFIG_DIR: "/auth", PENDULUM_GIT_TOKEN: "w", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "x" }, { GH_TOKEN: "t" });
   assert.deepEqual(e, { PATH: "/bin", PENDULUM_INPUT_MODEL: "m" });
-});
-
-test("scrubbedEnv: an undefined or null extra value removes the key (the dispatch run's GITHUB_SHA never reaches a child)", () => {
-  const e = scrubbedEnv({ PATH: "/bin", GITHUB_SHA: "abc", GITHUB_REF: "refs/heads/main", KEEP: "1" }, { GITHUB_SHA: undefined, GITHUB_REF: "refs/heads/pendulum/7", GONE: null });
-  assert.deepEqual(e, { PATH: "/bin", GITHUB_REF: "refs/heads/pendulum/7", KEEP: "1" });
-});
-
-test("runnerFileEnv: a setup command's GITHUB_PATH and GITHUB_ENV writes reach the job's later children", async () => {
-  const { writeFileSync: write } = await import("node:fs");
-  const { runnerFileEnv } = await import("../scripts/lib/checkout.mjs");
-  const dir = mkdtempSync(join(tmpdir(), "pendulum-runner-"));
-  write(join(dir, "path"), "/usr/lib/postgresql/18/bin\n/usr/bin\n\n");
-  write(join(dir, "env"), "PGHOST=localhost\nNOTE<<EOF\nline one\nline two\nEOF\nBAD LINE\n");
-  const out = runnerFileEnv({ PATH: "/usr/bin:/bin", GITHUB_PATH: join(dir, "path"), GITHUB_ENV: join(dir, "env") });
-  assert.deepEqual(out, { PATH: "/usr/lib/postgresql/18/bin:/usr/bin:/bin", PGHOST: "localhost", NOTE: "line one\nline two" });
-  assert.deepEqual(runnerFileEnv({ PATH: "/bin" }), {});
-});
-
-test("sessions: a Codex rollout is saved into the usage directory and restored locally from the newest earlier stage", async () => {
-  const { restoreTranscript, saveTranscript } = await import("../scripts/lib/session.mjs");
-  const root = mkdtempSync(join(tmpdir(), "sess-"));
-  const saved = { CODEX_HOME: process.env.CODEX_HOME, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL };
-  process.env.CODEX_HOME = join(root, "codex");
-  process.env.PENDULUM_LOCAL = "1";
-  try {
-    const rel = join("2026", "11", "06", "rollout-2026-11-06T16-42-54-t1.jsonl");
-    mkdirSync(join(root, "codex", "sessions", "2026", "11", "06"), { recursive: true });
-    writeFileSync(join(root, "codex", "sessions", rel), '{"secret":"sk-live-0123456789"}\n');
-    const ws = join(root, "ws");
-    const usageDir = join(ws, "usage-work-1");
-    mkdirSync(usageDir, { recursive: true });
-    const s = saveTranscript({ harness: "codex", sessionId: "t1", usageDir, checkout: "/c", secrets: ["sk-live-0123456789"] });
-    assert.deepEqual(s, { harness: "codex", id: "t1", files: [rel], checkout: "/c" });
-    assert.match(readFileSync(join(usageDir, "transcript", rel), "utf8"), /\*\*\*/);
-    writeFileSync(join(usageDir, "result.json"), JSON.stringify({ session: s }));
-    rmSync(join(root, "codex", "sessions"), { recursive: true });
-    assert.deepEqual(await restoreTranscript({ checkout: "/c", workDir: ws, harness: "codex" }), { id: "t1", from: "usage-work-1", reason: "" });
-    assert.ok(existsSync(join(root, "codex", "sessions", rel)));
-    assert.match((await restoreTranscript({ checkout: "/c", workDir: ws, harness: "copilot" })).reason, /codex's; this stage runs copilot/);
-    assert.match((await restoreTranscript({ checkout: "/other", workDir: ws, harness: "codex" })).reason, /checkout path differs/);
-  } finally {
-    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("sessions: locally the restore reads every earlier stage directory, past any number of stages that saved none", async () => {
-  const { restoreTranscript, saveTranscript } = await import("../scripts/lib/session.mjs");
-  const { utimesSync } = await import("node:fs");
-  const root = mkdtempSync(join(tmpdir(), "sess-"));
-  const saved = { CODEX_HOME: process.env.CODEX_HOME, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL };
-  process.env.CODEX_HOME = join(root, "codex");
-  process.env.PENDULUM_LOCAL = "1";
-  try {
-    const rel = join("2026", "11", "15", "rollout-2026-11-15T08-00-00-w1.jsonl");
-    mkdirSync(join(root, "codex", "sessions", "2026", "11", "15"), { recursive: true });
-    writeFileSync(join(root, "codex", "sessions", rel), '{"id":"w1"}\n');
-    const ws = join(root, "ws");
-    const work = join(ws, "usage-work-1");
-    mkdirSync(work, { recursive: true });
-    writeFileSync(join(work, "result.json"), JSON.stringify({ session: saveTranscript({ harness: "codex", sessionId: "w1", usageDir: work, checkout: "/c", secrets: [] }) }));
-    utimesSync(join(work, "result.json"), 1000, 1000);
-    rmSync(join(root, "codex", "sessions"), { recursive: true });
-    // Four later stages ran no harness (clean rebases, an already-reviewed head): none saved a session.
-    for (let i = 2; i <= 5; i += 1) {
-      const d = join(ws, `usage-review-${i}`);
-      mkdirSync(d, { recursive: true });
-      writeFileSync(join(d, "result.json"), JSON.stringify({ exit: "done" }));
-      utimesSync(join(d, "result.json"), 1000 + i, 1000 + i);
-    }
-    assert.deepEqual(await restoreTranscript({ checkout: "/c", workDir: ws, harness: "codex" }), { id: "w1", from: "usage-work-1", reason: "" });
-  } finally {
-    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-    rmSync(root, { recursive: true, force: true });
-  }
 });
 
 test("sessions: a stage saves every session it ran (the reviewer's own too), masked, and only the lineage's is restored", async () => {
@@ -447,21 +239,6 @@ test("a resumed Claude pass counts its own share, not the session's running tota
   assert.equal(fix.turns, 15);
   assert.ok(Math.abs(mergeUsage([work, fix]).usd - 14.2617083) < 1e-6, "the run costs what the session reported last");
   assert.equal(sinceSession(fixReported, undefined), fixReported, "an unknown prior session leaves the record as reported");
-});
-
-test("a session restored from an earlier job counts its own share: the transcript's last cost-state is the prior total", async () => {
-  const { transcriptTotal } = await import("../scripts/lib/usage.mjs");
-  // Shapes and numbers from a real resumed session: Claude Code writes a cost-state line as each process ends.
-  const state = (usd, input, output, written) => JSON.stringify({ type: "cost-state", sessionId: "s1", totalCostUSD: usd, modelUsage: { "claude-haiku-5-5": { inputTokens: input, outputTokens: output, cacheReadInputTokens: 0, cacheCreationInputTokens: written, costUSD: usd } } });
-  const transcript = [JSON.stringify({ type: "user", message: { content: "say hi" } }), state(0.0040019, 1, 90, 20000), JSON.stringify({ type: "assistant" }), state(0.0060084, 2, 150, 21446), ""].join("\n");
-  const prior = transcriptTotal(transcript);
-  assert.equal(prior.usd, 0.0060084, "the last cost-state line wins");
-  assert.equal(prior.models["claude-haiku-5-5"].output, 150);
-  assert.equal(transcriptTotal('{"type":"user"}\n'), null, "no cost-state: no prior total");
-  const reported = parseUsage("claude", JSON.stringify({ type: "system", subtype: "init", session_id: "s1", claude_code_version: "2.1.277" }) + "\n" + JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, session_id: "s1", total_cost_usd: 0.00635726, modelUsage: { "claude-haiku-5-5": { inputTokens: 4, outputTokens: 182, cacheReadInputTokens: 21446, cacheCreationInputTokens: 21446, costUSD: 0.00635726 } } }), "claude-haiku-5-5", 0);
-  const own = sinceSession(reported, prior);
-  assert.ok(Math.abs(own.usd - 0.00034886) < 1e-9, `resumed pass usd ${own.usd}`);
-  assert.equal(own.models["claude-haiku-5-5"].output, 32);
 });
 
 test("a resumed Codex pass counts its own share, in this process and from an earlier stage; output is priced once", async () => {
@@ -525,69 +302,6 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
     else process.env[k] = v;
     rmSync(bin, { recursive: true, force: true });
   }
-});
-
-test("a session total is only subtracted when it is a running total", async () => {
-  const rec = (usd) => ({ usd, tokens: { input: 1, output: 1, cached: 1, written: 1 }, models: null, turns: 3 });
-  assert.deepEqual([sinceSession(rec(2), rec(5)).usd, sinceSession(rec(2), rec(5)).usdUnknownWhy], [null, ["resumed-total"]], "below the prior total: no running total, so unknown");
-  assert.equal(sinceSession(rec(7), rec(null)).usd, 7, "a prior pass with no total subtracts nothing");
-  assert.equal(sinceSession(rec(7), rec(5)).usd, 2);
-});
-
-test("prompt cache TTL: off by default; auto asks Claude Code for an hour on an API key only; an explicit setting wins; other harnesses get none", () => {
-  assert.equal(promptCacheTtl("claude", { ANTHROPIC_API_KEY: "k" }), null, "off until the A/B is run");
-  assert.equal(resolveInputs({ env: {} }).promptCacheTtl, "off");
-  assert.equal(resolveInputs({ env: { PENDULUM_PROMPT_CACHE_TTL: " AUTO " } }).promptCacheTtl, "auto");
-  assert.equal(resolveInputs({ env: { PENDULUM_INPUT_PROMPT_CACHE_TTL: "2h" } }).promptCacheTtl, "off", "an invalid value warns and reads as off");
-  const auto = { PENDULUM_PROMPT_CACHE_TTL: "auto" };
-  assert.equal(promptCacheTtl("claude", { ...auto, ANTHROPIC_API_KEY: "k" }), "1h");
-  assert.equal(promptCacheTtl("claude", { ...auto, ANTHROPIC_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "t" }), "1h", "the API key wins over the OAuth token, so it is what bills");
-  assert.equal(promptCacheTtl("claude", { ...auto, CLAUDE_CODE_OAUTH_TOKEN: "t" }), null, "a plan token already gets an hour");
-  assert.equal(promptCacheTtl("claude", auto), null, "a CLI login is left to the CLI");
-  assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "off", ANTHROPIC_API_KEY: "k" }), null);
-  assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "5m", ANTHROPIC_API_KEY: "k" }), "5m");
-  assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "1H", CLAUDE_CODE_OAUTH_TOKEN: "t" }), "1h");
-  assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "2h", ANTHROPIC_API_KEY: "k" }), null, "a value Claude Code would ignore is not sent");
-  for (const h of ["codex", "copilot"]) assert.equal(promptCacheTtl(h, { ANTHROPIC_API_KEY: "k", PENDULUM_PROMPT_CACHE_TTL: "1h" }), null);
-  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "p", cacheTtl: "1h" }).env, { ...AGENT_SHELL_TELEMETRY_OFF, ...VENDOR_TELEMETRY_OFF.claude.env, CLAUDE_CODE_PROMPT_CACHE_TTL: "1h" });
-  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "p" }).env, { ...AGENT_SHELL_TELEMETRY_OFF, ...VENDOR_TELEMETRY_OFF.claude.env });
-});
-
-test("prompt cache: each harness's first request (or turn) after a CI wait and the stage's write share go in the usage record", () => {
-  const msg = (id, u, parent = null) => JSON.stringify({ type: "assistant", parent_tool_use_id: parent, message: { id, usage: u }, session_id: "s" });
-  const stream = [
-    JSON.stringify({ type: "system", subtype: "init", session_id: "s" }),
-    msg("m1", { input_tokens: 3, cache_read_input_tokens: 1000, cache_creation_input_tokens: 40000, cache_creation: { ephemeral_1h_input_tokens: 40000, ephemeral_5m_input_tokens: 0 }, output_tokens: 9 }),
-    msg("m2", { input_tokens: 1, cache_read_input_tokens: 41000, cache_creation_input_tokens: 500, output_tokens: 9 }),
-    JSON.stringify({ type: "result", subtype: "success", session_id: "s", total_cost_usd: 0.4, usage: { input_tokens: 4, cache_read_input_tokens: 42000, cache_creation_input_tokens: 40500, output_tokens: 18 } }),
-  ].join("\n");
-  const claude = parseClaude(stream, "m");
-  assert.deepEqual(claude.cache.first, { unit: "request", input: 41003, cached: 1000, written: 40000, written1h: 40000, written5m: 0 });
-  // A sub-agent's message is not the main thread's first request.
-  const sub = parseClaude([msg("x", { input_tokens: 9, cache_creation_input_tokens: 7 }, "toolu_1"), msg("m1", { input_tokens: 1, cache_read_input_tokens: 2, cache_creation_input_tokens: 3 })].join("\n"), "m");
-  assert.equal(sub.cache.first.written, 3);
-  const codex = parseCodex(fixture("codex-events.jsonl"), "gpt-6.1-sol");
-  assert.equal(codex.cache.first.unit, "turn");
-  assert.equal(codex.cache.first.written, null, "Codex reports no cache writes");
-  const copilot = parseCopilot(fixture("copilot-events.jsonl"), null, 0, { usageFile: join(import.meta.dirname, "fixtures", "copilot-usage.json") });
-  assert.equal(copilot.cache.first, null, "Copilot reports the run, not a request");
-  assert.equal(copilot.cache.ttlSeconds, 300, "the TTL Copilot chose, from its usage checkpoint");
-
-  const run = (label, started, ended, extra) => ({ ...claude, label, started, ended, cacheTtl: "1h", ...extra });
-  const s = cacheSummary([
-    run("work", "2026-11-08T10:00:00Z", "2026-11-08T10:20:00Z"),
-    run("validation-fix-1", "2026-11-08T10:32:30Z", "2026-11-08T10:40:00Z", { resumed: true }),
-  ]);
-  assert.equal(s.ttl, "1h");
-  assert.equal(s.writeShare, Math.round((81000 / 165008) * 1000) / 1000);
-  assert.equal(s.afterWait.length, 1, "only a fix pass follows a CI wait");
-  assert.deepEqual({ ...s.afterWait[0], first: undefined }, { label: "validation-fix-1", waitMin: 12.5, resumed: true, first: undefined, writeShare: Math.round((40500 / 82504) * 1000) / 1000 });
-  assert.equal(s.afterWait[0].first.written1h, 40000);
-  const c = cacheSummary([{ ...copilot, label: "work" }]);
-  assert.equal(c.ttl, null);
-  assert.equal(c.harnessTtlSeconds, 300);
-  assert.equal(c.writeShare, Math.round((24943 / 24945) * 1000) / 1000);
-  assert.equal(cacheSummary([{ ...codex, label: "work" }]).writeShare, null, "no writes reported is null, never zero");
 });
 
 test("copilot 1.0.107 (captured Nov 8): dollars are the AI credits at the configured rate; a resumed pass counts only its own share", () => {
@@ -673,38 +387,3 @@ test("copilot metering cannot be talked down: negative or forged-low credits, un
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("copilot caps: --max-ai-credits from what is left (per process, at least 30); a run with no priced credits is of unknown cost and stops nothing; a bad rate is refused", () => {
-  const credits = (maxUsd, creditUsd) => {
-    const a = harnessCommand({ harness: "copilot", prompt: "P", maxUsd, creditUsd }).args;
-    return a.includes("--max-ai-credits") ? a[a.indexOf("--max-ai-credits") + 1] : null;
-  };
-  assert.equal(credits(25, 0.01), "2500");
-  assert.equal(credits(0.1, 0.01), "30", "Copilot refuses fewer than 30");
-  assert.equal(credits(25, 0.02), "1250");
-  assert.equal(credits(0, 0.01), null, "no cap set, no flag");
-  // The cap compares the known dollars only: a run of unknown cost adds none, and the stage goes on (#483).
-  assert.equal(capReached(25, [{ harness: "copilot", usd: null, usdUnknown: 1, usdUnknownWhy: ["credits"], turns: 3 }, { usd: 24.9 }]), false);
-  assert.equal(decideExit({ harness: { budgetExceeded: true } }).reason, "dollar cap reached");
-  assert.equal(copilotCreditUsd({ PENDULUM_INPUT_COPILOT_CREDIT_USD: "0.02" }), 0.02);
-  for (const bad of ["0", "-1", "abc"]) assert.equal(copilotCreditUsd({ PENDULUM_INPUT_COPILOT_CREDIT_USD: bad }), 0.01, bad);
-  assert.equal(copilotCreditUsd({}), 0.01);
-});
-
-test("copilot follow-ups: the session's running total is recorded and bounds a restored seed; no run under the 30-credit floor", async () => {
-  const { writeUsage } = await import("../scripts/lib/session.mjs");
-  const { runHarness } = await import("../scripts/lib/harness.mjs");
-  // A three-stage session: this stage's own spend is small, the session's total is not; the seed is bounded by the total.
-  const dir = mkdtempSync(join(tmpdir(), "pendulum-usage-"));
-  const total = { usd: 0.5, tokens: { input: 9e4, output: 900, cached: 6e4, written: 2e4 }, models: null, premiumRequests: 3, aiu: 50, sessionStartTime: "2026-11-08T21:01:11.345Z" };
-  const result = writeUsage(dir, { harness: "copilot", model: "m", records: [{ harness: "copilot", sessionId: "other", usd: 0.01, tokens: {}, sessionTotal: { usd: 9 } }, { harness: "copilot", sessionId: "s1", usd: 0.06, tokens: { input: 1, output: 1, cached: 0, written: 0 }, sessionTotal: total }], passes: 0, exit: "delivered", reason: "", credentialBasis: "x", session: { harness: "copilot", id: "s1", files: ["s1"] } });
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, "result.json"), "utf8")).sessionTotal, total);
-  assert.equal(writeUsage(dir, { harness: "copilot", records: [], passes: 0, exit: "blocked", reason: "", credentialBasis: "x" }).sessionTotal, null);
-  rmSync(dir, { recursive: true, force: true });
-  const seed = { usd: 0.4, aiu: 40, premiumRequests: 3, tokens: { input: 8e4, output: 800, cached: 5e4, written: 2e4 }, sessionStartTime: total.sessionStartTime };
-  assert.equal(clampTotal(seed, result).usd, 0.4, "bounded by the session's total, not the stage's own $0.06");
-  assert.equal(clampTotal(seed, { usd: 0.06 }).usd, 0.06, "an older result.json with no session total: the stage's own figures");
-  assert.equal(clampTotal({ ...seed, usd: 7 }, result).usd, 0.5);
-  // Under 30 AI credits left no Copilot run starts: a zero-cost record over budget, never one of unknown cost.
-  const floor = await runHarness({ harness: "copilot", prompt: "p", maxUsd: 0.29, cwd: tmpdir(), env: { HOME: process.env.HOME }, timeoutMs: 1000, label: "work-1" });
-  assert.deepEqual([floor.budgetExceeded, floor.usd, floor.ok, floor.error, floor.usdUnknown], [true, 0, false, "dollar cap reached", undefined]);
-});

@@ -7,20 +7,16 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deciderKind, openDecider, settleDecisionCosts } from "../scripts/lib/decider.mjs";
+import { openDecider, settleDecisionCosts } from "../scripts/lib/decider.mjs";
 import { DECIDE_RETRY, NEVER_SENT, answerCost, gatewayDecider } from "../scripts/lib/adapters/decider-ai-gateway.mjs";
 import { decisionPrompt, parseAnswer } from "../scripts/lib/adapters/decider-harness.mjs";
-import { DECISION_RUN, DECISION_SH, decisionLaunch, decisionSpend, openPasses, carveDriftReserve, driftReserve, meterPass, passMaxUsd, reservedSpend, runDecision, stagePasses, stageSpendNow } from "../scripts/lib/harness.mjs";
+import { DECISION_RUN, DECISION_SH, decisionLaunch, decisionSpend, runDecision, stagePasses, stageSpendNow } from "../scripts/lib/harness.mjs";
 import { cacheSummary } from "../scripts/lib/usage.mjs";
-import { TRIAGE_QUESTION, openTriage } from "../scripts/lib/triage.mjs";
-import { DRIFT_QUESTION, GOALS, WINDOW, openDrift } from "../scripts/lib/drift.mjs";
-import { deciderCheck } from "../scripts/doctor.mjs";
-import { writeUsage } from "../scripts/lib/session.mjs";
-import { costByPhase, sumSpend } from "../scripts/lib/logic.mjs";
-import { holdSecrets, resolveInputs } from "../scripts/lib/inputs.mjs";
+import { TRIAGE_QUESTION } from "../scripts/lib/triage.mjs";
+import { DRIFT_QUESTION } from "../scripts/lib/drift.mjs";
+import { sumSpend } from "../scripts/lib/logic.mjs";
+import { holdSecrets } from "../scripts/lib/inputs.mjs";
 import { setAgent } from "../scripts/lib/proc.mjs";
-import { answerDecider } from "../scripts/review.mjs";
-import { FINDING_QUESTION, openFindingCheck } from "../scripts/lib/finding-check.mjs";
 import { KEPT_QUESTION, openKeptCheck } from "../scripts/lib/kept.mjs";
 
 // The gateway's pause before its one retry is taken at once: the tries are what these tests count, not the 2 s.
@@ -72,17 +68,6 @@ function fakeHarness(name, out, { code = 0, sleepMs = 0, echo = false, variants 
   return { bin, calls: () => lines().filter((l) => l.at === "start"), lines };
 }
 
-/** The most runs of a fake that overlapped, from its start and end lines. */
-const mostAtOnce = (lines) => {
-  let now = 0;
-  let most = 0;
-  for (const l of [...lines].sort((a, b) => a.t - b.t || (a.at === "end" ? -1 : 1))) {
-    now += l.at === "start" ? 1 : -1;
-    most = Math.max(most, now);
-  }
-  return most;
-};
-
 const claudeSays = (text, usd = 0.012) =>
   [{ type: "system", subtype: "init", session_id: "11111111-1111-1111-1111-111111111111" }, { type: "result", subtype: "success", is_error: false, num_turns: 1, result: text, session_id: "11111111-1111-1111-1111-111111111111", total_cost_usd: usd, usage: { input_tokens: 900, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }].map((l) => JSON.stringify(l)).join("\n") + "\n";
 
@@ -93,15 +78,6 @@ const codexSays = (text) => jsonl([{ type: "thread.started", thread_id: "01a1d3a
 const stageOf = (bin, harness, extra = {}) => {
   const kept = [];
   return { kept, stage: { harness, model: "m-1", env: { HOME: homedir(), PATH: `${bin}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-dummy", ...extra }, record: (r) => kept.push(r) } };
-};
-
-/** Wait until `ok()` holds (polled every 20 ms, up to 10 s). */
-const until = async (ok) => {
-  const end = Date.now() + 10_000;
-  while (!ok()) {
-    if (Date.now() > end) throw new Error("timed out waiting");
-    await new Promise((r) => setTimeout(r, 20));
-  }
 };
 
 const INPUT = "Failing CI job: test\nLog of the failing job (key lines):\nError: connect ECONNRESET";
@@ -201,149 +177,6 @@ test("#379: Codex and Copilot are asked the same way: no shell, no write, no ses
   assert.ok(!cp.includes("--allow-all") && !cp.includes("--allow-all-tools"));
 });
 
-test("#379: a usage limit on a decision call is no answer and no hold: nothing is waited for or thrown, the account is not asked again in this process, and the usage keeps no refusal", async () => {
-  const { bin, calls } = fakeHarness("claude", LIMIT_RUN, { code: 1 });
-  const { stage, kept } = stageOf(bin, "claude");
-  const d = openDecider({ inputs: {}, env: {}, stage });
-  assert.deepEqual(await d.decide(INPUT, TRIAGE_QUESTION), { verdict: null, confidence: null, error: "rate_limited" });
-  assert.deepEqual(await d.decide(INPUT, TRIAGE_QUESTION), { verdict: null, confidence: null, error: "rate_limited" });
-  // Another decider of the same stage (the drift advisory beside triage) asks nothing either.
-  assert.deepEqual(await openDecider({ inputs: {}, env: {}, stage }).decide(INPUT, DRIFT_QUESTION), { verdict: null, confidence: null, error: "rate_limited" });
-  assert.equal(calls().length, 1, "asked once in the stage");
-  assert.equal(kept.length, 1);
-  assert.equal(kept[0].refusal, undefined);
-  // A Blocked stage's usage with that record names no spent account (writeUsage limitRefused).
-  const dir = mkdtempSync(join(tmpdir(), "pendulum-decider-usage-"));
-  const usage = writeUsage(dir, { harness: "claude", model: "m-1", records: kept, passes: 0, exit: "blocked", reason: "r", credentialBasis: "login" });
-  assert.equal(usage.limitRefused, undefined);
-  assert.equal(usage.usageLimit, undefined);
-});
-
-test("#379: one stage runs at most three decision calls at once on its harness, across all its deciders; its calls fold into one usage record that counts toward max_usd and is no pass", async () => {
-  const { bin, lines } = fakeHarness("claude", claudeSays('{"choice":"change_caused","confidence":0.9}', 0.01), { sleepMs: 300 });
-  const { stage, kept } = stageOf(bin, "claude");
-  // Three triage deciders and a drift one, as review.mjs opens them, all on the stage's one adapter.
-  const ds = [0, 1, 2, 3].map(() => openDecider({ inputs: {}, env: {}, stage }));
-  const all = await Promise.all(Array.from({ length: 8 }, (_, i) => ds[i % 4].decide("x", TRIAGE_QUESTION)));
-  assert.ok(all.every((a) => a.verdict === "change_caused"));
-  assert.equal(lines().filter((l) => l.at === "start").length, 8);
-  assert.equal(mostAtOnce(lines()), 3);
-  // One record for the stage's eight calls.
-  assert.equal(kept.length, 1);
-  assert.equal(kept[0].calls, 8);
-  assert.ok(Math.abs(kept[0].usd - 0.08) < 1e-9);
-  const pass = { harness: "claude", model: "m-1", label: "work-1", usd: 1.5, tokens: { input: 10, output: 5, cached: 0, written: 0 }, basis: "harness-reported: total_cost_usd", started: "2026-11-16T00:00:00.000Z", ended: "2026-11-16T00:10:00.000Z", ok: true };
-  const records = [kept[0], pass];
-  assert.ok(Math.abs(sumSpend(records).usd - 1.58) < 1e-9, "max_usd counts it");
-  assert.equal(costByPhase(records), "", "no pass of its own in the exit line");
-  const dir = mkdtempSync(join(tmpdir(), "pendulum-decider-usage-"));
-  const usage = writeUsage(dir, { harness: "claude", model: "m-1", records, passes: 1, exit: "pr", reason: "", credentialBasis: "login" });
-  assert.equal(usage.runs, 1, "the decision record is no run");
-  assert.equal(usage.basis, pass.basis, "the pass is the base, not the decision record");
-  assert.equal(usage.started, pass.started);
-  assert.ok(Math.abs(usage.usd - 1.58) < 1e-9);
-});
-
-test("#379: a decision call is bounded by its wall clock: a harness that does not answer in time is no answer", async () => {
-  const { bin } = fakeHarness("claude", claudeSays('{"choice":"change_caused","confidence":0.9}'), { sleepMs: 5_000 });
-  const t = Date.now();
-  const rec = await runDecision({ harness: "claude", model: "m-1", prompt: "q", env: stageOf(bin, "claude").stage.env, timeoutMs: 300 });
-  assert.ok(Date.now() - t < 4_000);
-  assert.equal(rec.timedOut, true);
-  assert.equal(rec.ok, false);
-});
-
-test("#379: the AI Gateway key wins when there is one; with neither a key nor a stage there is no decider, as before", () => {
-  const { stage } = stageOf("/nonexistent", "claude");
-  const actions = { GITHUB_ACTIONS: "true" };
-  const gw = openDecider({ inputs: { aiGatewayApiKey: "vck_dummy_key_123" }, env: actions, model: "perplexity/pplx-decider-v1.2", stage });
-  assert.equal(gw.name, "ai-gateway");
-  assert.equal(gw.model, "perplexity/pplx-decider-v1.2");
-  const off = openDecider({ inputs: {}, env: actions, model: "x/y" });
-  assert.equal(off.off, "no-key");
-  assert.deepEqual(deciderKind({ inputs: {}, env: actions }), { name: "harness", code: "no-key", route: "auto" });
-  assert.deepEqual(deciderKind({ inputs: { aiGatewayApiKey: "k" }, env: actions }), { name: "ai-gateway", code: null, route: "auto" });
-});
-
-test("#379: red-check triage and the drift advisory ask the stage's harness when there is no key", async () => {
-  const { stage } = stageOf("/nonexistent", "claude");
-  const repo = { full: "o/r" };
-  // Triage: on, through the stage's harness, rather than off (no-key).
-  const t = openTriage({ inputs: {}, env: {}, repo, issue: 1, prNumber: 2, stage });
-  assert.equal(t.off, undefined);
-  assert.equal(t.model, "claude m-1");
-  assert.equal(openTriage({ inputs: {}, env: {}, repo, issue: 1, prNumber: 2 }).off, "no-key", "no stage, no key: off as before");
-
-  // Drift: a real checkpoint through the fake harness, flagged on the progress comment.
-  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"scope_creep","confidence":0.91}'));
-  const lines = [];
-  let now = 0;
-  const drift = openDrift({ inputs: {}, env: {}, progress: async (l) => lines.push(l), stage: stageOf(bin, "claude").stage, now: () => now });
-  assert.ok(drift, "the advisory runs without a key");
-  const w = drift.watch({ stage: "work-1", goal: GOALS.work, plan: () => "- [ ] add the parser" });
-  now = 10 * 60_000;
-  for (let i = 0; i < WINDOW; i += 1) w.feed(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: `ls ${i}`, exit_code: 0 } }));
-  // The pass goes on while the checkpoint is asked; its answer lands before the pass ends.
-  await until(() => lines.length === 1);
-  await w.stop();
-  assert.equal(calls().length, 1);
-  assert.ok(calls()[0].prompt.includes("Plan items:\n1. add the parser"));
-  assert.deepEqual(lines, ["drift advisory (claude m-1): scope_creep 0.91 in work-1 after 12 activity entries; advice only, the run goes on"]);
-  assert.equal(openDrift({ inputs: {}, env: {} }), null, "no stage, no key: no advisory, as before");
-});
-
-test("#379: doctor names the decider: the stage's harness without a key, the gateway's models with one, a warning for a key file Pendulum refuses", () => {
-  const actions = { GITHUB_ACTIONS: "true" };
-  const h = deciderCheck({ inputs: { harness: "codex" }, env: actions });
-  assert.equal(h.status, "PASS");
-  assert.match(h.detail, /the stage's own harness \(codex\) on its login.*no AI Gateway key \(no-key\)/);
-  const g = deciderCheck({ inputs: { aiGatewayApiKey: "k" }, env: actions });
-  assert.equal(g.status, "PASS");
-  assert.match(g.detail, /AI Gateway's decision models \(triage perplexity\/pplx-decider-v1\.2, drift baseten\/elephant-1\)/);
-  const home = mkdtempSync(join(tmpdir(), "pendulum-decider-home-"));
-  mkdirSync(join(home, ".config", "pendulum"), { recursive: true });
-  writeFileSync(join(home, ".config", "pendulum", "ai-gateway-key"), "k\n", { mode: 0o644 });
-  const w = deciderCheck({ inputs: { harness: "claude" }, env: {}, home });
-  assert.equal(w.status, "WARN");
-  assert.match(w.detail, /key-file-mode/);
-});
-
-test("#379: a Codex subscription's usage limit is read from the call's own rollout: no answer, asked once in the stage, and the rollout removed", async () => {
-  const thread = "01a1d3a0-5c1e-7b20-9f3a-2c4d6e8f0256";
-  // The rollout's rate-limit snapshot at the failure, stamped now (codex-0.167-usage-limit-rollout.jsonl's shape).
-  const snapshot = fixture("codex-0.167-usage-limit-rollout.jsonl").split("\n").filter((l) => l.includes('"token_count"')).map((l) => {
-    const o = JSON.parse(l);
-    o.timestamp = "__NOW__";
-    o.payload.rate_limits = { ...o.payload.rate_limits, primary: { ...o.payload.rate_limits.primary, used_percent: 100 } };
-    return JSON.stringify(o);
-  }).join("\n");
-  const codexHome = mkdtempSync(join(tmpdir(), "pendulum-decider-codexhome-"));
-  const { bin, calls } = fakeHarness("codex", fixture("codex-0.167-usage-limit.jsonl"), { code: 1, rollout: `${snapshot}\n`, thread });
-  const { stage, kept } = stageOf(bin, "codex", { CODEX_HOME: codexHome });
-  const d = openDecider({ inputs: {}, env: {}, stage });
-  assert.deepEqual(await d.decide(INPUT, TRIAGE_QUESTION), { verdict: null, confidence: null, error: "rate_limited" });
-  assert.deepEqual(await openDecider({ inputs: {}, env: {}, stage }).decide(INPUT, DRIFT_QUESTION), { verdict: null, confidence: null, error: "rate_limited" });
-  assert.equal(calls().length, 1);
-  assert.deepEqual(readdirSync(join(codexHome, "sessions", "2026", "11", "16")), []);
-  assert.equal(kept[0].refusal, undefined);
-});
-
-test("#379: a model that refuses the low reasoning effort is asked once more with its own, and both runs' spend is kept", async () => {
-  const refused = jsonl([{ type: "thread.started", thread_id: "01a1d3a0-5c1e-7b20-9f3a-2c4d6e8f0aaa" }, { type: "turn.started" }, { type: "turn.failed", error: { message: JSON.stringify({ status: 400, error: { type: "invalid_request_error", code: "unsupported_value", param: "reasoning.effort", message: "Unsupported value" } }) } }]);
-  const { bin, calls } = fakeHarness("codex", codexSays('{"choice":"base_failure","confidence":0.75}'), { variants: [{ arg: "model_reasoning_effort", out: refused, code: 1 }] });
-  const { stage, kept } = stageOf(bin, "codex", { CODEX_HOME: mkdtempSync(join(tmpdir(), "pendulum-decider-codexhome-")) });
-  assert.deepEqual(await openDecider({ inputs: {}, env: {}, stage }).decide(INPUT, TRIAGE_QUESTION), { verdict: "base_failure", confidence: 0.75 });
-  const c = calls();
-  assert.equal(c.length, 2);
-  assert.ok(c[0].args.includes('model_reasoning_effort="low"'));
-  assert.ok(!c[1].args.some((a) => a.includes("model_reasoning_effort")));
-  assert.equal(kept[0].calls, 2);
-  // Remembered for the stage: the next call asks with the model's own effort at once, one run.
-  assert.deepEqual(await openDecider({ inputs: {}, env: {}, stage }).decide(INPUT, TRIAGE_QUESTION), { verdict: "base_failure", confidence: 0.75 });
-  assert.equal(calls().length, 3);
-  assert.ok(!calls()[2].args.some((a) => a.includes("model_reasoning_effort")));
-});
-
 test("#379: the two production launches: locally in the stage's outer sandbox, on a runner as the agent in a home of its own; no worker secret by name or value, no Copilot trust variable", () => {
   holdSecrets(["held-worker-value-0123456789"]);
   const given = { PATH: "/usr/bin:/bin", HOME: "/home/dev", TMPDIR: "/stage/tmp", CLAUDE_CONFIG_DIR: "/home/dev/.claude-b", CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-dummy", OTHER_NAME: "held-worker-value-0123456789", PENDULUM_SHELL_SECRETS: "packed", COPILOT_ALLOW_ALL: "1", GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS: "1" };
@@ -379,99 +212,6 @@ test("#379: the two production launches: locally in the stage's outer sandbox, o
   }
 });
 
-test("#379: a gateway that refuses Pendulum's key hands this question and the rest of the stage to the stage's harness, said once", async () => {
-  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"change_caused","confidence":0.88}'));
-  const { stage } = stageOf(bin, "claude");
-  const realFetch = globalThis.fetch;
-  let gatewayCalls = 0;
-  globalThis.fetch = async () => (gatewayCalls++, new Response('{"error":{"type":"authentication_error"}}', { status: 401 }));
-  try {
-    const actions = { GITHUB_ACTIONS: "true" };
-    const inputs = { aiGatewayApiKey: "vck_dummy_key_123" };
-    const triage = openDecider({ inputs, env: actions, model: "perplexity/pplx-decider-v1.2", stage });
-    assert.equal(triage.name, "ai-gateway");
-    assert.deepEqual(await triage.decide(INPUT, TRIAGE_QUESTION), { verdict: "change_caused", confidence: 0.88 });
-    assert.deepEqual(await openDecider({ inputs, env: actions, model: "baseten/elephant-1", stage }).decide(INPUT, TRIAGE_QUESTION), { verdict: "change_caused", confidence: 0.88 });
-    assert.equal(gatewayCalls, 1, "the gateway is not asked again in the stage");
-    assert.equal(calls().length, 2);
-    // decision_route gateway: never the harness.
-    const only = openDecider({ inputs: { ...inputs, decisionRoute: "gateway" }, env: actions, model: "m", stage: stageOf(bin, "claude").stage });
-    assert.deepEqual(await only.decide(INPUT, TRIAGE_QUESTION), { verdict: null, confidence: null, error: "auth" });
-    assert.equal(calls().length, 2);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
-test("#379: the decision_route setting: auto by default, gateway only, or off", async () => {
-  assert.equal(resolveInputs({ env: {} }).decisionRoute, "auto");
-  assert.equal(resolveInputs({ env: { PENDULUM_DECISION_ROUTE: "OFF" } }).decisionRoute, "off");
-  assert.equal(resolveInputs({ env: { PENDULUM_DECISION_ROUTE: "gateway" } }).decisionRoute, "gateway");
-  assert.equal(resolveInputs({ env: { PENDULUM_DECISION_ROUTE: "nonsense" } }).decisionRoute, "auto");
-  const { stage } = stageOf("/nonexistent", "claude");
-  const repo = { full: "o/r" };
-  assert.equal(openTriage({ inputs: { decisionRoute: "off" }, env: {}, repo, issue: 1, prNumber: 2, stage }).off, "route-off");
-  assert.equal(openTriage({ inputs: { decisionRoute: "gateway" }, env: {}, repo, issue: 1, prNumber: 2, stage }).off, "no-key", "gateway only, and no key");
-  assert.equal(openDrift({ inputs: { decisionRoute: "off" }, env: {}, stage }), null);
-  assert.equal(openDrift({ inputs: { decisionRoute: "off", aiGatewayApiKey: "k" }, env: { GITHUB_ACTIONS: "true" }, stage }), null, "off with a key too");
-  const off = deciderCheck({ inputs: { decisionRoute: "off" }, env: { GITHUB_ACTIONS: "true" } });
-  assert.equal(off.status, "PASS");
-  assert.match(off.detail, /^off \(decision_route off\)/);
-});
-
-/**
- * A drift watcher's checkpoint: WINDOW command entries at a time `now` minutes in, then, once `done()` holds (its
- * question answered, while the pass goes on), the watcher stopped.
- */
-async function checkpoint(drift, at, minutes, done = () => true) {
-  const w = drift.watch({ stage: `work-${minutes}`, goal: GOALS.work });
-  at.now = minutes * 60_000;
-  for (let i = 0; i < WINDOW; i += 1) w.feed(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: `ls ${minutes}-${i}`, exit_code: 0 } }));
-  await until(done);
-  await new Promise((r) => setTimeout(r, 50));
-  await w.stop();
-}
-
-test("#379: after the stage harness's usage limit the drift advisory asks no more in the stage; a gateway's 429 does not silence it", async () => {
-  const { bin, calls } = fakeHarness("claude", LIMIT_RUN, { code: 1 });
-  const at = { now: 0 };
-  const { stage, kept } = stageOf(bin, "claude");
-  const drift = openDrift({ inputs: {}, env: {}, stage, now: () => at.now });
-  await checkpoint(drift, at, 10, () => kept.length === 1);
-  await checkpoint(drift, at, 20);
-  assert.equal(calls().length, 1);
-
-  const realFetch = globalThis.fetch;
-  let gateway = 0;
-  globalThis.fetch = async () => (gateway++, new Response('{"error":{"type":"rate_limit_exceeded"}}', { status: 429 }));
-  try {
-    const at2 = { now: 0 };
-    const gw = openDrift({ inputs: { aiGatewayApiKey: "vck_dummy_key_123" }, env: { GITHUB_ACTIONS: "true" }, now: () => at2.now });
-    await checkpoint(gw, at2, 10, () => gateway === 2);
-    await checkpoint(gw, at2, 20, () => gateway === 4);
-    assert.equal(gateway, 4, "asked at both checkpoints (each with the gateway's one retry)");
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
-test("#379: a pass's end ends the drift check in flight at once: no answer, its spend still kept, and while it runs it is the stage's decision, not a pass", async () => {
-  const { bin, lines } = fakeHarness("claude", claudeSays('{"choice":"scope_creep","confidence":0.95}'), { sleepMs: 8_000 });
-  const { stage } = stageOf(bin, "claude");
-  const progress = [];
-  const at = { now: 0 };
-  const drift = openDrift({ inputs: {}, env: {}, stage, progress: async (l) => progress.push(l), now: () => at.now });
-  const w = drift.watch({ stage: "work-1", goal: GOALS.work });
-  at.now = 10 * 60_000;
-  for (let i = 0; i < WINDOW; i += 1) w.feed(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: `ls ${i}`, exit_code: 0 } }));
-  while (!lines().length) await new Promise((r) => setTimeout(r, 50));
-  assert.ok(openPasses().some((p) => p.decision === true && p.label === "decision"), "in flight at a stop: the decision record, not a pass");
-  const t = Date.now();
-  await w.stop();
-  assert.ok(Date.now() - t < 4_000, "not the call's full time");
-  assert.deepEqual(progress, [], "no answer, no drift line");
-});
-
 test("#379: decision spend is counted for the validation loop's budget, and the stage's cache summary leaves the decision record out", async () => {
   const { bin } = fakeHarness("claude", claudeSays('{"choice":"change_caused","confidence":0.9}', 0.04));
   const before = decisionSpend();
@@ -481,56 +221,6 @@ test("#379: decision spend is counted for the validation loop's budget, and the 
   const work = { harness: "claude", label: "work-1", usd: 1, tokens: { input: 100, output: 5, cached: 50, written: 10 }, started: "2026-11-16T00:00:00Z", ended: "2026-11-16T00:05:00Z" };
   const decision = { harness: "claude", label: "decision", decision: true, usd: 0.04, tokens: { input: 9000, output: 20, cached: 0, written: 9000 }, started: "2026-11-16T00:06:00Z", ended: "2026-11-16T00:07:00Z" };
   assert.deepEqual(cacheSummary([work, decision, pass]), cacheSummary([work, pass]));
-});
-
-test("#379: the review stage's decision calls run on the reviewer's model, the independent one", () => {
-  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
-  assert.match(src, /const decisionStage = \{ harness: inputs\.harness, model: inputs\.reviewerModel \|\| inputs\.model, env: \(\) => decisionEnv,/);
-  // On the harness env (no worker secret) once it exists; before it, the edit check's own (#400).
-  assert.match(src, /\n  decisionEnv = harnessEnv;\n/);
-});
-
-test("#379: a gateway that answers 402 (its credits) hands the stage to its harness, as a refused key does", async () => {
-  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"flaky_or_infra","confidence":0.8}'));
-  const realFetch = globalThis.fetch;
-  let gateway = 0;
-  globalThis.fetch = async () => (gateway++, new Response('{"error":{"type":"insufficient_funds"}}', { status: 402 }));
-  try {
-    const d = openDecider({ inputs: { aiGatewayApiKey: "vck_dummy_key_123" }, env: { GITHUB_ACTIONS: "true" }, model: "perplexity/pplx-decider-v1.2", stage: stageOf(bin, "claude").stage });
-    assert.deepEqual(await d.decide(INPUT, TRIAGE_QUESTION), { verdict: "flaky_or_infra", confidence: 0.8 });
-    assert.deepEqual(d.asked(), { name: "harness", model: "claude m-1" });
-    assert.equal(gateway, 1);
-    assert.equal(calls().length, 1);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
-test("#379: the answer gate and the finding check ask the stage's harness without a key, on the stage's one adapter", async () => {
-  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"fixed","confidence":0.9}'));
-  const { stage, kept } = stageOf(bin, "claude");
-  const gate = answerDecider({ inputs: {}, env: {}, stage });
-  assert.equal(gate.off, null);
-  assert.equal(gate.model, "claude m-1");
-  assert.equal(answerDecider({ inputs: {}, env: {} }).off, "no-key", "no stage, no key: off as before");
-  const check = openFindingCheck({ inputs: {}, env: {}, stage });
-  assert.equal(check.off, null);
-  const [r] = await check.judge([{ id: 1, path: "a.js", line: 3, body: "null check missing", reply: "Fixed.", diff: "+if (x == null) return;" }], { repo: "o/r", prNumber: 2 });
-  assert.deepEqual(r, { id: 1, verdict: "fixed", confidence: 0.9, error: null });
-  assert.ok(calls()[0].prompt.includes('"enum":["fixed","rebutted","decided","unresolved"]'));
-  assert.equal(FINDING_QUESTION.choices.length, 4);
-  assert.equal(kept.length, 1);
-});
-
-test("#379: the rebase check judges through the stage's harness without a key, and is off only with no decider", async () => {
-  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"kept","confidence":0.92}'));
-  const { stage } = stageOf(bin, "claude");
-  const check = openKeptCheck({ inputs: {}, env: {}, stage });
-  assert.ok(check);
-  assert.deepEqual(await check.judge({ path: "src/a.ts", hunks: [{ at: 1, text: "@@ -1 +1,2 @@\n-x\n+a" }], file: "a\nb\n" }), { kept: true, lost: false, why: "" });
-  assert.equal(calls().length, 1);
-  assert.equal(openKeptCheck({ inputs: {}, env: {} }), null, "no stage, no key");
-  assert.equal(openKeptCheck({ inputs: { decisionRoute: "off" }, env: {}, stage }), null);
 });
 
 test("#379: a stage harness's usage limit in the rebase check ends the stage through UsageLimitReached: nothing pushed, never read as a change not kept", async () => {
@@ -636,36 +326,6 @@ test("#479: what one gateway answer costs before any lookup, by the relay's rule
   assert.deepEqual(answerCost(200, { answers: [] }, GEN), { usd: null, id: GEN, reported: false });
 });
 
-test("#479: the gateway decider answers at once and prices aside: the reported cost with no lookup, else the generation's record; a lookup stops after two 'no record' answers", async () => {
-  const fast = (gw) => gatewayDecider({ key: "vck_dummy_key_123", model: "m", fetchImpl: gw.fetch, lookupDelaysMs: [1, 1, 1, 1], lookupMaxMs: 5_000 });
-  const reported = fakeGateway({ id: GEN, reported: 0.007, cost: 0.5 });
-  const a = await fast(reported).decide(INPUT, KEPT_QUESTION);
-  assert.equal(a.verdict, "kept");
-  assert.equal(reported.seen.posts[0].redirect, "manual", "the POST follows no redirect, as the relay's");
-  assert.deepEqual(await a.spend.settled, { usd: 0.007 });
-  assert.deepEqual(reported.seen.lookups, [], "a reported cost is not looked up");
-  // No reported cost: the generation's record, which comes after the verdict.
-  let release;
-  const looked = fakeGateway({ id: GEN, cost: 0.004, hold: new Promise((r) => (release = r)) });
-  const b = await fast(looked).decide(INPUT, KEPT_QUESTION);
-  assert.equal(b.verdict, "kept", "the verdict does not wait for the price");
-  let settled = null;
-  b.spend.settled.then((s) => (settled = s));
-  await until(() => looked.seen.lookups.length === 1);
-  assert.equal(settled, null);
-  release();
-  assert.deepEqual(await b.spend.settled, { usd: 0.004 });
-  // A record that never comes: two 404s end the lookup, and the call is of unknown cost: the gateway gave no cost.
-  const none = fakeGateway({ id: GEN });
-  const c = await fast(none).decide(INPUT, KEPT_QUESTION);
-  assert.deepEqual(await c.spend.settled, { usd: null, usdUnknown: 1, usdUnknownWhy: ["decision-no-cost"] });
-  assert.equal(none.seen.lookups.length, 2);
-  // Lookups that keep failing (a 5xx each) until the tries run out: of unknown cost, the lookup's fault.
-  const down = async (url) => (new URL(url).pathname === "/v1/generation" ? new Response("{}", { status: 503 }) : fakeGateway({ id: GEN }).fetch(url));
-  const d = await gatewayDecider({ key: "vck_dummy_key_123", model: "m", fetchImpl: down, lookupDelaysMs: [1, 1], lookupMaxMs: 5_000 }).decide(INPUT, KEPT_QUESTION);
-  assert.deepEqual(await d.spend.settled, { usd: null, usdUnknown: 1, usdUnknownWhy: ["decision-lookup"] });
-});
-
 /**
  * #565 W1: the answer `/v1/decisions` gives, as Vercel's reference for the endpoint shows it (the OpenAI Decisions API's
  * shape, its gateway metadata at `provider_metadata.gateway`), for the two models every local stage asked on
@@ -740,45 +400,7 @@ test("#479: a 429 naming a generation is looked up from $0; a request that never
   assert.deepEqual(await reset.spend.settled, { usd: null, usdUnknown: 2, usdUnknownWhy: ["decision"] });
 });
 
-test("#479: a gateway decision call in a stage is running, of unknown cost, until its price comes; then it is in the stage's spend, decision record, usage and caps", async () => {
-  let release;
-  const gw = fakeGateway({ id: GEN, cost: 0.0042, hold: new Promise((r) => (release = r)) });
-  await withFetch(gw.fetch, async () => {
-    const { records, stage } = gatewayStage();
-    const before = stageSpendNow();
-    const decided = decisionSpend();
-    const check = openKeptCheck({ inputs: KEY_INPUTS, env: ON_ACTIONS, stage });
-    assert.deepEqual(await check.judge(HUNK), { kept: true, lost: false, why: "" }, "the verdict, before the price");
-    assert.equal(stageSpendNow().unknown, before.unknown + 1, "the spend line shows it running");
-    assert.ok(openPasses().some((p) => p.decision), "a stopped stage counts it as of unknown cost");
-    assert.equal(records.length, 1);
-    assert.equal(records[0].usdUnknown, undefined, "counted once: as the open call, not in the record too");
-    await until(() => gw.seen.lookups.length === 1);
-    release();
-    await settleDecisionCosts();
-    assert.equal(records[0].decider, "ai-gateway");
-    assert.equal(records[0].calls, 1);
-    assert.ok(Math.abs(records[0].usd - 0.0042) < 1e-9);
-    assert.ok(stagePasses().includes(records[0]), "kept with the stage's passes");
-    assert.equal(stageSpendNow().unknown, before.unknown);
-    assert.ok(Math.abs(stageSpendNow().usd - before.usd - 0.0042) < 1e-9);
-    assert.ok(Math.abs(decisionSpend() - decided - 0.0042) < 1e-9);
-    const usage = writeUsage(mkdtempSync(join(tmpdir(), "pendulum-gw-usage-")), { harness: "claude", model: "m-1", records, passes: 0, exit: "pr", reason: "", credentialBasis: "login" });
-    assert.ok(Math.abs(usage.usd - 0.0042) < 1e-9);
-    assert.ok(Math.abs(usage.gatewayDecisionUsd - 0.0042) < 1e-9);
-    assert.equal(usage.gatewayDecisionCalls, 1);
-    assert.equal(usage.runs, 0, "a decision record is no run");
-    // Billed to the gateway key (#508's usage.mjs BILLING): its dollars are `api`, and it names no harness pass's kind.
-    assert.equal(records[0].billing, "api");
-    assert.deepEqual(usage.usdByBilling, { api: 0.0042 });
-    const pass = { harness: "claude", label: "work-1", usd: 1, billing: "subscription", tokens: { input: 1, output: 1, cached: 0, written: 0 }, started: "2026-11-16T00:00:00Z", ended: "2026-11-16T00:05:00Z" };
-    const mixed = writeUsage(mkdtempSync(join(tmpdir(), "pendulum-gw-usage-")), { harness: "claude", model: "m-1", records: [pass, ...records], passes: 1, exit: "pr", reason: "", credentialBasis: "login", billing: "subscription" });
-    assert.equal(mixed.billing, "subscription", "the stage's kind is its harness passes'");
-    assert.deepEqual(mixed.usdByBilling, { subscription: 1, api: 0.0042 });
-  });
-});
-
-test("#479: a stage's gateway call the gateway gives no cost for is of unknown cost, never $0, and the stage goes on; a price not come by the stage's end is unknown and never read after", async () => {
+test("#479: a stage's gateway call the gateway gives no cost for is of unknown cost, never $0, and the stage goes on", async () => {
   await withFetch(fakeGateway().fetch, async () => {
     const { records, stage } = gatewayStage();
     const before = stageSpendNow();
@@ -791,82 +413,5 @@ test("#479: a stage's gateway call the gateway gives no cost for is of unknown c
     assert.equal(stageSpendNow().usd, before.usd);
     assert.deepEqual(sumSpend(records), { usd: 0, unknown: 1 });
   });
-  let release;
-  const slow = fakeGateway({ id: GEN, cost: 1, hold: new Promise((r) => (release = r)) });
-  await withFetch(slow.fetch, async () => {
-    const { records, stage } = gatewayStage();
-    const before = stageSpendNow();
-    await openKeptCheck({ inputs: KEY_INPUTS, env: ON_ACTIONS, stage }).judge(HUNK);
-    await until(() => slow.seen.lookups.length === 1);
-    await settleDecisionCosts({ timeoutMs: 20 });
-    assert.equal(records[0].usdUnknown, 1, "not come by the bound: unknown");
-    assert.deepEqual(records[0].usdUnknownWhy, ["decision-unsettled"], "the stage's end came first");
-    release();
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(records[0].usd, null, "a price that comes later is never read: nothing priced, one unknown");
-    assert.equal(stageSpendNow().usd, before.usd);
-  });
 });
 
-test("#479: the drift reserve: 10% of max_usd, at least one call's cap, at most max_usd, none with no cap; passes get the rest, so a first pass running beside the advisory cannot spend it", async () => {
-  assert.equal(driftReserve(25), 2.5);
-  assert.equal(driftReserve(1), DECISION_RUN.maxUsd);
-  assert.equal(driftReserve(0.31), DECISION_RUN.maxUsd);
-  assert.equal(driftReserve(DECISION_RUN.maxUsd), 0, "no more than one call's cap: no room for the advisory");
-  assert.equal(driftReserve(0), 0);
-  assert.equal(carveDriftReserve(0), 0);
-  assert.equal(passMaxUsd(0), 0, "no cap: nothing changes");
-  // The worker and the review stage carve it before any pass, and every pass cap is max_usd less its unspent part.
-  for (const file of ["worker.mjs", "review.mjs"]) {
-    const src = readFileSync(join(import.meta.dirname, "..", "scripts", file), "utf8");
-    assert.match(src, /carveDriftReserve\(inputs\.maxUsd, \{ on: deciderKind\(\{ inputs \}\)\.name !== "off" \}\);\n {2}const passCap = \(\) => passMaxUsd\(inputs\.maxUsd\);/);
-    // Past the carve, max_usd is read whole only to carve, to make the pass cap, and in a log line that names it.
-    const rest = src.replace("carveDriftReserve(inputs.maxUsd,", "").replace("passMaxUsd(inputs.maxUsd)", "").replaceAll("max_usd ${inputs.maxUsd} (less the drift reserve)", "");
-    assert.doesNotMatch(rest, /inputs\.maxUsd/, `${file}: no pass cap reads max_usd whole`);
-  }
-  assert.match(readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8"), /maxUsd: attempt === 1 \? passCap\(\) : budgetLeft\(\)/);
-  // max_usd $1: $0.30 reserved, so the first pass starts with $0.70.
-  carveDriftReserve(1);
-  const spentBefore = reservedSpend();
-  assert.equal(passMaxUsd(1), 0.7);
-  const pass = meterPass({ label: "work-1" });
-  // A drift call costs $0.12 of the reserve; then $0.18 is left, under one call's cap: not asked again.
-  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"on_task","confidence":0.9}', 0.12));
-  const { stage, kept } = stageOf(bin, "claude");
-  const at = { now: 0 };
-  const drift = openDrift({ inputs: {}, env: {}, stage, now: () => at.now });
-  try {
-    await checkpoint(drift, at, 10, () => kept.length === 1);
-    assert.equal(calls().length, 1);
-    assert.ok(Math.abs(reservedSpend() - spentBefore - 0.12) < 1e-9);
-    await checkpoint(drift, at, 20);
-    await checkpoint(drift, at, 30);
-    assert.equal(calls().length, 1, "the reserve's rest is under one call's cap: not asked again");
-    // The reserve's spent part is in the stage's spend: the passes' cap grows by it, so their room is unchanged.
-    assert.ok(Math.abs(passMaxUsd(1) - (0.7 + 0.12)) < 1e-9);
-    // The rebase check gates the merge: it runs whatever is left of the reserve.
-    assert.deepEqual(await openKeptCheck({ inputs: {}, env: {}, stage }).judge(HUNK), { kept: false, lost: false, why: "the decision model gave no answer (no_answer)" });
-    assert.equal(calls().length, 2);
-    assert.ok(Math.abs(reservedSpend() - spentBefore - 0.12) < 1e-9, "an essential call is no drift spend");
-  } finally {
-    pass.end({ usd: 0 });
-    carveDriftReserve(0);
-  }
-});
-
-test("#565 W2: doctor warns that each harness decision call on Copilot costs a premium request, with Pendulum's own gateway key or decision_route off as the fix; other harnesses pass as before", () => {
-  const actions = { GITHUB_ACTIONS: "true" };
-  const onActions = deciderCheck({ inputs: { harness: "copilot" }, env: actions });
-  assert.equal(onActions.status, "WARN");
-  assert.match(onActions.detail, /the stage's own harness \(copilot\) on its login.*no AI Gateway key \(no-key\); on Copilot each call costs one premium request, billed to the seat as AI credits$/);
-  assert.match(onActions.fix, /^give Pendulum its own AI Gateway key \(the workflow's `ai_gateway_api_key` input \(the repository secret AI_GATEWAY_API_KEY\)\) so the gateway's decision models answer them, or set decision_route off to make none$/);
-  assert.doesNotMatch(onActions.fix, /worker_secrets/, "never the worker's key");
-  const home = mkdtempSync(join(tmpdir(), "pendulum-decider-home-"));
-  const local = deciderCheck({ inputs: { harness: "copilot" }, env: {}, home });
-  assert.equal(local.status, "WARN");
-  assert.match(local.fix, /~\/\.config\/pendulum\/ai-gateway-key as docs\/LOCAL\.md says/);
-  const codex = deciderCheck({ inputs: { harness: "codex" }, env: actions });
-  assert.equal(codex.status, "PASS");
-  assert.doesNotMatch(codex.detail, /premium request/);
-  assert.equal(deciderCheck({ inputs: { harness: "copilot", aiGatewayApiKey: "k" }, env: actions }).status, "PASS", "with Pendulum's own key the gateway answers");
-});

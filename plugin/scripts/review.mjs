@@ -310,7 +310,7 @@ export function reviewOverlap({ run, progress, head, conflicted = async () => fa
       settled = true;
       decide(false);
       if (!r.green && !r.held && !r.aborted) end();
-      if (reviewing && !reviewerEnded && !r.aborted) await progress(`required checks on ${short()} ${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer runs`, { step: "ci", sha: head() || null, outcome: r.green ? "passed" : r.held ? "failed" : "finished" });
+      if (reviewing && !reviewerEnded && !r.aborted) await progress(`required checks on ${short()} ${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer runs`, { step: "ci", sha: head() || null, outcome: r.green ? "passed" : r.held ? "failed" : "finished", aside: true });
       return r;
     },
     (e) => {
@@ -1679,6 +1679,7 @@ async function main() {
     eventsFile,
     label: "review",
     onLine: reviewLive?.onLine,
+    onPass: reviewLive?.onPass,
     // The pass beside it ending the stage (a conflict, checks that never start, a red that stays) ends the reviewer too.
     ...(overlap ? { signal: overlap.signal } : {}),
   });
@@ -1773,6 +1774,7 @@ async function main() {
             env: harnessEnv,
             eventsFile,
             onLine: foundationLive.onLine,
+            onPass: foundationLive.onPass,
             signal: overlap?.signal ?? null,
           }),
         );
@@ -1965,6 +1967,7 @@ async function main() {
       fed = answerFed({ fresh: !resume, decisions, listed, afterPush: afterPush.length > 0 });
       return {
         onLine: answerLive.onLine,
+        onPass: answerLive.onPass,
         onResume: answerLive.onResume,
         ...workerRun(inputs),
         resume,

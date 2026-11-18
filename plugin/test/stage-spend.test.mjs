@@ -151,6 +151,32 @@ test("a stage killed after a real pass leaves that pass's reported dollars in it
   assert.deepEqual(spendOf(gh.progress.at(-1)), { usd, unknown: 0 }, "daily_usd counts it");
 });
 
+test("a pass's record joins the stage's passes as its dollars join the stage's spend: no write between counts one without the other", async () => {
+  const root = mkdtempSync(join(tmpdir(), "spend-booked-"));
+  mkdirSync(join(root, "bin"));
+  fakeCodex(join(root, "bin"));
+  // A relayed pass: its end waits on the gateway's last lookups (relay.endPass) after its dollars are booked. What a
+  // progress write would read then: the stage's spend so far and its passes.
+  const script = `
+    import { runHarness, stagePasses, stageSpendNow } from ${JSON.stringify(LIB("harness.mjs"))};
+    import { setActiveRelay } from ${JSON.stringify(LIB("gateway-relay.mjs"))};
+    let seen = null;
+    const relay = { token: "pendulum-relay-test", url: "http://127.0.0.1:9", beginPass() {}, totals: () => ({ usd: 0 }), endPass: async () => {
+      seen = { usd: stageSpendNow().usd, running: stageSpendNow().running, passes: stagePasses().map((p) => [p.label, p.usd, !!p.started, !!p.ended, p.exitCode, p.timedOut, p.ok]) };
+      return { usd: 0, calls: 0, unknown: 0, pings: 1 };
+    } };
+    setActiveRelay(relay);
+    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: process.env.FAKE_STATE, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: process.env.FAKE_STATE, PENDULUM_SHELL_SECRETS: JSON.stringify({ AI_GATEWAY_API_KEY: relay.token }) }, timeoutMs: 60_000, label: "work-1" });
+    process.stdout.write(JSON.stringify({ seen, usd: rec.usd, after: stagePasses().length }) + "\\n");
+  `;
+  const s = stageProcess(script, { FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` });
+  await s.exited;
+  const out = JSON.parse(s.out().trim().split("\n").at(-1) || "null");
+  assert.ok(out?.seen && out.usd > 0, `the relayed pass did not run:\n${s.out()}\n${s.err()}`);
+  assert.deepEqual(out.seen, { usd: out.usd, running: 0, passes: [["work-1", out.usd, true, true, 0, false, true]] }, "the record whole but for the relay's part");
+  assert.equal(out.after, 1, "the record is among the stage's passes once");
+});
+
 /**
  * A local Objective's stages, one process each, against one fake GitHub and one live Codex session: each restores the work
  * lineage, writes a phase line, runs one pass through runHarness, and then ends as `how` says:
@@ -204,8 +230,8 @@ async function stages(plan) {
       const until = Date.now() + 10_000;
       while (!there(join(root, "half")) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
       if (how.startsWith("term")) {
-        // The status line the stop's write carries (no write now: the last was moments ago), or where it goes.
-        if (how === "term-5xx") progress.live("FAIL-THIS", { everyMs: 3_600_000 });
+        // A header link the stop's write carries (a link writes nothing itself), or where that write goes.
+        if (how === "term-5xx") progress.link("FAIL-THIS", "https://example.test/fail");
         if (how === "term-unsent") process.env.GITHUB_API_URL = process.env.FAKE_DEAD;
         process.stdout.write("spent\\n");
         await run;

@@ -1211,7 +1211,9 @@ export function costByPhase(records) {
  * report a resumed session's running total: since(session, prior) names the total it had already
  * reported, so the line shows the pass's own share (as runHarness counts it). open() counts the command items the
  * stream shows started and not yet ended (a Claude tool call or background task, a Codex command or MCP call, a Copilot
- * tool execution): what a silent harness has in flight.
+ * tool execution): what a silent harness has in flight. passStart() and passEnd() mark a pass of the run starting and
+ * ending, whatever its stream said: a rerun under the same tracker (runHarness's reruns) is running again, with no cost
+ * yet, and a pass killed before its result line has ended all the same.
  */
 export function harnessActivity(now = () => Date.now()) {
   const s = { startedAt: now(), lastEventAt: null, events: 0, turns: 0, toolCalls: 0, lastTool: null, subagents: new Map(), tokens: { input: 0, output: 0, written: 0 }, usd: null, ended: false, lastText: "" };
@@ -1317,7 +1319,15 @@ export function harnessActivity(now = () => Date.now()) {
     if (thread && prior) priors.set(thread, { input: prior.tokens?.input ?? 0, output: prior.tokens?.output ?? 0, written: prior.tokens?.written ?? 0, usd: prior.usd ?? null });
   };
   // A background shell's tool call ends at its launch, so its task counts; a sub-agent's task is its open tool call already.
-  return { feed, snapshot, since, open: () => open.size + [...s.subagents.values()].filter((a) => !a.done && a.kind === "command").length };
+  const passStart = () => {
+    s.ended = false;
+    s.usd = null;
+  };
+  const passEnd = () => {
+    s.ended = true;
+    open.clear();
+  };
+  return { feed, snapshot, since, passStart, passEnd, open: () => open.size + [...s.subagents.values()].filter((a) => !a.done && a.kind === "command").length };
 }
 
 /**

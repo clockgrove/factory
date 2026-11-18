@@ -916,6 +916,7 @@ async function main() {
     }
     rec = await runHarness({
       onLine: live.onLine,
+      onPass: live.onPass,
       onResume: live.onResume,
       harness: inputs.harness,
       model: inputs.model,
@@ -998,7 +999,7 @@ async function main() {
     const catchPrompt = conflictPassPrompt({ prompt, branch, defaultBranch, cause: `because ${defaultBranch} changed ${outbox.conflict.paths.join(", ")} during the run` });
     const resume = session.canResume ? session.id : null;
     const live = liveActivity(progress, { harness: inputs.harness, model: inputs.model, tick: () => io.tick() });
-    const pass = await runHarness({ onLine: live.onLine, onResume: live.onResume, harness: inputs.harness, model: inputs.model, effort: inputs.effort, prompt: resume ? catchPrompt.split("\n\n---\n\n").at(-1) : catchPrompt, freshPrompt: catchPrompt, maxUsd: budgetLeft(), resume, cwd: checkout, env: harnessEnv, timeoutMs: remainingMs(deadlineAt), eventsFile, label: "conflict" });
+    const pass = await runHarness({ onLine: live.onLine, onPass: live.onPass, onResume: live.onResume, harness: inputs.harness, model: inputs.model, effort: inputs.effort, prompt: resume ? catchPrompt.split("\n\n---\n\n").at(-1) : catchPrompt, freshPrompt: catchPrompt, maxUsd: budgetLeft(), resume, cwd: checkout, env: harnessEnv, timeoutMs: remainingMs(deadlineAt), eventsFile, label: "conflict" });
     await live.finish();
     records.push(pass);
     if (pass.sessionId) session.id = pass.sessionId;

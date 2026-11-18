@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runHarness } from "../scripts/lib/harness.mjs";
+import { runHarness, stagePasses, stageSpendNow } from "../scripts/lib/harness.mjs";
+import { liveActivity, progressReporter } from "../scripts/lib/session.mjs";
+import { repoOf } from "../scripts/lib/github.mjs";
 import { backgroundJobs } from "../scripts/lib/usage.mjs";
 
 const line = (o) => JSON.stringify(o);
@@ -23,7 +25,7 @@ const refused400 = refused401.replaceAll('"api_error_status":401', '"api_error_s
 // bg-hang: the result, then waiting on the job, which does nothing (a hang judgement, the wall clock or a stop ends it);
 // budget: Claude Code's own dollar cap; refuse401: a provider's refusal of the pass;
 // no-session: bg-kill with no session id anywhere. Without a job: ok answers with the session's running total,
-// refuse400 refuses the resumed session's request.
+// refuse400 refuses the resumed session's request; held answers as ok once the file FAKE_GO names exists (5 s at most).
 const claude = `#!${process.execPath}
 const fs = require("node:fs");
 const dir = process.env.FAKE_STATE;
@@ -39,6 +41,12 @@ const result = (extra = {}) => put({ type: "result", subtype: "success", is_erro
 if (mode === "refuse400") { process.stdout.write(fs.readFileSync(dir + "/refuse400.jsonl")); process.exit(1); }
 put({ type: "system", subtype: "init", session_id: sid, claude_code_version: "2.1.325" });
 if (mode === "ok") { result(); process.exit(0); }
+if (mode === "held") {
+  put({ type: "assistant", session_id: sid, message: { content: [{ type: "text", text: "Going on." }], usage: { input_tokens: 1, output_tokens: 1 } } });
+  const until = Date.now() + 5000;
+  const go = setInterval(() => { if (fs.existsSync(process.env.FAKE_GO) || Date.now() > until) { clearInterval(go); result(); process.exit(0); } }, 10);
+  return;
+}
 put({ type: "assistant", session_id: sid, message: { content: [{ type: "tool_use", id: "toolu_q" + n, name: "Bash", input: { command, run_in_background: true } }], usage: { input_tokens: 1, output_tokens: 1 } } });
 put({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "bq" + n, task_type: "local_bash", description: "Run the full Wave 5 qualification" }], session_id: sid });
 put({ type: "system", subtype: "task_started", task_id: "bq" + n, tool_use_id: "toolu_q" + n, description: "Run the full Wave 5 qualification", is_backgrounded: true, task_type: "local_bash", session_id: sid });
@@ -56,7 +64,7 @@ if (mode === "bg-hang") setInterval(() => {}, 1000);
 else process.kill(process.pid, "SIGKILL");
 `;
 
-async function pass(plan, opts = {}, { command = QUALIFY } = {}) {
+async function pass(plan, opts = {}, { command = QUALIFY, go = "" } = {}) {
   const bin = mkdtempSync(join(tmpdir(), "pendulum-bg-"));
   const state = join(bin, "state");
   mkdirSync(state);
@@ -66,7 +74,7 @@ async function pass(plan, opts = {}, { command = QUALIFY } = {}) {
   const path = process.env.PATH;
   process.env.PATH = `${bin}:${path}`;
   try {
-    const rec = await runHarness({ harness: "claude", model: "claude-opus-5-5", prompt: "the task card", maxUsd: 5, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: state, FAKE_PLAN: JSON.stringify(plan), FAKE_CMD: command }, timeoutMs: 600_000, label: "work-1", ...opts });
+    const rec = await runHarness({ harness: "claude", model: "claude-opus-5-5", prompt: "the task card", maxUsd: 5, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: state, FAKE_PLAN: JSON.stringify(plan), FAKE_CMD: command, FAKE_GO: go }, timeoutMs: 600_000, label: "work-1", ...opts });
     const calls = readdirSync(state).filter((f) => f.startsWith("call-")).sort().map((f) => JSON.parse(readFileSync(join(state, f), "utf8")));
     return { rec, calls };
   } finally {
@@ -174,4 +182,75 @@ test("backgroundJobs: Claude Code's last live set of background tasks, its comma
   assert.deepEqual(backgroundJobs("claude", withSets.join("\n")), [{ id: "f1", description: "unit tests", command: "pnpm test" }]);
   assert.deepEqual(backgroundJobs("claude", [calls, ...started, live([])].join("\n")), []);
   assert.deepEqual(backgroundJobs("codex", [calls, ...started].join("\n")), []);
+});
+
+test("runHarness's passes under one liveActivity: the first pass's cost reaches the card at its end, the rerun is the Now row while it runs", async () => {
+  const real = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
+    if ((init.method || "GET") === "GET") return json([]);
+    bodies.push(JSON.parse(init.body).body);
+    return json({ id: 9, user: { login: "me", type: "User" }, body: bodies.at(-1) });
+  };
+  // This test's own share of the process's stage spend and passes (the file's other tests ran passes too).
+  const base = stageSpendNow();
+  const before = stagePasses().length;
+  const soFar = async () => {
+    const n = stageSpendNow();
+    return { usd: Math.round((n.usd - base.usd) * 1e6) / 1e6, unknown: n.unknown - base.unknown, running: n.running };
+  };
+  const go = join(mkdtempSync(join(tmpdir(), "pendulum-go-")), "go");
+  // The writes landed when the rerun started, and the index of the write this test asks for at the rerun's first line.
+  let atStart = null;
+  let asked = null;
+  try {
+    const progress = progressReporter(repoOf("acme/app"), 7, { token: () => "t" }, { stage: "work", runId: "1", harness: "claude", model: "claude-opus-5-5", soFar, passesOf: () => stagePasses().slice(before), env: { PENDULUM_TIME_ZONE: "UTC" } });
+    await progress("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
+    const live = liveActivity(progress, { harness: "claude", model: "claude-opus-5-5" });
+    let started = 0;
+    let during = null;
+    const onPass = (phase, r) => {
+      if (phase === "start") started += 1;
+      if (phase === "start" && started === 2) atStart = bodies.length;
+      live.onPass(phase, r);
+    };
+    // While the rerun runs (its stream begun, its result held back): a write, then the rerun may end.
+    const onLine = (l) => {
+      live.onLine(l);
+      if (started === 2 && !during) during = progress.planAsked([]).then(() => {
+        asked = bodies.length - 1;
+        writeFileSync(go, "");
+      });
+    };
+    // The session is killed with its background job still running, then resumed once (runHarness: JOBS).
+    const { calls } = await pass(["bg-kill", "held"], { onLine, onPass, onResume: live.onResume }, { go });
+    await during;
+    await live.finish();
+    // Every write queued so far lands before this one (session.mjs progressReporter's one queue).
+    await progress.planAsked([]);
+    assert.equal(calls.length, 2, "two passes ran");
+  } finally {
+    globalThis.fetch = real;
+  }
+  const cards = bodies.map((b) => b.split("\n\n<details>")[0]);
+  const row = (c) => /^\| [^|]+ \| Built the change · Opus 5\.5 \| [^|]+ \| ([^|]+) \|$/m.exec(c)?.[1] ?? null;
+  const now = (c) => /\*\*Now:\*\* building the change/.test(c);
+  // At the rerun's start, before its first line's write: the step is the Now row again, by a write of its own.
+  assert.ok(atStart !== null && asked !== null && cards.slice(atStart, asked).some(now), `no Now row written at the rerun's start (writes ${atStart} to ${asked}):\n${cards.join("\n=====\n")}`);
+  // At the first pass's end: its cost on the headline and the step's row, no Now row.
+  const firstEnd = cards.findIndex((c) => row(c) === "$0.25" && !now(c));
+  assert.ok(firstEnd > 0, cards.join("\n=====\n"));
+  assert.match(cards[firstEnd], /\*\*\$0\.25\*\* so far/);
+  assert.doesNotMatch(cards[firstEnd], /has not reported a cost yet/);
+  // While the rerun runs: the first pass's cost on its row, the step the Now row, the rerun not reported yet.
+  const rerun = cards.slice(firstEnd + 1).find((c) => now(c));
+  assert.ok(rerun, cards.join("\n=====\n"));
+  assert.equal(row(rerun), "$0.25");
+  assert.match(rerun, /\*\*\$0\.25\*\* so far\n.*1 AI run has not reported a cost yet/);
+  assert.match(rerun, /\| running \| when it ends \|$/m);
+  // At the rerun's end: both passes on the row, no Now row.
+  assert.equal(row(cards.at(-1)), "$0.50");
+  assert.ok(!now(cards.at(-1)));
+  assert.match(cards.at(-1), /\*\*\$0\.50\*\* so far/);
 });

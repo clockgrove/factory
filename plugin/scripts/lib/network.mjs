@@ -601,20 +601,46 @@ const githubHost = (host) => host === "github.com" || host.endsWith(".github.com
 const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"];
 
 /**
- * The proxy settings of Pendulum's own git (the outbox mirror's fetch and push, its scratch repositories'): exactly the
- * ones the stage's Node fetch uses, read from the stage process's own environment, and nothing else. Node's fetch takes
- * a proxy from it only when NODE_USE_ENV_PROXY is 1 (as local mode's stages run), each setting's lower-case name before
- * its upper-case one; git reads http_proxy in lower case only. So each setting the fetch uses is given in both cases,
- * and none when the fetch goes directly. An https remote goes through the proxy as a CONNECT tunnel carrying TLS (curl
- * tunnels every https URL), so the mirror's GitHub credential reaches the proxy only encrypted.
+ * The proxy settings of Pendulum's own git (the outbox mirror's fetch and push, its scratch repositories') for `remote`
+ * (its URL): exactly the ones the stage's Node fetch uses, read from the stage process's own environment, and nothing
+ * else. Node's fetch (undici's EnvHttpProxyAgent) takes a proxy from it only when NODE_USE_ENV_PROXY is 1 (as local mode's
+ * stages run): each name's lower-case form before its upper-case one, an https URL through the https proxy or else the
+ * http one, and NO_PROXY's entries split on commas and white space, each a host (a leading `.` or `*.` dropped) that
+ * covers itself and its subdomains, with `host:port` covering that port only, and `*` as the whole value covering every
+ * host. Curl, which git and its proxy settings go through, reads https_proxy alone for an https URL, http_proxy only in
+ * lower case, and a NO_PROXY of comma-separated plain hosts. So git gets the resolved proxies in both cases, and NO_PROXY
+ * rewritten to the hosts Node's fetch keeps off the proxy on the remote's port; none of it when the fetch goes directly.
+ * An https remote goes through the proxy as a CONNECT tunnel carrying TLS (curl tunnels every https URL), so the
+ * mirror's GitHub credential reaches the proxy only encrypted.
  */
-export function gitProxyEnv(env = process.env) {
+export function gitProxyEnv(env = process.env, remote = "") {
   if (env.NODE_USE_ENV_PROXY !== "1") return {};
+  const httpProxy = env.http_proxy ?? env.HTTP_PROXY;
+  const httpsProxy = (env.https_proxy ?? env.HTTPS_PROXY) || httpProxy;
   const out = {};
-  for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"]) {
-    const value = env[name.toLowerCase()] ?? env[name];
-    if (value) Object.assign(out, { [name]: value, [name.toLowerCase()]: value });
+  if (httpsProxy) Object.assign(out, { HTTPS_PROXY: httpsProxy, https_proxy: httpsProxy });
+  if (httpProxy) Object.assign(out, { HTTP_PROXY: httpProxy, http_proxy: httpProxy });
+  const noProxy = env.no_proxy ?? env.NO_PROXY ?? "";
+  let hosts;
+  if (noProxy === "*") hosts = ["*"];
+  else {
+    let port = 0;
+    try {
+      const u = new URL(remote);
+      port = Number(u.port) || { "https:": 443, "http:": 80 }[u.protocol] || 0;
+    } catch {
+      // A path: no network, so no port.
+    }
+    hosts = [];
+    for (const entry of noProxy.split(/[,\s]/).filter(Boolean)) {
+      const m = /^(.+):(\d+)$/.exec(entry);
+      if (m && Number(m[2]) !== port) continue;
+      const host = (m ? m[1] : entry).replace(/^\*?\./, "").toLowerCase();
+      // Node's fetch matches a host by name alone: `*` within a list, an address range, matches none.
+      if (host && host !== "*" && !host.includes("/")) hosts.push(host);
+    }
   }
+  if (hosts.length) Object.assign(out, { NO_PROXY: hosts.join(","), no_proxy: hosts.join(",") });
   return out;
 }
 

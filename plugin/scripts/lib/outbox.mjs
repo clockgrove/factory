@@ -270,7 +270,7 @@ export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
 async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = { paths: [], scripts: [], unresolved: [] }, toolchainPaths = [], setup = "", setupContext = {}, deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch, networkOrigin = originOf(remote) }) {
   // Pendulum's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
   // and no hook: it runs only here, never in the agent's checkout. Its proxy is the stage's Node fetch's (gitProxyEnv).
-  const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...gitProxyEnv(), ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
+  const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...gitProxyEnv(process.env, remote), ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
   const git = (args, opts = {}) => exec("git", ["-C", mirror, ...args], { env: gitEnv(), maxBytes: 64 * 1024 * 1024, ...opts });
   git.dir = mirror;
   git.env = gitEnv;
@@ -1764,7 +1764,7 @@ export async function replay(git, { from, onto, theirs }) {
  */
 export async function mergeTree({ remote, token = () => null, ours, theirs, base = tmpdir() }) {
   const dir = mkdtempSync(join(base, "merge-tree-"));
-  const env = () => addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...gitProxyEnv(), ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"]]);
+  const env = () => addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...gitProxyEnv(process.env, remote), ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"]]);
   const git = (args) => exec("git", ["-C", dir, ...args], { env: env() });
   try {
     if ((await git(["init", "-q", "--bare"])).code !== 0) return null;
@@ -1812,7 +1812,7 @@ export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
   };
   // commit-tree writes the trial merges' commits: a fixed identity and time, so the same inputs make the same commit.
   const who = { GIT_AUTHOR_NAME: "pendulum", GIT_AUTHOR_EMAIL: "pendulum@localhost", GIT_COMMITTER_NAME: "pendulum", GIT_COMMITTER_EMAIL: "pendulum@localhost", GIT_AUTHOR_DATE: "@0 +0000", GIT_COMMITTER_DATE: "@0 +0000" };
-  const env = () => addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...gitProxyEnv(), ...who, ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"]]);
+  const env = () => addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...gitProxyEnv(process.env, remote), ...who, ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"]]);
   const git = (args) => exec("git", ["-C", dir, ...args], { env: env() });
   const must = async (args, what) => {
     const r = await git(args);
@@ -1915,7 +1915,7 @@ export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
  */
 export async function scratchHistory({ remote, token = () => null, objects = null, base = tmpdir() }) {
   const dir = mkdtempSync(join(base, "history-"));
-  const env = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...gitProxyEnv(), ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"], ["core.alternateRefsCommand", "true"]]));
+  const env = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...gitProxyEnv(process.env, remote), ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"], ["core.alternateRefsCommand", "true"]]));
   const git = (args, opts = {}) => exec("git", ["-C", dir, ...args], { env: env(), maxBytes: 64 * 1024 * 1024, ...opts });
   const close = () => rmSync(dir, { recursive: true, force: true });
   if ((await git(["init", "-q", "--bare"])).code !== 0 || (await git(["config", "remote.origin.url", remote])).code !== 0) {

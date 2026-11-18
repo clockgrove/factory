@@ -774,8 +774,11 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const byId = new Map(comments.map((c) => [c.id, c]));
-  // A named reviewer's comment is never Pendulum's own, even where the author filter stands in for the review ids.
-  const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
+  // A root is Pendulum's reviewer's by its review ids; unknown, by the App's login alone; with neither (local mode, the
+  // reviews unread), nobody's, so no other text passes as its reviewer's (#601). A named reviewer's comment is never
+  // Pendulum's own, even where the author filter stands in for the review ids.
+  if (!reviewIds && !reviewerLogin) log(`PR #${prNumber}: Pendulum's reviews are unknown and no App login stands in, so no line comment counts as its reviewer's`);
+  const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !!reviewerLogin && c.user?.login === reviewerLogin);
   const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
   const theirs = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty)) : [];
   const ourIds = new Set(roots.map((c) => c.id));
@@ -800,6 +803,20 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const done = new Set(trusted.map((c) => BODY_RESOLVED.exec(c.body || "")?.[1]).filter(Boolean));
   const said = new Map(trusted.map((c) => [BODY_REPLY.exec(c.body || "")?.[1], c.body]).filter(([id]) => id));
   return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)), ...(PR_BODY_REPLY.test(said.get(f.id)) ? { earlierPrBody: true } : {}) } : f))];
+}
+/**
+ * The ids of Pendulum's own reviews on PR `prNumber` of Objective `issue` (marker(issue, "review"), by a trusted author:
+ * trustedAuthor), which unaddressedReviewComments takes as its reviewer's. A transient failure of the read is sent again
+ * within rest's bound; a read that still fails is logged and gives null, and then no comment counts as the reviewer's
+ * unless the App's login stands in (#601).
+ */
+export async function ownReviewIds(repo, prNumber, issue, opts) {
+  try {
+    return new Set(((await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true })) || []).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
+  } catch (e) {
+    log(`#${issue}: Pendulum's reviews on PR #${prNumber} could not be read (${errCode(e)})`);
+    return null;
+  }
 }
 /** Pendulum's earlier answer as the next answer pass reads it: its marker and heading off, sanitised and cut. */
 const answerText = (body) =>

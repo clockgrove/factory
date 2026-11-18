@@ -83,6 +83,7 @@ import {
   isValidated,
   progressReporter,
   remainingMs,
+  ownReviewIds,
   unaddressedReviewComments,
   answerDiff,
   bodyChanges,
@@ -1843,13 +1844,7 @@ async function main() {
   // A pass with nothing to answer (the reviewer's JSON had no comments: Pendulum's placeholder went up) skips the worker pass.
   // Pendulum's own reviews on this PR (the marker in the body, from Pendulum or someone who can push): their comments are the reviewer's.
   // A failed read falls back to the author filter (null), not a crashed review run.
-  const pendulumReviewIds = async () => {
-    try {
-      return new Set(((await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })) || []).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
-    } catch {
-      return null;
-    }
-  };
+  const pendulumReviewIds = () => ownReviewIds(repo, pr.number, issue, token);
   // The repository's third-party reviewers (third-party-review.mjs): each one's review of the head Pendulum's reviewer
   // read comes before the answer pass, within a bound; without one in time the stage goes on and the progress says so.
   // Not when the cap is spent: no answer pass runs then. A review still to come is not waited for here: the stage

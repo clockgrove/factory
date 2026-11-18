@@ -49,7 +49,7 @@ import { GROUP_RECORD, STOP_SIGNALS, bootId, exec, processRecord, reapRecorded, 
 import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, adoptLocal, hasLocalLabel, markLocalRoute, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, previousKeyDirProblem, localClaim, LOCAL_TOKEN_PERMISSIONS, cloneRepo, cloneTop, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim, noTokenLine, repoFromRemote, saveLocalToken } from "./lib/local.mjs";
 import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, spendText, queueHungMs, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
-import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueState, queueTimeoutMin, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
+import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueState, queueTimeoutMin, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, ownReviewIds, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handoverOf, shellQuote, workflowName } from "./lib/handover.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
@@ -4298,7 +4298,7 @@ async function deliver(issue, flags) {
   const open = await findPr(repo, branch, opts).catch(() => null);
   const left = record.part ? record.part.remaining.length : open && isSplitPart(prior, open.number) ? prior.remaining : 0;
   let pr = await publishPr(repo, { branch, base: defaultBranch, issue, issueTitle: issueData.title, prText: files["pr.md"], splitPart: left > 0, pr: open, handover }, opts);
-  const toAnswer = await unaddressedReviewComments(repo, pr.number, null, { ...opts, reviewIds: null }).catch(() => []);
+  const toAnswer = await unaddressedReviewComments(repo, pr.number, null, { ...opts, reviewIds: await ownReviewIds(repo, pr.number, issue, opts) }).catch(() => []);
   const replied = await postReplies(repo, pr.number, issue, files["replies.json"], toAnswer.map((c) => c.id), opts);
   await postNote(repo, issue, files["note.md"], opts);
   if (record.exit === "delivered") {

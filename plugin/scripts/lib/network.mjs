@@ -496,20 +496,20 @@ export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt
     throw new NetworkDown({ origin, code, since, resetAt, ...(Number.isFinite(resetAt) ? { key } : {}) });
   }
   const ep = episode(origin, code, resetAt, key, check);
-  if (signal) {
-    let cut;
-    const aborted = new Promise((_, no) => signal.addEventListener("abort", (cut = () => no(signal.reason)), { once: true }));
-    await Promise.race([ep.done, aborted]).finally(() => signal.removeEventListener("abort", cut));
-  }
+  // The caller's own end of the wait, raced in each wait below; its listener goes once the wait is over.
+  let cut = null;
+  const done = signal ? Promise.race([ep.done, new Promise((_, no) => signal.addEventListener("abort", (cut = () => no(signal.reason)), { once: true }))]) : ep.done;
+  const sleepEnd = new AbortController();
   let back;
-  if (Number.isFinite(deadlineAt) && deadlineAt < ep.end) {
-    if (Number.isFinite(ep.resetAt)) back = false;
-    else {
-      const cut = new AbortController();
-      back = await Promise.race([ep.done, OUTAGE.sleep(deadlineAt - OUTAGE.now(), cut.signal).then(() => false)]);
-      cut.abort();
-    }
-  } else back = await ep.done;
+  try {
+    if (Number.isFinite(deadlineAt) && deadlineAt < ep.end) {
+      if (Number.isFinite(ep.resetAt)) back = false;
+      else back = await Promise.race([done, OUTAGE.sleep(deadlineAt - OUTAGE.now(), sleepEnd.signal).then(() => false)]);
+    } else back = await done;
+  } finally {
+    sleepEnd.abort();
+    if (cut) signal.removeEventListener("abort", cut);
+  }
   if (!back) throw new NetworkDown({ origin, code: ep.code, since: ep.since, resetAt: ep.resetAt, key: ep.key ?? null });
 }
 

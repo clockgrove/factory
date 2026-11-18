@@ -814,7 +814,7 @@ export class Local {
     const tries = (this.markTries ??= new Map());
     const r = await markLocalRoute(this.repo, issue, opts, { check: true, timeline: (repo, n, opts) => timelineOf(repo, n, { ...opts, cache: (this.timelines ??= new Map()) }) });
     // Ended by its caller (withClaim's heartbeat at its stage's end): no try.
-    if (opts.signal?.aborted) return;
+    if (opts.stopSignal?.aborted) return;
     const tried = (tries.get(issue) ?? 0) + 1;
     tries.set(issue, tried);
     if (r.marked || r.person || tried >= MARK_TRIES) {
@@ -1957,11 +1957,12 @@ export class Local {
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
     // beats due meanwhile are skipped rather than queued behind it. Each reads who holds the claim first: a claim it
     // cannot read is written as before (no answer is no other holder). `stop` ends them with the stage: a beat in flight
-    // then has its request, or its wait for the network, ended (rest's `signal`), and writes nothing after its read.
+    // then has its read, or its wait for the network, ended and starts no write (rest's `stopSignal`); a write GitHub
+    // may already have gets its answer.
     let beating = null;
     let lost = null;
     const stop = new AbortController();
-    const opts = { ...this.opts, signal: stop.signal };
+    const opts = { ...this.opts, stopSignal: stop.signal };
     const heartbeat = async () => {
       const now = await localClaim(this.repo, issue, opts).catch(() => undefined);
       if (stop.signal.aborted) return;

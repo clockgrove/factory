@@ -265,7 +265,7 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
     // Ended by its caller: no wait and no retry follows.
     if (signal?.aborted) throw e;
     if (quota && e?.code === RATE_LIMIT_SPENT && Number.isFinite(e.resetAt) && (waitingOutages() || stoppedWaiting())) {
-      await networkBack(origin, RATE_LIMIT_SPENT, { deadlineAt, resetAt: e.resetAt, key: quota });
+      await networkBack(origin, RATE_LIMIT_SPENT, { deadlineAt, resetAt: e.resetAt, key: quota, signal });
       end = bound();
       n -= 1;
       continue;
@@ -274,7 +274,7 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
       // Stopped waiting: at once, as the outage this process gave up on (its host and first loss), when it was this host's.
       if (stoppedWaiting()) throw downFor(origin) ?? e;
       if (waitingOutages()) {
-        await networkBack(origin, e.code, { deadlineAt });
+        await networkBack(origin, e.code, { deadlineAt, signal });
         end = bound();
         n -= 1;
         continue;
@@ -467,10 +467,14 @@ export const githubNow = () => Date.now() + clockSkewMs;
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
- * `signal` (an AbortSignal) ends the call: a request in flight, or its wait for the network, and no retry follows. `onLink(link)` is
- * given each page's Link header (null without one), for a caller that pages itself.
+ * `signal` (an AbortSignal) ends the call: a request in flight, or its wait for the network, and no retry follows.
+ * `stopSignal` ends it as `signal` does, but never a write GitHub may already have: a write in flight gets its answer
+ * (no retry follows), and one not sent yet is not sent. `onLink(link)` is given each page's Link header (null without
+ * one), for a caller that pages itself.
  */
-export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null, onLink = null } = {}) {
+export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null, stopSignal = null, onLink = null } = {}) {
+  const ends = [signal, stopSignal].filter(Boolean);
+  const ended = ends.length > 1 ? AbortSignal.any(ends) : (ends[0] ?? null);
   let url = /^https?:/.test(path) ? path : `${API()}/${path.replace(/^\//, "")}`;
   const accept = raw ? raw.replace(/^Accept:\s*/i, "") : "application/vnd.github+json";
   const again = repeatable(method, path) ? async () => true : createAgain(landed ?? commentLanded(method, url, body, { token, signal, deadlineAt }));
@@ -482,8 +486,9 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     const kept = conditional ? cache.get(url) : undefined;
     sent = { token: await currentToken(token), at: Date.now() };
     let res;
+    if (method !== "GET") stopSignal?.throwIfAborted();
     try {
-      res = await call(url, { method, body, token: sent.token, accept, maxBytes: raw ? maxBytes : 0, etag: kept?.etag, signal });
+      res = await call(url, { method, body, token: sent.token, accept, maxBytes: raw ? maxBytes : 0, etag: kept?.etag, signal: method === "GET" ? ended : signal });
     } catch (e) {
       throw transportError(`${method} ${path}`, e);
     }
@@ -513,7 +518,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
   const pages = [];
   for (;;) {
     const what = `${method} ${String(path).split("?")[0]}`;
-    const res = await refreshedOn401(what, token, () => sent, () => withRetry(what, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota, signal }));
+    const res = await refreshedOn401(what, token, () => sent, () => withRetry(what, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota, signal: ended }));
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
     const { text, link } = res;
@@ -2007,6 +2012,8 @@ export async function primeSelf(opts) {
     const u = await rest("user", opts);
     if (u?.login) setSelf(u.type === "Bot" && !u.login.endsWith("[bot]") ? `${u.login}[bot]` : u.login);
   } catch {
+    // Ended by its caller (rest's signals): no second read.
+    if (opts?.signal?.aborted || opts?.stopSignal?.aborted) return selfLogin();
     try {
       const v = (await graphql("query { viewer { login __typename } }", {}, opts))?.viewer;
       if (v?.login) setSelf(v.__typename === "Bot" && !v.login.endsWith("[bot]") ? `${v.login}[bot]` : v.login);

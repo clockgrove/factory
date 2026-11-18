@@ -389,7 +389,8 @@ export function ownPredicate(appId = null, self = []) {
  * when every stage of Pendulum's own in it has its per-pass figures (pass-figures.mjs stagePassFigures, from its ledger),
  * the card's run (its clock to its merge) lies in the period, and every stage comment in the period, Pendulum's or
  * one by someone who can push (`pushed`), is one the card counted: in that run, or a vendor comment of a stage in it;
- * and none of them, in the period or not, was written or edited after the card. A card with no stage is none.
+ * and none of them, in the period or not, was written or edited after the card's last write. A card on an end other than
+ * a merge (#589: Blocked, a Question, closed unmerged) carries no merged summary (readSummary): its stages are read. A card with no stage is none.
  * Anyone else's card, or a summary that does not read, is none: the stages are read. Returns {comment, summary}.
  */
 export function summaryFor(n, comments, scope, { mine, pushed = (c) => pushAuthor(c) || throughApp(c), by = [], stages = false } = {}) {
@@ -412,7 +413,8 @@ export function summaryFor(n, comments, scope, { mine, pushed = (c) => pushAutho
   const head = new RegExp(`^<!-- pendulum:${n}:(progress|vendor):((?:work|review):[A-Za-z0-9:-]{1,100}) -->`);
   const stageComments = on.filter((c) => (mine(c) || pushed(c)) && head.test(c.body || ""));
   // A stage comment written or edited after the card (a late vendor booking, a spend line changed) is in no figure of it.
-  const card = ms(found.comment.created_at);
+  // The card's figures are those of its last write: a card is written again in place as its run ends again (#589).
+  const card = Math.max(ms(found.comment.created_at), ms(found.comment.updated_at) || 0);
   if (stageComments.some((c) => !(ms(c.created_at) <= card) || (c.updated_at && !(ms(c.updated_at) <= card)))) return null;
   const ran = new Set(stageComments.filter((c) => head.exec(c.body)[1] === "progress" && inRun(c.created_at)).map((c) => head.exec(c.body)[2]));
   const counted = (c) => inRun(c.created_at) || (head.exec(c.body)[1] === "vendor" && ran.has(head.exec(c.body)[2]));

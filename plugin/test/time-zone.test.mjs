@@ -211,19 +211,19 @@ test("the finish card writes its times in the Objective's zone; its markers and 
   const utc = card({ GITHUB_ACTIONS: "true", PENDULUM_TIME_ZONE: undefined });
   const berlin = card({ GITHUB_ACTIONS: "true", PENDULUM_TIME_ZONE: "Europe/Berlin" });
   const la = card({ GITHUB_ACTIONS: "true", PENDULUM_TIME_ZONE: "Europe/Berlin" }, `${zoneMarker("America/Los_Angeles")}\n\n${real.issue.body}`);
-  assert.match(utc, /landed (through your merge queue )?at \d{1,2}:\d\d [AP]M UTC</);
-  assert.match(utc, /\*\*How the time went\*\* \(UTC\)/);
-  assert.match(berlin, /landed (through your merge queue )?at \d{1,2}:\d\d [AP]M GMT\+1</);
-  assert.match(la, /\*\*How the time went\*\* \(America\/Los_Angeles\)/);
-  assert.match(la, /<summary>Full run log \(America\/Los_Angeles\)<\/summary>/);
-  assert.match(la, /landed (through your merge queue )?at \d{1,2}:\d\d [AP]M PST</);
+  assert.match(utc, /merged (through your merge queue )?at \d{1,2}:\d\d [AP]M UTC · /);
+  assert.match(utc, /\*\*Timeline\*\* \(UTC\)/);
+  assert.match(berlin, /merged (through your merge queue )?at \d{1,2}:\d\d [AP]M GMT\+1 · /);
+  assert.match(la, /\*\*Timeline\*\* \(PST\)/);
+  assert.match(la, /\*\*Run log\*\* \(PST\)/);
+  assert.match(la, /merged (through your merge queue )?at \d{1,2}:\d\d [AP]M PST · /);
   // The chart's bars sit on the zone's clock: Los Angeles is 8 hours behind UTC in November.
   const bars = (md) => [...md.matchAll(/:active, (\S+), (\S+)$/gm)].map((m) => [Date.parse(`${m[1]}Z`), Date.parse(`${m[2]}Z`)]);
   assert.ok(bars(utc).length > 0);
   assert.deepEqual(bars(la), bars(utc).map(([a, b]) => [a - 8 * 3600_000, b - 8 * 3600_000]));
   // The finish marker and the summary marker: the same bytes in every zone.
   const markers = (md) => md.split("\n").filter((l) => l.startsWith("<!--"));
-  assert.equal(markers(utc).length, 2);
+  assert.equal(markers(utc).length, 3, "the finish, summary and end lines");
   assert.deepEqual(markers(berlin), markers(utc));
   assert.deepEqual(markers(la), markers(utc));
   assert.doesNotMatch(markers(la).join("\n"), /America|tz/);

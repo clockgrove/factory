@@ -262,7 +262,7 @@ export async function planGate({ repo, issue, sha, text = null, editedAt = null,
   const relabeled = work && !!posted?.record && after(label, posted.record.label);
   const judged = text && !relabeled ? await judgedEdit({ repo, issue, record: posted?.record, now: { sha, ...text }, check }) : { kept: false, record: null, said: null };
   const state = planTextState({ sha, plan: posted, labeledAt: label, editedAt: edited, work, kept: judged.kept });
-  if (judged.said && progress) await progress(judged.said, { step: "edit", detail: judged.said });
+  if (judged.said && progress) await progress(judged.said, { step: "edit", kept: judged.kept === true });
   // The plan's record as it stands now: with a verdict newly asked, written with the plan's text.
   const planned = judged.record ?? posted?.record ?? null;
   const stamp = (record) => (posted?.text !== null && posted?.text !== undefined ? stampPlan(repo, issue, posted, record, opts) : null);
@@ -326,7 +326,7 @@ export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, rea
     }
   }
   if (judged.record && posted.text !== null) await stampPlan(repo, issue, posted, judged.record, opts);
-  if (judged.said && progress) await progress(judged.said, { step: "edit", detail: judged.said });
+  if (judged.said && progress) await progress(judged.said, { step: "edit", kept: judged.kept === true });
   if (planTextState({ sha, plan: posted, editedAt, kept: judged.kept }) !== "changed") return "same";
   return judged.unjudged ? "unjudged" : "changed";
 }

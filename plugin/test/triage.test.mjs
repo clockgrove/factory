@@ -549,6 +549,7 @@ test("validation loop: a required job GitHub never started gets no triage and no
   const loop = async (job) => {
     const triaged = [];
     const phases = [];
+    const steps = [];
     const result = await withGitHub({ runs: [checkRun], jobs: { 1: job }, annotations: { 1: locked.annotations } }, () =>
       validationLoop({
         checkout: "/nonexistent",
@@ -563,10 +564,10 @@ test("validation loop: a required job GitHub never started gets no triage and no
         checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t" },
         outbox: { push: async () => true, expected: () => sha },
         triage: { red: async (r) => (triaged.push(r.failedRuns.map((f) => f.name)), { rerun: false }) },
-        onPhase: async (l) => phases.push(l),
+        onPhase: async (l, step) => (phases.push(l), steps.push(step)),
       }),
     );
-    return { result, triaged, phases };
+    return { result, triaged, phases, steps };
   };
 
   const stuck = await loop(locked.job);
@@ -584,6 +585,14 @@ test("validation loop: a required job GitHub never started gets no triage and no
   assert.deepEqual(real.triaged, [["quality"]], "a job that ran and failed is triaged");
   assert.deepEqual(real.result.harness, { timedOut: true }, "and goes on to the fix pass");
   assert.ok(real.phases.some((l) => /red: required checks quality on a{7}; fix run$/.test(l)), real.phases.join("\n"));
+  // #589: each line names its step; the wait records its own end and its result on its step, which the card reads.
+  const wait = real.steps.find((x) => x?.wait);
+  assert.equal(wait.sha, sha);
+  assert.ok(Number.isFinite(wait.end), "the wait's own end");
+  assert.equal(wait.outcome, "failed");
+  assert.deepEqual(real.steps.find((x) => x?.step === "fix"), { step: "fix", check: `required checks quality on ${sha.slice(0, 7)}` });
+  assert.ok(stuck.steps.some((x) => x?.step === "ci" && x.red === "not-started"));
+  assert.ok(real.steps.every((x) => x && typeof x.step === "string"), "no line without its step");
 });
 
 test("#402: validation loop: a triage rerun may wait for its workflow run as long as the checks' own wait, within the stage's wall clock less the guard", async () => {

@@ -35,6 +35,7 @@ import { CLI, CODEX_LOGIN_REFUSED } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
 import { clockText, whenText } from "./lib/clock.mjs";
 import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, pendulumSandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
+import { vendorCard } from "./lib/card-kit.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit, doctorBlock, objectiveDecisions } from "./lib/session.mjs";
@@ -656,7 +657,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
       if (!held.taken) return log(`#${n}: the ${record.stage} stage's vendor cost is booked by another process; its comment is that one's`);
       const head = marker(n, "vendor", key);
       // A stage that left no progress comment has its model dollars here, so the daily sum still counts them.
-      const body = `${head}\n${vendorBody({ line: vendorLine({ id: record.id, state, cost, rates: adapter.rates, error }), vendorUsd: cost.usd, vendorUnknown: !!cost.usageUnknown, ...(mine ? {} : { modelUsd, modelUnknown, modelBilling }) })}`;
+      const body = `${head}\n${vendorBody({ line: vendorLine({ id: record.id, state, cost, rates: adapter.rates, error }), vendorUsd: cost.usd, vendorUnknown: !!cost.usageUnknown, card: vendorCard({ stage: record.stage, cost, rates: adapter.rates }), ...(mine ? {} : { modelUsd, modelUnknown, modelBilling }) })}`;
       const had = comments.find((c) => isSelf(c) && (c.body || "").startsWith(`${head}\n`));
       if (had) await api.rest(`repos/${repo.full}/issues/comments/${had.id}`, { ...opts, method: "PATCH", body: { body } });
       else await api.rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body } });

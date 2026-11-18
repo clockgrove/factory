@@ -203,7 +203,7 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
   // new record with a new bound every time. No wait.
   if (!selfLogin()) {
     await clearWait({ repo, issue, prNumber, token });
-    await progress(`third-party review: Pendulum's own login is unknown, so its wait record could not be read back; going on without waiting`, { step: "thirdParty", detail: "Pendulum's own login is unknown; going on without waiting" });
+    await progress(`third-party review: Pendulum's own login is unknown, so its wait record could not be read back; going on without waiting`, { step: "thirdParty", failed: "Pendulum's own login is unknown" });
     return { logins, wait: null };
   }
   const seen = reviewedHead(await readReviews(repo, prNumber, opts), sha, logins);
@@ -211,7 +211,7 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
   try {
     comments = await listComments(repo, prNumber, opts);
   } catch (e) {
-    await progress(`third-party review: the PR's wait record could not be read (${String(e?.message || e).slice(0, 80)}); going on without waiting`, { step: "thirdParty", detail: "the wait record could not be read; going on without waiting" });
+    await progress(`third-party review: the PR's wait record could not be read (${String(e?.message || e).slice(0, 80)}); going on without waiting`, { step: "thirdParty", failed: "the wait record could not be read" });
     return { logins, wait: null };
   }
   const record = waitOf(comments, issue);
@@ -220,7 +220,7 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
   // Only this process's own record is rewritten; another writer's for this head gets a record of ours beside it.
   const mine = current?.own ? current : null;
   if (!seen.missing.length || passed) {
-    await progress(thirdPartyLine(seen, sha, waitMs), { step: "thirdParty", sha, reviewed: seen.reviewed, missing: seen.missing });
+    await progress(thirdPartyLine(seen, sha, waitMs), { step: "thirdParty", sha, reviewed: seen.reviewed, missing: seen.missing, minutes: Math.round(waitMs / 60_000) });
     await dropWait(repo, record, opts);
     return { logins, wait: null };
   }
@@ -238,7 +238,7 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
     }
   } catch (e) {
     await dropWait(repo, record, opts);
-    await progress(`third-party review: the wait could not be recorded on the PR (${String(e?.message || e).slice(0, 80)}); going on without ${seen.missing.join(", ")}`, { step: "thirdParty", detail: `the wait could not be recorded; going on without ${seen.missing.join(", ")}` });
+    await progress(`third-party review: the wait could not be recorded on the PR (${String(e?.message || e).slice(0, 80)}); going on without ${seen.missing.join(", ")}`, { step: "thirdParty", failed: "the wait could not be recorded", missing: seen.missing });
     return { logins, wait: null };
   }
   const until = since + waitMs;

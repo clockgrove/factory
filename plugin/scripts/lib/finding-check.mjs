@@ -368,7 +368,11 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
   const how = new Map();
   const unjudged = [];
   const found = [];
+  // Each part of the check's span, for the progress comment's Took (progress-card.mjs): from its start to its line.
+  let from = Date.now();
   const say = async (line, step) => {
+    if (step) Object.assign(step, { start: from, end: Date.now() });
+    from = Date.now();
     log(line);
     if (progress) await progress(line, step);
   };
@@ -431,7 +435,7 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
         left.push(it);
       }
     }
-    await say(`finding check (${check.model}): ${items.length - left.length} of ${items.length} answer(s) resolve their findings${left.length ? `; still open: ${left.slice(0, 5).map(findingPlace).join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}` : ""}${unjudged.length ? `; no verdict on ${unjudged.length} (${[...new Set(unjudged.map((u) => u.error))].join(", ")})` : ""}`, { step: "check", judged: { resolved: items.length - left.length, of: items.length, unjudged: unjudged.length }, model: check.model });
+    await say(`finding check (${check.model}): ${items.length - left.length} of ${items.length} answer(s) resolve their findings${left.length ? `; still open: ${left.slice(0, 5).map(findingPlace).join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}` : ""}${unjudged.length ? `; no verdict on ${unjudged.length} (${[...new Set(unjudged.map((u) => u.error))].join(", ")})` : ""}`, { step: "check", judged: { resolved: items.length - left.length, of: items.length, unjudged: unjudged.length }, open: left.map(findingPlace), model: check.model, verdicts: items.map((it) => ({ place: findingPlace(it), verdict: byId.get(String(it.id))?.verdict ?? null, confidence: byId.get(String(it.id))?.confidence ?? null })), floor: floor.text });
   }
   const resolved = [];
   const lines = answered.filter((f) => yes.has(String(f.id)) && !isBodyFindingId(f.id));

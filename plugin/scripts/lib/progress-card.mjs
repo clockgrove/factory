@@ -1,356 +1,531 @@
 // The progress comment's card (#589): a stage's progress comment read at a glance, in the finish card's look
 // (card-kit.mjs). Three layers, each pure:
-//   stepOf        each line's step, as the stage wrote it (`{step, ...fields}`, STEPS), its fields checked and kept;
-//                 the card decides on those fields, never on a line's words;
-//   progressData  the steps as rows: a run of one step merged, a repeated pass folded into one row with a count across
-//                 the CI steps between (FOLDS), each row's time span and its own dollars from the stage's ledger; the
-//                 headline's figures. The table and any chart read this one data;
-//   progressCard  the markdown: headline, "what to do", the table, and the Run details' own lines.
-// Under the card, a collapsed "Run details" block holds what the table leaves out, then the comment's log as every
-// reader reads it (session.mjs progressReporter writes it there byte for byte: its header, its `- <time> <text>` lines
-// with their hidden UTC stamps, and every hidden marker line).
+//   stepOf        each line's step, as the stage wrote it (`{step, ...fields}`), its fields checked and kept; the card
+//                 decides on those fields and on the passes' labels, never on a line's words. A step object the stage
+//                 keeps may get its end (`end`) and its result (`outcome`) later: they are read at each write;
+//   progressData  the steps as rows, one per kind of step in order of first occurrence, ×N for repeats; each row's
+//                 Took from recorded starts and ends only (an AI run's record; a wait's own start and end), its cost
+//                 from the AI runs that ended in it; the AI judge calls in a row of their own. The table and the
+//                 timeline chart read this one data;
+//   progressCard  the markdown: the two-line headline, the action line, the table, the timeline chart, Run details.
+// Run details ends with the Full log: the comment as every reader reads it (session.mjs progressReporter writes it there
+// byte for byte: its header, its `- <time> <text>` lines with their hidden UTC stamps). The card itself never writes a
+// line that starts `- ` and a clock, nor "min at the last line".
 import { clockText, timeZone, zoneDay } from "./clock.mjs";
-import { billingBasis, centsOf, costText, many, modelId, modelName, plainText, stateText, tableCell } from "./card-kit.mjs";
-import { UNKNOWN_WHY } from "./usage.mjs";
+import { AGENTS, BASIS_NOTE, basisText, causeSentences, causesShort, cellCost, centsOf, durationText, ganttChart, kindsOf, many, minutesText, modelId, modelName, moneyText, plainText, stateBadge, stateWords, tableCell } from "./card-kit.mjs";
+import { passKind } from "./usage.mjs";
 
-/**
- * The steps a line can be (`step`), each `[done, now]`: its name in the table, and the name the last row of a running
- * stage gives it. `note` is a line no other step fits: its own text is its detail.
- */
-export const STEPS = Object.freeze({
-  setup: ["Set up", "Setting up"],
-  work: ["Work", "Working"],
-  conflict: ["Resolved a conflict", "Resolving a conflict"],
-  rebase: ["Checked the rebase", "Checking the rebase"],
-  review: ["Review", "Reviewing"],
-  thirdParty: ["Third-party review", "Waiting for a third-party review"],
-  queue: ["Merge queue", "Reading the merge queue"],
-  answer: ["Answered", "Answering"],
-  ci: ["Waited for CI", "Waiting for CI"],
-  commands: ["Ran the checks", "Running the checks"],
-  handoff: ["Handed CI to the review", "Handing CI to the review"],
-  triage: ["Triaged a red check", "Triaging a red check"],
-  fix: ["Fixed CI", "Fixing CI"],
-  red: ["CI stayed red", "CI is red"],
-  scope: ["Put files back", "Putting files back"],
-  check: ["Checked the answers", "Checking the answers"],
-  edit: ["Checked an issue edit", "Checking an issue edit"],
-  drift: ["Drift check", "Drift check"],
-  decisions: ["Read the maintainers' decisions", "Reading the maintainers' decisions"],
-  note: ["Note", "Note"],
-  exit: ["Ended", "Ending"],
+/** The rows' words: [name, what the Now row says, the timeline's section]. */
+export const ROWS = Object.freeze({
+  setup: ["Set up", "setting up", "Set up"],
+  edit: ["Checked your edit", "checking your edit", "Edit check"],
+  build: ["Built the change", "building the change", "Build"],
+  rebased: ["Rebased", "rebasing", "Rebase"],
+  conflict: ["Resolved a conflict", "resolving a conflict", "Conflict"],
+  drift: ["Drift advisory", "checking for drift", "Drift"],
+  ci: ["Waited for CI", "waiting for CI", "CI wait"],
+  commands: ["Ran your checks", "running your checks", "Checks"],
+  crossOs: ["Waited for cross-OS CI", "waiting for cross-OS CI", "Cross-OS CI"],
+  flake: ["Flake check", "checking for a flake", "Flake check"],
+  fix: ["Fixed CI", "fixing CI", "CI fix"],
+  handoff: ["Handed CI to the review", "handing CI to the review", "Hand-off"],
+  scope: ["Kept the change in scope", "putting files back", "Scope"],
+  review: ["Reviewed the change", "reviewing the change", "Review"],
+  queue: ["Merge queue failure", "reading the merge queue", "Queue"],
+  outside: ["Outside reviewer", "waiting for an outside reviewer", "Outside review"],
+  answer: ["Answered", "answering the review", "Answers"],
+  check: ["Checked the answers", "checking the answers", "Check"],
+  comments: ["Read new comments", "reading new comments", "Comments"],
+  wrapup: ["Wrap-up", "wrapping up", "Wrap-up"],
+  judge: ["AI judge calls", "asking the AI judge", "AI judge"],
+  note: ["Note", "working", "Note"],
 });
+/** A line's step (the stage's `step` code) to its row's kind. */
+const ROW_OF = Object.freeze({ setup: "setup", edit: "edit", work: "build", conflict: "conflict", rebase: "rebased", drift: "drift", ci: "ci", commands: "commands", triage: "flake", fix: "fix", handoff: "handoff", scope: "scope", review: "review", queue: "queue", thirdParty: "outside", answer: "answer", check: "check", comments: "comments", note: "note" });
+/** Rows whose count shows (×N) when more than one of their steps happened. */
+const COUNTED = new Set(["build", "rebased", "conflict", "ci", "commands", "crossOs", "flake", "fix", "review", "answer"]);
+/** A step cell's detail clause, in characters (Step-cell details are cut to SHORT_DETAIL when the comment is near the limit). */
+export const DETAIL_MAX = 140;
+export const SHORT_DETAIL = 60;
 
-/** The exit row's name, by its exit. */
-const ENDED = Object.freeze({ delivered: "Delivered", blocked: "Blocked", question: "Question", stopped: "Stopped", skipped: "Skipped", paused: "Paused", waiting: "Waiting" });
-/** The stage's kind in its headline. */
-const KINDS = Object.freeze({ work: "🛠️ Work", review: "🔍 Review", merge: "🔀 Merge pass" });
-
-/** Steps a later step of the same kind folds into, across rows of these steps between them (the fix loop's CI waits). */
-export const FOLDS = Object.freeze({ fix: new Set(["ci", "commands", "triage"]) });
-/** Steps whose rows count their passes (×N when more than one merged or folded into them). */
-const COUNTED = new Set(["fix", "work", "answer", "review"]);
-/** Steps never merged with the one before: each is its own row. */
-const ALONE = new Set(["note", "exit"]);
-/** The most rows the table shows: past it the middle rows fold into one that points to Run details. */
-export const ROWS_MAX = 40;
-/** How many of a merged row's details it keeps, the latest. */
-const DETAILS_MAX = 3;
+/** The stage's name in its headline, by its kind (a work stage that only rebases is a Rebase). */
+const STAGE_NAMES = Object.freeze({ work: "Work", review: "Review", merge: "Merge check" });
 
 const count = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : 0);
 const sha7 = (v) => (typeof v === "string" && /^[0-9a-f]{7,64}$/.test(v) ? v.slice(0, 7) : null);
-const words = (v, max = 2000) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+const text = (v, max = 2000) => (typeof v === "string" && v.trim() ? v.trim().replace(/\s+/g, " ").slice(0, max) : null);
 const logins = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?$/.test(x)) : []);
+const time = (v) => (Number.isFinite(v) ? v : null);
+const code = (v) => (typeof v === "string" && /^[a-z][a-z-]{0,30}$/.test(v) ? v : null);
 const tally = (v) => (v && typeof v === "object" ? { a: count(v.proven ?? v.resolved), of: count(v.of), off: count(v.failed ?? v.unjudged) } : null);
+const clip = (s, max) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+const firstClause = (s) => String(s ?? "").split(/[;:(]/)[0].trim();
 
 /**
- * A line's step as the card keeps it (`step`: `{step, ...fields}` from the stage; none or an unknown one is a `note`
- * with `text`, the line, as its detail): its kind and its fields, each checked as its kind, nothing else.
+ * A line's step as the card reads it, at `t` (the line's time): its kind (ROW_OF; none or an unknown step is a `note`
+ * with `line` as its words) and its fields, each checked as its kind. Its span: `start` (else `t`) to `end`, when set.
  */
-export function stepOf(step, text = "") {
-  const s = step && typeof step === "object" && Object.hasOwn(STEPS, step.step) ? step : { step: "note", detail: text };
-  const e = { kind: s.step, sha: sha7(s.sha), detail: words(s.detail) ?? (s.step === "note" ? words(text) : null) };
+export function stepOf(step, t, line = "") {
+  const s = step && typeof step === "object" && Object.hasOwn(ROW_OF, step.step) ? step : { step: "note" };
+  const kind = s.step === "ci" && s.crossOs === true ? "crossOs" : s.step === "work" && s.rebase === true ? "rebased" : ROW_OF[s.step];
+  const e = { kind, t, start: time(s.start) ?? t, end: time(s.end), sha: sha7(s.sha), pass: s.pass !== false };
   switch (s.step) {
     case "setup":
-      if (s.first === true) e.first = true;
-      if (Number.isFinite(s.cloneS)) e.cloneS = Math.max(0, Math.round(s.cloneS));
-      e.resume = words(s.resume, 400);
-      e.resumed = typeof s.resumed === "string" && /^[A-Za-z0-9-]{1,40}$/.test(s.resumed) ? s.resumed : null;
-      if (s.continued === true) e.continued = true;
+      Object.assign(e, { first: s.first === true, installFailed: s.installFailed === true, session: text(s.session, 400), resumed: s.resumed === true, unpriced: text(s.unpriced, 600), account: text(s.account, 600) });
+      break;
+    case "edit":
+      e.kept = s.kept === true;
       break;
     case "work":
-    case "review":
-      e.model = modelId(s.model);
-      e.passes = s.pass === false ? 0 : 1;
-      if (s.step === "work") e.attempt = count(s.attempt) || 1;
-      if (s.foundation === true) e.foundation = true;
-      if (s.beside === true) e.beside = true;
+      Object.assign(e, { model: modelId(s.model), freshAfterFail: s.freshAfterFail === true, counts: s.pass !== false });
       break;
     case "conflict":
-      e.base = words(s.base, 200);
+      Object.assign(e, { base: text(s.base, 100), model: modelId(s.model), counts: true });
       break;
-    case "answer":
-      e.passes = s.pass === false ? 0 : 1;
-      e.comments = count(s.comments);
-      e.thirdParty = count(s.thirdParty);
-      e.decisions = count(s.decisions);
-      if (s.question === true) e.question = true;
-      if (s.queue === true) e.queue = true;
-      break;
-    case "commands":
-      e.commands = count(s.commands);
-      break;
-    case "fix":
-      e.passes = 1;
-      break;
-    case "check":
-      e.tests = tally(s.tests);
-      e.judged = tally(s.judged);
-      if (s.off === true) e.off = true;
-      e.again = count(s.again);
-      e.decider = modelId(s.model);
-      break;
-    case "thirdParty":
-      e.reviewed = logins(s.reviewed);
-      e.missing = logins(s.missing);
-      e.waiting = logins(s.waiting);
-      e.until = Number.isFinite(s.until) ? s.until : null;
+    case "rebase":
+      e.note = text(s.note, 1000);
       break;
     case "drift":
-      e.model = modelId(s.model);
+      Object.assign(e, { verdict: code(s.verdict?.replace?.(/_/g, "-")), model: modelId(s.model) });
       break;
-    case "exit":
-      e.exit = typeof s.exit === "string" && /^[a-z-]{1,20}$/.test(s.exit) ? s.exit : null;
-      e.reason = words(s.reason);
-      e.todo = words(s.todo);
+    case "ci":
+      Object.assign(e, { wait: s.wait === true, counts: s.wait === true, outcome: code(s.outcome), red: code(s.red), check: text(s.check, 200), clause: text(s.clause, 300), minutes: count(s.minutes), result: text(s.result, 300), late: s.late === true });
+      // A line that begins a CI round is no wait of its own: its row's Took is the waits'.
+      if (s.begin === true) e.end = e.start;
+      break;
+    case "commands":
+      Object.assign(e, { commands: count(s.commands), counts: true });
+      break;
+    case "triage":
+      Object.assign(e, { outcome: code(s.outcome), jobs: Array.isArray(s.jobs) ? s.jobs.filter((j) => typeof j === "string").slice(0, 10) : [], counts: true });
+      break;
+    case "fix":
+      Object.assign(e, { check: text(s.check, 200), why: code(s.why), denied: text(s.denied, 300), capped: text(s.capped, 40), counts: s.pass !== false });
+      break;
+    case "handoff":
+      break;
+    case "scope":
+      Object.assign(e, { files: count(s.files), answer: s.answer === true });
+      break;
+    case "review":
+      Object.assign(e, { model: modelId(s.model), foundation: s.foundation === true, counts: true });
+      break;
+    case "queue":
+      e.state = code(s.state);
+      break;
+    case "thirdParty":
+      Object.assign(e, { reviewed: logins(s.reviewed), missing: logins(s.missing), waiting: logins(s.waiting), until: time(s.until), minutes: count(s.minutes), failed: text(s.failed, 200) });
+      break;
+    case "answer":
+      Object.assign(e, { comments: count(s.comments), thirdParty: count(s.thirdParty), decisions: count(s.decisions), question: s.question === true, queue: s.queue === true, freshAfterFail: s.freshAfterFail === true, counts: s.pass !== false });
+      break;
+    case "check":
+      Object.assign(e, { tests: tally(s.tests), judged: tally(s.judged), open: Array.isArray(s.open) ? s.open.filter((x) => typeof x === "string").slice(0, 5) : [], again: count(s.again), off: s.off === true, decider: modelId(s.model), floor: text(s.floor, 120), verdicts: Array.isArray(s.verdicts) ? s.verdicts.slice(0, 20) : [] });
+      break;
+    case "comments":
+      e.count = count(s.count);
       break;
     default:
-      break;
+      e.line = text(line, 2000);
   }
   return e;
 }
 
-/** A row from its first step, at `t`. */
-const rowOf = (t, e) => ({ ...e, t, last: t, members: 1, between: 0, details: e.detail ? [e.detail] : [] });
+/** A pass record's row kind, by its label (usage.mjs passKind; `decision` records are the AI judge's row). */
+export function passRow(p, { rebase = false } = {}) {
+  if (p?.decision) return "judge";
+  const label = typeof p?.label === "string" ? p.label : "";
+  if (label === "answer-scope" || /-scope-\d+$/.test(label)) return "scope";
+  const kind = passKind(label);
+  if (kind === "work") return rebase ? "rebased" : "build";
+  return kind ?? "wrapup";
+}
 
-/** Step `e` at `t` merged into `row`: counts added, the latest commit, model and resume kept, details kept unique. */
-function merge(row, e, t) {
-  row.members += 1;
-  row.last = t;
-  for (const k of ["passes", "comments", "thirdParty", "decisions", "commands", "again"]) if (e[k] !== undefined) row[k] = (row[k] ?? 0) + e[k];
-  for (const k of ["tests", "judged"]) if (e[k]) row[k] = row[k] ? { a: row[k].a + e[k].a, of: row[k].of + e[k].of, off: row[k].off + e[k].off } : e[k];
-  for (const k of ["sha", "model", "resume", "resumed", "decider", "attempt", "until", "base"]) if (e[k]) row[k] = e[k];
-  for (const k of ["first", "continued", "foundation", "beside", "question", "queue", "off"]) if (e[k]) row[k] = true;
-  for (const k of ["reviewed", "missing", "waiting"]) if (e[k]?.length) row[k] = [...new Set([...(row[k] ?? []), ...e[k]])];
-  if (e.cloneS !== undefined) row.cloneS = e.cloneS;
-  if (e.detail && !row.details.includes(e.detail)) row.details.push(e.detail);
+/** The union of spans' lengths, in ms: what overlapping spans of one row took together. */
+function unionMs(spans) {
+  const s = spans.filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b >= a).sort((x, y) => x[0] - y[0]);
+  let total = 0;
+  let cur = null;
+  for (const [a, b] of s) {
+    if (!cur || a > cur[1]) {
+      if (cur) total += cur[1] - cur[0];
+      cur = [a, b];
+    } else cur[1] = Math.max(cur[1], b);
+  }
+  return cur ? total + cur[1] - cur[0] : 0;
 }
 
 /**
- * The rows from the lines (`[t, text, event]`, event from stepOf), oldest first: a run of one step merges into one row
- * (its time the first's); a step in FOLDS folds a later one of its kind into its row across the rows of the steps it
- * names between them (`between` counts those rows); the exit is a row only when it has a reason.
+ * The card's data (pure): `{stage, name, subject, issue, started, now, crosses, zone, exit, live, rows, nowRow, spend,
+ * parts, unknown}`. `lines`: [t, text, step] as the stage wrote them (step: the stage's object, read now); `passes`: the
+ * stage's ended AI runs (harness.mjs stagePasses' records, else the ledger line's entries), each with its label, its
+ * dollars, its runs of unknown cost, its start and end; `snap`: the running pass's activity (logic.mjs harnessActivity)
+ * and its model, for the Now row. A row: {kind, t, events, passes, count, took (ms, null when nothing recorded an end),
+ * spans, usd (null: no AI ran), unknown, cents}.
  */
-export function stepRows(lines) {
+export function progressData({ stage, subject = null, issue, started, now, lines = [], exit = null, live = true, spend = null, parts = null, passes = [], snap = null, rebase = false, zone = timeZone().zone }) {
+  const events = lines.map(([t, line, step]) => ({ ...stepOf(step, t, line), step }));
+  const end = events.find((e) => e.step?.step === "exit");
+  const steps = events.filter((e) => e.step?.step !== "exit");
+  // Running: the last step is the Now row's, not its row's, until a later step (or the exit) follows it.
+  const current = live && !exit && steps.length ? steps.at(-1) : null;
   const rows = [];
-  for (const [t, , e] of lines) {
-    if (!e) continue;
-    if (e.kind === "exit") {
-      if (e.reason) rows.push(rowOf(t, { ...e, detail: e.reason }));
-      continue;
-    }
-    const prev = rows.at(-1);
-    if (prev && prev.kind === e.kind && !ALONE.has(e.kind)) {
-      merge(prev, e, t);
-      continue;
-    }
-    const across = FOLDS[e.kind];
-    if (across) {
-      let i = rows.length - 1;
-      while (i >= 0 && across.has(rows[i].kind)) i -= 1;
-      if (i >= 0 && i < rows.length - 1 && rows[i].kind === e.kind) {
-        rows[i].between += rows.splice(i + 1).length;
-        merge(rows[i], e, t);
-        continue;
-      }
-    }
-    rows.push(rowOf(t, e));
-  }
-  return rows;
-}
-
-/**
- * Each row's own dollars from the stage's ledger (logic.mjs ledgerOfComment's `ledger`): a pass's known dollars and runs
- * of unknown cost go to the row it started in (the last row at or before its start, the first row for one before
- * every row). Decision calls are on no row: the headline counts them. Each row's `usd` (null: no pass priced on it),
- * `unknown` and `cents`, the rows' cents adding up as the finish card's do (card-kit.mjs centsOf).
- */
-export function rowMoney(rows, ledger) {
-  const usd = rows.map(() => null);
-  const unknown = rows.map(() => 0);
-  for (const p of Array.isArray(ledger) ? ledger : []) {
-    if (p?.decision) continue;
+  const rowFor = (kind, t) => {
+    let r = rows.find((x) => x.kind === kind);
+    if (!r) rows.push((r = { kind, t, events: [], passes: [] }));
+    return r;
+  };
+  for (const e of steps) if (e !== current) rowFor(e.kind, e.t).events.push(e);
+  const stageRebase = rebase || steps.some((e) => e.kind === "rebased");
+  const tail = [];
+  for (const p of (passes || []).filter((x) => x && !x.noRun)) {
+    const kind = passRow(p, { rebase: stageRebase });
     const at = Date.parse(p.started);
-    if (!Number.isFinite(at) || !rows.length) continue;
-    const i = Math.max(0, rows.findLastIndex((r) => r.t <= at && r.kind !== "exit"));
-    if (typeof p.usd === "number") usd[i] = (usd[i] ?? 0) + p.usd;
-    unknown[i] += p.usdUnknown || (p.usd === null ? 1 : 0);
+    let r = rows.find((x) => x.kind === kind);
+    if (!r) {
+      r = { kind, t: Number.isFinite(at) ? at : now, events: [], passes: [] };
+      (kind === "judge" || kind === "wrapup" ? tail : rows).push(r);
+    }
+    r.passes.push(p);
   }
-  const cents = centsOf(usd);
-  return rows.map((_, i) => ({ usd: usd[i] === null ? null : Math.round(usd[i] * 1e6) / 1e6, unknown: unknown[i], cents: cents[i] }));
-}
-
-/**
- * The card's data (pure), which the table and any chart read: `{stage, subject, issue, started, now, minutes, crosses,
- * state, exit, todo, live, spend, parts, unknown: {runs, running, decision}, rows}`, each row with its time span (`t`
- * to `end`, ms: the next row's start, else the stage's last write) and its money (rowMoney). Arguments: progressCard's.
- */
-export function progressData({ stage, subject = null, issue, started, now, lines = [], exit = null, todo = null, live = true, spend = null, parts = null, ledger = null, zone = timeZone().zone }) {
-  const rows = stepRows(lines);
-  const money = rowMoney(rows, ledger);
-  rows.forEach((r, i) => Object.assign(r, money[i], { end: i + 1 < rows.length ? rows[i + 1].t : Math.max(r.last, now) }));
+  tail.sort((a, b) => (a.kind === "judge") - (b.kind === "judge"));
+  const all = [...rows, ...tail];
+  for (const r of all) {
+    r.count = r.kind === "judge" ? r.passes.reduce((n, p) => n + (count(p.calls) || 1), 0) : r.events.filter((e) => e.counts).length;
+    // Took: AI runs from their records; any other step from its own recorded span. Nothing recorded: null.
+    r.spans = (r.passes.length ? r.passes.map((p) => [Date.parse(p.started), Date.parse(p.ended)]) : r.events.map((e) => [e.start, e.end])).filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a);
+    r.took = r.kind === "judge" || !r.spans.length ? null : unionMs(r.spans);
+    const priced = r.passes.filter((p) => typeof p.usd === "number");
+    r.usd = r.passes.length ? priced.reduce((s, p) => s + p.usd, 0) : null;
+    r.unknown = r.passes.reduce((n, p) => n + (count(p.usdUnknown) || (typeof p.usd === "number" ? 0 : 1)), 0);
+    r.model = modelId(r.passes.find((p) => p.model && !p.decision)?.model) ?? r.events.findLast((e) => e.model)?.model ?? null;
+  }
+  const cents = centsOf(all.map((r) => r.usd));
+  all.forEach((r, i) => (r.cents = cents[i]));
   const n = parts?.usdUnknown ?? 0;
   const running = parts?.running ? Math.min(parts.usdRunning ?? 0, n) : 0;
-  const why = parts?.usdUnknownWhy ?? [];
+  const rebaseStage = stage === "work" && stageRebase;
   return {
     stage,
+    name: rebaseStage ? "Rebase" : (STAGE_NAMES[stage] ?? stage),
     subject,
     issue,
     started,
     now,
     zone,
-    minutes: Math.round((now - started) / 60000),
     crosses: zoneDay(started, zone) !== zoneDay(now, zone),
     exit,
-    todo,
+    end: end ? stepOf(end.step, end.t) : null,
+    endStep: end?.step ?? null,
     live,
+    rows: all,
+    current: current ? { ...current, row: current.kind } : null,
+    snap,
     spend,
     parts,
-    unknown: { runs: n, running, decision: n > running && why.length === 1 && why[0] === "decision", why },
-    rows,
+    unknown: { runs: n, running, why: parts?.usdUnknownWhy ?? [] },
   };
 }
 
-/** A row's name: its step's, with its comments or its passes counted. `now`: the running stage's last row. */
-function rowName(r, now) {
-  const [done, doing] = STEPS[r.kind];
-  if (r.kind === "exit") return ENDED[r.exit] ?? (r.exit ? `Ended: ${r.exit}` : done);
-  const base = now ? doing : done;
-  const named = r.kind === "answer" && r.comments ? `${base} ${many(r.comments, "comment")}` : base;
-  return COUNTED.has(r.kind) && r.passes > 1 ? `${named} ×${r.passes}` : named;
-}
-
-/** A row's detail words, from its fields, then the details the stage gave it (the latest DETAILS_MAX). */
-function rowWords(r, at) {
+/** What a row's events say, in one clause (at most `max` characters), the stage's own words cut, never rewritten. */
+function rowDetail(r, { at, max, data }) {
+  const ev = r.events;
+  const last = (f) => ev.findLast(f);
   const w = [];
   switch (r.kind) {
     case "setup":
-      if (r.first) w.push("first time on this machine");
-      if (r.cloneS !== undefined) w.push(`cloned in ${r.cloneS} s`);
-      if (r.resume) w.push(r.resumed ? `resumed session ${r.resumed}` : r.continued ? "continued the paused work pass" : "fresh start");
+      if (ev.some((e) => e.first)) w.push("first clone on this machine");
+      if (ev.some((e) => e.installFailed)) w.push("install failed; the agent finishes it");
       break;
-    case "work":
-      if (r.model) w.push(modelName(r.model));
-      if (r.attempt > 1) w.push(`attempt ${r.attempt}`);
-      break;
-    case "review":
-      if (r.model) w.push(modelName(r.model));
-      if (r.foundation) w.push("foundation pass");
-      if (r.beside) w.push("beside the CI run");
-      break;
-    case "conflict":
-      if (r.base) w.push(`with \`${r.base}\``);
-      break;
+    case "build":
     case "answer":
-      if (r.thirdParty) w.push(`${r.thirdParty} from a third-party reviewer`);
-      if (r.decisions) w.push(many(r.decisions, "unread maintainer decision"));
-      if (r.question) w.push("the maintainers' answer");
-      if (r.sha) w.push(`the red CI on \`${r.sha}\`${r.queue ? " (the merge queue's run)" : ""}`);
+      if (ev.some((e) => e.freshAfterFail)) w.push("resume failed, started a new session");
+      break;
+    case "drift": {
+      const v = last((e) => e.verdict)?.verdict;
+      w.push(`AI judge flagged ${v === "looping" ? "possible looping" : "possible scope creep"}; advice only`);
+      break;
+    }
+    case "edit":
+      if (ev.some((e) => e.kept)) w.push("wording only, plan kept");
       break;
     case "ci":
-    case "fix":
-    case "red":
-    case "handoff":
-      if (r.sha) w.push(`\`${r.sha}\``);
+    case "crossOs": {
+      const wait = ev.findLastIndex((e) => e.wait);
+      const red = ev.findLastIndex((e) => e.red);
+      const sha = last((e) => e.sha)?.sha;
+      const result = last((e) => e.result)?.result;
+      if (red > wait || (red >= 0 && wait < 0)) {
+        const e = ev[red];
+        const words = { "late-start": `CI had not started; waited up to ${e.minutes} min`, "held-answer": `failed: \`${e.check}\`; fixed while answering the review`, "held-next": `failed: \`${e.check}\`; fixed in the next step`, stuck: `CI did not finish: ${firstClause(e.clause)}`, "not-started": "CI did not start (GitHub's side)", base: "fails the same way on the default branch; not this change", unjudged: "could not tell whether the default branch fails the same way", setting: `setting problem: ${e.clause}` }[e.red];
+        if (words) w.push(words);
+      } else if (result && r.kind === "crossOs") w.push(result);
+      else {
+        const outcome = last((e) => e.outcome)?.outcome;
+        // A failed round's failing check, from the fix that followed it.
+        const failedCheck = outcome === "failed" ? [...(data.rows.find((x) => x.kind === "fix")?.events ?? []), ...(data.current?.kind === "fix" ? [data.current] : [])].findLast((e) => e.check)?.check : null;
+        const where = sha ? `${r.count > 1 ? "last " : ""}on \`${sha}\`` : "";
+        if (outcome === "passed") w.push(`passed${where ? `${r.count > 1 ? ", " : " "}${where}` : ""}`);
+        else if (outcome === "failed") w.push(failedCheck ? `failed: \`${failedCheck}\`` : `failed${where ? ` ${where}` : ""}`);
+        else if (outcome === "finished") w.push(`finished${where ? ` ${where}` : ""}`);
+        else if (where) w.push(where);
+      }
       break;
-    case "commands":
-      if (r.commands) w.push(many(r.commands, "command"));
+    }
+    case "commands": {
+      const n = last((e) => e.commands)?.commands;
+      if (n) w.push(many(n, "command"));
       break;
-    case "check":
-      if (r.tests) w.push(`${r.tests.a} of ${r.tests.of} ${r.tests.of === 1 ? "fix" : "fixes"} proven by tests${r.tests.off ? `, ${r.tests.off} failed on the head` : ""}`);
-      if (r.judged) w.push(`${r.judged.a} of ${r.judged.of} judged resolved${r.judged.off ? `, ${r.judged.off} with no verdict` : ""}`);
-      if (r.off) w.push("the check is off: each reply answers its finding");
-      if (r.again) w.push(`judged again: ${many(r.again, "answer")}`);
+    }
+    case "flake": {
+      const said = { fix: "the change's; fixing", "flake-rerun": "a flake; failed jobs rerun", "flake-nofix": "a flake; no fix needed", cancelled: "a cancelled job is not a flake; fixing", off: "off", refused: "rerun not permitted", "rerun-once": "already rerun once", "not-rerunnable": "not rerunnable", "rerun-unchanged": "failed jobs rerun once" };
+      const short = { fix: "the change's", "flake-rerun": "flake rerun", "flake-nofix": "flake, no fix needed", cancelled: "cancelled, not a flake", "rerun-green": "rerun passed", off: "off", refused: "rerun not permitted", "rerun-once": "already rerun once", "not-rerunnable": "not rerunnable", "rerun-unchanged": "failed jobs rerun once" };
+      if (ev.length === 1) {
+        const e = ev[0];
+        w.push(e.outcome === "rerun-green" ? `rerun passed with no change: ${e.jobs.join(", ")}` : (said[e.outcome] ?? ""));
+      } else {
+        const by = new Map();
+        for (const e of ev) by.set(short[e.outcome] ?? "checked", (by.get(short[e.outcome] ?? "checked") ?? 0) + 1);
+        w.push([...by].map(([k, n]) => `${n} ${k}`).join(", "));
+      }
       break;
-    case "thirdParty":
-      if (r.reviewed?.length) w.push(`reviewed by ${r.reviewed.join(", ")}`);
-      if (r.missing?.length && !r.waiting?.length) w.push(`no review from ${r.missing.join(", ")}`);
-      if (r.waiting?.length) w.push(`waiting until ${r.until ? at(r.until) : "?"} for ${r.waiting.join(", ")}`);
+    }
+    case "fix": {
+      const why = last((e) => e.why);
+      const check = last((e) => e.check)?.check;
+      const said = why && { rerun: "a fix changed nothing; failed jobs rerun", fresh: "a fix changed nothing; one more attempt in a new session", "no-fresh": `no further attempt: ${why.denied ?? ""}`, capped: `reached the ${why.capped ?? ""} limit; not checked`, unchanged: "the failure is unchanged", "no-progress": "the last fix made no progress", scope: "a fix touched build or CI files outside the plan; put back" }[why.why];
+      if (said && ev.indexOf(why) > ev.findLastIndex((e) => e.check)) w.push(said);
+      else if (check) w.push(`last failure: \`${check}\``);
+      break;
+    }
+    case "handoff": {
+      const sha = last((e) => e.sha)?.sha;
+      w.push(sha ? `CI on \`${sha}\` still running` : "CI still running");
+      break;
+    }
+    case "scope": {
+      const files = ev.reduce((n, e) => n + (e.files || 0), 0);
+      w.push(files ? `${many(files, "build or CI file")} put back` : "build or CI files put back");
+      break;
+    }
+    case "review":
+      if (ev.some((e) => e.foundation)) w.push("foundation review");
+      break;
+    case "queue": {
+      const s = last((e) => e.state)?.state;
+      const said = { fixing: "the PR's own change; one fix", requeued: "not this change; queued again", superseded: "not read: the branch moved on", pending: "read again by the next review", blocked: "the PR's own change; Blocked" }[s];
+      if (said) w.push(said);
+      break;
+    }
+    case "outside": {
+      const e = ev.at(-1);
+      if (e?.waiting?.length) w.push(`waiting for ${e.waiting.join(", ")} until ${e.until ? at(e.until) : "?"}`);
+      else if (e?.failed) w.push(`could not wait: ${e.failed}; went on`);
+      else {
+        if (e?.reviewed?.length) w.push(`${e.reviewed.join(", ")} reviewed`);
+        if (e?.missing?.length) w.push(`${e.missing.join(", ")} did not review within ${e.minutes} min; went on`);
+      }
+      break;
+    }
+    case "check": {
+      const sum = (k) => ev.reduce((a, e) => (e[k] ? { a: a.a + e[k].a, of: a.of + e[k].of, off: a.off + e[k].off } : a), { a: 0, of: 0, off: 0 });
+      const tests = sum("tests");
+      const judged = sum("judged");
+      const parts = [];
+      if (tests.of) parts.push(`${tests.a} of ${tests.of} ${tests.of === 1 ? "fix" : "fixes"} proven by tests`);
+      if (judged.of) parts.push(`${judged.a} of ${judged.of} judged resolved`);
+      if (ev.some((e) => e.off)) parts.push("off: a reply counts as an answer");
+      const again = ev.reduce((n, e) => n + e.again, 0);
+      if (again) parts.push(`${again} judged again`);
+      const open = [...new Set(ev.flatMap((e) => e.open))];
+      const not = judged.off;
+      w.push(`${parts.join(", ")}${open.length ? `; still open: ${open.map((p) => `\`${p}\``).join(", ")}` : ""}${not ? `; ${not} not judged` : ""}`);
+      break;
+    }
+    case "comments":
+      w.push("nothing asked; the merge goes on");
+      break;
+    case "note":
+      w.push(ev.at(-1)?.line ?? "");
       break;
     default:
       break;
   }
-  const keep = r.kind === "note" || r.kind === "exit" ? r.details : r.details.slice(-DETAILS_MAX);
-  return [...w, ...keep];
+  return clip(w.filter(Boolean).join("; "), max);
 }
 
-/** A row's detail cell: its words, each a cell's text, then its dollars in bold. */
-const detailCell = (r, at) => [...rowWords(r, at).map((x) => tableCell(x)), ...(r.between ? [`${many(r.between, "CI step")} between, in Run details`] : []), ...(r.usd === null && !r.unknown ? [] : [`**${costText((r.cents ?? 0) / 100, r.unknown)}**`])].join(" · ");
+/** A row's name in its Step cell, with its count and its model. */
+function rowName(r) {
+  const [name] = ROWS[r.kind];
+  const ev = r.events;
+  let base = name;
+  if (r.kind === "conflict") {
+    const b = ev.findLast((e) => e.base)?.base;
+    if (b) base = `Resolved a conflict with \`${b}\``;
+  }
+  if (r.kind === "answer") {
+    const comments = ev.reduce((n, e) => n + e.comments, 0);
+    const third = ev.reduce((n, e) => n + e.thirdParty, 0);
+    const decisions = ev.reduce((n, e) => n + e.decisions, 0);
+    const question = ev.some((e) => e.question);
+    const sha = ev.findLast((e) => e.sha)?.sha;
+    if (comments) base = `Answered ${many(comments, "review comment")}${third ? ` (${third} from an outside reviewer)` : ""}${question ? " and your answer" : ""}${sha ? ` and the failed CI on \`${sha}\`` : ""}`;
+    else if (decisions) base = `Applied ${many(decisions, "maintainer decision")}`;
+    else if (question) base = "Applied your answer";
+    else if (sha) base = `Fixed the failed CI on \`${sha}\``;
+    else base = "Answered the review";
+  }
+  if (r.kind === "comments") {
+    const n = ev.reduce((a, e) => a + e.count, 0);
+    base = `Read ${many(n, "new comment")}`;
+  }
+  const shown = COUNTED.has(r.kind) || r.kind === "judge" ? r.count : 0;
+  return `${base}${shown > 1 || (r.kind === "judge" && shown) ? ` ×${shown}` : ""}${r.model && ["build", "rebased", "conflict", "review", "answer"].includes(r.kind) ? ` · ${modelName(r.model)}` : ""}`;
+}
+
+/** A row's cost cell: its AI runs' known cents and runs of unknown cost; "—" when no AI ran in it. */
+const costCell = (r) => (r.usd === null && !r.unknown ? "—" : cellCost(r.cents ? r.cents / 100 : (r.usd ?? 0), r.unknown));
+
+/** The words of the Now row's step, its model and what its agent last reported. */
+function nowCell(d, at) {
+  const c = d.current;
+  const [, doing] = ROWS[c.kind];
+  const model = d.snap?.model ? modelName(d.snap.model) : c.model ? modelName(c.model) : null;
+  const s = d.snap?.snap;
+  // What the agent last reported (its activity snapshot), else the stage's own live line, else how long the step has run.
+  const activity = s && !s.ended ? `${s.elapsedMin} min, ${many(s.turns, "turn")}, ${many(s.toolCalls, "tool call")}, ${s.idleMin === 0 || s.idleMin === null ? "active now" : `last activity ${s.idleMin} min ago`}` : d.status || `${minutesText(Math.max(0, d.now - c.t))}`;
+  const where = (c.kind === "ci" || c.kind === "crossOs") && c.sha ? ` on \`${c.sha}\`` : "";
+  return `**Now:** ${tableCell(`${doing}${where}${model ? ` · ${model}` : ""} · ${activity}`)}`;
+}
 
 /**
- * The card's markdown (pure): `stage` (work, review, merge); `subject` ({label, url} of the PR, else null: the issue);
- * `issue`; `started` and `now` (ms); `lines` ([t, text, event], event from stepOf); `status` (what the harness is doing
- * now); `exit` (null while running); `todo` (a Blocked or Question stage's "what to do"); `live` (false for a record
- * that never runs: no state, no last row); `spend` and `parts` (the spend line's figure and parts; null spend: none
- * shown); `ledger` (the ledger line's entries, for each row's dollars); `ran` (choice.mjs ranWith); `harness`; `zone`;
- * `compact` (no table: the comment is near GitHub's size limit). Returns `{card, details}`: the headline and table, and
- * Run details' own lines (the log goes after them, progressBody).
+ * The card's markdown (pure), from progressData's arguments and: `status` (the live line: the Now row's words when no
+ * activity snapshot came with it), `ran` (choice.mjs ranWith), `harness`, `runId`, `runUrl`, `where` (`actions`,
+ * `sandbox`, `local`), `detailMax` (the Step cells' clause: DETAIL_MAX, SHORT_DETAIL near the limit), `chart` (false: no
+ * timeline chart), `explain` (false: Run details without its explanatory sentences), `notes` (Run details' lines the
+ * reporter adds: the ledger cut). Returns `{card, details, chart}`: the headline, action line and table; Run details'
+ * own lines (the Full log goes after them, progressBody); the timeline chart's block ("" for none).
  */
-export function progressCard({ status = "", ran = null, harness = null, compact = false, ...args }) {
-  const d = progressData(args);
+export function progressCard({ status = "", ran = null, harness = null, runId = null, runUrl = null, where = "local", detailMax = DETAIL_MAX, chart = true, explain = true, notes = [], ...args }) {
+  const d = { ...progressData(args), status };
   const at = (t) => clockText(t, { zone: d.zone, abbr: false, date: d.crosses });
-  const kind = KINDS[d.stage] ?? `⚙️ ${d.stage}`;
-  const where = d.subject ? `[${d.subject.label}](${d.subject.url})` : `issue #${d.issue}`;
-  const state = d.live ? ` · ${stateText(d.exit)}` : "";
-  const basis = d.spend === null ? "" : billingBasis(d.spend, d.parts?.usdByBilling);
-  const cost = d.spend === null ? "" : ` · **${costText(d.spend, 0)}**${basis ? ` ${basis}` : ""}`;
+  const atZ = (t) => clockText(t, { zone: d.zone, date: d.crosses });
+  const running = d.live && !d.exit;
   const u = d.unknown;
-  const unknown = d.spend === null || !u.runs ? [] : [...(u.running ? [`${many(u.running, "pass", "passes")} still running`] : []), ...(u.runs > u.running ? [`${many(u.runs - u.running, u.decision ? "decision call" : "run")} of unknown cost`] : [])];
-  const head = [`### ${kind} · ${where}${state}`, `**Started ${clockText(d.started, { zone: d.zone, date: d.crosses })} · ${d.minutes} min**${cost}${unknown.length ? ` · ${unknown.join(" · ")}` : ""}`];
-  if (d.todo) head.push("", `**What to do:** ${plainText(d.todo)}`);
-  const out = d.rows.map((r) => `| ${at(r.t)} | ${tableCell(rowName(r, false))} | ${detailCell(r, at)} |`);
-  // Running: the last row says what the stage is doing now, for how long, and what its harness last reported.
-  if (d.live && !d.exit) {
-    const last = d.rows.at(-1);
-    const doing = last ? `${rowName(last, true)} · ${Math.max(0, Math.round((d.now - last.t) / 60000))} min so far` : `Starting · ${d.minutes} min so far`;
-    const detail = [last ? detailCell(last, at) : "", status ? tableCell(status) : ""].filter(Boolean).join(" · ");
-    if (last) out.pop();
-    out.push(`| ${at(last ? last.t : d.started)} | **${tableCell(doing)}** | ${detail} |`);
+  const usd = d.spend;
+  const byBilling = d.parts?.usdByBilling;
+  // Line 1: badge and state, where, how long, the cost.
+  const state = d.live ? `${stateBadge(d.exit)} ${d.name} ${stateWords(d.exit)}` : `✅ ${d.name}`;
+  const target = d.subject ? d.subject.label : `issue #${d.issue}`;
+  const wall = d.now - d.started;
+  const cost = usd === null ? "" : running ? ` · **${moneyText(usd)}** so far` : ` · **${cellCost(usd, u.runs)}**`;
+  const line1 = `**${state}** · ${target} · ${running ? `${minutesText(wall)} so far` : minutesText(wall)}${cost}`;
+  // Line 2: times, what the dollars are, the runs of unknown cost.
+  const basis = usd === null ? "" : basisText(usd, byBilling);
+  const rest = u.runs - u.running;
+  const unknownWords = [...(running && u.running ? [`${many(u.running, "AI run")} ${u.running === 1 ? "has" : "have"} not reported a cost yet`] : []), ...(usd !== null && rest > 0 ? [`plus ${many(rest, "AI run")} of unknown cost${u.why.length ? ` (${causesShort(u.why)})` : ""}`] : [])];
+  const times = running ? `Started ${atZ(d.started)} · updated ${atZ(d.now)}` : d.live ? `${at(d.started)} – ${atZ(d.now)}` : atZ(d.now);
+  const line2 = [times, basis, ...unknownWords].filter(Boolean).join(" · ");
+  const head = [line1, line2];
+  if (d.exit === "stopped" && d.endStep?.reason) head.push(plainText(d.endStep.reason));
+  // A send-back's rebase: which rebase of the Objective it was, and all its rebases' cost (session.mjs rebaseExitLine).
+  if (typeof d.endStep?.rebase === "string" && d.endStep.rebase) head.push(plainText(`${d.endStep.rebase[0].toUpperCase()}${d.endStep.rebase.slice(1)}`));
+  // The action line, for the states that need a person, and why.
+  const act = actionLines(d, atZ);
+  if (act.length) head.push("", ...act);
+  // The table: one row per kind of step, the Now row while running, the Total once ended.
+  const rows = d.rows.map((r) => {
+    const detail = rowDetail(r, { at, max: detailMax, data: d });
+    return `| ${at(r.t)} | ${tableCell(`${rowName(r)}${detail ? ` · ${detail}` : ""}`, 400)} | ${r.took === null ? "—" : durationText(r.took)} | ${costCell(r)} |`;
+  });
+  if (running && d.current) rows.push(`| ${at(d.current.t)} | ${nowCell(d, at)} | running | ${d.snap?.snap && !d.snap.snap.ended ? "when it ends" : "—"} |`);
+  else if (running) rows.push(`| ${at(d.started)} | **Now:** ${tableCell(status ? status : "starting")} | running | — |`);
+  if (!running && d.live) rows.push(`| | **Total** | **${minutesText(wall)}** | **${usd === null ? "—" : cellCost(usd, u.runs)}** |`);
+  const table = rows.length ? ["", "| Time | Step | Took | Cost |", "| :-- | :-- | --: | --: |", ...rows] : [];
+  // The timeline chart: at the end only, with three or more rows that took a recorded time.
+  const timed = d.rows.filter((r) => r.took !== null && r.spans.length);
+  const gantt = chart && !running && timed.length >= 3 ? ganttChart(timed.map((r) => ({ section: ROWS[r.kind][2], bars: r.spans.map(([a, b]) => ({ start: a, end: b, tag: "active" })) })), { zone: d.zone, days: d.crosses, leftPadding: 110 }) : null;
+  const chartBlock = gantt ? `<details><summary>Timeline chart</summary>\n\n${gantt}\n\nEvery bar's figures are in the table above.\n\n</details>` : "";
+  return { card: [...head, ...table].join("\n"), details: runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at }), chart: chartBlock };
+}
+
+/** The action line (a blockquote) for Blocked, Question, paused and waiting: what to do, then why. [] for the rest. */
+function actionLines(d, atZ) {
+  const s = d.endStep;
+  const why = (r) => {
+    const first = String(r ?? "").split(/(?<=[.!?])\s/)[0];
+    return plainText(clip(first, 300));
+  };
+  if (d.exit === "blocked") {
+    const todo = s?.next === "none" ? "a resume or a restart does not get past this; the Blocked notice on this issue says why." : "fix the cause below, then re-apply the `pendulum:objective` label. The Blocked notice on this issue has the full steps.";
+    return [`> **What to do:** ${todo}`, ">", `> **Why:** ${why(s?.reason)}`];
   }
-  const shown = out.length > ROWS_MAX ? [...out.slice(0, 5), `| … | ${out.length - ROWS_MAX + 1} more steps | in Run details |`, ...out.slice(-(ROWS_MAX - 6))] : out;
-  const table = compact ? ["", "The steps are in Run details: this comment is near GitHub's size limit."] : shown.length ? ["", "| Time | Step | |", "|---|---|---|", ...shown] : [];
-  // Run details: the harness and models, the resume policy and the decision model, and what the unknown runs are.
-  const said = [];
-  if (harness) said.push(`harness ${harness}`);
-  if (ran) {
-    const m = [["worker", ran.worker], ["sub-agent", ran.subagent], ["reviewer", ran.reviewer]].filter(([, id]) => id).map(([k, id]) => `${k} ${modelName(id)}`);
-    if (m.length) said.push(`models: ${m.join(", ")}`);
-    if (ran.account) said.push(`account ${ran.account}`);
+  if (d.exit === "question") {
+    const todo = s?.form === "pr" && s.pr ? `answer in a comment on this issue or PR #${s.pr}, then mark PR #${s.pr} ready. Pendulum goes on from where it stopped.` : "answer the question in a comment on this issue. Pendulum goes on from where it stopped.";
+    return [`> **What to do:** ${todo}`, ">", `> **Question:** ${plainText(clip(String(s?.reason ?? "").replace(/^question:\s*/i, ""), 300))}`];
   }
-  const resume = d.rows.findLast((r) => r.resume)?.resume;
-  if (resume) said.push(`resume: ${resume}`);
-  const decider = d.rows.findLast((r) => r.decider)?.decider;
-  if (decider) said.push(`decision model: ${decider}`);
-  const details = [];
-  if (said.length) details.push(plainText(said.join(" · ")));
-  if (d.spend !== null && u.runs) details.push(`${many(u.runs, "run")} of unknown cost${u.why.length ? `: ${u.why.map((w) => UNKNOWN_WHY[w] ?? w).join("; ")}` : ""}${u.running ? ` (${u.running} still running at this write)` : ""}. Exact figures are in the spend and ledger lines below.`);
-  return { card: [...head, ...table].join("\n"), details: details.join("\n\n") };
+  if (d.exit === "paused") return [`> **What to do:** nothing; Pendulum goes on when the usage limit resets${s?.resetAt ? ` at ${atZ(s.resetAt)}` : ""}.`];
+  if (d.exit === "waiting") {
+    const o = d.rows.find((r) => r.kind === "outside")?.events.findLast((e) => e.waiting?.length);
+    return [`> **What to do:** nothing; waiting for ${o ? `${o.waiting.join(", ")} until ${o.until ? atZ(o.until) : "its bound"}` : "an outside review"}.`];
+  }
+  return [];
+}
+
+/** Run details' own lines: the run, the models, the session, now, the unknown cost, the cost notes, the legend. */
+function runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at }) {
+  const out = [];
+  const setups = d.rows.find((r) => r.kind === "setup")?.events ?? [];
+  const account = ran?.account ? ` · account \`${ran.account}\`` : "";
+  const place = { actions: "on GitHub Actions", sandbox: "in the cloud sandbox", local: "on this machine" }[where] ?? "on this machine";
+  const labels = ran?.labels?.length ? ` · chosen by ${ran.labels.map((l) => `\`${l}\``).join(", ")}` : "";
+  if (runId) out.push(`- **Run:** ${runUrl ? `[${runId}](${runUrl})` : runId} ${place}${harness ? ` · agent ${AGENTS[harness] ?? harness}` : ""}${account}${labels}`);
+  const judge = d.rows.flatMap((r) => r.events).findLast((e) => e.decider)?.decider;
+  const models = ran ? [["worker", ran.worker], ["sub-agents", ran.subagent], ["reviewer", ran.reviewer]].filter(([, id]) => id).map(([k, id]) => `${k} ${modelName(id)}`) : [];
+  if (judge) models.push(`AI judge ${judge}`);
+  if (models.length) out.push(`- **Models:** ${models.join(" · ")}`);
+  const session = setups.findLast((e) => e.session);
+  if (session) out.push(`- **Session:** ${session.resumed ? "resumed" : "new"} (${plainText(session.session.replace(/^fresh \((.*)\)$/, "$1"))})`);
+  for (const e of setups.filter((x) => x.account)) out.push(`- **Account:** ${plainText(e.account)}`);
+  const s = d.snap?.snap;
+  if (d.live && !d.exit && s && !s.ended) {
+    const bits = [];
+    if (s.subagentsActive?.length) bits.push(`${many(s.subagentsActive.length, "sub-agent")} running (${s.subagentsActive.map((a) => `${a.type}: ${a.description || "?"}, ${a.minutes} min`).join("; ")})`);
+    if (s.backgroundCommands) bits.push(`${many(s.backgroundCommands, "background command")} running`);
+    if (s.lastTool) bits.push(`last tool ${s.lastTool}`);
+    const k = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+    if (s.tokens) bits.push(`${k(s.tokens.input)} tokens in, ${k(s.tokens.output)} out`);
+    if (bits.length) out.push(`- **Right now:** ${plainText(bits.join("; "))}`);
+  }
+  const verdicts = explain ? (d.rows.find((r) => r.kind === "check")?.events.flatMap((e) => e.verdicts.map((v) => ({ ...v, floor: e.floor }))) ?? []) : [];
+  if (verdicts.length) out.push(`- **AI judge verdicts:** ${plainText(verdicts.map((v) => `\`${v.place}\` ${String(v.verdict ?? "no verdict").replace(/_/g, " ")}${typeof v.confidence === "number" ? ` (${v.confidence.toFixed(2)})` : ""}`).join("; "))}${verdicts[0].floor ? ` · floor: ${plainText(verdicts[0].floor)}` : ""}`);
+  // The unknown cost, one sentence per cause with its count (from the AI runs' own records), else the spend line's causes.
+  const counts = [];
+  for (const r of d.rows) for (const p of r.passes) if (count(p.usdUnknown) || typeof p.usd !== "number") counts.push([(p.usdUnknownWhy ?? [])[0] ?? (p.decision ? "decision" : "unreported"), count(p.usdUnknown) || 1]);
+  const said = causeSentences(counts.length ? counts : d.unknown.runs ? [[d.unknown.why[0] ?? "unreported", d.unknown.runs]] : []);
+  if (said) out.push(`- **Unknown cost:** ${said}`);
+  const costNotes = [];
+  const kinds = d.spend ? kindsOf(d.spend, d.parts?.usdByBilling) : [];
+  for (const k of kinds) if (BASIS_NOTE[k || "unknown"]) costNotes.push(BASIS_NOTE[k || "unknown"]);
+  for (const e of setups.filter((x) => x.unpriced)) costNotes.push(`This model has no listed price, so its runs show as unknown (${plainText(e.unpriced)}).`);
+  if (explain && d.live && !d.exit) costNotes.push("An AI run reports its cost when it ends.");
+  if (costNotes.length) out.push(`- **Cost notes:** ${[...new Set(costNotes)].join(" ")}`);
+  const fix = d.rows.find((r) => r.kind === "fix");
+  if (fix && fix.passes.length > 1) out.push(`- **Fixed CI, each round:** ${fix.passes.map((p, i) => `${i + 1}: ${typeof p.usd === "number" ? cellCost(p.usd, count(p.usdUnknown)) : "unknown"}`).join(" · ")}`);
+  const premium = d.rows.flatMap((r) => r.passes).reduce((n, p) => n + (typeof p.premiumRequests === "number" ? p.premiumRequests : 0), 0);
+  if (premium) out.push(`- **Copilot:** ${premium} premium requests`);
+  for (const e of d.rows.find((r) => r.kind === "rebased")?.events.filter((x) => x.note) ?? []) out.push(`- **Rebase:** ${plainText(e.note)}`);
+  for (const n of notes) out.push(`- ${plainText(n)}`);
+  if (explain) out.push(d.live && !d.exit ? "- — means no AI ran in that step. Steps are grouped by kind; the full log below is in time order." : "- — means no AI ran in that step; AI judge calls are counted in their own row. Steps can overlap, so the Took column does not add up to the total; the full log below is in time order.");
+  void at;
+  return out.join("\n");
 }
 
 /**
- * The whole comment body after its key (pure): the card, then the Run details block holding the card's own details and
- * `log`, the comment as every reader reads it (session.mjs progressReporter: header, lines and markers, unchanged).
+ * The whole comment body after its key (pure): the card, the timeline chart, then Run details with its own lines and the
+ * Full log (`log`: the stage's header and lines, as every reader reads them); `tail`, the marker lines (with the carried
+ * decision-spend text), after it, unchanged.
  */
-export function progressBody(card, log) {
-  return `${card.card}\n\n<details><summary>Run details</summary>\n\n${card.details ? `${card.details}\n\n` : ""}${log}\n\n</details>`;
+export function progressBody(card, log, tail = "") {
+  return `${card.card}${card.chart ? `\n\n${card.chart}` : ""}\n\n<details><summary>Run details</summary>\n\n${card.details ? `${card.details}\n\n` : ""}**Full log**\n\n${log}\n\n</details>${tail}`;
 }

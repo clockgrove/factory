@@ -1290,11 +1290,12 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   let earlier = null;
   const opts = { token };
   const actions = { token: actionsToken };
-  const record = async (line, rec) => {
+  // `outcome`: the verdict's code for the progress comment's flake-check row (progress-card.mjs).
+  const record = async (line, rec, outcome = "fix") => {
     mine = mergeTriage(mine, rec);
     progress?.triage?.(mine);
     log(line);
-    if (progress) await progress(line, { step: "triage", detail: line });
+    if (progress) await progress(line, { step: "triage", outcome });
   };
   const known = async () => {
     if (!earlier) {
@@ -1329,7 +1330,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
         // A throttled call (rate limit) is no refusal: this red goes to the fix pass, and a later one may ask again.
         const refused = (e.status === 403 || e.status === 404) && !e.rateLimited;
         const why = refused && e.status === 403 ? ", no permission to rerun jobs (Actions: write)" : "";
-        await record(outcome(`the rerun was refused: ${e.status || "error"}${why}`), refused ? { refused: true } : {});
+        await record(outcome(`the rerun was refused: ${e.status || "error"}${why}`), refused ? { refused: true } : {}, "refused");
         return { refusal: { status: e.status || null, permission: refused && e.status === 403, rateLimited: !!e.rateLimited, where: env.GITHUB_ACTIONS ? "actions" : "local" } };
       }
     }
@@ -1431,7 +1432,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     offSaid = true;
     const line = `triage: off (${code}); ${cancels.map((c) => `${c.text}, no flake; `).join("")}fix pass`;
     log(line);
-    if (progress) await progress(line, { step: "triage", detail: line });
+    if (progress) await progress(line, { step: "triage", outcome: "off" });
     return { rerun: false };
   };
 
@@ -1440,16 +1441,16 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     if (!failedRuns.length) return no;
     const seen = await known();
     if (seen.refused) {
-      await record(`triage: a rerun was refused earlier on this Objective (the token cannot rerun jobs: it needs Actions read and write); fix pass`, {});
+      await record(`triage: a rerun was refused earlier on this Objective (the token cannot rerun jobs: it needs Actions read and write); fix pass`, {}, "refused");
       return no;
     }
     if (seen.reruns.has(sha)) {
-      await record(`triage: the failed jobs on ${sha.slice(0, 7)} were already rerun once; fix pass`, {});
+      await record(`triage: the failed jobs on ${sha.slice(0, 7)} were already rerun once; fix pass`, {}, "rerun-once");
       return no;
     }
     const { notActions, jobs, runIds } = await askJobs({ sha, failedRuns, required, seen });
     if (notActions) {
-      await record(`triage: ${notActions} is not an Actions job, so it cannot be rerun; fix pass`, {});
+      await record(`triage: ${notActions} is not an Actions job, so it cannot be rerun; fix pass`, {}, "not-rerunnable");
       return no;
     }
     asked.set(sha, jobs);
@@ -1458,16 +1459,16 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     // is that job's consequence: its verdict decides, and its rerun reruns both.
     const counted = jobs.filter((j) => !j.after);
     if (!rerunWanted(counted, floor.min)) {
-      await record(triageLine({ sha, model, jobs, outcome: "fix pass", floor }), {});
+      await record(triageLine({ sha, model, jobs, outcome: "fix pass", floor }), {}, "fix");
       return no;
     }
     const failed = await rerunRuns(runIds, (why) => triageLine({ sha, model, jobs, outcome: `fix pass (${why})`, floor }), until);
-    if (failed?.line) await record(failed.line, {});
+    if (failed?.line) await record(failed.line, {}, "fix");
     // What the Block says when this red is the last (session.mjs validationLoop, refusedRerunText): every job's
     // verdict and failure line, and the refusal.
     if (failed?.refusal) return { rerun: false, refused: { ...failed.refusal, jobs: counted.map((j) => ({ name: j.name, verdict: j.verdict, confidence: j.confidence, line: j.sig.line, lines: j.sig.lines })) } };
     if (failed) return no;
-    await record(triageLine({ sha, model, jobs, outcome: "failed jobs rerun", floor }), { reruns: [sha], sigs: counted.map((j) => j.sig.id).filter(Boolean), ran: counted.map((j) => ({ id: j.id, name: j.name, step: j.step, sig: j.sig.id })) });
+    await record(triageLine({ sha, model, jobs, outcome: "failed jobs rerun", floor }), { reruns: [sha], sigs: counted.map((j) => j.sig.id).filter(Boolean), ran: counted.map((j) => ({ id: j.id, name: j.name, step: j.step, sig: j.sig.id })) }, "flake-rerun");
     return { rerun: true, ignoreIds: new Set(failedRuns.map((r) => r.id)), jobs: jobs.map((j) => j.name) };
   };
 
@@ -1548,13 +1549,13 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     if (!failedRuns.length) return { flaky: false };
     const { notActions, jobs } = await askJobs({ sha, failedRuns, required, seen: await known() });
     if (notActions) {
-      await record(`triage: ${notActions} is not an Actions job; the change's`, {});
+      await record(`triage: ${notActions} is not an Actions job; the change's`, {}, "not-rerunnable");
       return { flaky: false };
     }
     asked.set(sha, jobs);
     const floor = floorNow();
     const flaky = rerunWanted(jobs.filter((j) => !j.after), floor.min);
-    await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : jobs.some((j) => j.cancel && !j.after) ? "a cancelled job is no flake: fix pass" : "the change's: fix pass", floor }), {});
+    await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : jobs.some((j) => j.cancel && !j.after) ? "a cancelled job is no flake: fix pass" : "the change's: fix pass", floor }), {}, flaky ? "flake-nofix" : jobs.some((j) => j.cancel && !j.after) ? "cancelled" : "fix");
     return { flaky, jobs, off: false };
   };
   // Whether a failing job's failure names what the PR changes: a changed path (changedPathIn), or a changed file or added
@@ -1625,10 +1626,10 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     const failed = await rerunRuns(runIds, line, until);
     if (failed?.refusal) return { rerun: false, refused: { ...failed.refusal, unchanged: true } };
     if (failed) {
-      await record(failed.line, {});
+      await record(failed.line, {}, "fix");
       return { rerun: false, skipped: `workflow run ${failed.incomplete} did not complete` };
     }
-    await record(line("failed jobs rerun once, no model asked"), { reruns: [sha], sigs: ran.map((x) => x.sig).filter(Boolean), ran });
+    await record(line("failed jobs rerun once, no model asked"), { reruns: [sha], sigs: ran.map((x) => x.sig).filter(Boolean), ran }, "rerun-unchanged");
     return { rerun: true, ignoreIds: new Set(failedRuns.map((r) => r.id)), jobs: failedRuns.map((r) => r.name) };
   };
   // Whether every failed job failed on GitHub's side (githubSide): its set-up or checkout only, a server or network

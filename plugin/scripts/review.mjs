@@ -22,6 +22,7 @@ import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, i
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { endCard } from "./lib/finish-card.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
@@ -289,7 +290,7 @@ export function reviewOverlap({ run, progress, head, conflicted = async () => fa
       settled = true;
       decide(false);
       if (!r.green && !r.held && !r.aborted) end();
-      if (reviewing && !reviewerEnded && !r.aborted) await progress(`required checks on ${short()} ${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer runs`, { step: "ci", sha: head() || null, detail: `${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer ran` });
+      if (reviewing && !reviewerEnded && !r.aborted) await progress(`required checks on ${short()} ${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer runs`, { step: "ci", sha: head() || null, outcome: r.green ? "passed" : r.held ? "failed" : "finished" });
       return r;
     },
     (e) => {
@@ -316,7 +317,12 @@ export function reviewOverlap({ run, progress, head, conflicted = async () => fa
     besideText: () => (settled ? "" : ` beside the required checks on ${short()}`),
     reviewerDone: async () => {
       reviewerEnded = true;
-      if (!settled) await progress(`waiting for required checks on ${short()} after the reviewer`, { step: "ci", sha: head() || null, detail: "after the reviewer" });
+      if (!settled) {
+        // This wait's own end is when the checks settle (progress-card.mjs: the CI row's Took).
+        const afterStep = { step: "ci", sha: head() || null, wait: true };
+        await progress(`waiting for required checks on ${short()} after the reviewer`, afterStep);
+        done.then(() => (afterStep.end = Date.now()), () => (afterStep.end = Date.now()));
+      }
       return done;
     },
     stop: () => ctl.abort(),
@@ -356,7 +362,7 @@ export async function thirdPartyGate({ repo, issue, pr, labels, names, own, skip
   const ended = await waitEnd({ repo, issue, prNumber: pr.number, labels, token: opts.token });
   if (ended.ok) return third;
   await clearWait({ repo, issue, prNumber: pr.number, token: opts.token });
-  await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`, { step: "thirdParty", detail: `${ended.why}; going on without ${third.wait.missing.join(", ")}` });
+  await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`, { step: "thirdParty", failed: ended.why, missing: third.wait.missing });
   return { logins: third.logins, wait: null };
 }
 
@@ -1009,6 +1015,8 @@ async function main() {
     }),
   );
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
+  // The issue as the stage read it, for a Blocked or Question end's finish card (finish-card.mjs endCard); null before.
+  let cardIssue = null;
   const finish = async (exit, reason, outage = null, usageLimit = null) => {
     watch?.stop();
     stopOverlap?.();
@@ -1047,7 +1055,10 @@ async function main() {
       const line = stageSpendLine(usage);
       progress.spend(line.usd, line.parts, line.ledger);
     }
-    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`, endStep({ issue, exit, reason, applied: lastApplied }));
+    const end = endStep({ issue, exit, reason, applied: lastApplied, resetAt: usageLimit?.reset ?? null });
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`, end);
+    // A Blocked or Question end gets the Objective's finish card too, upserted in place (finish-card.mjs endCard; never throws).
+    if ((exit === "blocked" || exit === "question") && cardIssue) await endCard(repo, { ...cardIssue, number: issue }, token, { exit, reason, form: end.form ?? null, appId: inputs.appId || process.env.PENDULUM_NOTICE_APP_ID || null, log });
     // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.
     stopWaiting();
     setOutput("exit", exit);
@@ -1188,6 +1199,7 @@ async function main() {
     return;
   }
   const { issueData } = trusted;
+  cardIssue = issueData;
   // The harness and models this Objective runs on (objective-trust.mjs choiceGate): the reviewer, and the fix and answer
   // passes, on what its labels choose over the repository's defaults, or a Block before anything is set up for it.
   const chosen = await choiceGate({ repo, issue, labels: trusted.labels, args, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review" });
@@ -1223,7 +1235,7 @@ async function main() {
   // Automatic choice picked the account: a limit with no reset ends the stage, to move the Objective or Block (#332).
   LIMIT.moves = stageMoves({ local, limits, pinned: acct.pinned });
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
-  if (acct.note) await progress(acct.note, { step: "setup", detail: acct.note });
+  if (acct.note) await progress(acct.note, { step: "setup", account: acct.note });
   // The chosen harness's credential (doctor.mjs credentialChecks), as the worker's job checks have it: a missing one Blocks
   // with its fix before anything is set up, never a crash at the first harness pass.
   const credFails = (await credentialChecks({ inputs })).filter((c) => c.status === "FAIL");
@@ -1321,11 +1333,13 @@ async function main() {
   // What already listens on loopback is no service of the setup's: Claude Code's commands reach only what it starts.
   if (inputs.harness === "claude" && access.agent) noteSetupStart();
   if (inputs.setup) {
-    await progress("setup", { step: "setup" });
+    const setupStep = { step: "setup" };
+    await progress("setup", setupStep);
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
     // One that fails while this machine's network is down runs once more after it is back (checkout.mjs runSetup).
     const tree = access.agent ? await outbox.defaultTree() : checkout;
     const s = await runSetup({ tree, command: inputs.setup, env: access.agent ? { ...childBase, TMPDIR: tmp.pendulum } : childBase, asRunner: !!access.agent, deadlineAt, head: "setup failed before review:" });
+    setupStep.end = Date.now();
     if (!s.ok) {
       await dropLabel();
       await applyExit(repo, { issue, pr, exit: "blocked", reason: s.reason, cause: "setup", notify: inputs.notify, stage: "review" }, token);
@@ -1340,10 +1354,12 @@ async function main() {
   const installTree = access.agent ? pendulumTree : checkout;
   const install = installCommand(installTree, inputs.install);
   if (install) {
-    await progress("install", { step: "setup" });
+    const installStep = { step: "setup" };
+    await progress("install", installStep);
     // An install that failed or left a dependency missing is not a red for the branch: what validation would say after
     // it is no verdict on the PR. installDeps repairs it once; still broken, the stage Blocks naming the install.
     const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt), tools: installTools(installTree, inputs.install) });
+    installStep.end = Date.now();
     if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
     if (!i.ok) {
       log(i.reason);
@@ -1466,12 +1482,12 @@ async function main() {
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
   reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: "resume policy is fresh" };
   const entered = reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`;
-  await progress(`re-entry: ${entered}`, { step: "setup", resume: entered, resumed: reentry.resumed ? restored.id.slice(0, 8) : null });
+  await progress(`re-entry: ${entered}`, { step: "setup", session: entered, resumed: !!reentry.resumed });
   for (const m of new Set([inputs.reviewerModel, inputs.model].filter(Boolean))) {
     const unpriced = unpricedCodex(inputs.harness, m, { gateway: !!inputs.codexGatewayKey });
     if (unpriced) {
       log(`warning: ${unpriced}`);
-      await progress(`unpriced: ${unpriced}`, { step: "setup", detail: `unpriced: ${unpriced}` });
+      await progress(`unpriced: ${unpriced}`, { step: "setup", unpriced });
     }
   }
 
@@ -1583,7 +1599,7 @@ async function main() {
   let queueFix = null;
   if (queued) {
     log(queued.line);
-    await progress(queued.line, { step: "queue", detail: queued.line });
+    await progress(queued.line, { step: "queue", state: queued.state });
     if (queued.state === "fixing") {
       heldRed = queued.red;
       queueFix = queued.record;
@@ -1960,7 +1976,7 @@ async function main() {
     if (answerFreshAfter(resumeAnswer, rec) && !mark(rec, rec).budgetExceeded) {
       records.push(rec);
       log(`resumed session ${resumeAnswer.slice(0, 8)} failed (${rec.error}); answering fresh`);
-      await progress("re-entry: resume failed; answering fresh", { step: "answer", detail: "resume failed; answering fresh", pass: false });
+      await progress("re-entry: resume failed; answering fresh", { step: "answer", freshAfterFail: true, pass: false });
       reentry = { ...(reentry || {}), resumed: false, reason: "resume failed" };
       session.id = null;
       rec = await runHarness(answerArgs(null));
@@ -1979,7 +1995,7 @@ async function main() {
       if (held.usage.length) out = io.files();
       if (held.question) {
         heldQuestion = true;
-        await progress(`answer-scope: put back and asked a Question: ${held.refused}`, { step: "scope", detail: `put back and asked a Question: ${held.refused}` });
+        await progress(`answer-scope: put back and asked a Question: ${held.refused}`, { step: "scope", answer: true });
       }
     }
     // Pendulum pushes the answer, updates the PR from pr.md, then posts the replies: only to the comments this pass was given.

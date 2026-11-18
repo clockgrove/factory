@@ -66,6 +66,7 @@ export const DEFAULTS = {
   install: "auto",
   validation: "",
   budget_command: "",
+  regenerate: "", // the command that writes the declared generated files (`pendulum-generated` in .gitattributes) in place, run after a conflict pass that met them (checkout.mjs runRegeneration); empty: none are declared
   protected_paths: "",
   toolchain_paths: "", // paths a fix pass may change only in its scope or on the fence check's yes, beside the exact lists (logic.mjs toolchainFile); empty: none
   ci_checks: "",
@@ -219,7 +220,7 @@ export function workflowSettings(wf = {}) {
  */
 export const WORKFLOW_ONLY_SETTINGS = new Set(
   [
-    ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
+    ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "REGENERATE", "LOCAL_SETUP", "LOCAL_DB"],
     ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION", "PROJECT"],
     ...["CROSS_OS_WORKFLOW", "CROSS_OS_CHECKS", "CROSS_OS_WAIT_MINUTES"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
@@ -714,6 +715,8 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     install: get("install"),
     validation: list(get("validation")),
     budgetCommand: get("budget_command"),
+    // The regeneration command (docs/INSTALL.md, Generated files): the reviewed workflow file's alone, never the branch's.
+    regenerate: String(get("regenerate") || "").trim(),
     protectedAdditions: list(get("protected_paths")),
     toolchainPaths: list(get("toolchain_paths")),
     ciChecks: list(get("ci_checks")),

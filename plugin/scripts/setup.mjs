@@ -598,6 +598,7 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     // `parallel: ` marks would make a plain YAML value a mapping: renderWorkflow's yamlScalar quotes it, once.
     validation: inputs.validation.join(", "),
     budget_command: inputs.budgetCommand,
+    regenerate: inputs.regenerate,
     protected_paths: protectedList.join(", "),
     ci_checks: inputs.ciChecks.join(", "),
     node_version: args.node_version || "22",

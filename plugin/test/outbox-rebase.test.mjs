@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { JUDGE_PATH_MAX_BYTES } from "../scripts/lib/outbox.mjs";
+import { openRegeneration } from "../scripts/lib/checkout.mjs";
 import { KEPT_QUESTION, openKeptCheck } from "../scripts/lib/kept.mjs";
 import { open, quiet, repos } from "./fixtures/outbox.mjs";
 
@@ -235,7 +236,7 @@ test("worker: a send-back's conflict pass ended by a cap mid-rebase pushes nothi
   assert.equal(decideExit({ harness: { ok: false, timedOut: true }, pr, commits: 0, unresolved, pushRejected: box.error !== unresolved ? box.error : "" }).reason, "time cap reached");
   // The worker calls the guard for every send-back conflict, caps or not.
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
-  assert.match(src, /\n {2}const keptCheck = rebaseOnto \? openKeptCheck\(\{ inputs, stage: decisionStage \}\) : null;\n {2}const unresolved = await sendBackGuard\(\{ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck\?\.judge \?\? null, progress, limited: keptCheck\?\.limited \?\? null, issue \}\);\n {2}let pushed = await outbox\.push\(\);/);
+  assert.match(src, /\n {2}const keptCheck = rebaseOnto \? openKeptCheck\(\{ inputs, stage: decisionStage \}\) : null;\n {2}const unresolved = await sendBackGuard\(\{ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck\?\.judge \?\? null, progress, limited: keptCheck\?\.limited \?\? null, issue, regenerate: rebaseRegenerate && \{ \.\.\.rebaseRegenerate, check: regenerateFirst \} \}\);\n {2}let pushed = await outbox\.push\(\);/);
 });
 
 /**
@@ -361,6 +362,49 @@ test("#515: a long doc table both sides edited, over 32 KiB of the branch's diff
   const group = d.asked.find((a) => a.hunks.length > 1 && a.hunks.includes(90)).hunks;
   const alone = d.asked.filter((a) => a.hunks.length === 1).map((a) => a.hunks[0]);
   assert.deepEqual(alone, group.filter((h) => h <= 90));
+});
+
+test("#619: a declared generated file both sides changed takes the base's side unjudged, and the regeneration check passes only on the command's own output with nothing written outside the declared paths", async () => {
+  // golden.json is one line of over 64 KiB that gen.sh writes from a.txt and b.txt; the branch changes a.txt, main b.txt.
+  const pad = "x".repeat(100_000);
+  const golden = (a, b) => `{"a":"${a}","b":"${b}","pad":"${pad}"}\n`;
+  const gen = `printf '{"a":"%s","b":"%s","pad":"%s"}\\n' "$(cat a.txt)" "$(cat b.txt)" "$(head -c 100000 /dev/zero | tr '\\0' x)" > golden.json\n`;
+  const t = await sentBack({
+    base: { ".gitattributes": "golden.json pendulum-generated\n", "gen.sh": gen, "a.txt": "a0\n", "b.txt": "b0\n", "golden.json": golden("a0", "b0") },
+    // The branch's own .gitattributes declares a.txt: it counts for nothing until it merges.
+    commits: [{ ".gitattributes": "golden.json pendulum-generated\na.txt pendulum-generated\n", "a.txt": "a1\n", "golden.json": golden("a1", "b0") }],
+    main: { "b.txt": "b1\n", "golden.json": golden("a0", "b1") },
+  });
+  assert.deepEqual([...(await t.box.generated([...t.box.conflicts, "a.txt"]))], ["golden.json"]);
+  // The conflict pass: the base's golden.json, then the rebase finished.
+  assert.throws(() => t.go("rebase", "-q", "origin/main"));
+  t.go("checkout", "-q", "origin/main", "--", "golden.json");
+  t.go("-c", "core.editor=true", "rebase", "--continue");
+  const { asked, judge } = hunkReader();
+  const env = { ...process.env, ...quiet };
+  // The stage's check, as any stage opens it: no rebase state, the trigger read from git.
+  // `met`: what the stage's own conflict pass adds (the declared paths it took main's side of).
+  const stage = (command, met = []) => openRegeneration({ command, generated: (paths) => t.box.generated(paths), touched: () => t.box.touched(t.onto), also: () => met }).check(t.r.work, { env, echo: false });
+  // No Block (nothing judged); the check is red on the head that holds main's golden.json, naming it.
+  assert.equal(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge, regenerate: true }), "");
+  assert.deepEqual([asked, t.box.regenerated], [[], ["golden.json"]]);
+  const stale = await stage("sh gen.sh", t.box.regenerated);
+  assert.ok(stale.green === false && stale.failed.output.includes("golden.json"), stale.failed?.output);
+  t.go("commit", "-q", "-am", "regenerate");
+  // A command that writes nothing is red on the committed head too: the file must be written again.
+  const idle = await stage("true");
+  assert.ok(idle.green === false && idle.failed.output.includes("golden.json"), idle.failed?.output);
+  // Committed: green, and the file is the command's output on the merged tree (the branch's a.txt with main's b.txt).
+  assert.equal((await stage("sh gen.sh")).green, true);
+  assert.equal(t.go("show", "HEAD:golden.json"), golden("a1", "b1"));
+  // A command that writes outside the declared paths, or exits non-zero, is a red.
+  const outside = await stage("sh gen.sh && echo stray > stray.txt");
+  assert.ok(outside.green === false && outside.failed.output.includes("stray.txt"), outside.failed?.output);
+  assert.equal((await stage("exit 3")).failed.code, 3);
+  // The guard: a red from the check on the paths the pass met leaves the pass unresolved, and nothing is pushed.
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  assert.ok(await sendBackGuard({ outbox: t.box, onto: { from: t.from, base: t.onto, files: ["golden.json"] }, defaultBranch: "main", judge, regenerate: { paths: [], check: async () => "red" } }));
+  assert.equal(await t.box.push(), false);
 });
 
 test("#452: in local mode a conflict pass the check cannot pass is kept on a branch of the Objective's clone, and nothing of it is pushed", async () => {

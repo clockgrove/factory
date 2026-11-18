@@ -55,8 +55,10 @@ jobs:
       # times a day, and what they left behind once filled /tmp's inodes (#2565).
       - name: An empty temp folder for the tests
         run: mkdir "$RUNNER_TEMP/tests"
+      # No test may hold the job: one still running after two minutes fails by name (the slowest takes seconds), and a
+      # file's process ends with its last test, whatever it left open (a timer, a socket).
       - name: Bench tests
-        run: node --test bench/test/*.test.mjs
+        run: node --test --test-timeout=120000 --test-force-exit bench/test/*.test.mjs
         env:
           TMPDIR: ${{ runner.temp }}/tests
       - name: The tests left the temp folder empty
@@ -87,8 +89,9 @@ jobs:
       # Each slice's own empty temp folder, which it must leave empty, as the bench tests' (above).
       - name: An empty temp folder for the tests
         run: mkdir "$RUNNER_TEMP/tests"
+      # The same bounds as the bench tests' (above): two minutes a test, and no file outlives its last test.
       - name: Plugin tests, slice ${{ matrix.slice }} of 4
-        run: node --test --test-shard=${{ matrix.slice }}/4 plugin/test/*.test.mjs
+        run: node --test --test-timeout=120000 --test-force-exit --test-shard=${{ matrix.slice }}/4 plugin/test/*.test.mjs
         env:
           TMPDIR: ${{ runner.temp }}/tests
       - name: The tests left the temp folder empty

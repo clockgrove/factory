@@ -1020,12 +1020,22 @@ function costBars(b) {
   return costChart([...b.asked.map((r) => bar(r.name, r)), ...b.churn.map((r) => bar(CHART_CHURN[r.row] ?? r.name, r))]);
 }
 
-/** The notes line under the money: what the bars show and what they leave out. */
-function notesLine(t, b, drawn) {
+/** What the money note says, once, when a row's cents are not its own figure's (sharedOut). */
+export const SHARED_NOTE = "The rows' cents are shared out to add up to the total, so a row can be a cent off its stage's own figure.";
+/**
+ * Whether any of `rows` (costRows', spendBreakdown's) shows cents other than its own dollars' (#617): centsOf gave it a
+ * cent, or took one, so the rows add up to the total's cents, where the stage's own record, its progress comment and the
+ * run log show its own figure.
+ */
+const sharedOut = (rows) => rows.some((r) => r.usd > 0 && r.cents && cellCost(r.cents / 100) !== cellCost(r.usd));
+
+/** The notes line under the money: what the bars show and what they leave out, and that rows are shared out when one is. */
+function notesLine(t, b, drawn, shared = false) {
   const none = [...b.asked, ...b.churn].filter((r) => r.usd === null).map((r) => r.name);
   const unknown = t.unknown ? `; ${many(t.unknown, "AI run")} of unknown cost ${t.unknown === 1 ? "is" : "are"} not drawn` : "";
   const named = none.length ? ` ${none.join(", ")} ${none.length === 1 ? "has" : "have"} no recorded dollars.` : "";
-  return drawn ? `Bars show recorded dollars only${unknown}.${named} CI minutes are not included.` : "CI minutes are not included.";
+  const said = shared ? `${SHARED_NOTE} ` : "";
+  return drawn ? `Bars show recorded dollars only${unknown}.${named} ${said}CI minutes are not included.` : `${said}CI minutes are not included.`;
 }
 
 /** How the wall clock's two parts are counted (#614), for Run details. */
@@ -1105,7 +1115,7 @@ export function renderFinishCard(d, { log = true, list = true, chart = true } = 
     drawn = !!bars;
     parts.push("**Where the money went**", ...(bars ? [bars] : []), ...breakdownTables(where));
   }
-  parts.push(notesLine(t, where, drawn));
+  parts.push(notesLine(t, where, drawn, sharedOut([...costs, ...(where.shown ? [...where.asked, ...where.churn] : [])])));
   const named = t.usd > 0 ? kindsOf(t.usd, t.byBilling) : [];
   // Dollars no record names a billing for: not recorded, never called billed or API-equivalent.
   const kinds = t.usd > 0 && !named.length ? ["unknown"] : named;
@@ -1136,8 +1146,10 @@ export const reportStageKind = (kind) => (kind === "review" || kind === "rebase"
 
 /**
  * The Objective's own pass measures, from its stages' ledgers (stagePassFigures), for a reader that compares Objectives
- * (#545's arms): `passes` ({total, answer, fix}, null unless every stage's passes are known: each of Pendulum's stages has
- * a ledger and none is one Pendulum cannot attribute), `modelMinutes` (the minutes of every harness pass, null unless
+ * (#545's arms): `passes` ({total, answer, fix}: its harness passes, null unless every stage's passes are known: each of
+ * Pendulum's stages has a ledger and none is one Pendulum cannot attribute), `decisionRecords` (its stages' decision
+ * records, which are no pass and are counted apart as the report counts them, report.mjs foldPasses, #617; null as
+ * `passes` is), `modelMinutes` (the minutes of every harness pass, null unless
  * `passes` is known and each harness pass has its times), `tokens` (every stage's, summed), and `labelled` and
  * `labelledWallMs` (the scorer's start of the clock, the first `pendulum:objective` label with no restart window, and the
  * wall clock from it to the merge; null with no label event, or one labelled before the rename to Pendulum: clockRenamed),
@@ -1149,10 +1161,12 @@ function objectivePasses(d) {
   const whole = d.stages.length > 0 && d.stages.every((s, i) => !s.unattributed && figures[i]);
   const kinds = whole ? figures.flat() : [];
   const count = (keep) => kinds.filter((k) => keep(k.kind)).reduce((t, k) => t + k.passes, 0);
-  const passes = whole ? { total: count(() => true), answer: count(isAnswer), fix: count(isFix) } : null;
+  const isDecision = (kind) => kind === "decision";
+  const passes = whole ? { total: count((kind) => !isDecision(kind)), answer: count(isAnswer), fix: count(isFix) } : null;
+  const decisionRecords = whole ? count(isDecision) : null;
   const modelMinutes = whole && !kinds.some((k) => k.untimed) ? kinds.reduce((t, k) => t + (k.harnessMinutes ?? 0), 0) : null;
   const wall = !d.clockRenamed && d.labelled && ms(d.merged) >= ms(d.labelled) ? ms(d.merged) - ms(d.labelled) : null;
-  return { passes, modelMinutes, tokens: d.stages.reduce((t, s) => addTokens(t, s.tokens), zeroTokens()), labelled: d.labelled ?? null, labelledWallMs: wall, clockWhy: d.clockRenamed ? "renamed" : null };
+  return { passes, decisionRecords, modelMinutes, tokens: d.stages.reduce((t, s) => addTokens(t, s.tokens), zeroTokens()), labelled: d.labelled ?? null, labelledWallMs: wall, clockWhy: d.clockRenamed ? "renamed" : null };
 }
 
 /**
@@ -1366,6 +1380,17 @@ export function readSummary(body, n) {
   const waits = waitsRead(v.waits) ?? null;
   if (!cost || !why || sandbox === undefined || !sandboxWhy || !foreign || [...stages, ...asked, ...churn].includes(null) || !started || !merged || !v.prs.every((p) => countOf(p))) return null;
   const counts = v.stageCounts && typeof v.stageCounts === "object" ? v.stageCounts : {};
+  const passes = v.passes && ["total", "answer", "fix"].every((f) => countOf(v.passes[f]) !== undefined) ? { total: v.passes.total, answer: v.passes.answer, fix: v.passes.fix } : null;
+  // Its decision records, apart from its passes (#617). A card from before they were counted apart has no such field and
+  // counted them in `passes.total`: they are taken back out of it from its stages' passes, which hold each decision
+  // record by kind. Such a card written with no stage's passes (summaryMarker's short form) cannot say how many of its
+  // total they are: its total stays as written and `decisionRecords` is undefined, never 0.
+  let decisionRecords = null;
+  if (passes && Object.hasOwn(v, "decisionRecords")) decisionRecords = countOf(v.decisionRecords) ?? null;
+  else if (passes && stages.every((s) => s.passes)) {
+    decisionRecords = stages.reduce((t, s) => t + s.passes.filter((k) => k.kind === "decision").reduce((n, k) => n + k.passes, 0), 0);
+    passes.total = Math.max(0, passes.total - decisionRecords);
+  } else if (passes) decisionRecords = undefined;
   return {
     v: v.v,
     pendulum: typeof v.pendulum === "string" && /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?$/.test(v.pendulum) ? v.pendulum : null,
@@ -1384,7 +1409,8 @@ export function readSummary(body, n) {
     checks: v.checks && countOf(v.checks.passed) !== undefined && countOf(v.checks.failed) !== undefined ? { passed: v.checks.passed, failed: v.checks.failed, required: v.checks.required === true } : null,
     reviews: v.reviews && countOf(v.reviews.count) !== undefined && countOf(v.reviews.findings) !== undefined ? { count: v.reviews.count, findings: v.reviews.findings } : null,
     stageCounts: { work: countOf(counts.work) ?? 0, rebase: countOf(counts.rebase) ?? 0, review: countOf(counts.review) ?? 0 },
-    passes: v.passes && ["total", "answer", "fix"].every((f) => countOf(v.passes[f]) !== undefined) ? { total: v.passes.total, answer: v.passes.answer, fix: v.passes.fix } : null,
+    passes,
+    decisionRecords,
     modelMinutes: usdOf(v.modelMinutes) ?? null,
     tokens: tokensRead(v.tokens ?? {}) ?? zeroTokens(),
     labelled: timeOf(v.labelled) ?? null,

@@ -167,7 +167,8 @@ function unionMs(spans) {
 
 /**
  * The card's data (pure): `{stage, name, subject, issue, started, now, crosses, zone, exit, live, rows, current, snap,
- * snapNow, spend, parts, unknown}`. `lines`: [t, text, step] as the stage wrote them (step: the stage's object, read now); `passes`: the
+ * snapNow, spend, parts, unknown}`. `current` is the Now row's step, with `since`, the time its row shows: its own, or
+ * that of the first line that began it. `lines`: [t, text, step] as the stage wrote them (step: the stage's object, read now); `passes`: the
  * stage's ended AI runs (harness.mjs stagePasses' records, else the ledger line's entries), each with its label, its
  * dollars, its runs of unknown cost, its start and end; `snap`: the running pass's activity (logic.mjs harnessActivity)
  * and its model, for the Now row. A row: {kind, t, events, passes, count, took (ms, null when nothing recorded an end),
@@ -207,7 +208,15 @@ export function progressData({ stage, subject = null, issue, started, now, lines
     if (!r) rows.push((r = { kind, t, events: [], passes: [] }));
     return r;
   };
-  for (const e of steps) if (e !== current) rowFor(e.kind, e.t).events.push(e);
+  // The lines that began the wait in progress (a CI round's first line, `begin`) are that wait's own: they are in the Now
+  // row with it, from the first one's time, never a finished row of their own above it (#617: one wait, one row). Once
+  // the wait ends, they are in its row as before.
+  const began = [];
+  if (current?.step?.wait === true) {
+    const same = steps.filter((e) => e.kind === current.kind);
+    for (let i = same.indexOf(current) - 1; i >= 0 && same[i].step?.begin === true; i -= 1) began.unshift(same[i]);
+  }
+  for (const e of steps) if (e !== current && !began.includes(e)) rowFor(e.kind, e.t).events.push(e);
   for (const p of (passes || []).filter((x) => x && !x.noRun)) {
     const at = Date.parse(p.started);
     const r = rowFor(passRow(p, { rebase: stageRebase }), Number.isFinite(at) ? at : now);
@@ -245,7 +254,7 @@ export function progressData({ stage, subject = null, issue, started, now, lines
     endStep: end?.step ?? null,
     live,
     rows: all,
-    current: current ? { ...current, row: current.kind } : null,
+    current: current ? { ...current, row: current.kind, since: began[0]?.t ?? current.t } : null,
     snap,
     // The running AI step's own activity: a snapshot only while its run has not ended, and only for an AI step.
     snapNow: current && AI.has(current.kind) && snap?.snap && !snap.snap.ended ? snap : null,
@@ -470,7 +479,7 @@ export function progressCard({ status = "", ran = null, harness = null, runId = 
     return `| ${at(r.t)} | ${tableCell(`${rowName(r)}${detail ? ` · ${detail}` : ""}`, 400)} | ${r.took === null ? "—" : durationText(r.took)} | ${costCell(r)} |`;
   });
   // The Now row, last: the step in progress; "starting" before any step; none between steps.
-  if (running && d.current) rows.push(`| ${at(d.current.t)} | ${nowCell(d, at)} | running | ${AI.has(d.current.kind) && d.current.pass !== false ? "when it ends" : "—"} |`);
+  if (running && d.current) rows.push(`| ${at(d.current.since)} | ${nowCell(d, at)} | running | ${AI.has(d.current.kind) && d.current.pass !== false ? "when it ends" : "—"} |`);
   else if (running && !d.rows.length) rows.push(`| ${at(d.started)} | **Now:** ${tableCell(clean(status, 400) ?? "starting")} | running | — |`);
   if (!running && d.live) rows.push(`| | **Total** | **${minutesText(wall)}** | **${usd === null ? "—" : cellCost(usd, u.runs)}** |`);
   const table = !showTable ? ["", "The steps are in Run details' Full log: this comment is near GitHub's size limit."] : rows.length ? ["", "| Time | Step | Took | Cost |", "| :-- | :-- | --: | --: |", ...rows] : [];

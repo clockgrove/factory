@@ -19,6 +19,7 @@ RETRY.sleep = async () => {};
 const PENDULUM_VERSION = pendulumBuild();
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
 const APP = { id: 2271, slug: "clockgrove-pendulum" };
+const BOT = { login: `${APP.slug}[bot]`, type: "Bot" };
 const ME = { login: "kirkmarple-clockgrove", type: "User" };
 const OPUS = "claude-opus-5-5";
 const FABLE = "claude-fable-5-2";
@@ -207,4 +208,63 @@ test("report (#569 V3): every cost in every breakdown keeps its split of unknown
   const opus = r.breakdowns.model.find((x) => x.key === OPUS);
   const split = (c) => [c.unknownRuns, c.unknownDecisionCalls, c.unknownUnsplitRuns];
   assert.deepEqual([split(opus.cost), split(opus.basis.pass.cost), split(opus.basis.stage.cost)], [[7, 3, 3], [1, 0, 0], [6, 3, 3]]);
+});
+
+/**
+ * #21, merged: a work stage, a review stage that ran no pass (its spend line says `noPass`: its one decision call aside)
+ * and a review stage that did. With `card`, its finish card as Pendulum's App posts it, built by the real card.
+ */
+async function noPassWorld({ card = false } = {}) {
+  const w = blank();
+  objective(w, 21);
+  stage(w, 21, "work", "local-w21", [pass("work-1", OPUS, [0, 5], 0.5)], { when: at(0) });
+  stage(w, 21, "review", "local-r21a", [decision(1, [10, 10.5], { usd: 0.01 })], { when: at(10), extra: { noPass: true } });
+  stage(w, 21, "review", "local-r21b", [pass("review", FABLE, [20, 22], 0.3), pass("validation-fix-1", OPUS, [23, 25], 0.2)], { when: at(20) });
+  const pr = { number: 1021, head: { ref: "pendulum/21", repo: { id: 1 } }, base: { repo: { id: 1 } }, created_at: at(4), updated_at: at(50), merged_at: at(50), state: "closed" };
+  w.pulls.push(pr);
+  if (card) {
+    const finish = await import("../scripts/lib/finish-card.mjs");
+    const mine = (c) => c.user?.login === ME.login || finish.pendulumOwn(APP.id)(c);
+    const timeline = [{ event: "labeled", label: { name: "pendulum:objective" }, actor: ME, created_at: at(-1) }];
+    const d = finish.finishData({ repo: REPO.full, issue: w.issues[0], timeline, comments: [...w.comments], pulls: [{ pr, timeline: [], reviews: [], reviewComments: [] }], checks: [], records: [], mine });
+    w.comments.push(comment(21, finish.finishCardBody(d), { user: BOT, app: APP, when: at(51) }));
+  }
+  return w;
+}
+
+
+test("#617: the finish card's summary counts decision records apart, as the report does, and a card from before it did still reads so", async () => {
+  const finish = await import("../scripts/lib/finish-card.mjs");
+  // #21: a work pass, a review stage of one decision record alone, a review pass and a fix pass.
+  const w = await noPassWorld({ card: true });
+  const card = w.comments.at(-1);
+  const sum = finish.readSummary(card.body, 21);
+  assert.deepEqual([sum.passes, sum.decisionRecords], [{ total: 3, answer: 0, fix: 1 }, 1], "work, review and fix: the decision record is no pass");
+  const row = async (world) => byIssue((await report(world, ["--issue", "21"])).json, 21);
+  const now = await row(w);
+  assert.deepEqual([now.passes, now.decisionRecords], [sum.passes, sum.decisionRecords], "the card and the report agree");
+
+  // The card as a release before this wrote it: no `decisionRecords`, the decision record counted in `passes.total`.
+  const older = (body, edit = (v) => v) => {
+    const [head, line, ...rest] = body.split("\n");
+    const v = JSON.parse(/^<!-- pendulum:21:summary (\{.*\}) -->$/.exec(line)[1]);
+    assert.equal(v.decisionRecords, 1);
+    delete v.decisionRecords;
+    v.passes.total += 1;
+    return [head, `<!-- pendulum:21:summary ${JSON.stringify(edit(v))} -->`, ...rest].join("\n");
+  };
+  const old = older(card.body);
+  assert.match(old, /"passes":\{"total":4,"answer":0,"fix":1\},"modelMinutes"/);
+  const read = finish.readSummary(old, 21);
+  assert.deepEqual([read.passes, read.decisionRecords], [{ total: 3, answer: 0, fix: 1 }, 1], "taken back out of its total, from its stages' passes");
+  assert.deepEqual({ ...read, pendulum: null }, { ...sum, pendulum: null }, "every other figure as written");
+  const oldWorld = { ...w, comments: w.comments.map((c) => (c === card ? { ...c, body: old } : c)) };
+  const then = await row(oldWorld);
+  assert.deepEqual([then.passes, then.decisionRecords, then.cost, then.modelMinutes], [now.passes, now.decisionRecords, now.cost, now.modelMinutes], "the report reads an old card to the same figures");
+  // Such a card written with no stage's passes cannot say how many of its total are decision records: never 0.
+  const bare = finish.readSummary(older(card.body, (v) => ({ ...v, stages: v.stages.map((s) => ({ ...s, passes: null })) })), 21);
+  assert.deepEqual([bare.passes, bare.decisionRecords], [{ total: 4, answer: 0, fix: 1 }, undefined]);
+  // A card with no ledger for a stage knows neither.
+  const none = finish.readSummary(older(card.body, (v) => ({ ...v, passes: null })), 21);
+  assert.deepEqual([none.passes, none.decisionRecords], [null, null]);
 });

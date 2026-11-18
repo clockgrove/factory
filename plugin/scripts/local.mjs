@@ -150,7 +150,10 @@ export const PAUSED_EXIT = 75;
 /** A word of a command line as a shell reads it back: as it is, or quoted when it holds anything else. */
 const shellWord = (w) => (/^[\w./:@%+=,-]+$/.test(String(w)) ? String(w) : shellQuote(w));
 
-/** `pendulum run`'s exit status for the end `r` (runToEnd). */
+/** The `--repo` and `--checkout` a command was given, as the resume command repeats them (Local.toEnd). */
+const whereFlags = (flags, local) => [flags.repo ? ` --repo ${shellWord(flags.repo)}` : "", flags.checkout ? ` --checkout ${shellWord(local.dev)}` : ""].join("");
+
+/** `pendulum run`'s and `pendulum review`'s exit status for the end `r` (Local.toEnd). */
 export const runExit = (r) => (r?.exit === "delivered" ? 0 : r?.exit === "paused" ? PAUSED_EXIT : 1);
 
 /** The line for an Objective with more than one account label (#265): it moves nowhere and waits. */
@@ -246,7 +249,7 @@ const WHERE = { repo: { value: "OWNER/NAME" }, checkout: { value: "CLONE" } };
 export const COMMANDS = {
   run: { args: ["issue"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: `one Objective, from the stage its state calls for (with --wait, to merged, waiting out a network pause as serve does); exits 0 delivered, ${PAUSED_EXIT} paused and resumable (its last line names the command), 1 otherwise` },
   serve: { args: [], flags: { ...WHERE, once: "bool", all: "bool", interval: { value: "SECONDS", number: true }, verbose: "bool" }, about: "a loop: the dispatcher's rules every --interval seconds (30); --verbose also names every setting left at Pendulum's defaults" },
-  review: { args: ["pr"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: "a review re-run" },
+  review: { args: ["pr"], flags: { ...WHERE, wait: "bool", verbose: "bool" }, about: `a review re-run (with --wait, to merged, waiting out a network pause as serve does); exits as run does` },
   doctor: { args: [], flags: { ...WHERE, json: "bool", probe: "bool", "run-setup": "bool", verbose: "bool" }, about: "whether this clone, its repository and this machine are ready for local mode, each check PASS, WARN or FAIL with its fix (doctor.mjs --local); exits 1 on a FAIL" },
   token: {
     args: ["set"],
@@ -2664,6 +2667,8 @@ export class Local {
     // A review this loop holds paused after its label came off (an outage met on its merge path: session.mjs outageFirst)
     // ends nothing by the label: the review runs again, and its exit or merge follows.
     if (next === "merge" && off?.stage === "review") return this.withClaim(issue, () => this.review(issue, pr.number, { wait }));
+    // `run --wait` paused on its merge path (a send-back's rebase): following the merge goes on, as the run did.
+    if (next === "merge" && wait) return this.withClaim(issue, () => this.followToMerge(issue, pr.number));
     log(`#${issue}: nothing left to run here (its PR is reviewed or gone); releasing the claim`);
     const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
     if (held?.commentId && sameMachineHolder(held.holder)) await rest(`repos/${this.repo.full}/issues/comments/${held.commentId}`, { ...this.opts, method: "DELETE" }).catch(() => {});
@@ -2687,7 +2692,11 @@ export class Local {
         log(`#${issue}: PR #${prNumber} still has comments arriving after ${reruns} review re-runs; left labelled ${REVIEW_LABEL} for the next serve tick`);
         return review;
       }
-      if ((await this.followMerge(issue, prNumber)) === "next") return { ...review, next: true };
+      const merged = await this.followMerge(issue, prNumber);
+      // A stage of its merge path (a review again, a send-back's rebase) that ended paused: that pause is this end, so
+      // the claim stays for its resume and the run never reads it as delivered.
+      if (merged?.exit) return merged;
+      if (merged === "next") return { ...review, next: true };
     }
     return review;
   }
@@ -3028,12 +3037,18 @@ export class Local {
         });
       }
       if (!wait) return { exit: "delivered" };
-      return this.withClaim(issue, async () => {
-        const merged = await this.followMerge(issue, pr.number);
-        return { exit: merged ? "delivered" : null, next: merged === "next" };
-      });
+      return this.withClaim(issue, () => this.followToMerge(issue, pr.number));
     }
     return this.runObjective(issue, { wait, named: true });
+  }
+
+  /**
+   * --wait on a reviewed PR: followMerge's answer as a stage's end. A stage of the merge path that ended paused is that
+   * end; else delivered once merged (`next`: a split Objective's next part is queued), none otherwise.
+   */
+  async followToMerge(issue, prNumber) {
+    const merged = await this.followMerge(issue, prNumber);
+    return merged?.exit ? merged : { exit: merged ? "delivered" : null, next: merged === "next" };
   }
 
   /**
@@ -3043,10 +3058,27 @@ export class Local {
    * command that resumes it; runExit gives it PAUSED_EXIT. `resumeWith`: that command's flags after `--wait`.
    */
   async runToEnd(issue, { wait = false, resumeWith = "", ...given } = {}) {
-    let r = await this.runIssue(issue, { wait, ...given });
+    return this.toEnd(issue, await this.runIssue(issue, { wait, ...given }), { wait, resumeWith, parts: true });
+  }
+
+  /**
+   * `pendulum review <pr>` to its end: its review (runReview), and with `wait` a stage that ends paused on an outage
+   * waited out in place and resumed (waitPaused), as runToEnd does; its split parts are left to the loop or a run.
+   */
+  async reviewToEnd(prNumber, { wait = false, resumeWith = "" } = {}) {
+    const issue = await this.reviewIssueOf(prNumber);
+    return this.toEnd(issue, await this.withClaim(issue, () => this.review(issue, prNumber, { wait })), { wait, resumeWith, parts: false });
+  }
+
+  /**
+   * The end `r` of a run or review of `issue`, carried on: with `wait`, a pause waited out in place (waitPaused), and
+   * with `parts` each next part of a split Objective run once the one before it merged. One that ends paused logs the
+   * command that resumes it (`pendulum run <issue> --wait`, then `resumeWith`), and runExit gives it PAUSED_EXIT.
+   */
+  async toEnd(issue, r, { wait = false, resumeWith = "", parts = true } = {}) {
     for (;;) {
       if (wait && r?.exit === "paused") r = await this.waitPaused(issue, r);
-      if (!r?.next) break;
+      if (!parts || !r?.next) break;
       r = await this.runObjective(issue, { wait: true });
     }
     if (r?.exit === "paused" && !this.stopping) log(`#${issue}: paused, resumable (exit ${PAUSED_EXIT}): its claim stays on this machine; \`pendulum run ${issue} --wait${resumeWith}\` resumes it here, as does a \`pendulum serve\` of this repository on this machine`);
@@ -3180,6 +3212,8 @@ export class Local {
     }
     log(`#${issue}: PR #${prNumber} conflicts with ${pr.base?.ref || "the default branch"} after other PRs merged; sending it back to the worker to rebase`);
     const r = await this.work(issue, { wait: true });
+    // Its rebase paused (an outage, a usage limit): followMerge ends on that pause.
+    if (r.exit === "paused") return r;
     if (r.next) return "next";
     if (r.exit !== "delivered") return false;
     // Delivered without the review label: its rebase conflicts again, so the next poll sends it back under the same rules.
@@ -3198,10 +3232,16 @@ export class Local {
 
   /** A review re-run on its own (a human re-applied pendulum:review), in the Objective's clone. */
   async runReview(prNumber, { wait = false } = {}) {
+    const issue = await this.reviewIssueOf(prNumber);
+    return this.withClaim(issue, () => this.review(issue, prNumber, { wait }));
+  }
+
+  /** The Objective of a PR on a pendulum/<issue> branch; throws for any other PR. */
+  async reviewIssueOf(prNumber) {
     const pr = await getPr(this.repo, prNumber, this.opts);
     const issue = Number(/^pendulum\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
     if (!issue) throw new Error(`PR #${prNumber} is not on a pendulum/<issue> branch`);
-    return this.withClaim(issue, () => this.review(issue, prNumber, { wait }));
+    return issue;
   }
 
   /**
@@ -3302,7 +3342,7 @@ export class Local {
           log(`#${issue}: a person took PR #${prNumber} out of the merge queue; Pendulum leaves it to them`);
           return false;
         }
-        if (how === "re-review" || how === "unread" || how === "code-scanning" || how === "queue-red" || how === "text-edit") return this.review(issue, prNumber, { wait: true }).then((r) => (r.next ? "next" : r.exit === "delivered"));
+        if (how === "re-review" || how === "unread" || how === "code-scanning" || how === "queue-red" || how === "text-edit") return this.review(issue, prNumber, { wait: true }).then((r) => (r.exit === "paused" ? r : r.next ? "next" : r.exit === "delivered"));
         if (how === "conflict") {
           const sent = await this.sendBack(issue, prNumber, inputs);
           if (sent !== "retry") return sent;
@@ -4595,8 +4635,7 @@ async function main() {
     local.solo = "run";
     let task = null;
     local.stopOnSignals(() => task);
-    const resumeWith = [flags.repo ? ` --repo ${shellWord(flags.repo)}` : "", flags.checkout ? ` --checkout ${shellWord(local.dev)}` : ""].join("");
-    task = local.runToEnd(issue, { wait: !!flags.wait, resumeWith });
+    task = local.runToEnd(issue, { wait: !!flags.wait, resumeWith: whereFlags(flags, local) });
     const r = await task;
     // Delivered, not followed to its merge: the last line says who tends it now.
     if (r.exit === "delivered" && !flags.wait) {
@@ -4627,8 +4666,8 @@ async function main() {
     local.solo = "review";
     let task = null;
     local.stopOnSignals(() => task);
-    task = local.runReview(Number(arg), { wait: !!flags.wait });
-    process.exitCode = (await task).exit === "delivered" ? 0 : 1;
+    task = local.reviewToEnd(Number(arg), { wait: !!flags.wait, resumeWith: whereFlags(flags, local) });
+    process.exitCode = runExit(await task);
     return;
   }
   if (cmd === "wait") {

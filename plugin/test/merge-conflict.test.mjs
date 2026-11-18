@@ -727,6 +727,26 @@ test("#331: local --wait takes code scanning's comment to the review stage, and 
   });
 });
 
+test("#575: a review the merge path sends back to (code scanning's comment) that pauses on this machine's network ends the --wait review paused, never delivered, so run exits 75, not 0", async () => {
+  const { runExit } = await import("../scripts/local.mjs");
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    gh.state.threads = [structuredClone(codeql.thread)];
+    gh.state.rules = [RULESET];
+    const paused = { exit: "paused", stage: "review", code: 0, outage: { host: "api.anthropic.test", origin: "https://api.anthropic.test", code: "EAI_AGAIN", since: "2026-11-17T08:47:00.000Z" } };
+    const ends = [{ exit: "delivered", stage: "review", code: 0 }, paused];
+    const started = [];
+    const loop = Object.assign(Object.create(Local.prototype), { repo, repoFull: "o/r", opts: { token: "t" }, baseEnv: () => ({ PENDULUM_CI_CHECKS: "ci" }), stage: async (n, name) => (started.push(name), ends[started.length - 1]) });
+    const r = await loop.review(2, 12, { wait: true });
+    assert.deepEqual(started, ["review", "review"], "the merge path's review ran and paused");
+    assert.equal(r, paused, "the pause is the review's end, for withClaim to keep the claim and run to wait it out");
+    assert.equal(runExit(r), 75);
+    assert.deepEqual(gh.attempts, [], "nothing is enqueued");
+  });
+});
+
 test("#331: code scanning's review rounds at the merge are bounded per re-entry, counted in Pendulum's record; past the bound it Blocks naming each open alert", async () => {
   await withGitHub(async (g, gh) => {
     const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");

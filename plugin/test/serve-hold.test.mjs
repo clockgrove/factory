@@ -318,7 +318,8 @@ function claimGitHub({ labels = ["pendulum:objective", "pendulum:local", "pendul
       comments.splice(comments.findIndex((x) => String(x.id) === one[1]), 1);
       return json({}, 200);
     }
-    if (p === "/pulls" && method === "GET") return fail("pulls") ? json({ message: "Server Error" }, 502) : json(pr ? [pr] : []);
+    if (p === "/pulls" && method === "GET") return fail("pulls") ? json({ message: "Server Error" }, 502) : json(pr && !pr.unopened ? [pr] : []);
+    if (pr && p === `/pulls/${pr.number}` && method === "GET") return json(pr);
     if (p === "/issues" && method === "GET") return json(u.searchParams.get("labels") && state.labels.has(u.searchParams.get("labels")) ? [{ number: 7, state: "open", labels: [...state.labels].map((name) => ({ name })) }] : []);
     const issue = /^\/issues\/(\d+)$/.exec(p);
     if (issue && method === "GET") return fail("issue") ? json({ message: "Server Error" }, 502) : json({ number: Number(issue[1]), state: "open", labels: [...labelsOf(issue[1])].map((name) => ({ name })) });
@@ -1134,11 +1135,13 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
 });
 
 /**
- * `pendulum run 7 --wait` (runToEnd) against claimGitHub, its work stage `ends` in turn (stage() stubbed: the rest of the
- * run is real), on a clock `at()` that reads it; the provider's host api.anthropic.test answers once `up(probe)` says so
- * for that probe (1, 2, …). Returns the run's end, its exit status, its log, the stages started and the probes made.
+ * `pendulum run 7 --wait` (runToEnd; `go` for another command) against claimGitHub, its stages ending as `ends` says in
+ * turn (stage() stubbed: the rest of the run is real; an end may be a function of the stage), on a clock `at()` that
+ * reads it; the provider's host api.anthropic.test answers once `up(probe)` says so for that probe (1, 2, …). A PR's
+ * merge, once followed, is merged (`merges` counts the follows). Returns the run's end, its exit status, its log, the
+ * stages started and the probes made.
  */
-async function runPaused({ ends, up, at, gh }) {
+async function runPaused({ ends, up, at, go = (loop) => loop.runToEnd(7, { wait: true, resumeWith: " --repo acme/app" }) }) {
   const { runExit } = await import("../scripts/local.mjs");
   const inner = globalThis.fetch;
   let probes = 0;
@@ -1148,12 +1151,18 @@ async function runPaused({ ends, up, at, gh }) {
     loop.clock = at;
     loop.resumePollMs = 1;
     const started = [];
-    loop.stage = async (n, name) => (started.push(name), ends[started.length - 1]);
+    loop.stage = async (n, name) => {
+      started.push(name);
+      const end = ends[started.length - 1];
+      return typeof end === "function" ? end(name) : end;
+    };
+    const merges = [];
+    loop.followMerge = async (n, prNumber) => (merges.push(prNumber), true);
     let r;
     const lines = await logged(async () => {
-      r = await loop.runToEnd(7, { wait: true, resumeWith: " --repo acme/app" });
+      r = await go(loop);
     });
-    return { r, code: runExit(r), log: lines.join(""), started, probes, loop };
+    return { r, code: runExit(r), log: lines.join(""), started, probes, loop, merges };
   } finally {
     globalThis.fetch = inner;
   }
@@ -1166,7 +1175,7 @@ test("#575: run --wait waits in place for a stage paused on this machine's netwo
   const gh = claimGitHub();
   try {
     const t = lostSince + 20 * 60_000;
-    const { r, code, log, started, probes } = await runPaused({ ends: [pausedOnDns, { exit: "delivered", stage: "work", code: 0 }], up: (n) => n >= 3, at: () => t, gh });
+    const { r, code, log, started, probes } = await runPaused({ ends: [pausedOnDns, { exit: "delivered", stage: "work", code: 0 }], up: (n) => n >= 3, at: () => t });
     assert.deepEqual(started, ["work", "work"], "the paused stage is resumed in place");
     assert.equal(probes, 3, "one probe a poll until the host answers");
     assert.equal(r.exit, "delivered");
@@ -1187,7 +1196,7 @@ test("#575: run --wait on a stage paused on this machine's network stops at serv
   try {
     let t = lostSince + 20 * 60_000;
     // Each probe that finds the host still down is five hours later.
-    const { r, code, log, started, probes, loop } = await runPaused({ ends: [pausedOnDns], up: () => ((t += 5 * 60 * 60_000), false), at: () => t, gh });
+    const { r, code, log, started, probes, loop } = await runPaused({ ends: [pausedOnDns], up: () => ((t += 5 * 60 * 60_000), false), at: () => t });
     assert.equal(PAUSED_EXIT, 75);
     assert.equal(r.exit, "paused");
     assert.equal(code, 75);
@@ -1200,6 +1209,72 @@ test("#575: run --wait on a stage paused on this machine's network stops at serv
     assert.ok(loop.offline.has(7));
   } finally {
     gh.restore();
+  }
+});
+
+/**
+ * PR #5 of pendulum/7, labelled for its review (`unopened`: listed once a work stage delivers). A review stage that
+ * delivers takes the label off, as review.mjs does.
+ */
+const reviewPr = (unopened = false) => ({ unopened, number: 5, state: "open", draft: false, head: { ref: "pendulum/7" }, base: { ref: "main" }, labels: [{ name: "pendulum:review" }] });
+const reviewPausedOnDns = { ...pausedOnDns, stage: "review" };
+const delivers = (pr) => (name) => {
+  if (name === "work") pr.unopened = false;
+  if (name === "review") pr.labels = [];
+  return { exit: "delivered", stage: name, code: 0 };
+};
+
+test("#575: run --wait whose review stage pauses on this machine's network after the work delivered waits in place, resumes the review once its host answers, and exits 0 only after the review delivered and the PR merged", async () => {
+  const pr = reviewPr(true);
+  const gh = claimGitHub({ pr });
+  try {
+    const t = lostSince + 20 * 60_000;
+    const { r, code, log, started, merges } = await runPaused({ ends: [delivers(pr), reviewPausedOnDns, delivers(pr)], up: (n) => n >= 2, at: () => t });
+    assert.deepEqual(started, ["work", "review", "review"], "the paused review is resumed in place");
+    assert.deepEqual(merges, [5], "its merge followed once the resumed review delivered");
+    assert.equal(r.exit, "delivered");
+    assert.equal(code, 0);
+    assert.match(log, /#7: the review stage paused: this machine could not reach api\.anthropic\.test \(EAI_AGAIN\)/);
+    assert.match(log, /#7: resuming \(api\.anthropic\.test answers again\)/);
+    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped at the end");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#575: run --wait whose review stage pauses on this machine's network past serve's 12-hour bound exits 75, never 0, its claim kept", async () => {
+  const pr = reviewPr(true);
+  const gh = claimGitHub({ pr });
+  try {
+    let t = lostSince + 20 * 60_000;
+    const { r, code, log, started, merges } = await runPaused({ ends: [delivers(pr), reviewPausedOnDns], up: () => ((t += 5 * 60 * 60_000), false), at: () => t });
+    assert.deepEqual(started, ["work", "review"]);
+    assert.deepEqual(merges, [], "no merge is followed for a review that never delivered");
+    assert.equal(r.exit, "paused");
+    assert.equal(code, 75);
+    assert.match(log, /#7: paused, resumable \(exit 75\): its claim stays on this machine; `pendulum run 7 --wait --repo acme\/app` resumes it here/);
+    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
+    assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#575: review --wait whose review stage pauses on this machine's network waits in place, resumes it once its host answers and exits 0 after its merge; past the bound it exits 75", async () => {
+  for (const back of [true, false]) {
+    const pr = reviewPr();
+    const gh = claimGitHub({ pr, labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"] });
+    try {
+      let t = lostSince + 20 * 60_000;
+      const up = back ? (n) => n >= 2 : () => ((t += 5 * 60 * 60_000), false);
+      const { code, log, started, merges } = await runPaused({ ends: [reviewPausedOnDns, delivers(pr)], up, at: () => t, go: (loop) => loop.reviewToEnd(5, { wait: true }) });
+      assert.deepEqual(started, back ? ["review", "review"] : ["review"]);
+      assert.deepEqual(merges, back ? [5] : []);
+      assert.equal(code, back ? 0 : 75);
+      if (!back) assert.match(log, /#7: paused, resumable \(exit 75\): its claim stays on this machine; `pendulum run 7 --wait` resumes it here/);
+    } finally {
+      gh.restore();
+    }
   }
 });
 

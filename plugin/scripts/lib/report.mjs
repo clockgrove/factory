@@ -1602,8 +1602,9 @@ const round2 = (n) => Math.round(n * 100) / 100;
  * each cost kind's dollars over those with no run of unknown cost, the review rounds, the fix passes over those whose
  * ledgers count them, and the wall clock over those with one; each `{median, p25, p75, n, leftOut}`. `leftOut` names
  * each one left out of any measure, with why: `comments-stopped` (the call budget stopped before its comments were all
- * read: every measure), `records-unread` (its comments were not read: every measure), `no-records` (its comments hold
- * no record of Pendulum's: every measure; never a $0), `unknown-runs` (a run of unknown cost, such as a stage before
+ * read: every measure; readReport reads the thread of every Objective merged in the period it has not read whole, so
+ * one it has not is one the budget stopped), `no-records` (its comments hold no record of cost: every measure; never a
+ * $0), `unknown-runs` (a run of unknown cost, such as a stage before
  * the period whose usage record was not read: its dollars), `no-passes` (its fix passes), `no-clock` (its wall clock;
  * its row's `clockWhy` says why).
  */
@@ -1623,7 +1624,7 @@ function perMergedOf(read, objectives, opts) {
     return n !== null && (new RegExp(`^<!-- pendulum:${n}:(?:progress|vendor):(?:work|review):`).test(body) || decisionSpendEntries(body).length > 0 || (mine(c) && body.startsWith(finishMarker(n)) && !!readSummary(body, n)));
   };
   const recorded = new Set((comments || []).filter((c) => pushed(c) && costed(c)).map(markerIssue));
-  const whyNot = (n) => (source.cut?.has(n) || (!source.threadsWhole?.has(n) && source.stopped) ? "comments-stopped" : !source.threadsWhole?.has(n) ? "records-unread" : !recorded.has(n) ? "no-records" : null);
+  const whyNot = (n) => (source.cut?.has(n) || !source.threadsWhole?.has(n) ? "comments-stopped" : !recorded.has(n) ? "no-records" : null);
   const whole = ns.filter((n) => !whyNot(n));
   // The same reads, the Objectives whole: no period, and their finish card summaries for that scope.
   const wholeScope = { ...scope, since: null, until: null, defaultPeriod: false, issues: whole, label: null, parent: null, compare: null };
@@ -1638,9 +1639,9 @@ function perMergedOf(read, objectives, opts) {
   // A row with no stage, no dollars, no run of unknown cost and no decision record holds no record of cost either.
   const empty = (o) => o.stages.work + o.stages.rebase + o.stages.review === 0 && COST_KINDS.every((k) => o.cost.usd[k] === 0) && !o.cost.unknownRuns && !m(o.issue).decisionRecords;
   const why = (n) => {
-    if (whyNot(n) || !byN.has(n)) return [whyNot(n) ?? "records-unread"];
+    if (whyNot(n)) return [whyNot(n)];
     const o = byN.get(n);
-    if (empty(o)) return ["no-records"];
+    if (!o || empty(o)) return ["no-records"];
     return [...(o.cost.unknownRuns ? ["unknown-runs"] : []), ...((m(n).fixPasses ?? null) === null ? ["no-passes"] : []), ...(o.wallMinutes === null ? ["no-clock"] : [])];
   };
   const counted = whole.filter((n) => byN.has(n) && !empty(byN.get(n))).map((n) => byN.get(n));
@@ -1797,7 +1798,7 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   add("comments-stopped", missing.commentsStopped, "Objectives whose comments the call budget stopped the report before reading in full: the comments after those read, when unread, and each sandbox comment whose stage's progress comment was not read are runs of unknown cost, and their review findings may count an earlier round's again");
   add("artifact-foreign", source.foreignIssues ?? new Set(), `usage artifacts uploaded by runs from forks, or naming no repository (${source.artifacts.foreign}), never read as Pendulum's`);
   add("no-ledger", missing.noLedger, "stages with no per-pass ledger in their progress comment or usage record (an older stage, or a local stage whose ledger did not fit its comment and that has no local record on this machine): no pass breakdown, answer and fix passes or cost per model minute for them");
-  if (missing.ledgerOverruns?.length) out.push({ code: "ledger-overruns", count: missing.ledgerOverruns.length, counts: { objectives: new Set(missing.ledgerOverruns.map((x) => x.issue)).size, stages: missing.ledgerOverruns.length }, issues: issuesOf(new Set(missing.ledgerOverruns.map((x) => x.issue))), stages: missing.ledgerOverruns, text: "stages whose per-pass ledger, or spend line's dollars by pass, names more dollars of a kind or more runs of unknown cost than the stage's own figure: their dollars are under no pass in the pass breakdown, the stage whole, its passes still counted" });
+  if (missing.ledgerOverruns?.length) out.push({ code: "ledger-overruns", count: missing.ledgerOverruns.length, counts: { objectives: new Set(missing.ledgerOverruns.map((x) => x.issue)).size, stages: missing.ledgerOverruns.length }, issues: issuesOf(new Set(missing.ledgerOverruns.map((x) => x.issue))), stages: missing.ledgerOverruns, text: "stages whose per-pass ledger, or spend line's dollars by pass, names more dollars of a kind or more runs of unknown cost than the stage's own figure: their passes, tokens and minutes stay counted in the pass rows, and only their dollars and runs of unknown cost move to the row of no pass, the stage's whole figure" });
   if (missing.ledgerStopped?.length) out.push({ code: "ledger-stopped", count: missing.ledgerStopped.length, counts: { objectives: new Set(missing.ledgerStopped.map((x) => x.issue)).size, stages: missing.ledgerStopped.length }, issues: issuesOf(new Set(missing.ledgerStopped.map((x) => x.issue))), stages: missing.ledgerStopped, text: "stages whose per-pass ledger is in a usage record the call budget stopped the report before reading: no pass breakdown for them" });
   add("no-model", missing.noModel, "stages whose harness line, ledger line and usage record name no model, or that have no usage record: under no model in the model breakdown");
   add("model-stopped", missing.modelStopped, "stages whose model only their usage record names, which the call budget stopped the report before reading: under no model in the model breakdown");

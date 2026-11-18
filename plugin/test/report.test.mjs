@@ -135,7 +135,7 @@ function fakeGitHub(w) {
       v.searchParams.set("page", String(k));
       return v.href;
     };
-    const link = n < last ? { link: `<${at(n + 1)}>; rel="next", <${at(last)}>; rel="last"` } : {};
+    const link = n < last && !w.noLink ? { link: `<${at(n + 1)}>; rel="next", <${at(last)}>; rel="last"` } : {};
     const items = list.slice((n - 1) * per, n * per);
     return json(wrap ? wrap(items, list.length) : items, 200, link);
   };
@@ -1481,4 +1481,127 @@ test("report (#566): one name per model: a Claude model's Copilot catalog id is 
   stage(63, "codex", "gpt-6.1-sol", 0.4);
   const { json: r } = await report(w, { since: "2026-11-17" });
   assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [["claude-sonnet-5-5", 2, 0.3], ["gpt-6.1-sol", 2, 0.7]]);
+});
+
+// ------------------------------------------------------------------ #563: whole threads in a period; planned == made
+
+/** The calls of a report that went to an issue's own comments. */
+const threadCalls = (calls) => calls.filter((c) => /^GET \/issues\/\d+\/comments/.test(c));
+
+test("report (#563 S1): a period that starts between two review rounds reads the Objective's earlier round from its thread: each finding counts once, in its own period", async () => {
+  // #11's first round (06:00) was last written before 07:00, so the repository-wide read since 07:00 does not hold it.
+  const issue = await report(reviewed(), { issue: 11, since: "2026-11-17T07:00:00Z" });
+  const { json: later, calls } = await report(reviewed(), { since: "2026-11-17T07:00:00Z" });
+  assert.deepEqual(later.findings.totals, { findings: 1, outcomes: outcomes({ open: 1 }), reviewStages: 1, cost: api(0.3), unnamed: 0 });
+  assert.deepEqual(later.findings, issue.json.findings, "the period reads the same as --issue");
+  // One read of #11's own thread, planned before it was made.
+  assert.deepEqual(threadCalls(calls), ["GET /issues/11/comments?per_page=100&page=1"]);
+  assert.equal(later.source.calls.planned, later.source.calls.made);
+  // A ∪ B == A + B: the first period counts the first round's findings, the second only the one the second raised.
+  const { json: whole } = await report(reviewed(), { since: "2026-11-17" });
+  const { json: before } = await report(reviewed(), { since: "2026-11-17", until: "2026-11-17T07:00:00Z" });
+  assert.equal(before.findings.totals.findings + later.findings.totals.findings, whole.findings.totals.findings);
+  assert.equal(before.findings.totals.reviewStages + later.findings.totals.reviewStages, whole.findings.totals.reviewStages);
+  // An Objective opened since the period's start has every comment in the repository-wide read: no thread is read.
+  assert.deepEqual(threadCalls((await report(reviewed(), { since: "2026-11-17" })).calls), []);
+});
+
+/** #12: a local work stage at 02:00 ($0.50) whose sandbox was booked at 05:00 ($0.04). */
+const booked = () => ({
+  ...world(),
+  comments: [
+    progress(12, "work", "local-v1", { user: ME, at: "2026-11-17T02:00:00Z", spend: { usd: 0.5, parts: { usdByBilling: { api: 0.5 }, billing: "api" } } }),
+    comment(12, `<!-- pendulum:12:vendor:work:local-v1 -->\nPendulum's sandbox cost for this stage:\nx\n${spendMarker(0.04, { vendorUsd: 0.04 })}`, { user: ME, at: "2026-11-17T05:00:00Z" }),
+  ],
+  issues: [{ number: 12, title: "Twelve", state: "open", labels: [{ name: "pendulum:objective" }], created_at: "2026-11-17T01:00:00Z", user: ME }],
+  pulls: [],
+  artifacts: {},
+});
+
+test("report (#563 S2): a sandbox booked after the period's start for a stage before it counts with its stage, in the earlier period alone; a stop before the thread leaves it of unknown cost", async () => {
+  const { json: whole } = await report(booked(), { since: "2026-11-17" });
+  const { json: A } = await report(booked(), { since: "2026-11-17", until: "2026-11-17T03:00:00Z" });
+  const { json: B } = await report(booked(), { since: "2026-11-17T03:00:00Z" });
+  assert.deepEqual([usd(byIssue(whole, 12)).sandbox, whole.totals.stages], [0.04, 1]);
+  assert.deepEqual([usd(byIssue(A, 12)).sandbox, A.totals.stages], [0.04, 1]);
+  assert.equal(byIssue(B, 12), undefined, "no stage of #12 started in B: no row, no sandbox, no phantom stage");
+  assert.deepEqual([B.totals.stages, B.totals.cost.usd.sandbox], [0, 0]);
+  assert.equal(B.source.calls.planned, B.source.calls.made);
+  // The budget stops before #12's thread (the login, the comments, the issues): its vendor comment may be of a stage
+  // before the period, so it is a run of unknown cost, never a sandbox stage of its own.
+  const { code, json: stopped } = await report(booked(), { since: "2026-11-17T03:00:00Z", "max-calls": 3 });
+  assert.equal(code, STOPPED_EXIT);
+  assert.deepEqual([usd(byIssue(stopped, 12)).sandbox, stopped.totals.stages, byIssue(stopped, 12).cost.unknownRuns, byIssue(stopped, 12).cost.unknownWhy], [0, 0, 1, ["stopped"]]);
+  assert.deepEqual(stopped.source.missing.find((m) => m.code === "comments-stopped")?.issues, [12]);
+});
+
+test("report (#563 S10): a stop during the repository-wide comment read keeps the pages read; the rest of each Objective's comments is a run of unknown cost", async () => {
+  const w = world();
+  // #5's and #3's comments on the first page, then 100 comments of no Objective, then #7's on the next.
+  const at = w.comments.findIndex((c) => c.issue_url === issueUrl(7));
+  const pad = Array.from({ length: 100 }, (_, k) => comment(100 + k, "a comment of no Objective", { user: ME, at: "2026-11-17T03:30:00Z" }));
+  w.comments.splice(at, 0, ...pad);
+  // The login, the first page of comments; the second is past the budget.
+  const { code, json: r } = await report(w, { since: "2026-11-17", "max-calls": 2 });
+  assert.equal(code, STOPPED_EXIT);
+  assert.equal(r.source.complete, false);
+  assert.deepEqual(r.objectives.map((o) => o.issue), [3, 5]);
+  assert.deepEqual(usd(byIssue(r, 5)), { api: 0.02, subscription: 1.2, credits: 0.3, unknown: 0, sandbox: 0 });
+  for (const n of [3, 5]) assert.ok(byIssue(r, n).cost.unknownWhy.includes("stopped") && byIssue(r, n).cost.unknownRuns >= 1, `#${n}: the rest of its comments`);
+  assert.deepEqual(r.source.missing.find((m) => m.code === "comments-stopped")?.issues, [3, 5]);
+  assert.equal(r.unknown.items.filter((x) => x.stage === null).length, 2);
+});
+
+test("report (#563 S4): --issue on an issue past 100 comments plans its second page once", async () => {
+  const many = world();
+  for (let k = 0; k < 150; k += 1) many.comments.push(comment(3, "a comment", { user: ME }));
+  const { json: r } = await report(many, { issue: 3 });
+  assert.equal(r.source.calls.byKind.comments, 2);
+  assert.equal(r.source.calls.planned, r.source.calls.made);
+});
+
+test("report (#563 S4): a paged read whose last page is exactly full ends there, every call planned", async () => {
+  // Exactly two full pages of the repository's comments: GitHub's Link header on the second names no next page.
+  const full = world();
+  while (full.comments.length < 200) full.comments.push(comment(100 + full.comments.length, "a comment of no Objective", { user: ME }));
+  const { json: r, calls } = await report(full, { since: "2026-11-17" });
+  assert.equal(r.source.calls.byKind.comments, 2);
+  assert.ok(!calls.some((c) => c.startsWith("GET /issues/comments") && c.endsWith("&page=3")));
+  assert.equal(r.source.calls.planned, r.source.calls.made);
+});
+
+test("report (#563 S4): the PR list's early stop leaves no planned page unread", async () => {
+  // 273 PRs, newest first: a full page updated in the period, then older ones; the list stops after the second page.
+  const old = world();
+  const pr = (k, at) => ({ number: 1000 + k, head: { ref: `feature/${k}` }, created_at: at, updated_at: at, merged_at: null, state: "closed" });
+  for (let k = 0; k < 120; k += 1) old.pulls.push(pr(k, "2026-11-17T06:00:00Z"));
+  for (let k = 120; k < 270; k += 1) old.pulls.push(pr(k, "2026-10-01T00:00:00Z"));
+  const { json: r } = await report(old, { since: "2026-11-17" });
+  assert.equal(r.source.calls.byKind.pulls, 2);
+  assert.equal(r.source.calls.planned, r.source.calls.made);
+});
+
+test("report (#563): a full first page with no Link header ends the read, and source.missing names each such read, by its issue where it read one", async () => {
+  const w = world();
+  for (let k = 0; k < 150; k += 1) w.comments.push(comment(100 + k, "a comment of no Objective", { user: ME }));
+  w.noLink = true;
+  const { json: r } = await report(w, { since: "2026-11-17" });
+  assert.equal(r.source.calls.byKind.comments, 1);
+  assert.equal(r.source.calls.planned, r.source.calls.made);
+  // One read, the repository's comments: no issue's thread.
+  const note = r.source.missing.find((m) => m.code === "no-link");
+  assert.deepEqual([note?.count, note?.issues], [1, []], JSON.stringify(r.source.missing));
+  assert.match(note.text, /the repository's comments/);
+  // --issue 3 with 150 comments of its own: the read of #3's thread is named, by its issue.
+  const own = world();
+  for (let k = 0; k < 150; k += 1) own.comments.push(comment(3, "a comment", { user: ME }));
+  own.noLink = true;
+  const { json: one } = await report(own, { issue: 3 });
+  assert.equal(one.source.calls.byKind.comments, 1);
+  const named = one.source.missing.find((m) => m.code === "no-link");
+  assert.deepEqual([named?.count, named?.issues], [1, [3]]);
+  assert.match(named.text, /#3's comments/);
+  // With GitHub's Link headers, no note.
+  const { json: linked } = await report({ ...w, noLink: false }, { since: "2026-11-17" });
+  assert.ok(!linked.source.missing.some((m) => m.code === "no-link"));
 });

@@ -1301,7 +1301,8 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
   const sinceClock = (p) => !started || ms(p.merged_at) >= ms(started);
   const prs = branch.filter((p) => p.merged_at);
   const parts = prs.filter(sinceClock).sort((a, b) => ms(a.merged_at) - ms(b.merged_at));
-  const unmerged = branch.find((p) => !p.merged_at);
+  // The run's own open or closed PR: one opened since the clock, never an older one left from before a restart.
+  const unmerged = branch.find((p) => !p.merged_at && (!started || ms(p.created_at) >= ms(started)));
   const reads = merged ? (parts.length ? parts : prs.slice(0, 1)) : [...parts, ...(unmerged ? [unmerged] : [])];
   const pulls = [];
   for (const p of reads) {

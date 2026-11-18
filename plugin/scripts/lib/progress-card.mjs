@@ -177,10 +177,11 @@ export function progressData({ stage, subject = null, issue, started, now, lines
   // Running: the Now row is the last step still open (a span with no end yet; an AI step no ended run of its kind has
   // closed), else the last step written. A line written beside it (a CI result while the reviewer runs, a drift
   // advisory mid-build) is no Now row.
+  const stageRebase = rebase || steps.some((e) => e.kind === "rebased");
   const ended = (passes || []).filter((p) => p && !p.noRun && Number.isFinite(Date.parse(p.ended)));
   const AI = new Set(["build", "rebased", "conflict", "review", "answer", "fix", "scope"]);
   const open = (e) => {
-    if (AI.has(e.kind)) return e.pass !== false && !ended.some((p) => passRow(p, { rebase }) === e.kind && Date.parse(p.started) >= e.t - 1000);
+    if (AI.has(e.kind)) return e.pass !== false && !ended.some((p) => passRow(p, { rebase: stageRebase }) === e.kind && Date.parse(p.started) >= e.t - 1000);
     // A wait, or a step the stage marks as a span (setup, install), until the stage records its end.
     return (e.step?.wait === true || e.step?.span === true) && !Number.isFinite(e.end);
   };
@@ -192,7 +193,6 @@ export function progressData({ stage, subject = null, issue, started, now, lines
     return r;
   };
   for (const e of steps) if (e !== current) rowFor(e.kind, e.t).events.push(e);
-  const stageRebase = rebase || steps.some((e) => e.kind === "rebased");
   const tail = [];
   for (const p of (passes || []).filter((x) => x && !x.noRun)) {
     const kind = passRow(p, { rebase: stageRebase });

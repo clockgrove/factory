@@ -2609,7 +2609,7 @@ export const STATE_CARD_MS = 20_000;
  */
 export async function stateCard(repo, issue, { exit, reason, form = null, next = null, cause = null }, { token }) {
   if (cause === "outage") return;
-  await endCard(repo, issue, { token }, { exit, reason, form, next, appId: input("app_id") || process.env.PENDULUM_LOCAL_APP_ID || null, log, timeoutMs: STATE_CARD_MS }).catch((e) => log(`#${issue}: the ${exit} card was not written (${String(e?.message || e).slice(0, 120)})`));
+  await endCard(repo, issue, { token }, { exit, reason, form, next, appId: input("app_id") || process.env.PENDULUM_LOCAL_APP_ID || process.env.PENDULUM_NOTICE_APP_ID || null, log, timeoutMs: STATE_CARD_MS }).catch((e) => log(`#${issue}: the ${exit} card was not written (${String(e?.message || e).slice(0, 120)})`));
 }
 
 export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "pendulum", next = null, card = true }, { token, notice = null }) {

@@ -785,6 +785,6 @@ test("#617: a card whose rows' cents are shared out to the total says so once, i
   const part = (usd) => ({ usd, usdByBilling: { api: usd }, usdByPass: { work: { usd: 0.202286, usdByBilling: { api: 0.202286 } }, fix: { usd: 0.1, usdByBilling: { api: 0.1 } } } });
   const drawn = renderFinishCard(withSelf(() => data({ comments: withSpend({ work: part(0.302286), review: { usd: 0.152868, usdByBilling: { api: 0.152868 } } }) })));
   assert.ok(drawn.includes("**Where the money went**"));
-  assert.match(drawn, new RegExp(`^Bars show recorded dollars only\\. ${SHARED_NOTE.replace(/[.']/g, "\\$&")} CI minutes are not included\\.$`, "m"));
+  assert.ok(drawn.includes(`\nBars show recorded dollars only. ${SHARED_NOTE} CI minutes are not included.\n`));
   assert.equal(drawn.split(SHARED_NOTE).length, 2);
 });

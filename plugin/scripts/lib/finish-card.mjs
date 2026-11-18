@@ -156,7 +156,7 @@ export const artifactStage = (name) => (typeof name !== "string" ? null : /(^|[-
  */
 function pauseOf(line, rec) {
   if (line) return line.limitPaused ? "usage-limit" : line.outagePaused ? "outage" : null;
-  const has = (v) => !!v && typeof v === "object";
+  const has = (v) => !!v && typeof v === "object" && !Array.isArray(v);
   if ((rec?.exit === "paused" || rec?.exit === "waiting") && has(rec.usageLimit)) return "usage-limit";
   return rec?.exit === "paused" && has(rec.outage) ? "outage" : null;
 }
@@ -406,8 +406,22 @@ function holdsOf(n, own, stages) {
   return holds;
 }
 
+// An owner as GitHub names one: letters, digits and dashes, and for a managed user (Enterprise Managed Users) an
+// underscore and its enterprise's short code of three to eight letters and digits at the end; 39 characters in all.
+const OWNER = "(?=[^/]{1,39}/)[A-Za-z0-9][A-Za-z0-9-]*(?:_[A-Za-z0-9]{3,8})?";
 /** A repository's `owner/name` as the card may print it, else null. */
-const repoName = (v) => (typeof v === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/.test(v) ? v : null);
+const repoName = (v) => (typeof v === "string" && new RegExp(`^${OWNER}/[A-Za-z0-9._-]{1,100}$`).test(v) ? v : null);
+/**
+ * The repository of a blocking issue (a timeline event's `blocked_by`, or a `blockers` entry): the one it names, this
+ * repository (`repo`) when it names none, and null for a name the card would not print: that issue is then left out,
+ * never read as this repository's issue of the same number.
+ */
+const blockerRepo = (b, repo) => {
+  const named = b?.repository?.full_name ?? b?.repo;
+  return named === undefined || named === null ? repo : repoName(named);
+};
+/** A blocking issue's id, `owner/name#n`, or null for one that names no issue or a repository the card would not print. */
+const blockerId = (b, repo) => (Number.isSafeInteger(b?.number) && b.number > 0 && blockerRepo(b, repo) ? `${blockerRepo(b, repo)}#${b.number}` : null);
 const isoTime = (t) => new Date(t).toISOString().replace(".000Z", "Z");
 
 /**
@@ -422,7 +436,7 @@ const isoTime = (t) => new Date(t).toISOString().replace(".000Z", "Z");
 function blockedWaits({ repo, timeline, blockers, started, stages }) {
   const first = stages.filter((s) => s.start).sort((a, b) => ms(a.start) - ms(b.start))[0];
   if (!first) return [];
-  const idOf = (b) => (Number.isSafeInteger(b?.number) && b.number > 0 ? `${repoName(b.repository?.full_name ?? b.repo) ?? repo}#${b.number}` : null);
+  const idOf = (b) => blockerId(b, repo);
   const events = (timeline || []).filter((e) => (e?.event === "blocked_by_added" || e?.event === "blocked_by_removed") && idOf(e.blocked_by) && Number.isFinite(ms(e.created_at))).sort((a, b) => ms(a.created_at) - ms(b.created_at));
   const spans = [];
   for (const [i, e] of events.entries()) {
@@ -448,18 +462,33 @@ function blockedWaits({ repo, timeline, blockers, started, stages }) {
 }
 
 /**
- * The blocking issues a card's blocked-by waits need read (postFinishCard): each one the issue timeline's
- * `blocked_by_added` events name, once, as {repo (owner/name), number}.
+ * The blocking issues a card's blocked-by waits need read (postFinishCard): each one a `blocked_by_added` event of the
+ * issue timeline names before `before` (the first stage's start: a relation added later is no wait before it), once, as
+ * {repo (owner/name), number}. None with no `before`.
  */
-export function blockersToRead(repo, timeline) {
+export function blockersToRead(repo, timeline, before) {
   const seen = new Map();
   for (const e of timeline || []) {
-    const b = e?.event === "blocked_by_added" ? e.blocked_by : null;
-    if (!Number.isSafeInteger(b?.number) || b.number <= 0) continue;
-    const full = repoName(b.repository?.full_name) ?? repo;
-    seen.set(`${full}#${b.number}`, { repo: full, number: b.number });
+    const id = e?.event === "blocked_by_added" && ms(e.created_at) < ms(before) ? blockerId(e.blocked_by, repo) : null;
+    if (id) seen.set(id, { repo: blockerRepo(e.blocked_by, repo), number: e.blocked_by.number });
   }
   return [...seen.values()];
+}
+
+/**
+ * The run's waits with no time counted twice (pure): oldest first, each cut to the part no earlier wait covers (its
+ * start then the earlier one's end, a recorded time too), and left out when nothing of it is left. Their lengths then
+ * add up to the time the run waited (waitedMs).
+ */
+function apart(holds) {
+  const out = [];
+  let upTo = -Infinity;
+  for (const h of [...holds].sort((a, b) => ms(a.start) - ms(b.start))) {
+    if (ms(h.end) <= upTo) continue;
+    out.push(ms(h.start) < upTo ? { ...h, start: isoTime(upTo) } : h);
+    upTo = ms(h.end);
+  }
+  return out;
 }
 
 /**
@@ -556,7 +585,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
   // Who filed the issue, and who applied the label that started the clock (its latest application by then).
   const labelled = (timeline || []).filter((e) => e.event === "labeled" && e.label?.name === label && ms(e.created_at) <= ms(started)).sort((a, b) => ms(a.created_at) - ms(b.created_at)).at(-1);
   const sum = (k) => shown.reduce((s, p) => s + (Number.isInteger(p.pr[k]) ? p.pr[k] : 0), 0);
-  const holds = [...blockedWaits({ repo, timeline, blockers, started, stages }), ...holdsOf(n, own.filter((c) => inRun(noticeAt(c))), stages)].sort((a, b) => ms(a.start) - ms(b.start));
+  const holds = apart([...blockedWaits({ repo, timeline, blockers, started, stages }), ...holdsOf(n, own.filter((c) => inRun(noticeAt(c))), stages)]);
   const closer = (timeline || []).filter((e) => e.event === "closed").sort((a, b) => ms(a.created_at) - ms(b.created_at)).at(-1)?.actor?.login;
   return {
     repo,
@@ -576,7 +605,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     next: ["resume", "work", "restart", "none"].includes(other?.next) ? other.next : null,
     closer: login(closer),
     // The run's recorded waits (#589, #614): the issues that blocked it before its first stage, and the time on hold after
-    // each Blocked or Question notice and each paused stage until the next stage started.
+    // each Blocked or Question notice and each paused stage until the next stage started, no time in two of them (apart).
     holds,
     planned: own.some((c) => (c.body || "").startsWith(marker(n, "plan")) && inRun(c.created_at)),
     // The scorer's start of the clock: the first label with no restart window (labelTime), null with no label event.
@@ -1262,7 +1291,7 @@ const passesRead = (list) => {
 };
 /** The kinds of wait a summary names (finishData's holds): what recorded it. */
 export const WAIT_KINDS = Object.freeze(["blocked-by", "blocked", "question", "paused"]);
-const BLOCKER = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100})?#[1-9]\d{0,15}$/;
+const BLOCKER = new RegExp(`^(?:${OWNER}/[A-Za-z0-9._-]{1,100})?#[1-9]\\d{0,15}$`);
 /**
  * A summary's waits read back (#614): each {kind (WAIT_KINDS), why (WAIT_WHY, or null), start, end, blockers (a blocked-by
  * wait's issues, "#12" or "owner/name#12")}. Null for a card written before waits were recorded, undefined for a broken list.
@@ -1503,16 +1532,23 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
   const since = comments.filter((c) => ms(c.created_at) >= ms(started));
   const unlined = unlinedStages(since, n, mine);
   const want = [...unlined, ...modellessStages(since, n, mine).filter((w) => !unlined.some((u) => u.stage === w.stage && u.key === w.key))];
-  // The issues the timeline says blocked this one (#614), each read once for its close: one GitHub will not show (403,
-  // 404, 410: another repository's, or one deleted) is left out, and its wait is then not shown; a passing failure throws.
-  const blockers = [];
-  for (const b of blockersToRead(repo.full, timeline)) {
-    const read = await rest(`repos/${b.repo}/issues/${b.number}`, opts).catch((e) => {
-      if (!e?.rateLimited && [403, 404, 410].includes(e?.status)) return null;
-      throw e;
-    });
-    if (read) blockers.push({ repo: b.repo, number: b.number, state: read.state, closed_at: read.closed_at ?? null });
-  }
+  // The issues the timeline says blocked this one before its first stage (#614: the first progress comment of the run,
+  // Pendulum's or one by someone who can push), each read once for its close, together: one GitHub will not show (403,
+  // 404, 410: another repository's, or one deleted) is left out, and its wait is then not shown; a rate limit or any
+  // other failure throws, for a later write to read again.
+  const stageAt = new RegExp(`^<!-- pendulum:${n}:progress:(?:work|review):`);
+  const firstStage = since.filter((c) => (mine(c) || pushed(c)) && stageAt.test(c.body || "")).map((c) => c.created_at).sort((a, b) => ms(a) - ms(b))[0];
+  const blockers = (
+    await Promise.all(
+      blockersToRead(repo.full, timeline, firstStage).map(async (b) => {
+        const read = await rest(`repos/${b.repo}/issues/${b.number}`, opts).catch((e) => {
+          if (!e?.rateLimited && [403, 404, 410].includes(e?.status)) return null;
+          throw e;
+        });
+        return read ? { repo: b.repo, number: b.number, state: read.state, closed_at: read.closed_at ?? null } : null;
+      }),
+    )
+  ).filter(Boolean);
   const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: want.length ? await records(n, want) : [], blockers, label, mine, pushed, end: ending });
   if (!d) return "nothing ran";
   if (!merged && !d.stages.length && !d.prs.length) return "nothing ran";

@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RETRY, repoOf } from "../scripts/lib/github.mjs";
 import { setSelf, spendMarker, spendParts, stageSpendLine } from "../scripts/lib/logic.mjs";
-import { COMMENT_MAX, endCard, finishCardBody, finishData, finishEndOf, finishMarker, finishSummary, finishTotals, postFinishCard, readSummary, renderFinishCard, summaryMarker } from "../scripts/lib/finish-card.mjs";
+import { COMMENT_MAX, endCard, finishCardBody, finishData, finishEndOf, finishMarker, finishSummary, blockersToRead, finishTotals, postFinishCard, readSummary, renderFinishCard, summaryMarker } from "../scripts/lib/finish-card.mjs";
 import { pushedBy, summaryFor } from "../scripts/lib/report.mjs";
 import * as F from "./fixtures/finish-ends.mjs";
 
@@ -186,8 +186,10 @@ function fakeObjective(o, prs, { onRead = null } = {}) {
       return json(comments);
     }
     if (method === "GET" && p === `/issues/${o.issue.number}`) return json({ ...o.issue, labels: [{ name: "pendulum:objective" }] });
-    // A blocking issue, as GitHub answers for it (`o.blockers`); one it does not hold is a 404.
-    const blocker = (o.blockers ?? []).find((b) => method === "GET" && p === `/issues/${b.number}`);
+    // A blocking issue, as GitHub answers for it (`o.blockers`, by repository and number; `status` and `headers` for a
+    // refusal); one it does not hold is a 404.
+    const blocker = (o.blockers ?? []).find((b) => method === "GET" && u.pathname === `/repos/${b.repo}/issues/${b.number}`);
+    if (blocker?.status) return new Response(JSON.stringify({ message: "refused" }), { status: blocker.status, headers: { "content-type": "application/json", ...(blocker.headers ?? {}) } });
     if (blocker) return json({ number: blocker.number, state: blocker.state, closed_at: blocker.closed_at });
     if (method === "GET" && /\/check-runs$/.test(p)) return json({ total_count: 0, check_runs: [] });
     if (method === "GET" && p === "/rulesets") return json([]);
@@ -503,6 +505,8 @@ test("finish card (#614): a stage's spend line records a pause on a usage limit 
   assert.deepEqual([outage.limitPaused, outage.outagePaused, outage.exit], [undefined, true, "paused"]);
   // A Block that met an outage, or any other end, records no pause.
   assert.deepEqual([line({ usd: 0, exit: "blocked", outage: { host: "x" } }).outagePaused, line({ usd: 1, exit: "delivered" }).limitPaused], [undefined, undefined]);
+  // Only an outage record marks one: a list, or anything else that is no record, does not.
+  assert.deepEqual([[], "down", true].map((outage) => line({ usd: 0, exit: "paused", outage }).outagePaused), [undefined, undefined, undefined]);
   // The card: an outage's pause is its own cause.
   const o = F.blockedThenPaused();
   const comments = o.comments.map((c) => ({ ...c, body: c.body.replace('"limitPaused":true,', '"outagePaused":true,') }));
@@ -516,6 +520,8 @@ test("finish card (#614): a stage's spend line records a pause on a usage limit 
   const record = { artifact: "pendulum-usage-421-review", progressRun: "1794996765735", usd: 0, exit: "waiting", usageLimit: { harness: "claude", reset: null, noReset: true }, harness: "claude", model: "claude-fable-5-2" };
   assert.equal(withEnv(ZONE, () => finishData({ ...o, comments: bare, records: [record] })).holds[1].why, "usage-limit");
   assert.equal(withEnv(ZONE, () => finishData({ ...o, comments: bare, records: [{ ...record, usageLimit: undefined }] })).holds.length, 1, "a wait for another reason names no pause");
+  assert.equal(withEnv(ZONE, () => finishData({ ...o, comments: bare, records: [{ ...record, usageLimit: [] }] })).holds.length, 1, "a list is no usage-limit record");
+  assert.equal(withEnv(ZONE, () => finishData({ ...o, comments: bare, records: [{ ...record, exit: "paused", usageLimit: undefined, outage: [] }] })).holds.length, 1, "nor an outage's");
 });
 
 test("finish card (#614): an Objective with no waits looks as before, its summary says so, and a card from before waits were recorded still reads", () => {
@@ -539,4 +545,82 @@ test("finish card (#614): an Objective with no waits looks as before, its summar
   // A broken waits list is no record of waits, never a card that cannot be read.
   const broken = readSummary(`${finishMarker(421)}\n<!-- pendulum:421:summary ${JSON.stringify({ ...v, waits: [{ kind: "nap", why: null, start: "x", end: "y" }] })} -->`, 421);
   assert.deepEqual([broken.waits, broken.workMs, broken.cost], [null, null, read.cost]);
+});
+
+test("finish card (#614): waits that overlap share no time: each is cut to the part no earlier wait covers, so the causes add up to the waiting total", () => {
+  const o = F.blockedThenPaused();
+  // A Block of the dispatcher's while #420 still blocked the Objective: its hold would run to the first stage's start.
+  const notice = { ...F.notice(421, "blocked", "0", "2026-11-17T21:00:00Z", "setup") };
+  const d = withEnv(ZONE, () => finishData({ ...o, comments: [notice, ...o.comments] }));
+  assert.deepEqual(d.holds.map((x) => [x.kind, x.why, x.start, x.end]), [
+    ["blocked-by", "blocked-by", "2026-11-17T20:34:26Z", "2026-11-18T09:10:43Z"],
+    ["blocked", "you", "2026-11-18T09:10:43Z", "2026-11-18T09:12:03Z"],
+    ["paused", "usage-limit", "2026-11-18T10:13:20Z", "2026-11-18T17:08:37Z"],
+  ]);
+  const t = finishTotals(d);
+  assert.equal(d.holds.reduce((n, x) => n + (Date.parse(x.end) - Date.parse(x.start)), 0), t.waited, "the waits' lengths are the waiting total");
+  assert.equal(t.worked + t.waited, t.wall);
+  const md = withEnv(ZONE, () => renderFinishCard(d));
+  assert.match(md, /^Waited 12 h 36 min blocked by #420, 1 min 20 s for you and 6 h 55 min on a usage limit; 21 h 45 min from the label to the merge\.$/m);
+  assert.match(md, /^\| Nov 18, 1:10 AM \| On hold 2 · waiting for you \| 1 min 20 s \| — \|$/m);
+  assert.match(md, /^\| \| Waiting \| 19 h 32 min \| \|$/m);
+  assert.deepEqual(finishSummary(d).waits.map((w) => w.start), d.holds.map((x) => x.start));
+  // A notice hold wholly inside an earlier wait adds nothing.
+  const inside = withEnv(ZONE, () => finishData({ ...o, comments: [notice, ...o.comments], blockers: [{ repo: "acme/app", number: 420, state: "closed", closed_at: "2026-11-18T09:12:03Z" }] }));
+  assert.deepEqual(inside.holds.map((x) => x.kind), ["blocked-by", "paused"]);
+});
+
+test("finish card (#614): a blocking issue is read in the repository its event names, never as this repository's issue of the same number; a managed user's owner name is taken", () => {
+  const o = F.blockedThenPaused();
+  const named = (full_name) => o.timeline.map((e) => (e.event === "blocked_by_added" ? { ...e, blocked_by: { number: 420, repository: { full_name } } } : e));
+  const closed = (repo) => [{ repo, number: 420, state: "closed", closed_at: "2026-11-18T09:10:43Z" }];
+  const first = (over) => withEnv(ZONE, () => finishData({ ...o, ...over })).holds[0];
+  // Another repository's issue: its own name on the card, and this repository's #420 is not its close.
+  assert.deepEqual([first({ timeline: named("acme/other"), blockers: closed("acme/other") }).blockers, first({ timeline: named("acme/other"), blockers: closed("acme/app") }).kind], [["acme/other#420"], "paused"]);
+  // A managed user's repository (an underscore and the enterprise's short code).
+  assert.deepEqual(first({ timeline: named("mona-cat_octo/app"), blockers: closed("mona-cat_octo/app") }).blockers, ["mona-cat_octo/app#420"]);
+  assert.deepEqual(blockersToRead("acme/app", named("mona-cat_octo/app"), "2026-11-18T09:12:03Z"), [{ repo: "mona-cat_octo/app", number: 420 }]);
+  // A name the card would not print: left out, and nothing is read for it.
+  for (const bad of ["emu_user_x/app", "a/b/c", "<b>/app", "", 7]) {
+    assert.equal(first({ timeline: named(bad), blockers: closed("acme/app") }).kind, "paused", String(bad));
+    assert.deepEqual(blockersToRead("acme/app", named(bad), "2026-11-18T09:12:03Z"), [], String(bad));
+  }
+  // No repository named: this one. Only relations added before the first stage are read, each once.
+  const later = { event: "blocked_by_added", created_at: "2026-11-18T12:00:00Z", blocked_by: { number: 500 } };
+  assert.deepEqual(blockersToRead("acme/app", [...o.timeline, later, o.timeline[1]], "2026-11-18T09:12:03Z"), [{ repo: "acme/app", number: 420 }]);
+  assert.deepEqual(blockersToRead("acme/app", o.timeline, undefined), [], "no stage: nothing to read");
+  // A summary's blockers read back with such a name.
+  const d = withEnv(ZONE, () => finishData({ ...o, timeline: named("mona-cat_octo/app"), blockers: closed("mona-cat_octo/app") }));
+  assert.deepEqual(readSummary(withEnv(ZONE, () => finishCardBody(d)), 421).waits[0].blockers, ["mona-cat_octo/app#420"]);
+});
+
+test("finish card (#614): the blocker's read through postFinishCard and endCard: another repository's, a refusal leaves the wait out, a rate limit or a 5xx fails the write for a later one", async () => {
+  const o = F.blockedThenPaused();
+  const repo = repoOf("acme/app");
+  const prs = () => [prOf(443, { merged_at: "2026-11-18T18:20:10Z", state: "closed", created_at: "2026-11-18T09:57:14Z" })];
+  const closed = { ...o.issue, state: "closed", closed_at: "2026-11-18T18:20:13Z" };
+  const cardOf = (fake) => fake.comments.find((c) => c.body.startsWith(finishMarker(421)))?.body;
+  const post = (fake) => over(fake, () => postFinishCard(repo, closed, { token: "t" }, { prBody: false }));
+  // Another repository's blocker: read there.
+  const other = { ...o, timeline: o.timeline.map((e) => (e.event === "blocked_by_added" ? { ...e, blocked_by: { number: 7, repository: { full_name: "acme/other" } } } : e)), blockers: [{ repo: "acme/other", number: 7, state: "closed", closed_at: "2026-11-18T09:10:43Z" }] };
+  const cross = fakeObjective(other, prs);
+  assert.equal(await post(cross), "posted");
+  assert.match(cardOf(cross), /^Waited 12 h 36 min blocked by acme\/other#7 and 6 h 55 min on a usage limit; /m);
+  // A plain 403 (a repository this token may not read): the card without that wait.
+  const refused = fakeObjective({ ...o, blockers: [{ repo: "acme/app", number: 420, status: 403 }] }, prs);
+  assert.equal(await post(refused), "posted");
+  assert.deepEqual(readSummary(cardOf(refused), 421).waits.map((w) => w.kind), ["paused"]);
+  // A rate-limited 403, and a 5xx: no card is written with a wait missing; the write fails, for a later one.
+  const limited = fakeObjective({ ...o, blockers: [{ repo: "acme/app", number: 420, status: 403, headers: { "retry-after": "1" } }] }, prs);
+  await assert.rejects(over(limited, () => postFinishCard(repo, closed, { token: "t", noRateWait: true }, { prBody: false })), (e) => e.rateLimited === true && e.status === 403);
+  assert.equal(cardOf(limited), undefined);
+  const down = fakeObjective({ ...o, blockers: [{ repo: "acme/app", number: 420, status: 502 }] }, prs);
+  await assert.rejects(post(down), (e) => e.status === 502);
+  assert.equal(cardOf(down), undefined);
+  // A Block's card (endCard) reads the blocker too: the wait before the first stage is on it.
+  const open = () => [prOf(443, { merged_at: null, draft: true, state: "open", created_at: "2026-11-18T09:57:14Z" })];
+  const blocked = fakeObjective({ ...o, comments: o.comments.filter((c) => !/:progress:review:1795023645301 -->/.test(c.body)) }, open);
+  assert.equal(await over(blocked, () => endCard(repo, o.issue, { token: "t" }, { exit: "blocked", reason: "findings stay open.", now: Date.parse("2026-11-18T17:40:00Z") })), "posted");
+  assert.match(cardOf(blocked), /\n### ⛔ Blocked · 1 h 34 min working, 19 h 31 min waiting · /);
+  assert.match(cardOf(blocked), /^Waited 12 h 36 min blocked by #420 and 6 h 55 min on a usage limit; 21 h 5 min from the label to the Block\.$/m);
 });

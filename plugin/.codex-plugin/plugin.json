@@ -1,6 +1,6 @@
 {
   "name": "pendulum",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "Label a GitHub issue and walk away: a coding agent (Claude Code, Codex or Copilot CLI) plans, builds and opens the pull request, a second agent reviews it, and your CI and merge queue land it.",
   "author": {
     "name": "Clockgrove",

@@ -9,7 +9,7 @@ import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answerableReviewer, answersComment, 
 import { addBilling } from "./usage.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
-import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, quotaNow, quotaResource, spentCandidate, spentOn, spentResetOf, spentUntil, stoppedWaiting, waitingOutages } from "./network.mjs";
+import { OUTAGE, RATE_LIMIT_SPENT, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, quotaNow, quotaResource, spentCandidate, spentOn, spentResetOf, spentUntil, stoppedWaiting, unreachableCode, waitingOutages } from "./network.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
 async function run(cmd, args, opts = {}) {
@@ -397,7 +397,7 @@ function transportError(what, e) {
   const code = causeCode(e);
   const err = new GitHubError(`${what} failed: ${e.message}${code ? ` (${code})` : ""}`, 0, "", { transport: true });
   err.code = code;
-  err.unsent = UNREACHABLE.has(code);
+  err.unsent = unreachableCode(code);
   return err;
 }
 

@@ -2802,8 +2802,10 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * (Copilot at its default), null when the record has no `ran` to say.
  */
 const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
-/** A route a stage records (backend.mjs ROUTES), or null. */
-const routeCode = (v) => (["actions", "local", "sandbox"].includes(v) ? v : null);
+/** The routes a stage records it ran on (backend.mjs stageRoute), on its usage record and spend line (#570). */
+export const ROUTES = Object.freeze(["actions", "local", "sandbox"]);
+/** A route a stage records (ROUTES), or null. */
+const routeCode = (v) => (ROUTES.includes(v) ? v : null);
 /** A stage's exit as its usage record names it (`delivered`, `blocked`, `question`, ...): a code, never words; null for none. */
 const exitCode = (v) => (typeof v === "string" && /^[a-z][a-z-]{0,30}$/.test(v) ? v : null);
 /**

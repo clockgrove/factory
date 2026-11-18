@@ -46,14 +46,22 @@ async function fakeGitHub() {
   return { progress, url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
 }
 
-const lineOf = (body) => JSON.parse(SPEND.exec(body)?.[1] ?? "null");
+/** A progress comment's spend line, read, less the route it records (#570), which routeOf reads. */
+const lineOf = (body) => {
+  const line = JSON.parse(SPEND.exec(body)?.[1] ?? "null");
+  if (!line) return line;
+  const { route: _route, ...rest } = line;
+  return rest;
+};
+/** The route a progress comment's spend line records, or null. */
+const routeOf = (body) => JSON.parse(SPEND.exec(body)?.[1] ?? "null")?.route ?? null;
 
-test("a local work stage that ran no harness pass ends with a $0 spend line, not none", async () => {
+for (const [route, env] of [["local", { PENDULUM_LOCAL: "1" }], ["actions", { GITHUB_ACTIONS: "true" }], ["sandbox", { GITHUB_ACTIONS: "true", PENDULUM_STAGE_SANDBOX: "1" }]]) test(`a ${route} work stage that ran no harness pass ends with a $0 spend line, not none, and the line records its route`, async () => {
   const gh = await fakeGitHub();
   const home = mkdtempSync(join(tmpdir(), "spend-"));
   // The fake GitHub names no author for the Objective: the stage Blocks before any harness pass.
   const child = spawn(process.execPath, [join(SCRIPTS, "worker.mjs"), "--repo", "owner/repo", "--issue", "7", "--checkout", home, "--usage-dir", join(home, "usage"), "--token-fd", "3"], {
-    env: { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, PENDULUM_LOCAL: "1" },
+    env: { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, ...env },
     stdio: ["ignore", "pipe", "pipe", "pipe"],
   });
   child.stdio[3].end("test-token");
@@ -66,7 +74,8 @@ test("a local work stage that ran no harness pass ends with a $0 spend line, not
   assert.ok(last, `the stage wrote no progress comment:\n${out}`);
   assert.match(last, /exit: blocked/, out);
   assert.doesNotMatch(last, /crashed/, "a Block by its own check, not a crash");
-  assert.deepEqual(lineOf(last), { usd: 0, noPass: true, exit: "blocked", route: "local" }, last);
+  assert.deepEqual(lineOf(last), { usd: 0, noPass: true, exit: "blocked" }, last);
+  assert.equal(routeOf(last), route, "the stage's final line records its route");
 });
 
 const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
@@ -404,6 +413,7 @@ test("the default progress writer of a local stage carries the stage's spend so 
     gh.close();
   }
   assert.deepEqual(gh.progress.map(lineOf), [{ usd: 0, running: true }, null]);
+  assert.equal(routeOf(gh.progress[0]), "local", "a line written while a local stage runs records its route (#570)");
 });
 
 test("stageSpendLine: $0 for no pass; the record's known dollars and key share; runs of unknown cost named, never priced", () => {

@@ -411,7 +411,7 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.breakdowns), ["account", "day", "harness", "model", "pass", "route", "stage", "version"]);
   assert.deepEqual(keys(r.breakdowns.stage[0]), ["cost", "key", "stages", "tokens"]);
   assert.deepEqual(keys(r.breakdowns.pass[0]), ["cost", "key", "modelMinutes", "passes", "spendLineStages", "tokens"]);
-  assert.deepEqual(keys(r.objectives.find((o) => o.issue === 3)), ["asked", "blocks", "churn", "clockWhy", "cost", "findings", "issue", "merged", "modelMinutes", "outcome", "passes", "route", "running", "stages", "started", "title", "tokens", "unpricedPasses", "url", "usdPerModelMinute", "wallMinutes"]);
+  assert.deepEqual(keys(r.objectives.find((o) => o.issue === 3)), ["asked", "blockedNotices", "churn", "clockWhy", "cost", "findings", "issue", "merged", "modelMinutes", "outcome", "passes", "route", "running", "stages", "started", "title", "tokens", "unpricedPasses", "url", "usdPerModelMinute", "wallMinutes"]);
   assert.deepEqual(keys(r.hotSpots), ["answerAndFixPasses", "blockedOrUnmergedSpend", "blockedStages", "cacheWriteShare", "costPerModelMinute", "reviewLoops"]);
   assert.ok(Array.isArray(r.hotSpots.blockedStages.unrecorded));
   for (const h of Object.values(r.hotSpots)) assert.ok(typeof h.rankBy === "string" && Array.isArray(h.items));
@@ -1731,7 +1731,7 @@ test("report (#570 V2): a stage whose passes name more than its own figure is bo
   assert.deepEqual(card.json.source.missing.find((m) => m.code === "ledger-overruns"), said);
 });
 
-test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Blocks, clock and Running, and the dollars by UTC day", async () => {
+test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Blocked notices, clock and Running, and the dollars by UTC day", async () => {
   const { vendorBody } = await import("../scripts/lib/logic.mjs");
   // The world with each local stage's spend line recording its route, as the writer does now: its Actions stages with
   // no spend line, and #7's build, record none.
@@ -1746,7 +1746,7 @@ test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Bl
     // #12: a cloud sandbox stage that left only its vendor comment, which records the route.
     w.issues.push(objectiveIssue(12, { state: "open", labels: ["pendulum:blocked"] }));
     w.comments.push(comment(12, `<!-- pendulum:12:vendor:work:9001-abcdef012345 -->\n${vendorBody({ line: "- sandbox stopped", vendorUsd: 0.04, modelUsd: 0.1, modelBilling: { usdByBilling: { api: 0.1 }, billing: "api" } })}`, { at: "2026-11-17T06:00:00Z" }));
-    // #13: merged in the period, with no record of it read.
+    // #13: merged in the period; its thread, read, holds no record of Pendulum's.
     w.issues.push(objectiveIssue(13));
     w.pulls.push(ownPull(13, { created: "2026-11-17T06:00:00Z", merged: "2026-11-17T07:00:00Z" }));
     return w;
@@ -1757,7 +1757,7 @@ test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Bl
   assert.deepEqual([3, 5, 7, 8, 12].map((n) => byIssue(r, n).route), [null, "local", "mixed", null, "sandbox"]);
   assert.deepEqual(Object.fromEntries(r.breakdowns.route.map((x) => [x.key, x.stages])), { null: 5, local: 5, decisions: 1, actions: 1, sandbox: 1 });
   assert.deepEqual(r.source.missing.find((m) => m.code === "route-unrecorded")?.issues, [3, 7, 8]);
-  assert.deepEqual([byIssue(r, 5).blocks, byIssue(r, 3).blocks], [1, 0]);
+  assert.deepEqual([byIssue(r, 5).blockedNotices, byIssue(r, 3).blockedNotices], [1, 0]);
   assert.deepEqual([byIssue(r, 5).running, byIssue(r, 3).running], [false, false]);
   const { json: nine } = await report(w, { issue: 9 });
   assert.equal(byIssue(nine, 9).running, true);
@@ -1768,12 +1768,12 @@ test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Bl
   assert.deepEqual(r.breakdowns.day.map((x) => [x.key, x.stages]), [["2026-11-17", r.totals.stages - 1], ["2026-11-18", 1]]);
   assert.equal(r.breakdowns.day[1].cost.usd.api, 0.05);
   // Per merged Objective: #3, #7 and #13, merged in the period; #7 has a teammate's stage (a run of unknown cost, and no
-  // fix passes it can count), and no record of #13 was read.
+  // fix passes it can count), and #13 no record at all: left out, never $0.
   const p = r.totals.perMerged;
   assert.equal(p.n, 3);
   assert.deepEqual([p.usd.api.median, p.usd.api.n, p.usd.api.leftOut], [usd(byIssue(r, 3)).api, 1, 2]);
   assert.deepEqual([p.reviewRounds.n, p.reviewRounds.leftOut, p.fixPasses.n, p.fixPasses.median, p.wallMinutes.n, p.wallMinutes.leftOut], [2, 1, 1, 1, 0, 3]);
-  assert.deepEqual(p.leftOut, [{ issue: 3, why: ["no-clock"] }, { issue: 7, why: ["unknown-runs", "no-passes", "no-clock"] }, { issue: 13, why: ["records-unread"] }]);
+  assert.deepEqual(p.leftOut, [{ issue: 3, why: ["no-clock"] }, { issue: 7, why: ["unknown-runs", "no-passes", "no-clock"] }, { issue: 13, why: ["no-records"] }]);
   // Merged in the period, with every stage's figures: a period that starts after #7's rebase and first review counts
   // only its later review in its row, and both of its reviews per merged Objective; #3 merged before it, out.
   const { json: late } = await report(w, { since: "2026-11-17T04:45:00Z" });
@@ -1800,7 +1800,7 @@ test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Bl
   assert.match(md, /^## By route$/m);
   assert.match(md, /^\| 2026-11-18 \| 1 \| \$0\.05 \|/m);
   assert.match(md, /^## Per merged Objective$/m);
-  assert.match(md, /^- Left out: #3 \(no-clock\); #7 \(unknown-runs, no-passes, no-clock\); #13 \(records-unread\)\.$/m);
+  assert.match(md, /^- Left out: #3 \(no-clock\); #7 \(unknown-runs, no-passes, no-clock\); #13 \(no-records\)\.$/m);
   assert.match(md, /^\| #7 \| merged \| mixed \| 0 \| — \|/m);
 });
 
@@ -1808,15 +1808,14 @@ test("report (#570): the route a stage ran on is recorded in its usage record an
   const { spendParts, vendorBody } = await import("../scripts/lib/logic.mjs");
   const { stageRoute } = await import("../scripts/lib/backend.mjs");
   assert.deepEqual([stageRoute({ GITHUB_ACTIONS: "true" }), stageRoute({ GITHUB_ACTIONS: "true", PENDULUM_STAGE_SANDBOX: "1" }), stageRoute({ PENDULUM_LOCAL: "1" }), stageRoute({})], ["actions", "sandbox", "local", null]);
-  const dir = mkdtempSync(join(tmpdir(), "usage-route-"));
-  const saved = process.env.PENDULUM_LOCAL;
-  process.env.PENDULUM_LOCAL = "1";
-  try {
-    const rec = writeUsage(dir, { harness: "claude", model: "claude-opus-5-5", records: [], passes: 0, exit: "delivered", reason: "", credentialBasis: "test" });
-    assert.equal(rec.route ?? JSON.parse(readFileSync(join(dir, "result.json"), "utf8")).route, "local");
-  } finally {
-    if (saved === undefined) delete process.env.PENDULUM_LOCAL;
-    else process.env.PENDULUM_LOCAL = saved;
+  // Local mode's backend wins over the variables of a runner or a sandbox beside it.
+  assert.equal(stageRoute({ PENDULUM_LOCAL: "1", GITHUB_ACTIONS: "true", PENDULUM_STAGE_SANDBOX: "1" }), "local");
+  for (const [route, env] of [["local", { PENDULUM_LOCAL: "1" }], ["actions", { GITHUB_ACTIONS: "true" }], ["sandbox", { GITHUB_ACTIONS: "true", PENDULUM_STAGE_SANDBOX: "1" }], [undefined, {}]]) {
+    const dir = mkdtempSync(join(tmpdir(), "usage-route-"));
+    writeUsage(dir, { harness: "claude", model: "claude-opus-5-5", records: [], passes: 0, exit: "delivered", reason: "", credentialBasis: "test", env });
+    const stored = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
+    assert.equal(stored.route, route, `result.json records ${route}`);
+    assert.equal(stageSpendLine(stored).parts.route, route, `its spend line records ${route}`);
   }
   const line = stageSpendLine({ usd: 0.1, route: "local" });
   assert.equal(spendParts(spendMarker(line.usd, line.parts)).route, "local");
@@ -1844,4 +1843,51 @@ test("report (#570 V8): the stages whose spend line records they ended Blocked, 
   assert.equal(spendParts(spendMarker(line.usd, line.parts)).exit, "blocked");
   assert.ok(!Object.hasOwn(spendParts(spendMarker(0.1, { exit: "Blocked: the tests failed" })), "exit"));
   assert.ok(!Object.hasOwn(stageSpendLine({ usd: 0.1 }).parts, "exit"));
+});
+
+test("report (#570 V5): an Objective merged in the period counts with every stage's figures, its thread read for them, never as $0", async () => {
+  // The probe: #20, labelled exp, its work ($5) and review ($1) on Nov 11, merged on Nov 17; nothing of it since then.
+  const w = blank();
+  w.issues.push({ ...objectiveIssue(20, { created: "2026-11-10T00:00:00Z", labels: ["exp"] }), updated_at: "2026-11-17T03:00:00Z" });
+  w.pulls.push(ownPull(20, { created: "2026-11-11T05:00:00Z", updated: "2026-11-17T03:00:00Z", merged: "2026-11-17T03:00:00Z" }));
+  w.comments.push(
+    progress(20, "work", "local-p1", { user: ME, at: "2026-11-11T01:00:00Z", spend: { usd: 5, parts: { usdByBilling: { api: 5 }, billing: "api", route: "local" } } }),
+    progress(20, "review", "local-p2", { user: ME, at: "2026-11-11T02:00:00Z", spend: { usd: 1, parts: { usdByBilling: { api: 1 }, billing: "api", route: "local" } } }),
+  );
+  const { json: r, calls } = await report(w, { label: "exp", since: "2026-11-17" });
+  assert.ok(calls.some((c) => c.startsWith("GET /issues/20/comments")), "its thread is read");
+  assert.equal(r.source.calls.planned, r.source.calls.made, "and planned");
+  assert.deepEqual(byIssue(r, 20).cost.usd.api, 0, "its row: no stage in the period");
+  const p = r.totals.perMerged;
+  assert.deepEqual([p.n, p.usd.api.median, p.usd.api.n, p.reviewRounds.median, p.leftOut], [1, 6, 1, 1, [{ issue: 20, why: ["no-passes", "no-clock"] }]]);
+  // The call budget stopped before its thread: left out, never $0.
+  const { json: stopped } = await report(w, { label: "exp", since: "2026-11-17", "max-calls": r.source.calls.made - 1 });
+  assert.deepEqual([stopped.totals.perMerged.n, stopped.totals.perMerged.usd.api.n, stopped.totals.perMerged.leftOut], [1, 0, [{ issue: 20, why: ["comments-stopped"] }]]);
+
+  // The boundary: #3's stages all before the period, its merge and its finish card in it; its card and thread are read.
+  const carded = churnedWorld();
+  carded.comments.push(await finishCard3(carded));
+  const { json: b } = await report(carded, { since: "2026-11-17T02:27:00Z" });
+  assert.ok(!b.objectives.some((o) => o.issue === 3 && o.stages.work + o.stages.review > 0), "no stage of #3 in the period");
+  const q = b.totals.perMerged;
+  // #3 and #7 merged in it; #7 is left out where its teammate's stage leaves it unknown, #3 nowhere.
+  assert.deepEqual([q.n, q.usd.api.n, q.usd.api.median, q.fixPasses.n, q.fixPasses.median, q.wallMinutes.n, q.leftOut.map((x) => x.issue)], [2, 1, 0.519812, 1, 1, 1, [7]]);
+});
+
+test("report (#570 V5): per merged Objective, the median and p25..p75 over three or more Objectives, each billing kind apart", async () => {
+  const w = blank();
+  for (const [n, usd] of [[30, 1], [31, 2], [32, 4], [33, 10]]) {
+    w.issues.push(objectiveIssue(n));
+    w.pulls.push(ownPull(n, { created: "2026-11-17T05:00:00Z", merged: "2026-11-17T06:00:00Z" }));
+    w.comments.push(progress(n, "work", `local-m${n}`, { user: ME, at: "2026-11-17T02:00:00Z", spend: { usd, parts: { usdByBilling: { api: usd }, billing: "api", route: "local" } } }));
+  }
+  // #33's build is on the subscription: $0 at api, its own kind apart.
+  w.comments = w.comments.map((c) => (c.body.startsWith("<!-- pendulum:33:") ? { ...c, body: c.body.replace('"usdByBilling":{"api":10},"billing":"api"', '"usdByBilling":{"subscription":10},"billing":"subscription"') } : c));
+  const { json: r } = await report(w, { since: "2026-11-17" });
+  const p = r.totals.perMerged;
+  assert.equal(p.n, 4);
+  // api over 0, 1, 2, 4; subscription over 0, 0, 0, 10: closest ranks interpolated, every measured Objective in each kind.
+  assert.deepEqual(p.usd.api, { median: 1.5, p25: 0.75, p75: 2.5, n: 4, leftOut: 0 });
+  assert.deepEqual(p.usd.subscription, { median: 0, p25: 0, p75: 2.5, n: 4, leftOut: 0 });
+  assert.deepEqual(p.reviewRounds, { median: 0, p25: 0, p75: 0, n: 4, leftOut: 0 });
 });

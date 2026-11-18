@@ -809,10 +809,12 @@ export class Local {
    * and stays a person's action. Ends when the mark is there, a person put the label on now, or after MARK_TRIES reads
    * that show no such label event; an adoption whose loop stopped first stays unmarked, a person's action in the score.
    */
-  async backfillMark(issue) {
+  async backfillMark(issue, opts = this.opts ?? { token: this.token }) {
     if (!this.unmarked?.has(issue)) return;
     const tries = (this.markTries ??= new Map());
-    const r = await markLocalRoute(this.repo, issue, this.opts ?? { token: this.token }, { check: true, timeline: (repo, n, opts) => timelineOf(repo, n, { ...opts, cache: (this.timelines ??= new Map()) }) });
+    const r = await markLocalRoute(this.repo, issue, opts, { check: true, timeline: (repo, n, opts) => timelineOf(repo, n, { ...opts, cache: (this.timelines ??= new Map()) }) });
+    // Ended by its caller (withClaim's heartbeat at its stage's end): no try.
+    if (opts.signal?.aborted) return;
     const tried = (tries.get(issue) ?? 0) + 1;
     tries.set(issue, tried);
     if (r.marked || r.person || tried >= MARK_TRIES) {
@@ -1954,11 +1956,15 @@ export class Local {
     await this.backfillMark(issue).catch((e) => log(`#${issue}: local-route mark: ${String(e?.message || e).slice(0, 120)}`));
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
     // beats due meanwhile are skipped rather than queued behind it. Each reads who holds the claim first: a claim it
-    // cannot read is written as before (no answer is no other holder).
+    // cannot read is written as before (no answer is no other holder). `stop` ends them with the stage: a beat in flight
+    // then has its request, or its wait for the network, ended (rest's `signal`), and writes nothing after its read.
     let beating = null;
     let lost = null;
+    const stop = new AbortController();
+    const opts = { ...this.opts, signal: stop.signal };
     const heartbeat = async () => {
-      const now = await localClaim(this.repo, issue, this.opts).catch(() => undefined);
+      const now = await localClaim(this.repo, issue, opts).catch(() => undefined);
+      if (stop.signal.aborted) return;
       if (now && now.holder !== this.holder && now.fresh && !deadHereHolder(now.holder, { own: this.holder })) {
         lost = now.holder;
         clearInterval(beat);
@@ -1974,14 +1980,14 @@ export class Local {
         return;
       }
       // This loop's own claim read: rewritten in place, with no second read.
-      if (now?.holder === this.holder && now.commentId) await beatClaim(this.repo, issue, now.commentId, this.holder, this.opts);
-      else await writeClaim(this.repo, issue, this.holder, this.opts);
-      await this.backfillMark(issue);
+      if (now?.holder === this.holder && now.commentId) await beatClaim(this.repo, issue, now.commentId, this.holder, opts);
+      else await writeClaim(this.repo, issue, this.holder, opts);
+      await this.backfillMark(issue, opts);
     };
     const beat = setInterval(() => {
       if (beating || lost) return;
       beating = heartbeat()
-        .catch((e) => log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`))
+        .catch((e) => stop.signal.aborted || log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`))
         .finally(() => {
           beating = null;
         });
@@ -1996,7 +2002,11 @@ export class Local {
       failure = e;
       throw e;
     } finally {
+      // The stage has ended: no beat starts, and the one in flight is ended and has settled before the claim is dropped,
+      // lapsed or kept below, so none writes a claim back after it.
       clearInterval(beat);
+      stop.abort();
+      await beating;
       this.lost?.delete(issue);
       // The claim went to another live loop (the heartbeat): its stage is that loop's, and so is the claim.
       if (lost) {

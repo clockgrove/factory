@@ -232,8 +232,11 @@ const LANDED = Symbol("landed");
  *
  * A 5xx that is still the answer once the bound is spent (or a create's check for it fails) is thrown as an outage of
  * `origin` from the call's first 5xx (outlasted), so the stage ends on it as on a lost network, never a crash.
+ *
+ * `signal` (the caller's AbortSignal) ends the call: its wait for the network or a reset throws the signal's reason, and a
+ * request it ended is thrown as it failed, with no retry.
  */
-async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWait = false, origin = null, quota = null } = {}) {
+async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWait = false, origin = null, quota = null, signal = null } = {}) {
   // The bound starts again after a wait for the network: the time the host was unreachable is no retry's.
   const bound = () => Math.min(RETRY.now() + RETRY.maxWaitMs, Number.isFinite(deadlineAt) ? deadlineAt : Infinity);
   let end = bound();
@@ -242,11 +245,11 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
   for (let n = 1; ; n += 1) {
     let e;
     if (origin && waitingOutages() && outageOn(origin)) {
-      await networkBack(origin, outageOn(origin).code, { deadlineAt });
+      await networkBack(origin, outageOn(origin).code, { deadlineAt, signal });
       end = bound();
     }
     if (quota && waitingOutages() && outageOn(quota)) {
-      await networkBack(origin, RATE_LIMIT_SPENT, { deadlineAt, resetAt: outageOn(quota).resetAt, key: quota });
+      await networkBack(origin, RATE_LIMIT_SPENT, { deadlineAt, resetAt: outageOn(quota).resetAt, key: quota, signal });
       end = bound();
     }
     // A quota given up on whose reset is still ahead: not sent, as the limit this process gave up on.
@@ -259,6 +262,8 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
     } catch (err) {
       e = err;
     }
+    // Ended by its caller: no wait and no retry follows.
+    if (signal?.aborted) throw e;
     if (quota && e?.code === RATE_LIMIT_SPENT && Number.isFinite(e.resetAt) && (waitingOutages() || stoppedWaiting())) {
       await networkBack(origin, RATE_LIMIT_SPENT, { deadlineAt, resetAt: e.resetAt, key: quota });
       end = bound();
@@ -462,7 +467,7 @@ export const githubNow = () => Date.now() + clockSkewMs;
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
- * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it. `onLink(link)` is
+ * `signal` (an AbortSignal) ends the call: a request in flight, or its wait for the network, and no retry follows. `onLink(link)` is
  * given each page's Link header (null without one), for a caller that pages itself.
  */
 export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null, onLink = null } = {}) {
@@ -508,7 +513,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
   const pages = [];
   for (;;) {
     const what = `${method} ${String(path).split("?")[0]}`;
-    const res = await refreshedOn401(what, token, () => sent, () => withRetry(what, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota }));
+    const res = await refreshedOn401(what, token, () => sent, () => withRetry(what, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota, signal }));
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
     const { text, link } = res;

@@ -484,9 +484,11 @@ function spentEpisode(origin, resetAt, key) {
  * an answer; throws NetworkDown when the process's limit or `deadlineAt` comes first, or the process stops waiting.
  * With `resetAt` (ms), quota `key`'s primary rate limit is spent until then: resolves once the reset has passed; a
  * reset past `deadlineAt` throws at once, since that wait cannot end in time. `check`: the probe the wait makes, `probe`
- * unless the caller waits on another reading of the network under a `key` of its own (machineDown).
+ * unless the caller waits on another reading of the network under a `key` of its own (machineDown). `signal` (an
+ * AbortSignal) ends this caller's wait, which throws the signal's reason; the outage and its other waiters go on.
  */
-export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt = null, key = origin, check = probe } = {}) {
+export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt = null, key = origin, check = probe, signal = null } = {}) {
+  signal?.throwIfAborted();
   if (!waitingOutages()) {
     const since = OUTAGE.now();
     // Stopped waiting: the rate limit is recorded as the one this process gave up on, for the stage's end (outageOf).
@@ -494,6 +496,11 @@ export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt
     throw new NetworkDown({ origin, code, since, resetAt, ...(Number.isFinite(resetAt) ? { key } : {}) });
   }
   const ep = episode(origin, code, resetAt, key, check);
+  if (signal) {
+    let cut;
+    const aborted = new Promise((_, no) => signal.addEventListener("abort", (cut = () => no(signal.reason)), { once: true }));
+    await Promise.race([ep.done, aborted]).finally(() => signal.removeEventListener("abort", cut));
+  }
   let back;
   if (Number.isFinite(deadlineAt) && deadlineAt < ep.end) {
     if (Number.isFinite(ep.resetAt)) back = false;

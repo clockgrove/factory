@@ -177,7 +177,7 @@ test("finish card, posted for real: a split Objective's spend per part and per k
   const card = o.writes.find((w) => w.method === "POST" && w.p === "/issues/5/comments" && w.body.startsWith(finishMarker(5)))?.body;
   assert.ok(card, "the card is posted");
   // The total is every stage's: $9.45 known, the re-run's pass of unknown cost beside it; what the dollars are, once.
-  assert.match(card, /^### ✅ Merged in 3 h · \$9\.45 \+ unknown\nIssue #5 → PRs #11, #12 · merged at 1:00 PM UTC · \$9\.45: \$7\.45 billed to your API key, \$2\.00 API-equivalent · plus 1 AI run of unknown cost\n/m);
+  assert.match(card, /^### ✅ Merged · 2 h 50 min working, 10 min waiting · \$9\.45 \+ unknown\nIssue #5 → PRs #11, #12 · merged at 1:00 PM UTC · \$9\.45: \$7\.45 billed to your API key, \$2\.00 API-equivalent · plus 1 AI run of unknown cost\n/m);
   // The work the issue asked for, per part and per kind: each stage's dollars by pass kind, the rest (here the part 1
   // review's $0.10 of decision calls) under its stage's own kind; the judge-only review's fix pass is work.
   assert.match(card, /\| What the issue asked for \| Cost \|\n\| :-- \| --: \|\n\| Part 1: work \| \$2\.50 \|\n\| Part 1: review \| \$0\.70 \|\n\| Part 1: answering the review \| \$0\.30 \|\n\| Part 1: fixing CI \| \$0\.50 \|\n\| Part 2: work \| \$2\.00 \|\n\| Part 2: review \| \$0\.80 \|\n\| Part 2: answering the review \| \$0\.40 \|\n\| Part 2: fixing CI \| \$0\.10 \|\n\n/);
@@ -190,7 +190,7 @@ test("finish card, posted for real: a split Objective's spend per part and per k
   // The Blocked notice after review 4, until the next stage: time on hold, grey in the timeline and a row of the table.
   assert.match(card, /section On hold\n {4}10m 00s :done, 2026-11-16T12:20:00, 2026-11-16T12:30:00/);
   assert.match(card, /\| 12:20 PM \| On hold · waiting for you \| 10 min \| — \|/);
-  assert.match(card, /^Blocked once: 10 min on hold, waiting for you\.$/m);
+  assert.match(card, /^Waited 10 min for you; 3 h from the label to the merge\.$/m);
   assert.doesNotMatch(card, /100\.00/, "a stranger's paste counts nothing");
   assert.match(card, /\| 11:50 AM \| Rebase \| 8 min \| \$1\.20 \|/, "the stage table still shows each stage");
   assert.match(card, /section Review 1\n[^\n]*\n {4}section Part 2\n[^\n]*\n {4}section Review 2\n/, "a repeated section name is numbered");

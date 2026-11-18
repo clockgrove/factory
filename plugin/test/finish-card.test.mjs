@@ -741,7 +741,7 @@ test("finish card (#567): an issue labelled before the rename to Pendulum has no
     // The summary records why (#587), so a reader takes it from the card; the card read back keeps it.
     assert.equal(readSummary(`${finishMarker(3)}\n${summaryMarker(d)}`, 3)?.clockWhy, "renamed", name);
     // Nothing else is read from that event: the clock's start and every other figure are as without it.
-    const rest = (x) => ({ ...x, pendulum: null, wallMs: null, labelledWallMs: null, clockWhy: null });
+    const rest = (x) => ({ ...x, pendulum: null, wallMs: null, workMs: null, labelledWallMs: null, clockWhy: null });
     assert.deepEqual(rest(sum), rest(finishSummary(plain)));
     const md = renderFinishCard(d);
     assert.match(md, /^### ✅ Merged · \$[^\n]*\n[^\n]* · Its wall clock is not known: it was labelled before the rename to Pendulum$/m);

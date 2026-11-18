@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { setSelf, setWriters } from "../scripts/lib/logic.mjs";
 import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
-import { badge, centsOf, finishData, finishMarker, gateChecks, objectiveRecords, renderFinishCard, withFinishBlock } from "../scripts/lib/finish-card.mjs";
+import { centsOf, finishData, finishMarker, gateChecks, objectiveRecords, renderFinishCard, withFinishBlock } from "../scripts/lib/finish-card.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -60,27 +60,25 @@ test("finish card: the merged run, every figure from the run's own records (scra
   assert.deepEqual([d.planned, d.author, d.labeller], [true, "kirkmarple-clockgrove", "kirkmarple-clockgrove"]);
 
   const md = renderFinishCard(d);
-  assert.ok(md.startsWith('<p align="center"><img src="https://raw.githubusercontent.com/clockgrove/pendulum/main/assets/brand/pendulum/web/mark-240.png" width="96" alt="Pendulum"></p>'));
-  assert.match(md, /^<h3 align="center">Merged in 3 min 54 s for \$0\.52\.<\/h3>$/m);
-  assert.doesNotMatch(md, /^#{1,2} |<h[12]\b/m, "an h3 headline, no h1 or h2");
-  assert.match(md, /issue #3 → <a href="https:\/\/github\.com\/clockgrove\/pendulum-scratch\/pull\/4">PR #4<\/a> · landed through your merge queue at 2:27 AM UTC/);
-  assert.ok(md.includes(badge("status", "merged", "4a7a3a")));
-  assert.ok(md.includes('<img alt="wall clock: 3m 54s" src="https://img.shields.io/badge/wall_clock-3m_54s-7a4a24?style=for-the-badge">'));
-  assert.ok(md.includes('<img alt="cost: $0.52" src="https://img.shields.io/badge/cost-%240.52-c9822e?style=for-the-badge">'));
-  assert.doesNotMatch(md, /human/i, "no human-action badge: the scorer's count is not computed at merge time");
-  assert.match(md, /^You wrote the issue and added the label\. Pendulum took it from there: it planned the work, opened PR #4 \(\*\*2 commits, \+20 −1 across 3 files\*\*\), got \*\*1 check\*\* green, had the change reviewed \(no findings\), and it merged through your merge queue\.$/m);
-  assert.match(md, /```mermaid\n%%\{init: \{"theme":"base"[^\n]*\}%%\ngantt\n/);
+  // Text only (#589): the headline block first, no image, no badge, no centred heading.
+  assert.ok(md.startsWith("### ✅ Merged in 3 min 54 s · $0.52\nIssue #3 → PR #4 · merged through your merge queue at 2:27 AM UTC · billing not recorded\n\n"), md.slice(0, 200));
+  assert.doesNotMatch(md, /<img|<h\d|shields\.io|^#{1,2} /m, "no image, no badge, no h1 or h2");
+  assert.doesNotMatch(md, /human/i, "no human-action figure: the scorer's count is not computed at merge time");
+  assert.match(md, /^You wrote the issue and added the label\. Pendulum planned the work, opened PR #4 \(\*\*2 commits, \+20 −1 across 3 files\*\*\), got \*\*1 CI check\*\* green, had the change reviewed \(no findings\), and it merged through your merge queue\.$/m);
+  assert.match(md, /\*\*Timeline\*\* \(UTC\)\n\n```mermaid\n%%\{init: \{"theme":"base"[^\n]*\}%%\ngantt\n/);
   assert.match(md, /section Build\n {4}1m 21s :active, 2026-11-17T02:24:34, 2026-11-17T02:25:55\n {4}section Review\n {4}35s :active, 2026-11-17T02:26:20, 2026-11-17T02:26:55\n {4}section Queue\n {4}44s :active, 2026-11-17T02:26:52, 2026-11-17T02:27:36\n```/);
-  assert.match(md, /\| Stage \| Time \| Cost \|\n\| --- \| ---: \| ---: \|\n\| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.36 \|\n\| Review · Fable 5\.2 \| 35 s \| \$0\.16 \|\n\| Merge queue · your CI \| 44 s \| — \|\n\| \*\*Total\*\* \| \*\*3 min 54 s\*\* \| \*\*\$0\.52\*\* \|/);
-  assert.match(md, /pie showData\n {4}"Plan \+ build" : 0\.36\n {4}"Review" : 0\.16\n```/);
-  // No billing recorded: the card says so rather than call it billed or API-equivalent.
-  assert.match(md, /<sub>These are the costs Pendulum recorded for this run\. Pendulum did not record how these dollars were billed\./);
-  assert.match(md, /<details><summary>Full run log \(UTC\)<\/summary>\n\n- 2:23:42 AM labelled `pendulum:objective`: the clock starts\n- 2:24:34 AM plan \+ build stage started \(claude-opus-5-5\)\n/);
-  assert.match(md, /- 2:27:36 AM PR #4 merged, 1 check green\n\n<\/details>$/);
+  assert.match(md, /\| Time \| Stage \| Took \| Cost \|\n\| :-- \| :-- \| --: \| --: \|\n\| 2:24 AM \| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.36 \|\n\| 2:26 AM \| Review · Fable 5\.2 \| 35 s \| \$0\.16 \|\n\| 2:26 AM \| Merge queue · your CI \| 44 s \| — \|\n\| \| \*\*Total\*\* \| \*\*3 min 54 s\*\* \| \*\*\$0\.52\*\* \|/);
+  // A plain run: no breakdown, so no cost chart; the notes line says what the figures leave out.
+  assert.doesNotMatch(md, /xychart|pie showData/);
+  assert.match(md, /^CI minutes are not included\.$/m);
+  // No billing recorded: Run details says so rather than call it billed or API-equivalent.
+  assert.match(md, /<details><summary>Run details<\/summary>\n\n- \*\*Cost basis:\*\* Pendulum did not record how these dollars were billed\.\n/);
+  assert.match(md, /\*\*Run log\*\* \(UTC\)\n- 2:23:42 AM labelled `pendulum:objective`: the clock starts\n- 2:24:34 AM plan \+ build stage started \(claude-opus-5-5\)\n/);
+  assert.match(md, /- 2:27:36 AM PR #4 merged, 1 CI check green\n\n<\/details>$/);
 
   // Someone else filed the issue: each is named, and a PR Pendulum did not open is described, not claimed.
   const other = renderFinishCard(withSelf(() => data({ issue: { ...real.issue, user: { login: "filer" } }, pulls: pulls({ pr: { ...real.pr, user: { login: "someone" } } }) })));
-  assert.match(other, /^\*\*filer\*\* wrote the issue and \*\*kirkmarple-clockgrove\*\* added the label\. Pendulum took it from there: it planned the work, got \*\*1 check\*\* green, had the change reviewed \(no findings\), and it merged through your merge queue\. PR #4 has \*\*2 commits, \+20 −1 across 3 files\*\*\.$/m);
+  assert.match(other, /^\*\*filer\*\* wrote the issue and \*\*kirkmarple-clockgrove\*\* added the label\. Pendulum planned the work, got \*\*1 CI check\*\* green, had the change reviewed \(no findings\), and it merged through your merge queue\. PR #4 has \*\*2 commits, \+20 −1 across 3 files\*\*\.$/m);
   // A model id that is not one is not printed.
   const odd = withSelf(() => data({ comments: real.comments.map((c) => ({ ...c, body: c.body.replace('"model":"claude-opus-5-5"', '"model":"<img src=x>"') })), records: real.records.map((r) => ({ ...r, model: "<b>" })) }));
   assert.equal(odd.stages[0].model, null);
@@ -120,8 +118,8 @@ test("finish card: Pendulum is its own login here or its App by id, never anothe
     const d = withSelf(() => data({ timeline, comments }));
     assert.deepEqual(d.stages.map((s) => [s.kind, s.usd, s.unknown, s.model]), [["build", 0.35637, 0, "claude-opus-5-5"], ["review", null, 1, null]]);
     const md = renderFinishCard(d);
-    assert.match(md, /<h3 align="center">Merged in 3 min 54 s for \$0\.36 plus spend that was not reported\.<\/h3>/);
-    assert.match(md, /\| Review \| 35 s \| unknown \|/, "the stage shows, its dollars never");
+    assert.match(md, /^### ✅ Merged in 3 min 54 s · \$0\.36 \+ unknown$/m);
+    assert.match(md, /\| 2:26 AM \| Review \| 35 s \| unknown \|/, "the stage shows, its dollars never");
     assert.match(md, /\*\*\$0\.36 \+ unknown\*\*/);
     assert.doesNotMatch(md, /0\.16/, "the other login's spend line is not read");
     // Another route's vendor comment: one more run of unknown cost, never its figure.
@@ -140,10 +138,10 @@ test("finish card: Pendulum is its own login here or its App by id, never anothe
   const none = withSelf(() => finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments: real.comments, pulls: pulls(), checks: real.checks, records: tagged(real.records), mine: () => false, pushed: () => false }));
   assert.deepEqual(none.stages, []);
   const md = renderFinishCard(none);
-  assert.match(md, /<h3 align="center">Merged in 3 min 54 s; its cost is unknown\.<\/h3>/);
+  assert.match(md, /^### ✅ Merged in 3 min 54 s · unknown$/m);
   assert.doesNotMatch(md, /\$0\.00/);
-  assert.match(md, /\| Pendulum's stages, no record found \| — \| unknown \|/);
-  assert.match(md, /Pendulum found no record of this run's stages, so its cost shows as unknown, not as a number\./);
+  assert.match(md, /\| — \| Pendulum's stages, no record found \| — \| unknown \|/);
+  assert.match(md, /- \*\*Unknown cost:\*\* 1 AI run had a record Pendulum could not read or attribute\. It is counted as unknown, never as \$0\./);
 });
 
 test("finish card: after a route switch, the other route's App stages are runs of unknown cost even with no App id to match them by", async () => {
@@ -160,10 +158,10 @@ test("finish card: after a route switch, the other route's App stages are runs o
     const d = finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments, pulls: pulls(), checks: real.checks, records: tagged(real.records, comments), mine: pendulumOwn(null) });
     assert.deepEqual(d.stages.map((s) => [s.kind, s.usd, s.unknown]), [["build", null, 1], ["review", 0.163442, 0]]);
     const md = renderFinishCard(d);
-    assert.match(md, /<h3 align="center">Merged in 3 min 54 s for \$0\.16 plus spend that was not reported\.<\/h3>/);
+    assert.match(md, /^### ✅ Merged in 3 min 54 s · \$0\.16 \+ unknown$/m);
     assert.match(md, /\*\*\$0\.16 \+ unknown\*\*/);
     assert.doesNotMatch(md, /\$0\.36/, "the App's figures are never read from another route");
-    assert.doesNotMatch(md, /for \$0\.16\.<\/h3>|\*\*\$0\.16\*\*/, "no bare $0.16 total");
+    assert.doesNotMatch(md, / · \$0\.16$|\*\*\$0\.16\*\*/m, "no bare $0.16 total");
     assert.equal(d.planned, false, "its plan marker is not this route's to trust");
   } finally {
     setSelf(null);
@@ -178,7 +176,7 @@ test("finish card: a Copilot stage with a spend line takes its model from its us
   const d = withSelf(() => data({ comments: copilot, records }));
   assert.deepEqual(d.stages.map((s) => [s.kind, s.model, s.usd, s.unknown]), [["build", "claude-sonnet-5.5", 0.4, 0], ["review", "claude-sonnet-5.5", 0.2, 0]]);
   const md = renderFinishCard(d);
-  assert.match(md, /\| Plan \+ build · claude-sonnet-5\.5 \| 1 min 21 s \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 35 s \| \$0\.20 \|/);
+  assert.match(md, /\| 2:24 AM \| Plan \+ build · claude-sonnet-5\.5 \| 1 min 21 s \| \$0\.40 \|\n\| 2:26 AM \| Review · claude-sonnet-5\.5 \| 35 s \| \$0\.20 \|/);
   // A Claude stage with a spend line: its harness line's model, as before, whatever its record says.
   const claude = withSelf(() => data({ comments: withSpend({ work: { usd: 0.4 }, review: { usd: 0.2 } }), records: real.records.map((r) => ({ ...r, model: "claude-sonnet-5.5" })) }));
   assert.deepEqual(claude.stages.map((s) => [s.kind, s.model, s.usd]), [["build", "claude-opus-5-5", 0.4], ["review", "claude-fable-5-2", 0.2]]);
@@ -190,17 +188,15 @@ test("finish card: a run with unreported spend shows it as unknown, never as a n
   const part = withSelf(() => data({ comments, records: [] }));
   assert.deepEqual(part.stages.map((s) => [s.usd, s.unknown]), [[null, 1], [0.1, 0]]);
   const md = renderFinishCard(part);
-  assert.match(md, /<h3 align="center">Merged in 3 min 54 s for \$0\.10 plus spend that was not reported\.<\/h3>/);
-  assert.ok(md.includes('<img alt="cost: $0.10 + unknown" src="https://img.shields.io/badge/cost-%240.10_%2B_unknown-c9822e?style=for-the-badge">'));
-  assert.match(md, /\| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| unknown \|/);
-  assert.match(md, /\| \*\*Total\*\* \| \*\*3 min 54 s\*\* \| \*\*\$0\.10 \+ unknown\*\* \|/);
-  assert.match(md, /One run has no reported cost, so it shows as unknown, not as a number\./);
-  assert.doesNotMatch(md, /pie showData/, "no chart of a total that is not known");
+  assert.match(md, /^### ✅ Merged in 3 min 54 s · \$0\.10 \+ unknown\nIssue #3 → PR #4 · merged through your merge queue at 2:27 AM UTC · billing not recorded · plus 1 AI run of unknown cost$/m);
+  assert.match(md, /\| 2:24 AM \| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| unknown \|/);
+  assert.match(md, /\| \| \*\*Total\*\* \| \*\*3 min 54 s\*\* \| \*\*\$0\.10 \+ unknown\*\* \|/);
+  assert.match(md, /- \*\*Unknown cost:\*\* 1 AI run ended \(or was still running\) before it reported its cost\. It is counted as unknown, never as \$0\./);
+  assert.doesNotMatch(md, /xychart|pie showData/, "no chart of a total that is not known");
 
   // No record at all for either stage (artifacts expired or unreadable): every figure is unknown.
   const none = renderFinishCard(withSelf(() => data({ records: [] })));
-  assert.match(none, /<h3 align="center">Merged in 3 min 54 s; its cost is unknown\.<\/h3>/);
-  assert.ok(none.includes('<img alt="cost: unknown"'));
+  assert.match(none, /^### ✅ Merged in 3 min 54 s · unknown$/m);
   assert.doesNotMatch(none.split("<details>")[0], /\$\d/, "no dollar figure anywhere above the run log");
 });
 
@@ -208,47 +204,39 @@ test("finish card: a record of a stage that ran no harness pass is a known $0, n
   const records = [{ ...real.records[0], usd: null, runs: 0, noRun: true }, real.records[1]];
   const d = withSelf(() => data({ records }));
   assert.deepEqual(d.stages.map((s) => [s.usd, s.unknown]), [[0, 0], [0.163442, 0]]);
-  assert.match(renderFinishCard(d), /<h3 align="center">Merged in 3 min 54 s for \$0\.16\.<\/h3>/);
+  assert.match(renderFinishCard(d), /^### ✅ Merged in 3 min 54 s · \$0\.16$/m);
 });
 
 test("finish card: what the dollars are comes from #508's usdByBilling, on records, spend lines and vendor comments; billing not recorded is no billing (B4)", () => {
   const records = real.records.map((r) => ({ ...r, usdByBilling: { subscription: r.usd } }));
   const md = renderFinishCard(withSelf(() => data({ records })));
-  assert.ok(md.includes('<h3 align="center">Merged in 3 min 54 s for $0.52 API-equivalent.</h3>'));
-  assert.ok(md.includes('<img alt="API-equivalent: $0.52"'), "the badge says what the dollars are");
-  assert.ok(md.includes("| Stage | Time | Cost (API-equivalent) |"), "one kind: the column says it once");
-  assert.match(md, /\| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.36 \|/);
-  assert.match(md, /An API-equivalent figure is what the usage would cost at API list prices, on your subscription; it is not billed\./);
-  assert.doesNotMatch(md, /alt="cost:/);
+  // What the dollars are, said once on the headline's second line; each cell is its cents alone.
+  assert.match(md, /^### ✅ Merged in 3 min 54 s · \$0\.52\nIssue #3 → PR #4 · merged through your merge queue at 2:27 AM UTC · API-equivalent, not billed$/m);
+  assert.match(md, /\| 2:24 AM \| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.36 \|/);
+  assert.match(md, /- \*\*Cost basis:\*\* API-equivalent is what this usage would cost at API list prices; you are on a subscription, so it is not billed\./);
 
-  // The same from local stages' spend lines; billed API spend reads as plain dollars.
+  // The same from local stages' spend lines; billed API spend is named as billed.
   const local = renderFinishCard(withSelf(() => data({ comments: withSpend({ work: { usd: 0.35637, usdByBilling: { subscription: 0.35637 } }, review: { usd: 0.163442, usdByBilling: { subscription: 0.163442 } } }), records: [] })));
-  assert.match(local, /for \$0\.52 API-equivalent\.<\/h3>/);
+  assert.match(local, / · API-equivalent, not billed$/m);
   const api = renderFinishCard(withSelf(() => data({ records: real.records.map((r) => ({ ...r, usdByBilling: { api: r.usd } })) })));
-  assert.match(api, /for \$0\.52\.<\/h3>/);
-  assert.match(api, /They are billed spend on your API key or AI Gateway key\./);
-  // A mix: the headline says which part is what; each cell says its own.
+  assert.match(api, / · billed to your API key$/m);
+  assert.match(api, /These dollars are billed to your API key or AI Gateway key\./);
+  // A mix: the second line splits the total by kind.
   const mixed = renderFinishCard(withSelf(() => data({ records: [{ ...real.records[0], usdByBilling: { api: 0.35637 } }, { ...real.records[1], usdByBilling: { subscription: 0.163442 } }] })));
-  assert.match(mixed, /for \$0\.52 \(part API-equivalent\)\.<\/h3>/);
-  assert.match(mixed, /alt="cost: \$0\.52"/);
-  assert.match(mixed, /\| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.36 \|\n\| Review · Fable 5\.2 \| 35 s \| \$0\.16 API-equivalent \|/);
+  assert.match(mixed, / · \$0\.52: \$0\.36 billed to your API key, \$0\.16 API-equivalent$/m);
+  assert.match(mixed, /\| 2:24 AM \| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.36 \|\n\| 2:26 AM \| Review · Fable 5\.2 \| 35 s \| \$0\.16 \|/);
   // Copilot AI credits are billed to the seat: named, never API-equivalent.
   const credits = renderFinishCard(withSelf(() => data({ records: real.records.map((r) => ({ ...r, usdByBilling: { credits: r.usd } })) })));
-  assert.match(credits, /for \$0\.52 in Copilot AI credits\.<\/h3>/);
-  assert.ok(credits.includes('<img alt="Copilot AI credits: $0.52"'));
+  assert.match(credits, / · Copilot AI credits, billed to your seat$/m);
   assert.doesNotMatch(credits, /API-equivalent/);
-  // #508's `unknown`: billing not recorded. It is no kind of billing: no badge label, no API-equivalent words.
+  // #508's `unknown`: billing not recorded. It is no kind of billing: no API-equivalent words.
   const unrecorded = renderFinishCard(withSelf(() => data({ records: real.records.map((r) => ({ ...r, usdByBilling: { unknown: r.usd } })) })));
-  assert.match(unrecorded, /for \$0\.52 \(billing not recorded\)\.<\/h3>/);
-  assert.ok(unrecorded.includes('<img alt="cost: $0.52"'));
-  assert.ok(unrecorded.includes("| Stage | Time | Cost (billing not recorded) |"));
-  assert.match(unrecorded, /Pendulum did not record how these dollars were billed\./, "no recorded kind: not 'some'");
-  assert.doesNotMatch(unrecorded, /For some of these dollars/);
+  assert.match(unrecorded, / · billing not recorded$/m);
+  assert.match(unrecorded, /Pendulum did not record how these dollars were billed\./);
   assert.doesNotMatch(unrecorded, /API-equivalent/);
   const half = renderFinishCard(withSelf(() => data({ records: [{ ...real.records[0], usdByBilling: { subscription: 0.35637 } }, { ...real.records[1], usdByBilling: { unknown: 0.163442 } }] })));
-  assert.match(half, /for \$0\.52 \(part API-equivalent, part billing not recorded\)\.<\/h3>/);
-  assert.match(half, /\| Review · Fable 5\.2 \| 35 s \| \$0\.16 \(billing not recorded\) \|/);
-  assert.match(half, /For some of these dollars Pendulum did not record how they were billed\./, "beside a recorded kind: 'some'");
+  assert.match(half, / · \$0\.52: \$0\.36 API-equivalent, \$0\.16 billing not recorded$/m);
+  assert.match(half, /- \*\*Cost basis:\*\* API-equivalent is what this usage would cost at API list prices; you are on a subscription, so it is not billed\. Pendulum did not record how these dollars were billed\./);
 });
 
 test("finish card: a sandbox stage's vendor comment counts whenever it was written; one with no progress comment is a stage of its own, its unknowns kept (B2, S8)", () => {
@@ -258,8 +246,7 @@ test("finish card: a sandbox stage's vendor comment counts whenever it was writt
   const late = comment(901, "2026-11-17T03:00:00Z", `<!-- pendulum:3:vendor:${key} -->\nPendulum's sandbox cost for this stage:\nx\n${spendLine({ usd: 0.05, vendorUsd: 0.05 })}`);
   const d = withSelf(() => data({ comments: [...real.comments, late] }));
   assert.deepEqual(d.sandbox, { usd: 0.05, unknown: 0 });
-  assert.match(renderFinishCard(d), /\| Cloud sandbox \| — \| \$0\.05 \|/);
-  assert.match(renderFinishCard(d), /"Cloud sandbox" : 0\.05/);
+  assert.match(renderFinishCard(d), /\| — \| Cloud sandbox \| — \| \$0\.05 \|/);
 
   // A stage that wrote no progress comment: its model dollars and billing from the vendor comment.
   const alone = comment(902, "2026-11-17T02:26:30Z", `<!-- pendulum:3:vendor:review:abc -->\nx\n${spendLine({ usd: 0.3, modelUsd: 0.2, vendorUsd: 0.1, usdByBilling: { subscription: 0.2 } })}`);
@@ -271,9 +258,9 @@ test("finish card: a sandbox stage's vendor comment counts whenever it was writt
   const vendorOnly = b.stages.find((s) => !s.start);
   assert.deepEqual([vendorOnly.usd, vendorOnly.unknown, b.sandbox.unknown], [null, 1, 1]);
   const md = renderFinishCard(b);
-  assert.match(md, /plus spend that was not reported/);
-  assert.match(md, /2 runs have no reported cost/);
-  assert.doesNotMatch(md, /pie showData/);
+  assert.match(md, / · plus 2 AI runs of unknown cost$/m);
+  assert.match(md, /- \*\*Unknown cost:\*\* 1 AI run ended \(or was still running\) before it reported its cost\. 1 sandbox stage had usage the vendor did not report\./);
+  assert.doesNotMatch(md, /xychart|pie showData/);
 });
 
 test("finish card: a stage is named only by what its records say (S5)", () => {
@@ -293,7 +280,7 @@ test("finish card: a stage is named only by what its records say (S5)", () => {
   assert.deepEqual(split.stages.map((s) => [s.kind, s.part]), [["build", 1], ["part", 2], ["review", 2]]);
   const md = renderFinishCard(split);
   assert.match(md, /\| Part 2 · Opus 5\.5 \|/);
-  assert.match(md, /opened PRs #2, #4 \(\*\*4 commits, \+40 −2 across 6 files\*\*\), got the last part's \*\*1 check\*\* green/);
+  assert.match(md, /opened PRs #2, #4 \(\*\*4 commits, \+40 −2 across 6 files\*\*\), got the last part's \*\*1 CI check\*\* green/);
 });
 
 test("finish card: the checks that gated the merge are the latest attempt of each, completed by the merge, and the required ones when there are (S3)", () => {
@@ -304,9 +291,9 @@ test("finish card: the checks that gated the merge are the latest attempt of eac
   assert.deepEqual(gateChecks(checks, at("7:36"), [{ name: "test", app: 15368 }, { name: "lint", app: 15368 }]), { passed: 2, failed: 0, required: true }, "the required checks only, from their own app");
   assert.equal(gateChecks([run(1, "test", "skipped", "7:00")], at("7:36")), null, "none green: no checks claim");
   const md = renderFinishCard(withSelf(() => data({ checks, required: [{ name: "test", app: 15368 }] })));
-  assert.match(md, /got \*\*1 required check\*\* green/);
+  assert.match(md, /got \*\*1 CI check\*\* green/);
   const red = renderFinishCard(withSelf(() => data({ checks })));
-  assert.match(red, /got \*\*3 checks\*\* green \(1 red\)/);
+  assert.match(red, /got \*\*3 CI checks\*\* green \(1 red\)/);
 });
 
 test("finish card: the rows' and the chart's cents add up to the total's", () => {
@@ -314,9 +301,10 @@ test("finish card: the rows' and the chart's cents add up to the total's", () =>
   assert.deepEqual(centsOf([0.004, 0.996, null]), [0, 100, null]);
   const records = [{ ...real.records[0], usd: 0.004 }, { ...real.records[1], usd: 0.996 }];
   const md = renderFinishCard(withSelf(() => data({ records })));
-  assert.match(md, /\| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.00 \|\n\| Review · Fable 5\.2 \| 35 s \| \$1\.00 \|/);
+  // A row under a cent above zero reads "<$0.01", never "$0.00"; the rows still add up to the total.
+  assert.match(md, /\| 2:24 AM \| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| <\$0\.01 \|\n\| 2:26 AM \| Review · Fable 5\.2 \| 35 s \| \$1\.00 \|/);
   assert.match(md, /\*\*\$1\.00\*\*/);
-  assert.doesNotMatch(md, /pie showData/, "one slice with a cent to show: no chart");
+  assert.doesNotMatch(md, /xychart/, "a plain run: no breakdown, no chart");
 });
 
 test("finish card: a merge queue drop is a drop, and the queue's own removal a second before the merge is the merge", () => {
@@ -351,10 +339,11 @@ test("finish card: review findings are counted from the reviews, line comments a
   assert.match(renderFinishCard(withSelf(() => data())), /had the change reviewed \(no findings\)/);
 });
 
-test("finish card: the PR body gets the headline and badges at its top, once however often it is written", () => {
+test("finish card: the PR body gets the card's headline block at its top, text only, once however often it is written", () => {
   const d = withSelf(() => data());
   const once = withFinishBlock(real.pr.body, d);
-  assert.ok(once.startsWith('<!-- pendulum:3:finish-pr -->\n<h3 align="center">Merged in 3 min 54 s for $0.52.</h3>\n\n<p align="center">\n<img alt="status: merged"'));
+  assert.ok(once.startsWith("<!-- pendulum:3:finish-pr -->\n### ✅ Merged in 3 min 54 s · $0.52\nIssue #3 → PR #4 · merged through your merge queue at 2:27 AM UTC · billing not recorded\n<!-- pendulum:3:finish-pr:end -->"), once.slice(0, 300));
+  assert.doesNotMatch(once, /<img|<h3|shields\.io/);
   assert.ok(once.endsWith(`<!-- pendulum:3:finish-pr:end -->\n\n${real.pr.body}`));
   assert.equal(withFinishBlock(once, d), once);
 });
@@ -401,11 +390,11 @@ test("finish card: an Actions stage's dollars come from its usage artifact, its 
  * comments; `labels3` its labels), #7 Blocked with a PR a person merged, #8 closed with its PR still open. Comments posted
  * are there on the next read. `failCard`: the status the card's POST answers with; `failBody`: the PR body PATCH's.
  */
-function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"], labels8 = ["pendulum:objective", "pendulum:in-review"], dropLabels = false } = {}) {
+function fakeRepo({ failCard = 0, failOn = 3, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"], labels8 = ["pendulum:objective", "pendulum:in-review"], dropLabels = false, pr80 = {} } = {}) {
   const issue = (number, labels) => ({ number, state: "closed", state_reason: "completed", closed_at: real.issue.closed_at, labels: labels.map((name) => ({ name })), body: "", user: { login: "kirkmarple-clockgrove", type: "User" } });
   const closed = [issue(3, labels3), issue(7, ["pendulum:objective", "pendulum:blocked"]), issue(8, labels8)];
   const comments = { 3: withSpend({ work: { usd: 0.35637 }, review: { usd: 0.163442 } }), 7: [], 8: [] };
-  const prs = { 3: [{ ...real.pr, user: bot }], 7: [{ number: 70, merged_at: "2026-11-17T02:27:36Z", created_at: "2026-11-17T02:20:00Z" }], 8: [{ number: 80, node_id: "PR_80", state: "open", draft: false, merged_at: null, created_at: "2026-11-17T02:20:00Z" }] };
+  const prs = { 3: [{ ...real.pr, user: bot }], 7: [{ number: 70, merged_at: "2026-11-17T02:27:36Z", created_at: "2026-11-17T02:20:00Z" }], 8: [{ number: 80, node_id: "PR_80", state: "open", draft: false, merged_at: null, created_at: "2026-11-17T02:20:00Z", ...pr80 }] };
   const writes = [];
   const reads = [];
   let nextId = 100;
@@ -423,11 +412,15 @@ function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective",
     if (method === "GET" && p === "/pulls" && u.searchParams.get("state") === "all") return json(prs[/pendulum\/(\d+)$/.exec(u.searchParams.get("head"))[1]] || []);
     if (method === "GET" && p === "/pulls" && u.searchParams.get("state") === "open") return json((prs[/pendulum\/(\d+)$/.exec(u.searchParams.get("head"))[1]] || []).filter((x) => x.state === "open"));
     if (method === "GET" && p === "/pulls/4") return json({ ...real.pr, user: bot });
+    const one = /^\/pulls\/(70|80)$/.exec(p);
+    if (method === "GET" && one) return json({ ...Object.values(prs).flat().find((x) => String(x.number) === one[1]), user: bot, head: { sha: "c".repeat(40), ref: "x" }, commits: 1, additions: 2, deletions: 0, changed_files: 1 });
+    if (method === "GET" && /^\/pulls\/(70|80)\/(reviews|comments)$/.test(p)) return json([]);
     if (method === "GET" && p === "/issues/4/timeline") return json(real.prTimeline);
     if (method === "GET" && p === "/pulls/4/reviews") return json(real.reviews);
     if (method === "GET" && p === "/pulls/4/comments") return json(real.reviewComments);
     if (method === "GET" && p === `/commits/${real.pr.merge_commit_sha}/check-runs`) return json({ total_count: real.checks.length, check_runs: real.checks });
     if (method === "GET" && p === "/actions/artifacts") return json({ total_count: 0, artifacts: [] });
+    if (method === "GET" && /^\/commits\/c+\/check-runs$/.test(p)) return json({ total_count: 0, check_runs: [] });
     if (method === "GET" && p === "/issues/3/timeline") return json(real.timeline);
     if (method === "GET" && /^\/issues\/\d+\/timeline$/.test(p)) return json([]);
     if (method === "GET" && p.endsWith("/collaborators")) return json([{ login: "kirkmarple-clockgrove" }]);
@@ -441,7 +434,7 @@ function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective",
       if (i) i.labels = i.labels.filter((l) => l.name !== decodeURIComponent(dl[2]));
       return json({}, 200);
     }
-    if (c && method === "POST" && failCard && JSON.parse(init.body).body?.startsWith(finishMarker(3))) return json({ message: "failed" }, failCard);
+    if (c && method === "POST" && failCard && JSON.parse(init.body).body?.startsWith(finishMarker(failOn))) return json({ message: "failed" }, failCard);
     if (c && method === "POST") {
       const posted = { id: (nextId += 1), user: bot, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: JSON.parse(init.body).body };
       (comments[c[1]] ??= []).push(posted);
@@ -472,35 +465,44 @@ async function tickOver(fake, { env = {}, now = new Date(Date.parse(real.issue.c
   }
 }
 
-test("finish card: the dispatcher's Done pass posts it once when an Objective merges, before its label goes; a later tick posts none; none on a Block or an unmerged close", async () => {
+test("finish card: the dispatcher's Done pass posts it once when an Objective closes, merged or not (#589), before its label goes; a later tick posts none", async () => {
   const fake = fakeRepo();
   const first = await tickOver(fake);
-  assert.deepEqual(first.finished, [3]);
+  assert.deepEqual(first.finished, [3, 7, 8], "a card for every closed Objective Pendulum ran: merged, merged by a person while Blocked, closed with its PR open");
   assert.deepEqual(first.done, [3, 7, 8], "every closed Objective is still tidied");
   const three = fake.writes.filter((w) => w.includes("/issues/3/") || w.startsWith("PATCH /pulls/4"));
   const card = three.filter((w) => w.startsWith(`POST /issues/3/comments ${finishMarker(3)}\n`));
   assert.equal(card.length, 1, "one card");
-  assert.match(card[0], /<h3 align="center">Merged in 3 min 54 s for \$0\.52\.<\/h3>/, "its dollars from the stages' spend lines");
-  assert.match(card[0], /got \*\*1 required check\*\* green/, "the branch protection's required check");
+  assert.match(card[0], /\n### ✅ Merged in 3 min 54 s · \$0\.52\n/, "its dollars from the stages' spend lines");
+  assert.match(card[0], /got \*\*1 CI check\*\* green/, "the branch protection's required check");
   assert.ok(!fake.reads.some((r) => r.includes("name=pendulum-usage-3")), "every stage has a spend line: no artifact is read");
-  const body = three.findIndex((w) => w.startsWith("PATCH /pulls/4 <!-- pendulum:3:finish-pr -->\n<h3"));
+  const body = three.findIndex((w) => w.startsWith("PATCH /pulls/4 <!-- pendulum:3:finish-pr -->\n### ✅ Merged"));
   assert.ok(body >= 0 && body < three.indexOf(card[0]), "the PR body first, then the card");
   assert.ok(three.indexOf(card[0]) < three.findIndex((w) => w.startsWith("DELETE /issues/3/labels/")), "the card before the label goes");
-  assert.ok(!fake.writes.some((w) => w.includes(finishMarker(7)) || w.includes(finishMarker(8))), "no card on a Block, nor on a close with its PR unmerged");
-  assert.ok(!fake.writes.some((w) => w.startsWith("PATCH /pulls/70") || w.startsWith("PATCH /pulls/80")));
+  // #7's PR merged (a person merged it while it was Blocked): a merged card. #8 closed with its PR open: closed, not merged.
+  assert.ok(fake.writes.some((w) => w.startsWith(`POST /issues/7/comments ${finishMarker(7)}\n`) && w.includes("\n### ✅ Merged ")));
+  const closedCard = fake.writes.find((w) => w.startsWith(`POST /issues/8/comments ${finishMarker(8)}\n`));
+  assert.match(closedCard, /\n<!-- pendulum:8:finish-end \{"end":"closed","at":"[^"]+"\} -->\n### ⏹️ Closed without merging after 7 min 39 s · unknown\nIssue #8 · PR #80 still open · closed at 2:27 AM UTC · plus 1 AI run of unknown cost\n/);
+  assert.match(closedCard, /Pendulum opened PR #80 \(\*\*1 commit, \+2 −0 across 1 file\*\*\); the issue was closed before it merged\./);
+  // Its summary says how it ended and names no merge, so no reader takes it for a merged Objective's.
+  const { readSummary } = await import("../scripts/lib/finish-card.mjs");
+  assert.match(closedCard, /<!-- pendulum:8:summary \{[^\n]*"merged":null[^\n]*"end":"closed"/);
+  assert.equal(readSummary(closedCard.replace(/^POST \/issues\/8\/comments /, ""), 8), null);
+  assert.doesNotMatch(closedCard, /What to do/, "a close needs no one to act");
+  assert.ok(!fake.writes.some((w) => w.startsWith("PATCH /pulls/80 <!--")), "no finish block on a PR that did not merge");
 
   // A second tick (the label's removal lost, so #3 is tidied again): its card is there, so none is posted.
   const before = fake.writes.length;
   const second = await tickOver(fake);
   assert.deepEqual(second.finished, []);
-  assert.ok(!fake.writes.slice(before).some((w) => w.includes(finishMarker(3)) || w.startsWith("PATCH /pulls/4")), "posted once");
+  assert.ok(!fake.writes.slice(before).some((w) => w.includes(finishMarker(3)) || w.includes(finishMarker(8)) || w.startsWith("PATCH /pulls/4")), "posted once: a merge and a close are final");
 });
 
 test("finish card: a passing failure waits for a later tick, by the tick's own clock; any other failure, or a refused PR body, does not hold it (B1, S9)", async () => {
   const closedAt = Date.parse(real.issue.closed_at);
   const failing = fakeRepo({ failCard: 502 });
   const failed = await tickOver(failing, { now: new Date(closedAt + 3600_000) });
-  assert.deepEqual(failed.finished, []);
+  assert.deepEqual(failed.finished, [7, 8], "#3 waits; the others' cards are posted");
   assert.ok(!failed.done.includes(3));
   assert.ok(!failing.writes.some((w) => w.startsWith("DELETE /issues/3/labels/")), "no tidy without its card");
   assert.ok(!failed.deadlines.some((d) => /finish/.test(JSON.stringify(d))), "no wake of its own: a later tick retries");
@@ -509,7 +511,7 @@ test("finish card: a passing failure waits for a later tick, by the tick's own c
   assert.ok((await tickOver(fakeRepo({ failCard: 422 }))).done.includes(3));
   // The PR body write refused: the card is posted all the same.
   const refused = fakeRepo({ failBody: 422 });
-  assert.deepEqual((await tickOver(refused)).finished, [3]);
+  assert.deepEqual((await tickOver(refused)).finished, [3, 7, 8]);
 });
 
 test("finish card: one route posts it, the local loop for pendulum:local Objectives and the Action for the rest, and under a person's login the PR body is left alone (S1, S-A, B3)", async () => {
@@ -521,7 +523,7 @@ test("finish card: one route posts it, the local loop for pendulum:local Objecti
   const local = ["pendulum:objective", "pendulum:local", "pendulum:in-review"];
   const action = fakeRepo({ labels3: local });
   const tick = await tickOver(action);
-  assert.deepEqual(tick.finished, []);
+  assert.deepEqual(tick.finished, [7, 8], "only its own Objectives' cards");
   assert.ok(!tick.done.includes(3));
   // The local loop posts it for its own, with no PR body block.
   const loop = fakeRepo({ labels3: local });
@@ -534,7 +536,7 @@ test("finish card: one route posts it, the local loop for pendulum:local Objecti
   assert.deepEqual(allTick.finished, []);
   assert.ok(!allTick.done.includes(3), "its label left for the Action's Done pass, which posts the card");
   assert.ok(!all.writes.some((w) => w.includes(finishMarker(3))));
-  assert.deepEqual((await tickOver(fakeRepo())).finished, [3], "the Action posts it");
+  assert.deepEqual((await tickOver(fakeRepo())).finished, [3, 7, 8], "the Action posts it");
 });
 
 test("finish card (#565 W3): the Action's tick on a pendulum:local Objective's close, before the loop's, leaves its label, so the loop's Done pass still posts its card; a day after the close the Action tidies it alone", async () => {
@@ -542,21 +544,24 @@ test("finish card (#565 W3): the Action's tick on a pendulum:local Objective's c
   // assetgrove #402 and #408: the Action's run on the close came first and took the label, so the loop had none to act on.
   const fake = fakeRepo({ labels3: local, dropLabels: true });
   const action = await tickOver(fake);
-  assert.deepEqual(action.finished, []);
+  assert.deepEqual(action.finished, [7, 8]);
   assert.ok(!fake.writes.some((w) => w.startsWith("DELETE /issues/3/labels/")), "the label stays for the loop");
   assert.ok(action.done.includes(7) && action.done.includes(8), "an Objective with no card to wait for is tidied as before");
   const loop = await tickOver(fake, { env: { PENDULUM_LOCAL: "1" } });
   assert.deepEqual(loop.finished, [3], "the loop's later tick posts the card");
   assert.ok(fake.writes.some((w) => w.startsWith(`POST /issues/3/comments ${finishMarker(3)}`)));
   assert.ok(fake.writes.some((w) => w.startsWith("POST /issues/3/comments <!-- pendulum:3:done -->")), "and its Done record");
-  // A person closed a pendulum:local Objective by hand with its PR still open (#80): no card is due, so the Action tidies
-  // it at once, its PR stopped (out of the merge queue, back to a draft), never left queued for a day.
+  // A person closed a pendulum:local Objective by hand with its PR still open (#80): its closed card is due (#589), so the
+  // Action leaves its label for the loop, but stops its PR at once (out of the merge queue, back to a draft), never left
+  // queued for a day; the loop's tick posts the card.
   const open = fakeRepo({ labels8: local, dropLabels: true });
   const openTick = await tickOver(open);
-  assert.ok(openTick.done.includes(8));
-  assert.ok(open.writes.some((w) => w.startsWith("DELETE /issues/8/labels/")), "its state label goes");
+  assert.ok(!openTick.done.includes(8));
+  assert.ok(!open.writes.some((w) => w.startsWith("DELETE /issues/8/labels/")), "its state label stays for the loop");
   assert.ok(open.writes.some((w) => w.startsWith("DELETE /issues/80/labels/")), "its PR stopped: the review label off");
-  // Closed as not planned: no card is due either.
+  const openLoop = await tickOver(open, { env: { PENDULUM_LOCAL: "1" } });
+  assert.ok(openLoop.finished.includes(8) && openLoop.done.includes(8), "the loop posts its closed card, then tidies it");
+  // Closed as not planned: its closed card is due the same way.
   const dropped = fakeRepo({ labels3: local, dropLabels: true });
   const fetchAll = dropped.fetch;
   dropped.fetch = async (url, init) => {
@@ -564,12 +569,12 @@ test("finish card (#565 W3): the Action's tick on a pendulum:local Objective's c
     if (new URL(url).pathname.endsWith("/issues") && (init?.method || "GET") === "GET") return new Response(JSON.stringify((await r.json()).map((i) => (i.number === 3 ? { ...i, state_reason: "not_planned" } : i))), { status: 200, headers: { "content-type": "application/json" } });
     return r;
   };
-  assert.ok((await tickOver(dropped)).done.includes(3), "closed as not planned: tidied at once");
+  assert.ok(!(await tickOver(dropped)).done.includes(3), "closed as not planned: its label waits for the loop's card");
   // Its loop not running: a day after the close the Action tidies it, with no card.
   const late = fakeRepo({ labels3: local, dropLabels: true });
   const lateTick = await tickOver(late, { now: new Date(Date.parse(real.issue.closed_at) + 25 * 3600_000) });
   assert.ok(lateTick.done.includes(3));
-  assert.deepEqual(lateTick.finished, []);
+  assert.ok(!lateTick.finished.includes(3), "no card for it");
 });
 
 test("finish card (#544): the summary marker carries the card's own figures, from the same finishData, and reads back as written", async () => {
@@ -585,9 +590,10 @@ test("finish card (#544): the summary marker carries the card's own figures, fro
   const runs = [withSelf(() => data()), withSelf(() => data({ comments: [...withSpend({ review: { usd: 0, usdUnknown: 1, usdUnknownWhy: ["zeroed"] } }), rebase, late, blind], records: real.records.slice(0, 1) }))];
   for (const d of runs) {
     const body = card.finishCardBody(d);
-    const [head, line, ...rest] = body.split("\n");
+    const [head, line, end, ...rest] = body.split("\n");
     assert.equal(head, finishMarker(3), "the card's own marker first, so one card per Objective still holds");
     assert.match(line, /^<!-- pendulum:3:summary \{[^\n<>]*\} -->$/, "one hidden line, nothing in it that closes the comment");
+    assert.equal(end, `<!-- pendulum:3:finish-end {"end":"merged","at":"${d.merged}"} -->`, "how the run ended, for a later write");
     assert.equal(rest.join("\n"), renderFinishCard(d), "the card itself is unchanged under it");
     // It reads back exactly as written.
     const s = card.readSummary(body, 3);
@@ -642,7 +648,11 @@ test("finish card (#544): the summary marker carries the card's own figures, fro
   const crowded = withSelf(() => data({ comments: [...real.comments, ...crowd] }));
   assert.ok(card.summaryMarker(crowded) === null, "no summary line fits");
   const crowdedBody = card.finishCardBody(crowded);
-  assert.equal(crowdedBody, `${finishMarker(3)}\n${renderFinishCard(crowded)}`);
+  assert.equal(crowdedBody, `${finishMarker(3)}\n${card.finishEndMarker(crowded)}\n${renderFinishCard(crowded)}`);
+  // 200 stages: like stages fold into one row each, the per-stage list in Run details; the timeline is left out.
+  assert.match(crowdedBody, /\| Work ×200 · Opus 5\.5 \| [^|]+ \| \$2\.00 \|/);
+  assert.match(crowdedBody, /^Timeline chart left out: 202 stages; the table has every figure\.$/m);
+  assert.match(crowdedBody, /\*\*Each stage\*\*\n- 2:24 AM Plan \+ build · Opus 5\.5: 1 min 21 s, /);
   assert.equal(card.readSummary(crowdedBody, 3), null);
   // A marker anywhere but the line under the finish marker reads as none.
   const plainBody = card.finishCardBody(runs[0]);
@@ -665,7 +675,7 @@ test("finish card (#544): the summary marker carries the card's own figures, fro
   const partial = comment(904, "2026-11-17T02:26:40Z", `<!-- pendulum:3:vendor:${keyOf("review")} -->\nx\n${spendLine({ usd: 0.02, vendorUsd: 0.02, usdUnknown: 1, usdUnknownWhy: ["sandbox"] })}`);
   const sandboxed = withSelf(() => data({ comments: [...real.comments, partial] }));
   assert.deepEqual(sandboxed.sandbox, { usd: 0.02, unknown: 1 });
-  assert.match(renderFinishCard(sandboxed), /plus spend that was not reported/);
+  assert.match(renderFinishCard(sandboxed), / · plus 1 AI run of unknown cost$/m);
   assert.deepEqual(card.finishSummary(sandboxed).sandbox, { usd: 0.02, cents: 2, unknown: 1, why: ["sandbox"], foreign: [] });
   // A teammate's vendor comment of one of Pendulum's stages is that stage's, no run of its own; one of no stage is a
   // run of unknown cost of its stage's kind, one each.
@@ -698,13 +708,27 @@ test("finish card (#567): an issue labelled before the rename to Pendulum has no
     const rest = (x) => ({ ...x, pendulum: null, wallMs: null, labelledWallMs: null, clockWhy: null });
     assert.deepEqual(rest(sum), rest(finishSummary(plain)));
     const md = renderFinishCard(d);
-    assert.match(md, /<h3 align="center">Merged for [^<]*\. Its wall clock is not known: it was labelled before the rename to Pendulum\.<\/h3>/);
-    assert.match(md, /alt="wall clock: not known"/);
-    assert.match(md, /\| \*\*Total\*\* \| \*\*not known\*\* \|/);
+    assert.match(md, /^### ✅ Merged · \$[^\n]*\n[^\n]* · Its wall clock is not known: it was labelled before the rename to Pendulum$/m);
+    assert.match(md, /\| \| \*\*Total\*\* \| \*\*not known\*\* \|/);
     assert.doesNotMatch(md, /Merged in /);
   }
   // A current label alone, or a label of another name that starts with it: the wall clock as before.
   const other = withSelf(() => data({ timeline: [{ event: "labeled", label: { name: `${PREVIOUS_NAME}:objectives` }, created_at: "2026-11-16T02:00:00Z" }, ...real.timeline] }));
   assert.equal(finishSummary(other).wallMs, finishSummary(plain).wallMs);
   assert.ok(finishSummary(plain).wallMs > 0 && finishSummary(plain).labelledWallMs > 0);
+});
+
+test("finish card (#589 S4): a closed Objective's open PR is stopped while its label waits for the card, on either route, and a stopped one is left alone", async () => {
+  const local = ["pendulum:objective", "pendulum:local", "pendulum:in-review"];
+  // The Action holds a pendulum:local Objective's label for the loop: its PR already a draft with no review label, no write.
+  const quiet = fakeRepo({ labels8: local, pr80: { draft: true, labels: [] } });
+  const tick = await tickOver(quiet);
+  assert.ok(!tick.done.includes(8));
+  assert.ok(!quiet.writes.some((w) => /\/(pulls|issues)\/80\b/.test(w) || w.startsWith("DELETE /issues/8/labels/")), JSON.stringify(quiet.writes));
+  // Its own route: the card meets a passing failure, the label waits for a later tick, and the open PR is stopped now.
+  const retry = fakeRepo({ failCard: 502, failOn: 8 });
+  const t = await tickOver(retry);
+  assert.ok(!t.done.includes(8) && !t.finished.includes(8));
+  assert.ok(!retry.writes.some((w) => w.startsWith("DELETE /issues/8/labels/")), "its label waits");
+  assert.ok(retry.writes.some((w) => w.startsWith("DELETE /issues/80/labels/")), "its PR stopped: the review label off");
 });

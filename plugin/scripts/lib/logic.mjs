@@ -3131,17 +3131,19 @@ export function vendorLine({ id, state, cost, rates, at = new Date().toISOString
  * model dollars. `modelUsd`: the harness's known dollars from the usage record, for a stage that left no progress
  * comment, with `modelUnknown` (usage.mjs unknownOf: `{usdUnknown, usdUnknownWhy}`) its runs of unknown cost and
  * `modelBilling` its billing (the record's `{usdByBilling, billing}`, usage.mjs BILLING; the vendor's dollars are in
- * none). A usage
+ * none). `card`: the comment's headline (card-kit.mjs vendorCard), above Run details holding `line`. A usage
  * the vendor did not report (`vendorUnknown`, or no figure at all: `vendorUsd: null`) is one run of unknown cost
  * (UNKNOWN_WHY `sandbox`) beside the vendor's known dollars, never $0 or a bound. Its spend line records its route,
  * `sandbox`.
  */
-export function vendorBody({ line, vendorUsd, vendorUnknown = false, modelUsd = null, modelUnknown = null, modelBilling = null }) {
+export function vendorBody({ line, vendorUsd, vendorUnknown = false, modelUsd = null, modelUnknown = null, modelBilling = null, card = null }) {
   const round = (n) => Math.round(n * 1e6) / 1e6;
   const vendor = Number.isFinite(vendorUsd) ? round(vendorUsd) : null;
   const model = Number.isFinite(modelUsd) ? round(modelUsd) : null;
   const unknown = unknownOf([...(modelUnknown?.usdUnknown ? [{ usd: 0, ...modelUnknown }] : []), ...(vendor === null || vendorUnknown ? [{ usd: null, usdUnknown: 1, usdUnknownWhy: ["sandbox"] }] : [])]);
-  return `Pendulum's sandbox cost for this stage:\n${line}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...(model === null ? {} : billingParts(modelBilling)), ...unknown, route: "sandbox" })}`;
+  // With `card` (card-kit.mjs vendorCard's headline, #589): the headline first, the line in Run details, the spend line last.
+  const said = `Pendulum's sandbox cost for this stage:\n${line}`;
+  return `${card ? `${card}\n\n<details><summary>Run details</summary>\n\n${said}\n\n</details>` : said}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...(model === null ? {} : billingParts(modelBilling)), ...unknown, route: "sandbox" })}`;
 }
 
 // ----------------------------------------------------------------- launch

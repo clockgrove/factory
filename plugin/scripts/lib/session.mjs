@@ -60,8 +60,10 @@ import {
   transientError,
   RETRY,
 } from "./github.mjs";
-import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { lineClock, logTime, whenText } from "./clock.mjs";
+import { input, log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { endCard } from "./finish-card.mjs";
+import { lineClock, logTime, timeZone, whenText } from "./clock.mjs";
+import { SHORT_DETAIL, progressBody, progressCard } from "./progress-card.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
 import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { REAP_NOW_MS, agentUser, atStop, exec, git, reapAgentNow, runnerCommand, trapStops } from "./proc.mjs";
@@ -94,7 +96,7 @@ import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, fa
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, findingsMarker, mergeFindings, isSelf, ledgerCut, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
+import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, findingsMarker, mergeFindings, isSelf, ledgerCut, ledgerOfComment, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -871,7 +873,7 @@ export async function holdScope({ outbox, session, harness, model, effort = null
   log(`${label}: outside the fix pass's scope: ${out.slice(0, 10).join(", ")}`);
   const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd) : 0;
   if (remainingMs(deadlineAt) > 120_000 && !(maxUsd > 0 && left <= 0)) {
-    if (progress) await progress(`${label}: ${out.length} toolchain file(s) outside the plan and the red; one turn to put them back`);
+    if (progress) await progress(`${label}: ${out.length} toolchain file(s) outside the plan and the red; one turn to put them back`, { step: "scope", files: out.length });
     const since = outbox.fenceStart();
     // What the fence check said, without the model's confidence: the worker is told the verdict, never how near it was.
     const told = verdict?.told ?? [];
@@ -984,10 +986,12 @@ export function stoppedRebase(progress, conflict, recs = []) {
 /** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */
 export const STOP_WRITE_MS = 5_000;
 /**
- * The size, in characters, a progress comment with its ledger line stays under (GitHub refuses a comment body over
+ * The size, in characters, a progress comment's log with its ledger line stays under (GitHub refuses a comment body over
  * 65,536): past it the stage writes the ledger line's cut form (logic.mjs ledgerCut), so its spend line still lands.
  */
 export const PROGRESS_LEDGER_ROOM = 60_000;
+/** GitHub's limit on a comment's body, in characters. */
+export const GITHUB_COMMENT_MAX = 65_536;
 
 /**
  * `soFar`: the stage's spend so far (harness.mjs stageSpendSoFar), written as a spend line with every write until
@@ -999,13 +1003,24 @@ export const PROGRESS_LEDGER_ROOM = 60_000;
  * harness's group already killed) writes it into the comment one last time, within STOP_WRITE_MS, when it differs from
  * what the comment's line shows, so a pass that ended before the next status write is not left at the last line's figure.
  */
-export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null, soFarNow = soFar === stageSpendSoFar ? stageSpendNow : null, env = process.env }) {
+export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null, soFarNow = soFar === stageSpendSoFar ? stageSpendNow : null, passesOf = stage === "merge" ? null : stagePasses, env = process.env }) {
   // The route the stage runs on (backend.mjs stageRoute), known from its start: every spend line it writes records it.
   const route = stageRoute(env);
   // Each line's time and text, written out at each write in the zone in force then (clock.mjs timeZone: the Objective's
   // own once the stage has read its issue), so one comment never mixes zones.
+  // Each line also carries its step (progress-card.mjs stepOf), which the card's table reads.
   const lines = [];
   const links = [];
+  // The PR the header links (progress.link), which the card's headline names: {label, url}.
+  let subject = null;
+  // The stage's exit, from its exit line's step (endStep).
+  let ended = null;
+  // The running pass's activity (logic.mjs harnessActivity's snapshot) and its model, for the card's Now row (progress.live).
+  let liveNow = null;
+  // Where the stage runs, as Run details names it: from the stage's own environment (`env`), as its route is.
+  const runWhere = env.GITHUB_ACTIONS === "true" ? "actions" : env.PENDULUM_STAGE_CLAIM ? "sandbox" : "local";
+  // A merge pass's comment is a record that never runs: its card names no state.
+  const live = stage !== "merge";
   const started = Date.now();
   const key = marker(issue, "progress", `${stage}:${runId}`);
   let status = "";
@@ -1035,7 +1050,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let rebaseShown = false;
   let stopHook = null;
   const clock = (t) => lineClock(t, { env });
-  const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
+  // The workflow run the header and Run details link, from the stage's own environment (`env`).
+  const runUrl = env.GITHUB_RUN_ID && env.GITHUB_SERVER_URL ? `${env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${env.GITHUB_RUN_ID}` : null;
   // Not final: the known dollars so far, and the runs of unknown cost (those still running among them).
   // The dollars by billing as the passes booked them when they ended (harness.mjs meterPass: each at its own, the
   // relayed key's as `api`); a reading with no split books the passes' at the credential's. A line written while the
@@ -1050,16 +1066,42 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     return { spend: live.usd, spendParts: Object.keys(parts).length ? parts : null };
   };
   const bodyOf = (interim) => {
-    const head = status ? `**${status}**\n\n` : "";
+    const now = Date.now();
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
     // The hosts this Objective's own host labels open to its sandboxes, beside every Objective's list (hostsLine).
     const hosts = hostsLine(ran?.hosts);
-    const withLedger = (l) => `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.map(([t, text]) => `- ${clock(t)} ${text}`).join("\n")}${progressTail({ harness, model, ran, ...interim, ledger: l, rebase, read, triage, asked, findings })}${carried}`;
+    // The Full log every reader reads (the scorecard's phases, cost-join), in Run details: its header and its lines with
+    // their hidden UTC stamps, as they always were; `cut`, its middle lines left out (the last resort below).
+    const logOf = ([head, tail] = [Infinity, 0]) => {
+      const all = lines.map(([t, text]) => `- ${clock(t)} ${text}`);
+      const kept = head + tail < all.length ? [...all.slice(0, head), `- … ${all.length - head - tail} lines left out to keep this comment under GitHub's size limit; the job log has them`, ...all.slice(all.length - tail)] : all;
+      return `Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((now - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${kept.join("\n")}`;
+    };
+    // The marker lines after Run details, unchanged, then the carried decision-spend text.
+    const tailOf = (l) => `${progressTail({ harness, model, ran, ...interim, ledger: l, rebase, read, triage, asked, findings })}${carried}`;
     const own = spend === null ? null : ledger;
-    const body = withLedger(own);
-    // A body the ledger line would take past PROGRESS_LEDGER_ROOM gets its cut form (logic.mjs ledgerCut): GitHub refuses
-    // a comment over its size limit, and the final spend line is never lost to the ledger beside it.
-    return own && key.length + 1 + body.length > PROGRESS_LEDGER_ROOM ? withLedger(ledgerCut(own, `left out to keep this comment under ${PROGRESS_LEDGER_ROOM} characters`)) : body;
+    // The AI runs that ended: the ledger line's once the stage has written it, else this process's passes so far.
+    const passes = (own && ledgerOfComment(own)?.ledger) || (passesOf ? passesOf() : []);
+    const cardOf = (opts) => progressCard({ stage, subject, issue, started, now, lines, status, exit: ended, live, spend: interim.spend ?? null, parts: interim.spendParts ?? null, passes, snap: liveNow, rebase: rebase !== null, ran, harness, runId, runUrl, where: runWhere, zone: timeZone(env).zone, ...opts });
+    const size = (b) => key.length + 1 + b.length;
+    // Near GitHub's limit (past PROGRESS_LEDGER_ROOM), in order: no timeline chart, shorter Step cells, no explanatory
+    // sentences, then the ledger line's cut form (logic.mjs ledgerCut: the final spend line is never lost to it), and
+    // only where GitHub would refuse the write otherwise, the table, then the Full log's middle lines.
+    const tries = [{}, { chart: false }, { chart: false, detailMax: SHORT_DETAIL }, { chart: false, detailMax: SHORT_DETAIL, explain: false }];
+    for (const opts of tries) {
+      const body = progressBody(cardOf(opts), logOf(), tailOf(own));
+      if (size(body) <= PROGRESS_LEDGER_ROOM) return body;
+    }
+    const last = { chart: false, detailMax: SHORT_DETAIL, explain: false };
+    const l = own ? ledgerCut(own, `left out to keep this comment under ${PROGRESS_LEDGER_ROOM} characters`) : null;
+    let body = progressBody(cardOf(last), logOf(), tailOf(l));
+    if (size(body) < GITHUB_COMMENT_MAX) return body;
+    // Past GitHub's limit even so: the table goes before any Full log line does.
+    const bare = { ...last, table: false };
+    body = progressBody(cardOf(bare), logOf(), tailOf(l));
+    // The first 20 and the last 40 lines; fewer when even those would not fit (lines can be 2,000 characters long).
+    for (let [head, tail] = [20, 40]; size(body) >= GITHUB_COMMENT_MAX && head + tail > 0; tail > head ? (tail -= 5) : (head -= 5)) body = progressBody(cardOf(bare), logOf([Math.max(0, head), Math.max(0, tail)]), tailOf(l));
+    return body;
   };
   /**
    * Stopped by a signal, the harness already killed: the spend so far once more, if it differs from what the line shows.
@@ -1109,9 +1151,16 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     if (wrote && soFarNow && commentId !== null) stopHook ??= atStop(stopWrite);
     return wrote;
   };
-  const progress = async (phase) => {
-    // A phase can quote the harness (an exit reason, the tool it ran last): sanitised like all harness text.
-    lines.push([Date.now(), sanitize(phase, { max: 2000 })]);
+  // A line and its step (progress-card.mjs STEPS: `{step, ...fields}`; none is a `note`), sanitised like all harness
+  // text since a phase can quote the harness (an exit reason, the tool it ran last).
+  const addLine = (phase, step) => {
+    const text = sanitize(phase, { max: 2000 });
+    // The step object is kept as the stage passed it: an end or a result it gets later shows at the next write.
+    if (step?.step === "exit" && typeof step.exit === "string") ended = step.exit;
+    lines.push([Date.now(), text, step && typeof step === "object" ? step : null]);
+  };
+  const progress = async (phase, step = null) => {
+    addLine(phase, step);
     status = "";
     // A status write still in flight lands first, so it never overwrites this one (the final spend line with it).
     await writing;
@@ -1139,8 +1188,9 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     model = (stage === "review" ? r.reviewer : r.worker) || "";
   };
   /** The live status line (what the harness is doing now); written at most every `everyMs`, never twice at once. */
-  progress.live = (text, { everyMs = 120_000, force = false } = {}) => {
+  progress.live = (text, { everyMs = 120_000, force = false, snap = null, model: liveModel = null } = {}) => {
     status = sanitize(text, { max: 2000 });
+    liveNow = snap ? { snap, model: liveModel } : null;
     if (!force && Date.now() - lastWrite < everyMs) return;
     if (writing) return;
     writing = write().finally(() => {
@@ -1187,10 +1237,10 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
    * has not reached the code yet. Written now, with `phase`'s line in the same write when given, so the record never
    * lands without the line that explains it; a failed write leaves them unread, which costs an answer pass, not a merge.
    */
-  progress.decisionsRead = async (r, phase = null) => {
+  progress.decisionsRead = async (r, phase = null, step = null) => {
     read = mergeRead(read, r);
     if (phase) {
-      lines.push([Date.now(), sanitize(phase, { max: 2000 })]);
+      addLine(phase, step);
       status = "";
     }
     await writing;
@@ -1235,6 +1285,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   /** A link shown in the header (the PR, once it exists). */
   progress.link = (label, url) => {
     if (!links.some((l) => l.includes(url))) links.push(`[${label}](${url})`);
+    subject ??= { label, url };
   };
   return progress;
 }
@@ -1250,11 +1301,11 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
     tracker.feed(line);
     // The drift advisory's watcher (drift.mjs), when on: its own checkpoint clock, never in the run's way.
     drift?.feed(line);
-    progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }));
+    progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { snap: tracker.snapshot(), model });
     // The hand-off's own throttle (at most every two minutes): the plan comment follows plan.md while the harness works.
     tick?.();
   };
-  progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { force: true });
+  progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { force: true, snap: tracker.snapshot(), model });
   return {
     onLine,
     onResume: tracker.since,
@@ -1262,7 +1313,7 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
     // The drift check in flight lands first, so its decision record is in the stage's usage before it is written.
     finish: async () => {
       await drift?.stop();
-      progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { force: true });
+      progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { force: true, snap: tracker.snapshot(), model });
     },
   };
 }
@@ -1345,9 +1396,11 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   const begin = async (sha = null) => {
     if (sha && sha === redHead) return;
     log(`${label} pass ${passes}: ${byChecks ? `${checks.what || "required checks"} ${checks.names.join(checks.request ? "; " : ", ")}` : `${commands.length} command(s)`}`);
-    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? checks.what || "required checks" : `${commands.length} commands`})`);
+    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? checks.what || "required checks" : `${commands.length} commands`})`, byChecks ? { step: "ci", begin: true } : { step: "commands", commands: commands.length });
   };
   const validate = async () => {
+    // The CI wait's step (progress-card.mjs): its end and its outcome are set on it as the wait returns.
+    let waitStep = null;
     // The commands on this pass: not on a first pass that reads the checks only (checksOnlyFirst).
     const commandsNow = localFirst && !(checksOnlyFirst && passes === 1);
     // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all). A failed command's output stays in
@@ -1370,7 +1423,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       const asked = await checks.request(sha, { remainingMs: remainingMs(deadlineAt) });
       if (asked?.refused) return { green: false, stuck: asked.refused, command: `${checks.what || "required checks"} ${checks.names.join("; ")} on ${sha.slice(0, 7)}`, sha };
     }
-    if (onPhase) await onPhase(`waiting for ${checks.what || "required checks"} (${checks.names.join(checks.request ? "; " : ", ")}) on ${sha.slice(0, 7)}`);
+    if (onPhase) await onPhase(`waiting for ${checks.what || "required checks"} (${checks.names.join(checks.request ? "; " : ", ")}) on ${sha.slice(0, 7)}`, (waitStep = { step: "ci", sha, wait: true, crossOs: !!checks.request }));
     // A sibling's merge can make the PR conflict while its checks are awaited: GitHub then starts none, so the wait ends.
     const conflicted = async () => conflictsAt(await getPr(checks.repo, checks.prNumber, { token: checks.token }), sha);
     // A required check with no run will get none once every workflow run on the head has completed, so the wait ends
@@ -1441,6 +1494,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // (checks.boundMs, cross-os.mjs), not at the stage's wall clock.
     const wait = async (ignoreIds = null, capMs = Infinity, more = {}) => {
       const x = await waitOnce(ignoreIds, capMs, more);
+      // The wait's own end, on its step (progress-card.mjs: the CI row's Took).
+      if (waitStep) waitStep.end = Date.now();
       lastRead = { sha, runs: x.runs || [] };
       if (x.timedOut && !x.conflict && checks.boundMs !== undefined && Date.now() - boundFrom.get(sha) >= checks.boundMs) x.atBound = true;
       return x;
@@ -1491,14 +1546,14 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       if (!stuck.waits) return stuckOf(stuck);
       const capMs = Math.min(checks.stuckWaitMs ?? CHECKS_WAIT_MS, remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS), boundLeft());
       if (capMs <= 0) return stuckOf(stuck);
-      if (onPhase) await onPhase(`${stuck.reason}; waiting up to ${Math.round(capMs / 60000)} min for ${stuck.runs.length > 1 ? "them" : "it"} to start, no fix run`);
+      if (onPhase) await onPhase(`${stuck.reason}; waiting up to ${Math.round(capMs / 60000)} min for ${stuck.runs.length > 1 ? "them" : "it"} to start, no fix run`, { step: "ci", sha, red: "late-start", minutes: Math.round(capMs / 60000) });
       x = await wait(ignoreIds, capMs, { appearMs: Infinity, backoffAfterMs: 0, progress: null });
       if (x.conflict || !unfinished(x)) return x;
       stuck = await classify(x);
       if (x.atBound) return stuckOf(bounded(stuck));
       // Started during that wait and still running: it is waited for as a check that started at once is.
       if (stuck.kind === "running") {
-        if (onPhase) await onPhase(`required checks on ${sha.slice(0, 7)} started late; waiting for them as usual`);
+        if (onPhase) await onPhase(`required checks on ${sha.slice(0, 7)} started late; waiting for them as usual`, { step: "ci", sha, late: true });
         x = await wait(ignoreIds);
         if (x.conflict || !unfinished(x)) return x;
         stuck = noProgress(x, await classify(x));
@@ -1518,7 +1573,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       if (freshHeads.has(sha)) return { green: false, again: true, unchanged: { ...freshHeads.get(sha).unchanged, fresh: true }, command };
       const said = `the fix pass changed nothing; rerunning the failed jobs on ${sha.slice(0, 7)}`;
       log(`${label}: ${said}`);
-      if (onPhase) await onPhase(`${label}: ${said}`);
+      if (onPhase) await onPhase(`${label}: ${said}`, { step: "fix", sha, why: "rerun", pass: false });
       const before = r.failedRuns;
       const a = triage?.again
         ? await triage.again({ sha, failedRuns: r.failedRuns, until: runUntil() }).catch((e) => {
@@ -1527,13 +1582,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
           })
         : { rerun: false, skipped: "no rerun path" };
       if (a.rerun) {
-        if (onPhase) await onPhase(`waiting for required checks again on ${sha.slice(0, 7)} after rerunning its failed jobs`);
+        if (onPhase) await onPhase(`waiting for required checks again on ${sha.slice(0, 7)} after rerunning its failed jobs`, (waitStep = { step: "ci", sha, wait: true, again: true }));
         r = await settle(await wait(a.ignoreIds), a.ignoreIds);
         if (r.conflict) return { green: false, conflict: true, command };
         if (r.stuck) return { green: false, stuck: r.stuck, command, sha };
         // Passing on a rerun is not proof of a flake, as after a triage rerun: said where a person reads it.
         if (r.green) {
-          if (onPhase) await onPhase(`rerun on ${sha.slice(0, 7)} turned green: ${(a.jobs || []).join(", ")} passed on rerun with no change; if this failure comes back, it may be an intermittent defect, not a flake`);
+          if (onPhase) await onPhase(`rerun on ${sha.slice(0, 7)} turned green: ${(a.jobs || []).join(", ")} passed on rerun with no change; if this failure comes back, it may be an intermittent defect, not a flake`, { step: "triage", sha, outcome: "rerun-green", jobs: a.jobs || [] });
           return { green: true, again: true, sha };
         }
       }
@@ -1577,12 +1632,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       // A flaky verdict whose rerun GitHub refused: said in the Block when this red is the last one (decideExit).
       if (t.refused) triaged = t.refused;
       if (t.rerun) {
-        if (onPhase) await onPhase(`waiting for required checks again on ${sha.slice(0, 7)} after the triage rerun`);
+        if (onPhase) await onPhase(`waiting for required checks again on ${sha.slice(0, 7)} after the triage rerun`, (waitStep = { step: "ci", sha, wait: true, again: true }));
         r = await settle(await wait(t.ignoreIds), t.ignoreIds);
         if (r.conflict) return { green: false, conflict: true, command };
         if (r.stuck) return { green: false, stuck: r.stuck, command, sha };
         // Passing on a rerun is not proof of a flake (an intermittent defect passes too): said where a person reads it.
-        if (r.green && onPhase) await onPhase(`triage rerun on ${sha.slice(0, 7)} turned green: ${(t.jobs || []).join(", ")} passed on rerun with no change; if this failure comes back, it may be an intermittent defect, not a flake`);
+        if (r.green && onPhase) await onPhase(`triage rerun on ${sha.slice(0, 7)} turned green: ${(t.jobs || []).join(", ")} passed on rerun with no change; if this failure comes back, it may be an intermittent defect, not a flake`, { step: "triage", sha, outcome: "rerun-green", jobs: t.jobs || [] });
       }
     }
     // Checks that finished passing as a required check would but did not all run (checks.verdict, cross-os.mjs: a skipped
@@ -1591,6 +1646,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       const notRun = checks.verdict(sha, r.runs || []);
       if (notRun) return { green: false, stuck: notRun, command, sha };
     }
+    if (waitStep) waitStep.outcome = r.green ? "passed" : "failed";
     // `waitedMs`: how long this head's checks took, triage's rerun included (a fresh worker pass's floor, freshPassDenied).
     return { green: r.green, results: [], fromChecks: true, sha, failedRuns: r.failedRuns, runs: r.runs, refusal: triaged, waitedMs: Date.now() - waitedFrom, failed: r.green ? null : { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } };
   };
@@ -1704,7 +1760,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     usage.push(...held.usage);
     if (held.harness) return end({ harness: held.harness, ...(held.harness.died ? { died: true } : {}), ...(held.refused ? { scope: held.refused, ...(held.cause ? { scopeCause: held.cause } : {}) } : {}) });
     if (held.refused) {
-      if (onPhase) await onPhase(`${label} pass ${red.passes}: ${held.question ? `put back and asked a Question: ${held.refused}` : held.refused}`);
+      if (onPhase) await onPhase(`${label} pass ${red.passes}: ${held.question ? `put back and asked a Question: ${held.refused}` : held.refused}`, { step: "fix", why: "scope", pass: false });
       // A Question: the stage stops here and its exit record decides (the caller passes no validation for it).
       return end({ scope: held.refused, ...(held.cause ? { scopeCause: held.cause } : {}), ...(held.question ? { question: true } : {}) });
     }
@@ -1715,13 +1771,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const v = await validate();
     if (v.aborted || signal?.aborted) return { green: false, aborted: true, passes: passes - 1, lastOutput: "", usage };
     // Each check's result on the head, as the checks name it (cross-os.mjs legsLine), once per pass that read them.
-    if (lastRead && checks?.resultLine && onPhase) await onPhase(checks.resultLine(lastRead.sha, lastRead.runs));
+    if (lastRead && checks?.resultLine && onPhase) await onPhase(checks.resultLine(lastRead.sha, lastRead.runs), { step: "ci", sha: lastRead.sha, crossOs: true, result: checks.resultLine(lastRead.sha, lastRead.runs) });
     lastRead = null;
     if (v.handedOff) {
       // No check was read: a pass only when the commands ran on it (the local route's).
       if (!v.ranCommands) passes -= 1;
       log(`${label}: ${v.command} run while the review starts; handed to the review stage`);
-      if (onPhase) await onPhase(`${label}: ${v.command} run while the review starts; handed to the review stage`);
+      if (onPhase) await onPhase(`${label}: ${v.command} run while the review starts; handed to the review stage`, { step: "handoff", sha: v.handedOff });
       return { green: false, handedOff: v.handedOff, passes, lastOutput: "", command: v.command, usage, handed };
     }
     // The same head as the red the fix pass had: not a pass of its own.
@@ -1744,13 +1800,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
           if (allOnBase(now.detail)) {
             const reason = baseFailureReason(now.detail);
             log(`${label} pass ${passes} red after its rerun: ${reason}`);
-            if (onPhase) await onPhase(`${label} pass ${passes} red after its rerun: ${reason}; handed back, no fresh worker pass`);
+            if (onPhase) await onPhase(`${label} pass ${passes} red after its rerun: ${reason}; handed back, no fresh worker pass`, { step: "ci", red: "base" });
             return { green: false, passes, lastOutput: String(v.rerunRed.failed.output || "").slice(-6000), command: v.command, usage, baseFailure: reason };
           }
           const unjudged = unjudgedBase(now.detail);
           if (unjudged) {
             log(`${label} pass ${passes} red after its rerun: ${unjudged.why}`);
-            if (onPhase) await onPhase(`${label} pass ${passes} red after its rerun: ${unjudged.why}; no fresh worker pass`);
+            if (onPhase) await onPhase(`${label} pass ${passes} red after its rerun: ${unjudged.why}; no fresh worker pass`, { step: "ci", red: "unjudged" });
             return { green: false, passes, lastOutput: String(v.rerunRed.failed.output || "").slice(-6000), command: v.command, usage, stalled: unjudged.why, stalledCause: unjudged.cause };
           }
           red = { ...lastFix, ...now, command: v.rerunRed.failed.command, rec: lastFix.rec };
@@ -1766,7 +1822,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         const denied = freshPassDenied({ cause: block.cause, head, tried: freshHeads, maxUsd, leftUsd: maxUsd > 0 ? maxUsd - spentUsd - sumSpend(usage).usd - (passDecisions() - decisionsAtStart) : 0, needUsd: sumSpend([lastFix.rec]).usd, leftMs: remainingMs(deadlineAt), needMs: Math.max(60_000, runMs + (lastFix.checksMs || 0) + 120_000) });
         const said = denied ? `the fix pass changed nothing on ${head.slice(0, 7)}; no fresh worker pass (${denied})` : `the fix pass changed nothing on ${head.slice(0, 7)}; one fresh worker pass, a new session with the failing checks' output, before Blocking`;
         log(`${label}: ${said}`);
-        if (onPhase) await onPhase(`${label}: ${said}`);
+        if (onPhase) await onPhase(`${label}: ${said}`, { step: "fix", why: denied ? "no-fresh" : "fresh", denied: denied || null, pass: false });
         if (!denied) {
           freshHeads.set(head, { unchanged: v.unchanged, session: session.id });
           // The scope fence names what this red names, as a fix pass's does.
@@ -1783,7 +1839,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
               ? `the fix pass changed nothing on ${head.slice(0, 7)}${lastLead ? ` (${String(lastLead).split("\n")[0].replace(/^--- /, "")})` : ""}; the fresh worker pass committed ${after.slice(0, 7)} and reached the ${ended.capped} cap; not validated`
               : `${block.reason}; the fresh worker pass after it reached the ${ended.capped} cap${after ? "" : " (whether it committed could not be read)"}`;
             log(`${label}: ${reason}`);
-            if (onPhase) await onPhase(`${label}: ${reason}`);
+            if (onPhase) await onPhase(`${label}: ${reason}`, { step: "fix", why: "capped", capped: ended.capped, pass: false });
             return { green: false, passes, lastOutput: red.tail, command: v.command, usage, unchanged: { reason, cause: "work" } };
           }
           if (ended) return ended;
@@ -1793,7 +1849,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         block = { ...block, reason: `${block.reason}; no fresh worker pass: ${denied}` };
       }
       log(`${label}: ${block.reason}`);
-      if (onPhase) await onPhase(`${label}: ${block.reason}`);
+      if (onPhase) await onPhase(`${label}: ${block.reason}`, { step: "fix", why: "unchanged", pass: false });
       return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: v.command, usage, unchanged: block };
     }
     if (v.pushRefused) return { green: false, passes, lastOutput: "", command: "push", usage, pushRefused: v.pushRefused };
@@ -1807,13 +1863,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (v.stuck) {
       passes -= 1;
       log(`${label}: ${v.stuck.reason}; no fix run`);
-      if (onPhase) await onPhase(`${label}: ${v.stuck.reason}; no fix run`);
+      if (onPhase) await onPhase(`${label}: ${v.stuck.reason}; no fix run`, { step: "ci", red: "stuck", clause: v.stuck.reason });
       return { green: false, passes, lastOutput: "", command: v.command, usage, stuck: v.stuck, sha: v.sha };
     }
     // A required job GitHub never started: infrastructure, not this change's, so no fix pass; the stage Blocks quoting GitHub.
     if (v.notStarted) {
       log(`${label} pass ${passes} red: ${v.notStarted}; infrastructure, no fix run`);
-      if (onPhase) await onPhase(`${label} pass ${passes} red: ${v.notStarted}; infrastructure, no fix run`);
+      if (onPhase) await onPhase(`${label} pass ${passes} red: ${v.notStarted}; infrastructure, no fix run`, { step: "ci", red: "not-started" });
       return { green: false, passes, lastOutput: "", command: v.command, usage, notStarted: v.notStarted };
     }
     last = v;
@@ -1825,13 +1881,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (allOnBase(detail)) {
       const reason = baseFailureReason(detail);
       log(`${label} pass ${passes} red: ${reason}`);
-      if (onPhase) await onPhase(`${label} pass ${passes} red: ${reason}; handed back, no fix run`);
+      if (onPhase) await onPhase(`${label} pass ${passes} red: ${reason}; handed back, no fix run`, { step: "ci", red: "base" });
       return { green: false, passes, lastOutput: failed.output.slice(-6000), command: failed.command, usage, baseFailure: reason };
     }
     const unjudged = unjudgedBase(detail);
     if (unjudged) {
       log(`${label} pass ${passes} red: ${unjudged.why}`);
-      if (onPhase) await onPhase(`${label} pass ${passes} red: ${unjudged.why}; no fix run`);
+      if (onPhase) await onPhase(`${label} pass ${passes} red: ${unjudged.why}; no fix run`, { step: "ci", red: "unjudged" });
       return { green: false, passes, lastOutput: failed.output.slice(-6000), command: failed.command, usage, stalled: unjudged.why, stalledCause: unjudged.cause };
     }
     lastLead = lead;
@@ -1854,12 +1910,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       stalled = `the fix pass before it ${judged.undecided ? "could not be judged for progress" : "made no progress"}: ${judged.why}; failing: ${redNames(shape).join(", ") || failed.command}${first ? ` (${first})` : ""}`;
       // An unmade judgement (the decider gave no answer) is Pendulum's, or its vendor's outage, never the work's.
       if (judged.undecided) stalledCause = judged.cause || "pendulum";
-      if (onPhase) await onPhase(`${label} pass ${passes} red: ${stalled}`);
+      if (onPhase) await onPhase(`${label} pass ${passes} red: ${stalled}`, { step: "fix", why: "no-progress", pass: false });
       break;
     }
     // The caller takes this red to its own pass (holdRed): no fix pass here.
     const held = holdRed?.();
-    if (onPhase) await onPhase(`${label} pass ${passes} red: ${failed.command}; ${held ? (typeof held === "string" ? held : "held for the stage's next pass") : "fix run"}${judged ? ` (progress: ${judged.why})` : ""}`);
+    if (onPhase) await onPhase(`${label} pass ${passes} red: ${failed.command}; ${held ? (typeof held === "string" ? held : "held for the stage's next pass") : "fix run"}${judged ? ` (progress: ${judged.why})` : ""}`, held ? { step: "ci", red: typeof held === "string" ? "held-answer" : "held-next", check: failed.command } : { step: "fix", check: failed.command });
     if (held) return { green: false, passes, lastOutput: tail, command: failed.command, usage, held: { passes, sha: v.sha ?? null, failures, detail, tail, lead, command: failed.command } };
     handed = shape;
     redHead = v.fromChecks ? v.sha : null;
@@ -1920,7 +1976,7 @@ export async function workValidation(args, cross = null) {
     handed = null;
     if (cross.problem) {
       log(`cross-os-validation: ${cross.problem}`);
-      if (args.onPhase) await args.onPhase(`cross-os-validation: ${cross.problem}`);
+      if (args.onPhase) await args.onPhase(`cross-os-validation: ${cross.problem}`, { step: "ci", crossOs: true, red: "setting", clause: cross.problem });
       return { green: false, passes, lastOutput: "", usage: [...usage], stuck: { reason: cross.problem, cause: "setup" } };
     }
     const c = add(await validationLoop({ ...args, spentUsd: spent(), commands: [], checks: cross.checks, label: "cross-os-validation", handOff: false, checksOnlyFirst: false, holdRed: null, handed, returnAfterFix: true, recurOnFirst: true }));
@@ -2452,10 +2508,45 @@ export async function noticePost({ notice, token, what, post }) {
  */
 export function questionNotice({ at = "", stage = "work", reason, pr = null, askOnIssue = false }) {
   const why = String(reason || "").replace(/^question:\s*/i, "");
-  // The form (logic.mjs questionForm) decides the instruction, as it decides what resumes the Objective.
-  if (questionForm({ pr, askOnIssue }) === "pr") return `${at}Question (${stage}): ${why} — PR #${pr.number} is a draft until it is answered. Answer in a comment on the issue or the PR, then mark the PR ready.`;
-  if (askOnIssue) return `${at}Question (${stage}): ${why.replace(/[.\s]+$/, "")}.${pr ? ` PR #${pr.number} stays a draft: answer here on the issue, not by marking it ready, which would start its review and merge it without the rest of the work.` : ""}`;
-  return `${at}Question (${stage}): ${why} Answer in a comment on the issue.`;
+  const how = questionAnswer({ pr, askOnIssue });
+  if (questionForm({ pr, askOnIssue }) === "pr") return `${at}Question (${stage}): ${why} — ${how}`;
+  if (askOnIssue) return `${at}Question (${stage}): ${why.replace(/[.\s]+$/, "")}.${how ? ` ${how}` : ""}`;
+  return `${at}Question (${stage}): ${why} ${how}`;
+}
+
+/**
+ * How a Question is answered, as its notice says it (questionNotice) and the progress comment's card repeats it: the
+ * form (logic.mjs questionForm) decides the instruction, as it decides what resumes the Objective. "" for a question
+ * asked on the issue with no PR (its notice says where already).
+ */
+export function questionAnswer({ pr = null, askOnIssue = false }) {
+  if (questionForm({ pr, askOnIssue }) === "pr") return `PR #${pr.number} is a draft until it is answered. Answer in a comment on the issue or the PR, then mark the PR ready.`;
+  if (askOnIssue) return pr ? `PR #${pr.number} stays a draft: answer here on the issue, not by marking it ready, which would start its review and merge it without the rest of the work.` : "";
+  return "Answer in a comment on the issue.";
+}
+
+/**
+ * The exit line's step (progress-card.mjs, `exit`): the stage's exit and reason and, from the exit the stage applied
+ * (`applied`: applyExit's arguments and the exit it applied), how a person goes on: a Block's way on (`next`: nextStep's
+ * code), a Question's form (logic.mjs questionForm) and its PR; `resetAt`, a pause's usage limit reset (ISO); `rebase`,
+ * a send-back rebase stage's rebase line (rebaseExitLine), for the card's headline.
+ */
+export function endStep({ issue, exit, reason = "", applied = null, resetAt = null, rebase = null }) {
+  const a = applied && applied.exit === exit ? applied : null;
+  const out = { step: "exit", exit, reason: reason || "", issue, ...(rebase ? { rebase } : {}) };
+  if (a && exit === "blocked") out.next = a.next || nextOf(a.cause ?? "pendulum");
+  if (a && exit === "question") Object.assign(out, { form: questionForm({ pr: a.pr ?? null, askOnIssue: !!a.askOnIssue }), pr: a.pr?.number ?? null });
+  if (resetAt && Number.isFinite(Date.parse(resetAt))) out.resetAt = Date.parse(resetAt);
+  return out;
+}
+
+/**
+ * The exit `applyExit` applied, for endStep: its arguments, with the exit it applied (a Question GitHub would not draft
+ * is applied as a Block with no PR, cause `pendulum`).
+ */
+export function appliedExit(args, result) {
+  if (!args || !result?.exit) return null;
+  return result.exit === args.exit ? { ...args } : { ...args, exit: result.exit, pr: null, cause: "pendulum", next: null, askOnIssue: false };
 }
 
 /**
@@ -2508,7 +2599,20 @@ export function doctorBlock(rows) {
  * decides whether the notice says to resume or restart (nextStep), unless `next` says it. Returns the exit applied and
  * its reason: a Question whose PR GitHub would not draft is applied as a Block (cause `pendulum`).
  */
-export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "pendulum", next = null }, { token, notice = null }) {
+/** How long a Blocked or Question end waits on its finish card (stateCard) before it goes on without it. */
+export const STATE_CARD_MS = 20_000;
+/**
+ * The Objective's finish card for a Blocked or Question end (finish-card.mjs endCard), wherever the exit is applied (a
+ * stage, the dispatcher, a launcher, the local loop), so the card always says the latest state; never on an outage,
+ * which may not reach GitHub, and bounded (STATE_CARD_MS) so it never holds the end's own outputs. Never throws. A stage
+ * writes it after its exit line (`card: false` to applyExit), so the card reads the stage's final spend line.
+ */
+export async function stateCard(repo, issue, { exit, reason, form = null, next = null, cause = null }, { token }) {
+  if (cause === "outage") return;
+  await endCard(repo, issue, { token }, { exit, reason, form, next, appId: input("app_id") || process.env.PENDULUM_LOCAL_APP_ID || process.env.PENDULUM_NOTICE_APP_ID || null, log, timeoutMs: STATE_CARD_MS }).catch((e) => log(`#${issue}: the ${exit} card was not written (${String(e?.message || e).slice(0, 120)})`));
+}
+
+export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "pendulum", next = null, card = true }, { token, notice = null }) {
   const project = await findProject(repo, { token }).catch(() => null);
   // The reason and the output can carry the harness's words (its exit record, a command's output): published as
   // Pendulum, they are sanitised like every other harness text (handoff.mjs sanitize).
@@ -2527,6 +2631,7 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
     // `key` names a Block whose repeats are one condition (local mode's git-identity): each repeat updates that comment.
     const body = `${at}${blockedLine({ issue, pr, stage, reason, fix, delivered, cause, next })}${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-DETAIL_CHARS).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}\n${blockMarker(cause)}`;
     await postNotice("Blocked notice", (o) => upsertComment(repo, issue, marker(issue, "blocked", key || `${stage}:${runId}`), body, o));
+    if (card) await stateCard(repo, issue, { exit, reason, next: next || nextOf(cause), cause }, { token });
     return { exit, reason };
   }
   if (exit === "question") {
@@ -2555,6 +2660,7 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
       const body = questionNotice({ at, stage, reason, pr, askOnIssue });
       await postNotice("Question notice", (o) => upsertComment(repo, issue, questionMarker(issue, { stage, runId, form }), body, o)).catch((e) => log(`Question notice: ${e.message.slice(0, 120)}`));
     }
+    if (card) await stateCard(repo, issue, { exit, reason, form, cause: null }, { token });
     return { exit, reason };
   }
   if (exit === "delivered") {
@@ -3978,7 +4084,7 @@ async function conversationsGate(repo, ctx, report, opts) {
  * Where the merge pass says an edit it judged wording only (objective-trust.mjs editedSincePlan): a progress comment of
  * its own on the issue, stage `merge`, one line, no spend.
  */
-const keptSaid = (repo, issue, opts) => (line) => progressReporter(repo, issue, opts, { stage: "merge", soFar: null })(line);
+const keptSaid = (repo, issue, opts) => (line, step = { step: "edit" }) => progressReporter(repo, issue, opts, { stage: "merge", soFar: null })(line, step);
 
 /**
  * Whether the unread writer comments (`unread`) let the merge go on: the comment check (comment-check.mjs judgeUnread,
@@ -4006,7 +4112,7 @@ async function unreadCleared(repo, { issue, prNumber, pr, issueData, unread, che
   // writes none, and the caller's flush writes it.
   await carryDecisionSpend(repo.full, issue, async (extra) => {
     progress.decisionSpend(extra);
-    if (!(await progress.decisionsRead(judged, r.line))) throw new Error("the read record was not written");
+    if (!(await progress.decisionsRead(judged, r.line, { step: "comments", count: Object.keys(judged).length }))) throw new Error("the read record was not written");
   }).catch(() => {});
   return "clear";
 }

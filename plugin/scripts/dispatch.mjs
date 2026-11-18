@@ -24,7 +24,7 @@ import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_J
 import { addBilling } from "./lib/usage.mjs";
 import { CLAIM_PAUSE_MS, LOCAL_LABEL, adoptLocal, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
-import { FINISH_RETRY_MS, cardable, newestPrMerged, objectiveRecords, postFinishCard } from "./lib/finish-card.mjs";
+import { FINISH_RETRY_MS, cardable, objectiveRecords, postFinishCard } from "./lib/finish-card.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, queueTimeoutMin, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -114,6 +114,18 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 /** Whether an Objective carries two account labels on GitHub Actions or the cloud sandbox with accounts declared (#267). */
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.PENDULUM_ACCOUNTS).declared && !!accountPin(issue.labels).two;
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, unknownToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], finished: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
+
+/**
+ * A closed Objective's PR still open, stopped while its state label waits for its finish card (#589): out of the merge
+ * queue, back to a draft, its review label off (stop.mjs applyStop, the label left). Only when there is something to stop
+ * (the PR out of draft, or still carrying the review label), so a tick that finds it stopped writes nothing. A failed read
+ * stops nothing this tick; the next one tries again.
+ */
+async function stopClosedPr(repo, number, project, opts) {
+  const pr = await findPr(repo, `pendulum/${number}`, opts).catch(() => null);
+  if (!pr || (pr.draft === true && !(pr.labels || []).some((l) => l.name === REVIEW_LABEL))) return;
+  await applyStop(repo, number, { pr, closed: true, project }, opts);
+}
 
 export async function dispatch(inputs, { token, decisionRole = "dispatcher", notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
@@ -1566,38 +1578,39 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
     // Every closed one's card in one read, not one read each.
     const cards = project && recent.length ? await projectStatuses(project, repo, recent.map((c) => c.number), opts) : {};
     for (const { number, labels } of doneTidies(recent, { cards, project: !!project, tends: (i) => backend().trigger.tends(i) })) {
-      // The finish card (finish-card.mjs): once per Objective that merged, at its first tidy, before its state label goes,
-      // by one route only: a local loop for a `pendulum:local` Objective, the Action for any other, so a loop with --all
-      // beside a running Action never posts a second card (it tidies the Action's Objectives but posts for none). One that
-      // met a passing failure (GitHub's 5xx, its rate limit, the network) leaves the label for a later tick (the cron's or
-      // the loop's; no wake of its own), up to FINISH_RETRY_MS after the close; after that, or on any other failure, the
-      // tidy goes on without it. Under a person's login (a local loop) the PR body keeps no finish block: the card on the
-      // issue is the record. Another route's Objective whose card is due (closed as completed, not Blocked or on a
-      // Question, the newest PR on its branch merged) keeps its state label for that route's Done pass up to
-      // FINISH_RETRY_MS after its close (#565): the label is what makes that pass post its card, so a tidy here first
-      // would leave it none. One whose branch read failed waits for a later tick the same way. Any other (a hand-close
-      // with its PR still open, which applyStop below takes out of the merge queue), or one past that window (its route
-      // not running), is tidied here as before.
+      // The finish card (finish-card.mjs): at its first tidy, before its state label goes, for every Objective Pendulum
+      // ran (cardable: a state label on it at its close), merged or closed without merging (#589), by one route only: a
+      // local loop for a `pendulum:local` Objective, the Action for any other, so a loop with --all beside a running Action
+      // never posts a second card (it tidies the Action's Objectives but posts for none). One that met a passing failure
+      // (GitHub's 5xx, its rate limit, the network) leaves the label for a later tick (the cron's or the loop's; no wake of
+      // its own), up to FINISH_RETRY_MS after the close; after that, or on any other failure, the tidy goes on without it.
+      // Under a person's login (a local loop) the PR body keeps no finish block: the card on the issue is the record.
+      // Another route's Objective whose card is due (cardable, closed within FINISH_RETRY_MS) keeps its state label for
+      // that route's Done pass until then (#565): the label is what makes that pass post its card, so a tidy here first
+      // would leave it none. Its PR is stopped here at once all the same (out of the merge queue, back to a draft; the
+      // label stays), so a hand-close with its PR still open never leaves it queued for a day. One past that window (its
+      // route not running) is tidied here as before.
       const closed = recent.find((i) => i.number === number);
       const ours = !!closed && hasLocalLabel(closed) === (backend().name === "local");
-      if (labels.length && closed && !ours && closed.state_reason === "completed" && cardable(labels) && +now - Date.parse(closed.closed_at) < FINISH_RETRY_MS) {
-        const due = await newestPrMerged(repo, number, opts).catch((e) => {
-          log(`  #${number}: its branch could not be read (${String(e?.message || e).slice(0, 120)}); its state label waits for a later tick`);
-          return true;
-        });
-        if (due) continue;
+      if (labels.length && closed && !ours && cardable(labels) && +now - Date.parse(closed.closed_at) < FINISH_RETRY_MS) {
+        await stopClosedPr(repo, number, project, opts);
+        continue;
       }
       if (labels.length && closed && ours) {
         const usageToken = inputs.githubToken || token;
         const card = await postFinishCard(repo, closed, opts, { label: inputs.objectiveLabel, prBody: !backend().trigger.asPerson, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, log, records: (n, want) => objectiveRecords(repo, n, { token: usageToken, want, download: (a) => downloadArtifactResult(repo, a, usageToken) }) }).catch((e) => e);
-        if (card === "posted") {
+        if (card === "posted" || card === "updated") {
           finished.push(number);
-          log(`  #${number}: merged; its finish card is posted`);
+          log(`  #${number}: closed; its finish card is ${card}`);
         } else if (card === "no self") log(`  #${number}: Pendulum's own login is unknown, so its records cannot be trusted; no finish card`);
         else if (card instanceof Error) {
           const again = transientError(card) && +now - Date.parse(closed.closed_at) < FINISH_RETRY_MS;
           log(`  #${number}: finish card: ${String(card.message).slice(0, 120)}; ${again ? "its state label waits for a later tick" : "the tidy goes on without it"}`);
-          if (again) continue;
+          // Waiting for its card, a PR it left open is stopped now all the same, never left queued for a later tick.
+          if (again) {
+            await stopClosedPr(repo, number, project, opts);
+            continue;
+          }
         }
       }
       // Under a person's login, the removal is recorded as Pendulum's before it is made, or waits for the next tick.

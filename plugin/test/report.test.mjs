@@ -22,6 +22,7 @@ import { scoreObjective } from "../../bench/lib/objective.mjs";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
 import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
+import { newForms } from "./fixtures/progress-new-form.mjs";
 
 /** The Pendulum build a stage of this checkout records (#565 W6): its release at its tag, else with its commit. */
 const PENDULUM_VERSION = pendulumBuild();
@@ -2016,6 +2017,17 @@ test("report (#568, #567): an Objective that straddles the rename books its read
   ]);
   assert.deepEqual(rowSums(r.breakdowns.model), usd(r.totals));
   assert.deepEqual(rowSums(r.breakdowns.model), usd(byIssue(r, 3)));
+});
+
+test("report (#589): progress comments with the card over their log read as the same comments before it", async () => {
+  for (const make of [world, ledgeredWorld]) {
+    const w = make();
+    const fresh = make();
+    fresh.comments = newForms(fresh.comments);
+    assert.ok(fresh.comments.some((c, i) => c.body !== w.comments[i].body), "the world has progress comments in the new form");
+    const [a, b] = [await report(w), await report(fresh)];
+    assert.deepEqual(b.json, a.json, make.name);
+  }
 });
 
 // ------------------------------------------------------------------ #570: the owner's first questions

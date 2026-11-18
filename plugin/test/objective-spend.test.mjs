@@ -174,15 +174,24 @@ test("finish card, posted for real: a split Objective's spend per part and per k
   assert.equal(await withFetch(o.fetch, () => postFinishCard(REPO, o.issue, { token: "t" })), "posted");
   const card = o.writes.find((w) => w.method === "POST" && w.p === "/issues/5/comments" && w.body.startsWith(finishMarker(5)))?.body;
   assert.ok(card, "the card is posted");
-  // The total is every stage's: $9.45 known, the re-run's pass of unknown cost beside it.
-  assert.match(card, /<h3 align="center">Merged in 3 h for \$9\.45 \(part API-equivalent\) plus spend that was not reported\.<\/h3>/);
+  // The total is every stage's: $9.45 known, the re-run's pass of unknown cost beside it; what the dollars are, once.
+  assert.match(card, /^### ✅ Merged in 3 h · \$9\.45 \+ unknown\nIssue #5 → PRs #11, #12 · merged at 1:00 PM UTC · \$9\.45: \$7\.45 billed to your API key, \$2\.00 API-equivalent · plus 1 AI run of unknown cost\n/m);
   // The work the issue asked for, per part and per kind: each stage's dollars by pass kind, the rest (here the part 1
   // review's $0.10 of decision calls) under its stage's own kind; the judge-only review's fix pass is work.
-  assert.match(card, /\*\*Where the dollars went\*\*\n\n\| What the issue asked for \| Cost \|\n\| --- \| ---: \|\n\| Part 1: work \| \$2\.50 \|\n\| Part 1: review \| \$0\.70 \|\n\| Part 1: answer passes \| \$0\.30 \|\n\| Part 1: fix passes \| \$0\.50 \|\n\| Part 2: work \| \$2\.00 API-equivalent \|\n\| Part 2: review \| \$0\.80 \|\n\| Part 2: answer passes \| \$0\.40 \|\n\| Part 2: fix passes \| \$0\.10 \|\n\n/);
-  // The churn apart, each from its stage's own record; the unknown pass stays unknown, never $0.
-  assert.match(card, /\| Churn Pendulum caused \| Stages \| Cost \|\n\| --- \| ---: \| ---: \|\n\| Conflict rebases after other PRs merged \| 1 \| \$1\.20 \|\n\| Catch-up passes after the default branch changed a workflow \| 1 \| \$0\.20 \|\n\| Reviews run again only to judge answers already made \| 1 \| \$0\.25 \|\n\| Passes run again after a Block \| 1 \| \$0\.50 \+ unknown \|\n/);
+  assert.match(card, /\| What the issue asked for \| Cost \|\n\| :-- \| --: \|\n\| Part 1: work \| \$2\.50 \|\n\| Part 1: review \| \$0\.70 \|\n\| Part 1: answering the review \| \$0\.30 \|\n\| Part 1: fixing CI \| \$0\.50 \|\n\| Part 2: work \| \$2\.00 \|\n\| Part 2: review \| \$0\.80 \|\n\| Part 2: answering the review \| \$0\.40 \|\n\| Part 2: fixing CI \| \$0\.10 \|\n\n/);
+  // The overhead apart, each from its stage's own record; the unknown pass stays unknown, never $0.
+  assert.match(card, /\| Overhead Pendulum caused \| Stages \| Cost \|\n\| :-- \| --: \| --: \|\n\| Rebases after other PRs merged \(conflict\) \| 1 \| \$1\.20 \|\n\| Catch-up runs after a workflow changed on the default branch \| 1 \| \$0\.20 \|\n\| Reviews run again only to judge answers \| 1 \| \$0\.25 \|\n\| Runs repeated after a Block \| 1 \| \$0\.50 \+ unknown \|\n/);
+  // The cost chart: one amber series, each bar a recorded figure with its dollars in its label; the unknown is not drawn.
+  assert.match(card, /xychart-beta horizontal\n {4}title "Recorded cost \(USD\)"\n {4}x-axis \["Part 1: work \$2\.50", [^\n]*"Overhead: after a Block \$0\.50 \+ unknown"\]\n {4}y-axis "USD" 0 --> 5\n {4}bar \[2\.50, 0\.70, 0\.30, 0\.50, 2\.00, 0\.80, 0\.40, 0\.10, 1\.20, 0\.20, 0\.25, 0\.50\]/);
+  assert.match(card, /^Bars show recorded dollars only; 1 AI run of unknown cost is not drawn\. CI minutes are not included\.$/m);
+  assert.doesNotMatch(card, /pie showData|<img|<h3/, "no pie, no image, no centred heading");
+  // The Blocked notice after review 4, until the next stage: time on hold, grey in the timeline and a row of the table.
+  assert.match(card, /section On hold\n {4}10m 00s :done, 2026-11-16T12:20:00, 2026-11-16T12:30:00/);
+  assert.match(card, /\| 12:20 PM \| On hold · waiting for you \| 10 min \| — \|/);
+  assert.match(card, /^Blocked once: 10 min on hold, waiting for you\.$/m);
   assert.doesNotMatch(card, /100\.00/, "a stranger's paste counts nothing");
-  assert.match(card, /\| Rebase \| 8 min \| \$1\.20 \|/, "the stage table still shows each stage");
+  assert.match(card, /\| 11:50 AM \| Rebase \| 8 min \| \$1\.20 \|/, "the stage table still shows each stage");
+  assert.match(card, /section Review 1\n[^\n]*\n {4}section Part 2\n[^\n]*\n {4}section Review 2\n/, "a repeated section name is numbered");
 });
 
 /**
@@ -244,11 +253,11 @@ test("finish card, posted for real (#539): a Copilot stage with a spend line tak
   const copilot = await actionsCard("copilot", null);
   assert.deepEqual(copilot.downloads.map((a) => [a[2], a[4]]), [["4401", "pendulum-usage-9"], ["4402", "pendulum-usage-9-review"]], "each stage's own run's artifact, once");
   assert.equal(copilot.artifactReads.length, 2);
-  assert.match(copilot.card, /\| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/, "the model from the record, the dollars from the spend lines");
+  assert.match(copilot.card, /\| 10:05 AM \| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/, "the model from the record, the dollars from the spend lines");
   assert.doesNotMatch(copilot.card, /\$7/, "the record's dollars are never counted beside the line's");
   const claude = await actionsCard("claude", "claude-opus-5-5");
   assert.deepEqual([claude.artifactReads, claude.downloads], [[], []], "a harness line that names its model: nothing more is read");
-  assert.match(claude.card, /\| Build · Opus 5\.5 \| 15 min \| \$0\.40 \|\n\| Review · Opus 5\.5 \| 5 min \| \$0\.20 \|/);
+  assert.match(claude.card, /\| 10:05 AM \| Build · Opus 5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · Opus 5\.5 \| 5 min \| \$0\.20 \|/);
 });
 
 test("finish card, posted for real (#543): a Copilot stage whose ledger line names its model reads no usage artifact; its dollars stay the spend line's", async () => {
@@ -260,11 +269,11 @@ test("finish card, posted for real (#543): a Copilot stage whose ledger line nam
   };
   const ledgered = await actionsCard("copilot", null, { ledger: { work: lineOf("4401", 0.4), review: lineOf("4402", 0.2) } });
   assert.deepEqual([ledgered.artifactReads, ledgered.downloads], [[], []], "the ledger lines name the model: nothing more is read");
-  assert.match(ledgered.card, /\| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
+  assert.match(ledgered.card, /\| 10:05 AM \| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
   // A ledger line that did not fit names no model: that stage's own run's artifact is read for it, as before.
   const cut = await actionsCard("copilot", null, { ledger: { work: lineOf("4401", 0.4), review: 'Per-pass ledger: 80 passes, over the 6000-character bound of its line; the stage\'s usage record holds it.\n<!-- pendulum:ledger {"cut":80} -->' } });
   assert.deepEqual(cut.downloads.map((a) => [a[2], a[4]]), [["4402", "pendulum-usage-9-review"]]);
-  assert.match(cut.card, /\| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
+  assert.match(cut.card, /\| 10:05 AM \| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| 10:25 AM \| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
 });
 
 test("finish card: a stage whose kinds do not fit inside its own figure stays whole in its stage; a Blocked notice or an answer-rounds record names no churn, only a stage's own record does; a plain run shows no breakdown", () => {
@@ -289,7 +298,7 @@ test("finish card: a stage whose kinds do not fit inside its own figure stays wh
     // cost cannot be split, so it stays a review.
     const judged = card([progress(3, "review", "1", at("10:15"), at("10:20"), { usd: 0, usdUnknown: 1, judgeOnly: true }), progress(3, "review", "2", at("10:25"), at("10:30"), { usd: 0, usdUnknown: 1, usdByPass: { answer: { usd: 0, usdUnknown: 1 } }, judgeOnly: true })]);
     const b = spendBreakdown(judged);
-    assert.deepEqual(b.churn.map((r) => [r.name, r.stages, r.usd, r.unknown]), [["Reviews run again only to judge answers already made", 1, null, 1]]);
+    assert.deepEqual(b.churn.map((r) => [r.name, r.stages, r.usd, r.unknown]), [["Reviews run again only to judge answers", 1, null, 1]]);
     assert.deepEqual(b.asked.map((r) => [r.name, r.usd, r.unknown]), [["Review", null, 1]]);
   } finally {
     setSelf(null);
@@ -510,7 +519,7 @@ test("max_objective_usd: unset or 0 is no cap and reads nothing; a variable's va
 test("#565 W7: a stage's decision dollars are a row of their own in the card's breakdown, out of its work", () => {
   const stage = { kind: "work", part: 1, usd: 1.25, unknown: 1, byBilling: { subscription: 1.2, api: 0.05 }, byPass: passRead({ work: { usd: 1.2, usdByBilling: { subscription: 1.2 } }, decision: { usd: 0.05, usdUnknown: 1, usdByBilling: { api: 0.05 } } }), churn: [] };
   const b = spendBreakdown({ stages: [stage], prs: [{ number: 1 }], sandbox: null });
-  assert.deepEqual(b.asked.map((r) => [r.name, r.usd, r.unknown]), [["Work", 1.2, 0], ["Decision calls", 0.05, 1]]);
+  assert.deepEqual(b.asked.map((r) => [r.name, r.usd, r.unknown]), [["Work", 1.2, 0], ["AI judge calls", 0.05, 1]]);
 });
 
 test("#565 W5: a stage that ran no pass of a kind records it, in result.json and its spend line, so it is no review round; one that ran one does not", () => {

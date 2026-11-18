@@ -152,7 +152,7 @@ It asks whether to start it now (it adds the `pendulum:objective` label), save i
 - The reviewer comments on the PR, and the coding agent answers each comment.
 - With the first-run preset, the PR is marked ready for review. Read it and merge it yourself.
 
-Runs take from a few minutes to a few hours. When it merges, a finish card on the issue sums up the time, cost and who did what; the plan comment, the progress comment, the PR's body and the review show the detail ([What it records](#what-it-records)). If the issue comes back Blocked or with a Question instead, see [When it needs you](#when-it-needs-you).
+Runs take from a few minutes to a few hours. When its run ends, a finish card on the issue sums up the time, cost and who did what; the plan comment, the progress comment, the PR's body and the review show the detail ([What it records](#what-it-records)). If the issue comes back Blocked or with a Question instead, see [When it needs you](#when-it-needs-you).
 
 **Why the issue has this shape:** the worker reads the issue as the whole specification. The Goal says what should change; each Acceptance entry is something a reviewer can check, and the reviewer judges every one, met or not; the Context records what you have already decided. Your tests then confirm the behaviour on the PR.
 
@@ -186,7 +186,7 @@ Pendulum acts only on issues written by people who can push to the repository, o
 
 Every Objective leaves a written trail on GitHub, so you can see how Pendulum ran it without opening a log.
 
-**When an Objective merges, Pendulum posts a finish card on its issue:** one comment that sums up the run. It has a headline with the time to merge and the cost, status, wall-clock and cost badges, a sentence on what you did and what Pendulum did (commits, lines and files changed, checks passed, review findings), a timeline of the stages, a cost table by stage and model with a chart, where the dollars went (including any rework Pendulum caused, shown apart), and the full run log folded away. Every figure comes from GitHub or Pendulum's own records; anything it has no record of shows as unknown, never as an estimate. On GitHub Actions and the cloud sandbox, the merged PR's body gets the same headline and badges at its top. An Objective that ends Blocked or with a Question gets no card ([The finish card](docs/USAGE.md#the-finish-card)).
+**When an Objective's run ends, Pendulum posts a finish card on its issue:** one comment that sums up the run, merged, Blocked, on a Question or closed without merging, written in place as the run ends again. It is text only: a headline with how it ended, the time and the cost, what the dollars are, what to do for a Blocked or Question end, a sentence on what you did and what Pendulum did (commits, lines and files changed, CI checks passed, review findings), a timeline of the stages with the time on hold, a stage table with the timeline's figures, where the money went with a bar chart (any overhead Pendulum caused shown apart), and Run details with the full run log. Every figure comes from GitHub or Pendulum's own records; anything it has no record of shows as unknown, never as an estimate. On GitHub Actions and the cloud sandbox, the merged PR's body gets the card's headline at its top ([The finish card](docs/USAGE.md#the-finish-card)).
 
 Along the way, and for every Objective however it ends:
 

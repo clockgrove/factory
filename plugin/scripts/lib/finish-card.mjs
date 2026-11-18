@@ -1,9 +1,14 @@
-// The finish card (#498): when an Objective merges, one comment on its issue says what happened, how long it took, what
-// it cost and who did what, built only from what GitHub and Pendulum's own records hold. Three parts:
-//   finishData      the card's figures from GitHub's answers (pure: the issue's timeline and comments, the merged PRs
-//                   with their timelines, reviews and review comments, the gate's check runs, the usage records);
-//   renderFinishCard / finishBlock   the card's markdown, and the headline with its badges for the PR body (pure);
-//   postFinishCard  the reads and writes, once per Objective (the `finish` marker), from the dispatcher's Done pass.
+// The finish card (#498, #589): when an Objective's run ends (merged, Blocked, on a Question, closed without merging), one
+// comment on its issue says what happened, how long it took, what it cost and who did what, built only from what GitHub
+// and Pendulum's own records hold. Text only (no image): a two-line headline block, the action lines of a Blocked or
+// Question end, the timeline (a Mermaid gantt) with the stage table that holds its figures, where the money went (a
+// one-colour bar chart beside its tables), and Run details. Three parts:
+//   finishData      the card's figures from GitHub's answers (pure: the issue's timeline and comments, the PRs with their
+//                   timelines, reviews and review comments, the gate's check runs, the usage records, an end other than a
+//                   merge);
+//   renderFinishCard / finishBlock   the card's markdown, and its headline block for the merged PR's body (pure);
+//   postFinishCard  the reads and writes: one card per Objective (the `finish` marker), written in place as its run ends
+//                   again, from the dispatcher's Done pass and a stage's own Blocked or Question end (endCard).
 // A figure Pendulum has no record of is left out or shown as unknown, never estimated (usage.mjs UNKNOWN_WHY). Every
 // marker the card reads is trusted only from Pendulum itself (pendulumOwn: its login here, or its App by id). A stage
 // comment by someone else who can push counts as a run of unknown cost, never its dollars; anyone else's counts nothing.
@@ -15,8 +20,13 @@ import { clockText, objectiveZone, timeZone, zoneDay, zoneOffsetMs } from "./clo
 import { stageHarnessOf } from "./cost-join.mjs";
 import { addTokens, isAnswer, isFix, stagePassFigures, zeroTokens } from "./pass-figures.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
-import { RUNNING_LABEL, STATE_LABELS, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
+import { RUNNING_LABEL, STATE_LABELS, blockCauseOf, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
+import { sanitize } from "./handoff.mjs";
+import { BASIS, BASIS_NOTE, COLORS, basisText, billingBasis, billingWords, causeSentences, cellCost, centsOf, costChart, costText, durationText, ganttChart, kindsOf, many, modelId, modelName, plainText, tableCell } from "./card-kit.mjs";
+
+// The shared look's helpers this module has always exported (card-kit.mjs holds them now).
+export { COLORS, billingBasis, billingWords, centsOf, costText, durationText, modelName };
 import { PREVIOUS_NAME } from "./local.mjs";
 import { BILLING, BILLING_WORDS, PASS_KEYS, UNKNOWN_WHY, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
 
@@ -28,11 +38,6 @@ const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 
 // GitHub stamps its timeline to the second: the merge queue's own removal of the PR it merges can carry the second before.
 const SECOND = 1000;
 
-/** The Pendulum mark the card shows, from the repository's own brand assets. */
-export const MARK_URL = "https://raw.githubusercontent.com/clockgrove/pendulum/main/assets/brand/pendulum/web/mark-240.png";
-
-/** The brand colours of the badges and charts. */
-export const COLORS = Object.freeze({ amber: "c9822e", brown: "7a4a24", green: "4a7a3a", slate: "2b4a5f", ink: "b06f22" });
 
 /**
  * The Objective's clock, as the scorecard starts it (bench/lib/objective.mjs reads it from here): its first
@@ -81,12 +86,13 @@ export const throughApp = (c) => {
   return !!app && app.slug !== "github-actions" && typeof app.slug === "string" && c.user?.login === `${app.slug}[bot]`;
 };
 
-/** Whether a closed Objective gets a finish card by its labels: none that ended Blocked or on a Question. */
-export const cardable = (labels) => !labels.some((n) => STATE_LABELS[n] === "Blocked" || STATE_LABELS[n] === "Question");
+/**
+ * Whether a closed Objective gets a finish card by its labels (#589): every Objective Pendulum ran (a state label still on
+ * it at its close) gets one, merged or not, Blocked or on a Question when it closed.
+ */
+export const cardable = (labels) => labels.some((n) => STATE_LABELS[n] !== undefined);
 
 const HARNESS_LINE = /^<!-- pendulum:harness (\{[^\n]*\}) -->$/m;
-/** A model id as the card may print it: model-id characters only, else null. */
-const modelId = (v) => (typeof v === "string" && /^[A-Za-z0-9._:/-]{1,80}$/.test(v) ? v : null);
 /** The stage's own model from its progress comment's harness line (logic.mjs harnessMarker), or null. */
 function stageModel(body) {
   const m = HARNESS_LINE.exec(body || "");
@@ -337,8 +343,47 @@ export function markChurn(stages) {
   return stages;
 }
 
+/** The ends other than a merge a card is posted for (#589): Blocked, a Question, closed without merging. */
+export const ENDS = Object.freeze(["blocked", "question", "closed"]);
+
+/** When a notice of Pendulum's was last written (its latest write: a repeated Block edits its notice in place). */
+const noticeAt = (c) => (c.updated_at && ms(c.updated_at) >= ms(c.created_at) ? c.updated_at : c.created_at);
+
 /**
- * The card's figures, from GitHub's answers (pure). Null when no PR of the Objective merged.
+ * The run's Blocked and Question notices of Pendulum's own (`own`, in the run) and the time on hold after each (#589), from
+ * their markers and times alone: a notice (session.mjs applyExit: `<!-- pendulum:<n>:blocked:… -->`, logic.mjs
+ * questionMarker) marks the stage whose span holds it as ended that way (`stage.outcome`), and the hold runs from the
+ * notice to the next stage's start. A notice no later stage follows has no recorded end: no hold. Notices inside a hold
+ * already counted add none. Returns [{kind, start, end}], oldest first.
+ */
+/**
+ * What a hold waited on, from its notice's structure alone: a Question waits for you; a Block by its cause line (logic.mjs
+ * blockMarker): an outage, a provider's usage limit or quota, or you for a cause a person fixes (the work, a setup gap,
+ * Pendulum itself). A notice with no cause line, or one of a cap or budget, names none.
+ */
+function holdCause(x) {
+  if (x.kind === "question") return "you";
+  return { outage: "an outage", "provider-quota": "a usage limit", work: "you", setup: "you", pendulum: "you" }[x.cause] ?? null;
+}
+
+function holdsOf(n, own, stages) {
+  const kindOf = (body) => (new RegExp(`^<!-- pendulum:${n}:blocked:[^\\n]* -->`).test(body) ? "blocked" : new RegExp(`^<!-- pendulum:${n}:question:\\S*:(issue|pr) -->`).test(body) ? "question" : null);
+  const notices = own.map((c) => ({ kind: kindOf(c.body || ""), at: noticeAt(c), cause: blockCauseOf(c.body) })).filter((x) => x.kind).sort((a, b) => ms(a.at) - ms(b.at));
+  const timed = stages.filter((s) => s.start);
+  const holds = [];
+  for (const x of notices) {
+    const stage = timed.findLast((s) => ms(s.start) <= ms(x.at) && ms(x.at) <= ms(s.end));
+    if (stage) stage.outcome = x.kind;
+    if (holds.some((h) => ms(h.start) <= ms(x.at) && ms(x.at) < ms(h.end))) continue;
+    const next = timed.find((s) => ms(s.start) > ms(x.at));
+    if (next) holds.push({ kind: x.kind, start: x.at, end: next.start, ...(holdCause(x) ? { cause: holdCause(x) } : {}) });
+  }
+  return holds;
+}
+
+/**
+ * The card's figures, from GitHub's answers (pure). Null when no PR of the Objective merged and no other end (`end`) is
+ * given.
  *  issue        {number, user}
  *  timeline     the issue's timeline events (its label events)
  *  comments     the issue's comments: the plan, each stage's progress comment (logic.mjs progress marker, its harness and
@@ -350,21 +395,32 @@ export function markChurn(stages) {
  *  records      the stages' usage records (session.mjs writeUsage: the Actions artifacts), each naming its progress
  *               comment's key (`progressRun`)
  *  mine         whose comments, reviews and PRs are Pendulum's (pendulumOwn; logic.mjs isSelf by default)
+ *  end          an end other than a merge (#589): {kind (ENDS), at (when: the Blocked or Question notice, the close),
+ *               reason, form (a Question's: issue or pr)}; read only when no PR merged. `pulls` then holds the newest PR on
+ *               the Objective's branch, whatever its state, if it has one
  *  pushed       whose comments are by someone who can push (logic.mjs pushAuthor) or came through a GitHub App other than
  *               Actions (throughApp): a progress or vendor comment of theirs that is not Pendulum's is a stage of unknown
  *               cost (its time shown, never its figures)
  */
-export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf, pushed = (c) => pushAuthor(c) || throughApp(c) }) {
+export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf, pushed = (c) => pushAuthor(c) || throughApp(c), end = null }) {
   const n = issue.number;
-  const merged = pulls.filter((p) => p?.pr?.merged_at).sort((a, b) => ms(a.pr.merged_at) - ms(b.pr.merged_at));
-  if (!merged.length) return null;
-  const last = merged.at(-1).pr;
-  const mergedAt = last.merged_at;
+  // An end other than a merge (#589: Blocked, a Question, closed without merging) is the caller's, at its recorded time,
+  // and wins: a split Objective's earlier part, merged before this run's Block, is no merge of this run.
+  const other = end && ENDS.includes(end.kind) && Number.isFinite(ms(end.at)) ? end : null;
+  const merged = pulls.filter((p) => p?.pr?.merged_at && (!other || ms(p.pr.merged_at) <= ms(other.at))).sort((a, b) => ms(a.pr.merged_at) - ms(b.pr.merged_at));
+  if (!merged.length && !other) return null;
+  const mergedAt = other ? null : merged.at(-1).pr.merged_at;
+  const endAt = mergedAt ?? new Date(ms(other.at)).toISOString();
+  // The PRs the card names: the merged ones, then, at another end, the newest unmerged one the caller read on the
+  // Objective's branch (open, a draft, or closed unmerged).
+  const open = other ? pulls.filter((p) => p?.pr?.number && !p.pr.merged_at).slice(-1) : [];
+  const shown = [...merged, ...open];
   // The clock: the first label at or after the run's last start over (a restart or a reopen), max_objective_usd's window too.
-  const started = labelTime(issue, timeline, label, objectiveWindow(comments.filter((c) => mine(c)), timeline)) ?? merged[0].pr.created_at;
-  const inRun = (at) => ms(at) >= ms(started) && ms(at) <= ms(mergedAt);
+  const started = labelTime(issue, timeline, label, objectiveWindow(comments.filter((c) => mine(c)), timeline)) ?? shown[0]?.pr.created_at ?? endAt;
+  const inRun = (at) => ms(at) >= ms(started) && ms(at) <= ms(endAt);
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
   // Which merged part a stage worked on: the parts merged before it started (a split Objective's PRs merge in order).
+  // Unmerged, every stage is the first part's.
   const partOf = (at) => merged.filter((p) => ms(p.pr.merged_at) < ms(at)).length + 1;
   const { stages, sandbox, foreignVendors } = objectiveStages({ issue: n, comments, records, mine, pushed, inRun, partOf });
   // Each stage's name, in time order, from recorded fields only: a review; a send-back's rebase (its rebase line); the
@@ -403,7 +459,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
   // out in a review body (logic.mjs bodyFindings; a cut tail counts what it stands for).
   const reviews = [];
   let findings = 0;
-  for (const { reviews: rs = [], reviewComments = [] } of merged) {
+  for (const { reviews: rs = [], reviewComments = [] } of shown) {
     const ours = (rs || []).filter((r) => mine(r) && (r.body || "").includes(marker(n, "review")));
     const ids = new Set(ours.map((r) => r.id));
     for (const r of ours) {
@@ -415,15 +471,28 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
 
   // Who filed the issue, and who applied the label that started the clock (its latest application by then).
   const labelled = (timeline || []).filter((e) => e.event === "labeled" && e.label?.name === label && ms(e.created_at) <= ms(started)).sort((a, b) => ms(a.created_at) - ms(b.created_at)).at(-1);
-  const sum = (k) => merged.reduce((s, p) => s + (Number.isInteger(p.pr[k]) ? p.pr[k] : 0), 0);
+  const sum = (k) => shown.reduce((s, p) => s + (Number.isInteger(p.pr[k]) ? p.pr[k] : 0), 0);
+  const holds = holdsOf(n, own.filter((c) => inRun(noticeAt(c))), stages);
+  const closer = (timeline || []).filter((e) => e.event === "closed").sort((a, b) => ms(a.created_at) - ms(b.created_at)).at(-1)?.actor?.login;
   return {
     repo,
     issue: n,
     author: login(issue.user?.login),
     labeller: login(labelled?.actor?.login),
-    prs: merged.map((p) => ({ number: p.pr.number, url: p.pr.html_url ?? `https://github.com/${repo}/pull/${p.pr.number}`, opened: p.pr.created_at, merged: p.pr.merged_at, ours: mine(p.pr) })),
+    prs: shown.map((p) => ({ number: p.pr.number, url: p.pr.html_url ?? `https://github.com/${repo}/pull/${p.pr.number}`, opened: p.pr.created_at, merged: p.pr.merged_at ?? null, ours: mine(p.pr), draft: p.pr.draft === true, open: p.pr.state === "open" && !p.pr.merged_at })),
     started,
     merged: mergedAt,
+    // How the run ended (ENDS, `merged` for a merge) and when; a Blocked or Question end's reason, and a Question's form
+    // (logic.mjs questionForm) and the PR it asks on.
+    end: other ? other.kind : "merged",
+    ended: endAt,
+    reason: other?.reason ? String(other.reason) : null,
+    form: other?.form === "pr" || other?.form === "issue" ? other.form : null,
+    // A Block's way on (session.mjs nextStep's code: resume, work, restart, none), when the caller knows it.
+    next: ["resume", "work", "restart", "none"].includes(other?.next) ? other.next : null,
+    closer: login(closer),
+    // Pendulum's Blocked and Question notices in the run, and the time on hold after each until the next stage started.
+    holds,
     planned: own.some((c) => (c.body || "").startsWith(marker(n, "plan")) && inRun(c.created_at)),
     // The scorer's start of the clock: the first label with no restart window (labelTime), null with no label event.
     labelled: labelTime(issue, timeline, label),
@@ -433,7 +502,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     additions: sum("additions"),
     deletions: sum("deletions"),
     files: sum("changed_files"),
-    checks: gateChecks(checks, mergedAt, required),
+    checks: mergedAt ? gateChecks(checks, mergedAt, required) : null,
     reviews: reviews.length ? { count: reviews.length, findings, last: reviews.sort((a, b) => ms(a) - ms(b)).at(-1) } : null,
     stages,
     queue,
@@ -446,38 +515,8 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
 
 // ------------------------------------------------------------------ words
 
-const pad = (v) => String(v).padStart(2, "0");
-/** A duration as the card's prose and table say it: "59 s", "3 min 55 s", "2 h 5 min", "1 d 3 h". */
-export function durationText(d) {
-  const s = Math.max(0, Math.round(d / 1000));
-  if (s < 60) return `${s} s`;
-  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h${Math.floor((s % 3600) / 60) ? ` ${Math.floor((s % 3600) / 60)} min` : ""}`;
-  return `${Math.floor(s / 86400)} d${Math.floor((s % 86400) / 3600) ? ` ${Math.floor((s % 86400) / 3600)} h` : ""}`;
-}
-/** The same, short, for a badge: "59s", "3m 55s", "2h 05m", "1d 3h". */
-const durationShort = (d) => {
-  const s = Math.max(0, Math.round(d / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ${pad(s % 60)}s`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ${pad(Math.floor((s % 3600) / 60))}m`;
-  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
-};
-const cents = (n) => `$${(n / 100).toFixed(2)}`;
-const dollars = (usd) => cents(Math.round(usd * 100));
-/** Known dollars and runs of unknown cost as a figure: "$0.52", "unknown", "$0.52 + unknown". */
-export const costText = (usd, unknown) => (unknown > 0 ? (usd > 0 ? `${dollars(usd)} + unknown` : "unknown") : dollars(usd ?? 0));
 
-/** A model id as people say it: claude-opus-5-5 is Opus 5.5; any other id as it is. */
-export function modelName(id) {
-  const m = /^claude-([a-z]+)-(\d+)-(\d+)(?:-\d{8})?$/.exec(String(id || ""));
-  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}` : modelId(id);
-}
 
-/** A stage's name in the table, the chart and the log. */
-const stageName = (s, planned) => ({ build: planned ? "Plan + build" : "Build", part: `Part ${s.part}`, work: "Work", rebase: "Rebase", review: "Review" })[s.kind];
-/** The same, short, for a timeline row (Mermaid section names: short, so the stock themes' margin fits them). */
-const rowName = (s) => ({ build: "Build", part: `Part ${s.part}`, work: "Work", rebase: "Rebase", review: "Review" })[s.kind];
 
 /** The reason codes of the cloud sandbox's runs of unknown cost: `sandbox` for a stage's own, `unattributed` for the rest. */
 export function sandboxWhy(d) {
@@ -494,93 +533,100 @@ export function finishTotals(d) {
   // No stage found at all: the run's cost was not read, so it is unknown, never $0.
   const unknown = d.stages.reduce((s, x) => s + (x.unknown || 0), 0) + (d.sandbox?.unknown ?? 0) + (d.stages.length ? 0 : 1);
   const why = [...new Set([...d.stages.flatMap((x) => (x.unknown ? x.why ?? [] : [])), ...sandboxWhy(d), ...(d.stages.length ? [] : ["no-record"])])].sort();
-  return { wall: d.clockRenamed ? null : ms(d.merged) - ms(d.started), usd: Math.round(usd * 1e6) / 1e6, unknown, why, byBilling: addBilling(...d.stages.map((s) => s.byBilling)) };
+  return { wall: d.clockRenamed ? null : ms(d.ended ?? d.merged) - ms(d.started), usd: Math.round(usd * 1e6) / 1e6, unknown, why, byBilling: addBilling(...d.stages.map((s) => s.byBilling)) };
 }
 
-/**
- * Each cost row's known dollars in whole cents, so the rows and the chart add up to the total's cents: each row rounded
- * down, and the cents left given to the rows with the largest remainders (`rows`: dollar figures; null stays null).
- */
-export function centsOf(rows) {
-  const known = rows.map((usd, i) => [i, usd]).filter(([, usd]) => usd !== null && usd > 0);
-  const out = rows.map((usd) => (usd === null ? null : 0));
-  const want = Math.round(known.reduce((s, [, usd]) => s + usd, 0) * 100);
-  for (const [i, usd] of known) out[i] = Math.floor(usd * 100 + 1e-9);
-  let left = want - known.reduce((s, [i]) => s + out[i], 0);
-  for (const [i] of [...known].sort((a, b) => (b[1] * 100 - Math.floor(b[1] * 100 + 1e-9)) - (a[1] * 100 - Math.floor(a[1] * 100 + 1e-9)) || a[0] - b[0])) {
-    if (left <= 0) break;
-    out[i] += 1;
-    left -= 1;
-  }
-  return out;
-}
-
-/**
- * What a figure's dollars are, from its dollars by billing (usage.mjs BILLING, read through billingRead): the kinds that
- * hold at least half a cent of it, "" standing for dollars no record names a billing for (a sandbox vendor's).
- */
-function kindsOf(usd, byBilling) {
-  const map = billingRead(byBilling);
-  const out = Object.keys(map).filter((k) => map[k] >= 0.005);
-  const unnamed = typeof usd === "number" ? usd - Object.values(map).reduce((s, n) => s + n, 0) : 0;
-  if (out.length && unnamed >= 0.005) out.push("");
-  return out;
-}
-
-/** The card's short words for a kind other than billed API spend; `unknown` is no billing, so it says none was recorded. */
-const SHORT = { subscription: "API-equivalent", credits: "Copilot AI credits", unknown: "billing not recorded" };
-
-/**
- * The words after a dollar figure: none for billed API spend or when nothing names a billing; for one other kind
- * " API-equivalent", " in Copilot AI credits" or " (billing not recorded)"; for a mix the kinds other than billed spend,
- * " (part API-equivalent, part billing not recorded)". The table spells each stage out.
- */
-export function billingWords(usd, byBilling) {
-  const kinds = kindsOf(usd, byBilling);
-  const odd = kinds.filter((k) => k && k !== "api" && SHORT[k]);
-  if (!odd.length) return "";
-  if (kinds.length === 1) return { subscription: " API-equivalent", credits: " in Copilot AI credits", unknown: " (billing not recorded)" }[odd[0]];
-  return ` (part ${odd.map((k) => SHORT[k]).join(", part ")})`;
-}
-
-/** The cost as the headline says it, with what the dollars are (billingWords). */
-function headlineCost({ usd, unknown, byBilling }) {
-  if (unknown > 0 && !(usd > 0)) return "; its cost is unknown";
-  return ` for ${dollars(usd)}${billingWords(usd, byBilling)}${unknown > 0 ? " plus spend that was not reported" : ""}`;
-}
-
-/** The headline: time to merge and the cost. */
-export function headline(d) {
-  const t = finishTotals(d);
-  return `Merged${t.wall === null ? "" : ` in ${durationText(t.wall)}`}${headlineCost(t)}.${t.wall === null ? ` ${RENAMED_CLOCK_WHY[0].toUpperCase()}${RENAMED_CLOCK_WHY.slice(1)}.` : ""}`;
-}
-
-/** A shields.io static badge, for-the-badge style: its label and message escaped as shields.io reads them. */
-export function badge(label, message, color) {
-  const part = (s) => encodeURIComponent(String(s).replace(/-/g, "--").replace(/_/g, "__").replace(/ /g, "_"));
-  return `<img alt="${label}: ${message}" src="https://img.shields.io/badge/${part(label)}-${part(message)}-${color}?style=for-the-badge">`;
-}
-
-/**
- * The cost badge's label: what its dollars are when they are all of one kind other than billed API spend and that kind
- * is a billing (an API-equivalent figure, Copilot AI credits); "cost" otherwise (billed, not recorded, or a mix, which the
- * headline and table spell out).
- */
-function costLabel(t) {
-  const kinds = kindsOf(t.usd, t.byBilling);
-  return kinds.length === 1 && (kinds[0] === "subscription" || kinds[0] === "credits") ? SHORT[kinds[0]] : "cost";
-}
-
-/** The badges: status, wall clock and cost. */
-export function badges(d) {
-  const t = finishTotals(d);
-  return [badge("status", "merged", COLORS.green), badge("wall clock", t.wall === null ? "not known" : durationShort(t.wall), COLORS.brown), badge(costLabel(t), costText(t.usd, t.unknown), COLORS.amber)];
-}
-
-const many = (n, one, more = `${one}s`) => `${n} ${n === 1 ? one : more}`;
 /** The zone the card's times are written in (clock.mjs timeZone): the Objective's own, else the repository's, else the default. */
 const zoneOf = (d) => timeZone(process.env, { objective: d.zone ?? null }).zone;
 const prList = (prs) => (prs.length === 1 ? `PR #${prs[0].number}` : `PRs ${prs.map((p) => `#${p.number}`).join(", ")}`);
+/** Whether the Objective's clock and its end fall on different days in the card's zone (the times then carry their dates). */
+const spansDays = (d) => zoneDay(ms(d.started), zoneOf(d)) !== zoneDay(ms(d.ended), zoneOf(d));
+/** The zone's short name, as the card's times carry it once: "PST", "GMT+1". */
+const zoneName = (d) => clockText(ms(d.ended), { zone: zoneOf(d) }).split(" ").at(-1);
+/** A time as the card writes it: in its zone, the date when the run crosses midnight, the zone's name with `abbr`. */
+const atOf = (d, t, { abbr = false } = {}) => clockText(ms(t), { zone: zoneOf(d), date: spansDays(d), abbr });
+const CHECK = () => "CI check";
+const once = (n, word) => (n === 1 ? `${word} once` : n === 2 ? `${word} twice` : `${word} ${n} times`);
+
+/** The headline's figure: the known dollars and runs of unknown cost ("$3.67 + unknown", "unknown"), "so far" when not final. */
+function headlineMoney(d, t) {
+  const figure = t.usd === 0 && t.unknown > 0 ? "unknown" : cellCost(t.usd, t.unknown);
+  return `${figure}${d.end === "blocked" || d.end === "question" ? " so far" : ""}`;
+}
+
+/** The headline (`### …`): the end, how long, what it cost. */
+export function headline(d) {
+  const t = finishTotals(d);
+  const how = t.wall === null ? "" : ` ${d.end === "merged" ? "in" : "after"} ${durationText(t.wall)}`;
+  const what = { merged: "✅ Merged", closed: "⏹️ Closed without merging", blocked: "⛔ Blocked", question: "❓ Question" }[d.end];
+  return `### ${what}${how} · ${headlineMoney(d, t)}`;
+}
+
+/**
+ * The headline's second line: the issue and its PRs, how and when it ended (the run's span when it crosses midnight),
+ * what the dollars are, and its runs of unknown cost.
+ */
+export function subline(d) {
+  const t = finishTotals(d);
+  const prs = d.prs.length ? prList(d.prs) : null;
+  const parts = [];
+  if (d.end === "merged") {
+    parts.push(`Issue #${d.issue} → ${prs}`);
+    const how = d.queue.some((q) => q.merged) ? "merged through your merge queue" : "merged";
+    parts.push(spansDays(d) ? `${atOf(d, d.started)} – ${atOf(d, d.ended, { abbr: true })}` : `${how} at ${atOf(d, d.ended, { abbr: true })}`);
+  } else {
+    // The run's own PR: the newest unmerged one (a split Objective's earlier parts merged before it).
+    const pr = d.prs.findLast((p) => !p.merged) ?? null;
+    parts.push(`Issue #${d.issue}`);
+    if (pr) parts.push(d.end === "closed" ? (pr.open ? `PR #${pr.number} still open` : `PR #${pr.number} closed, not merged`) : pr.draft ? `PR #${pr.number} is a draft` : `PR #${pr.number} is open`);
+    const at = atOf(d, d.ended, { abbr: true });
+    parts.push({ closed: `closed at ${at}`, blocked: `Blocked at ${at}`, question: `Question asked at ${at}` }[d.end]);
+  }
+  const basis = t.usd > 0 ? basisText(t.usd, t.byBilling) || BASIS.unknown : "";
+  if (basis) parts.push(basis);
+  if (t.unknown) parts.push(`plus ${many(t.unknown, "AI run")} of unknown cost`);
+  if (t.wall === null) parts.push(`${RENAMED_CLOCK_WHY[0].toUpperCase()}${RENAMED_CLOCK_WHY.slice(1)}`);
+  return parts.join(" · ");
+}
+
+/** The headline's third line, when the run waited on a person: how long it was on hold, and why. */
+function holdLine(d) {
+  const holds = d.holds ?? [];
+  if (!holds.length) return null;
+  const held = holds.reduce((n, h) => n + (ms(h.end) - ms(h.start)), 0);
+  const blocked = holds.filter((h) => h.kind === "blocked").length;
+  const questions = holds.filter((h) => h.kind === "question").length;
+  if (holds.length === 1) return `${blocked ? "Blocked once" : "Asked a Question once"}: ${durationText(held)} on hold${holds[0].cause ? `, waiting for ${holds[0].cause}` : ""}.`;
+  const ran = d.stages.filter((s) => s.start).reduce((n, s) => n + (ms(s.end) - ms(s.start)), 0);
+  const why = [...(blocked ? [once(blocked, "Blocked")] : []), ...(questions ? [many(questions, "Question")] : [])].join(", ");
+  return `Stages ran for ${durationText(ran)} in all; ${durationText(held)} on hold (${why}).`;
+}
+
+/**
+ * Text the harness may have written, on one line of a card: sanitised as every harness text Pendulum publishes (handoff.mjs
+ * sanitize: no live mention, no closing keyword, no bot command), its line breaks folded to spaces, so nothing it holds
+ * starts a line of the card; at most `max` characters.
+ */
+const oneLine = (text, max = 300) => {
+  const one = plainText(sanitize(String(text ?? ""), { max: max * 2 })).replace(/\s+/g, " ").trim();
+  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+};
+
+/** The action lines of a Blocked or a Question card: what to do, then why. */
+function actionLines(d) {
+  const reason = String(d.reason ?? "").replace(/^question:\s*/i, "");
+  if (d.end === "blocked") {
+    // Its way on (session.mjs nextStep): one that no resume or restart gets past is said so; any other is fixed, then resumed.
+    const todo = d.next === "none" ? "a resume or a restart does not get past this; the Blocked notice on this issue says why." : "fix the cause below, then re-apply the `pendulum:objective` label. The Blocked notice on this issue has the full steps.";
+    return [`> **What to do:** ${todo}`, ">", `> **Why:** ${oneLine(reason.split(/(?<=[.!?])\s/)[0])}`];
+  }
+  if (d.end === "question") {
+    const pr = d.prs.findLast((p) => !p.merged);
+    const todo = d.form === "pr" && pr ? `answer in a comment on this issue or PR #${pr.number}, then mark PR #${pr.number} ready. Pendulum goes on from where it stopped.` : "answer the question in a comment on this issue. Pendulum goes on from where it stopped.";
+    return [`> **What to do:** ${todo}`, ">", `> **Question:** ${oneLine(reason)}`];
+  }
+  return [];
+}
 
 /** Who did what, and what Pendulum did, in plain sentences: only what the records say. */
 export function summary(d) {
@@ -588,90 +634,122 @@ export function summary(d) {
   const did = [];
   if (d.planned) did.push("planned the work");
   const change = `${many(d.commits, "commit")}, +${d.additions} −${d.deletions} across ${many(d.files, "file")}`;
-  const ours = d.prs.every((p) => p.ours);
+  const ours = d.prs.length > 0 && d.prs.every((p) => p.ours);
   if (ours) did.push(`opened ${prList(d.prs)} (**${change}**)`);
   if (d.checks) {
-    const what = many(d.checks.passed, d.checks.required ? "required check" : "check");
+    const what = many(d.checks.passed, CHECK(d.checks));
     const whose = d.prs.length > 1 ? `the last part's ` : "";
     did.push(`got ${whose}${d.checks.passed > 1 && !d.checks.failed ? "all " : ""}**${what}** green${d.checks.failed ? ` (${d.checks.failed} red)` : ""}`);
   }
   if (d.reviews) did.push(`had the change reviewed (${d.reviews.findings ? many(d.reviews.findings, "finding") : "no findings"})`);
-  const how = d.queue.some((q) => q.merged) ? "it merged through your merge queue" : "it merged";
-  const pendulum = did.length ? `Pendulum took it from there: it ${did.join(", ")}, and ${how}.` : `${how[0].toUpperCase()}${how.slice(1)}.`;
-  const theirs = ours ? "" : ` ${prList(d.prs)} ${d.prs.length === 1 ? "has" : "have"} **${change}**.`;
+  const list = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]);
+  const theirs = ours || !d.prs.length ? "" : ` ${prList(d.prs)} ${d.prs.length === 1 ? "has" : "have"} **${change}**.`;
+  let pendulum;
+  if (d.end === "merged") {
+    const how = d.queue.some((q) => q.merged) ? "it merged through your merge queue" : "it merged";
+    pendulum = did.length ? `Pendulum ${did.join(", ")}, and ${how}.` : `${how[0].toUpperCase()}${how.slice(1)}.`;
+  } else if (d.end === "closed") {
+    const who = d.closer && d.closer === d.author && d.author === d.labeller ? "you closed the issue" : d.closer ? `**${d.closer}** closed the issue` : "the issue was closed";
+    pendulum = did.length ? `Pendulum ${list(did)}; ${who} before it merged.` : `${who[0].toUpperCase()}${who.slice(1)} before it merged.`;
+  } else pendulum = `Pendulum ${did.length ? `${did.join(", ")}, and ` : ""}${d.end === "blocked" ? "is Blocked" : "asked a Question"}.`;
   return `${person ? `${person} ` : ""}${pendulum}${theirs}`;
 }
 
-/** The source line: where the times and dollars come from, and what the dollars are. */
-function sources(d, t) {
-  const unknownLine = !d.stages.length ? " Pendulum found no record of this run's stages, so its cost shows as unknown, not as a number." : t.unknown ? ` ${t.unknown === 1 ? "One run has" : `${t.unknown} runs have`} no reported cost, so ${t.unknown === 1 ? "it shows" : "they show"} as unknown, not as a number.` : "";
-  const kinds = t.usd > 0 ? kindsOf(t.usd, t.byBilling) : [];
-  const said = [];
-  if (kinds.length && kinds.every((k) => k === "api")) said.push("They are billed spend on your API key or AI Gateway key.");
-  if (kinds.includes("subscription")) said.push("An API-equivalent figure is what the usage would cost at API list prices, on your subscription; it is not billed.");
-  if (kinds.includes("credits")) said.push(`Copilot AI credits are ${BILLING_WORDS.credits.replace(/^Copilot AI credits, /, "")}.`);
-  // Not recorded: the `unknown` kind, dollars no record names, or no kind at all. "Some" only beside a recorded kind.
-  const recorded = kinds.some((k) => k && k !== "unknown");
-  if (t.usd > 0 && (!kinds.length || kinds.includes("unknown") || kinds.includes(""))) said.push(recorded ? "For some of these dollars Pendulum did not record how they were billed." : "Pendulum did not record how these dollars were billed.");
-  const what = ["These are the costs Pendulum recorded for this run.", ...said].join(" ");
-  return `${what}${unknownLine} Your CI minutes are not included. Times come from the issue, the PR and the run records.`;
-}
+// ------------------------------------------------------------------ timeline and stage table
 
-// ------------------------------------------------------------------ charts
+/** A stage's name in the table, the chart and the log, numbered (`n`) when its name repeats. */
+const stageName = (s, planned) => ({ build: planned ? "Plan + build" : "Build", part: `Part ${s.part}`, work: "Work", rebase: "Rebase", review: "Review" })[s.kind];
+/** The same, short, for a timeline row (Mermaid section names: short, so the stock themes' margin fits them). */
+const rowName = (s) => ({ build: "Build", part: `Part ${s.part}`, work: "Work", rebase: "Rebase", review: "Review" })[s.kind];
+/** A stage's result words in the table, when it ended Blocked or on a Question. */
+const OUTCOME = Object.freeze({ blocked: "⛔ Blocked", question: "❓ Question" });
 
 /**
- * The charts' colours. GitHub's web view applies a diagram's `init` in both colour modes; a viewer that ignores it (the
- * GitHub Mobile app in dark mode) draws with its own light or dark theme instead. So:
- * - every bar is an `active` task: the stock light and dark themes paint those blue with dark text, where a plain task is
- *   grey in the dark theme and a `done` one grey in both;
- * - with `init` applied, the bars are amber with dark text in them, and every text outside a bar (a label too long for
- *   its bar, the section names, the time axis) is a mid-tone ink, #b06f22, which reads at about 4:1 or better on white
- *   and on GitHub's dark background alike (`themeCSS` sets it on an active task's outside label, which the theme
- *   otherwise draws in the bar's dark text colour);
- * - the stage names are the section names, drawn in the theme's own title colour, so under a stock theme they read too;
- *   a bar's own label is only its duration, also in the table;
- * - the section bands are a faint amber wash, and the grid lines a mid grey (`themeCSS`: the axis draws them in its
- *   text colour otherwise), on either page.
- * `gantt.useWidth` draws the timeline at a phone-friendly width, so GitHub's scaling to the comment's width keeps its
- * text legible on a phone.
+ * The timeline's rows and the stage table's (pure), in time order: each stage with a recorded time, its name numbered
+ * when it repeats; each time on hold; the merge queue's entries. {kind (stage, hold, queue), name, start, end, stage}.
  */
-const INK = `#${COLORS.ink}`;
-const GANTT_THEME = {
-  theme: "base",
-  themeVariables: { fontSize: "16px", taskBkgColor: `#${COLORS.amber}`, taskBorderColor: `#${COLORS.brown}`, activeTaskBkgColor: `#${COLORS.amber}`, activeTaskBorderColor: `#${COLORS.brown}`, taskTextColor: "#1f1206", taskTextDarkColor: "#1f1206", taskTextLightColor: "#1f1206", taskTextOutsideColor: INK, taskTextClickableColor: INK, sectionBkgColor: "rgba(201,130,46,0.12)", altSectionBkgColor: "rgba(201,130,46,0.04)", sectionBkgColor2: "rgba(201,130,46,0.12)", titleColor: INK, textColor: INK, gridColor: "#8b949e", excludeBkgColor: "transparent" },
-  themeCSS: `text.taskTextOutsideRight, text.taskTextOutsideLeft { fill: ${INK} !important; } .grid .tick line { stroke: #8b949e; }`,
-  gantt: { useWidth: 440, barHeight: 24, barGap: 6, fontSize: 15, sectionFontSize: 15, leftPadding: 80 },
-};
-const PIE_THEME = { theme: "base", themeVariables: { pie1: `#${COLORS.amber}`, pie2: `#${COLORS.green}`, pie3: `#${COLORS.slate}`, pie4: `#${COLORS.brown}`, pie5: "#8b949e", pieStrokeColor: `#${COLORS.brown}`, pieOuterStrokeColor: `#${COLORS.brown}`, pieTitleTextColor: INK, pieSectionTextColor: "#ffffff", pieLegendTextColor: INK, pieSectionTextSize: "16px", pieOpacity: "1" } };
-const init = (theme) => `%%{init: ${JSON.stringify(theme)}}%%`;
-
-/** A tick interval that keeps the time axis to about five labels, so they never collide on a phone. */
-function tickFor(span) {
-  const steps = [["1minute", 6e4], ["2minute", 12e4], ["5minute", 3e5], ["10minute", 6e5], ["15minute", 9e5], ["30minute", 18e5], ["1hour", 36e5], ["2hour", 72e5], ["6hour", 216e5], ["12hour", 432e5], ["1day", 864e5], ["1week", 6048e5]];
-  return (steps.find(([, step]) => span / step <= 5) ?? steps.at(-1))[0];
-}
-
-const isoSecond = (t) => new Date(ms(t)).toISOString().slice(0, 19);
-/** Whether the Objective's clock and its merge fall on different days in the card's zone (the times then carry their dates). */
-const spansDays = (d) => zoneDay(ms(d.started), zoneOf(d)) !== zoneDay(ms(d.merged), zoneOf(d));
-
-/**
- * The timeline: one row per stage and per merge queue entry, in time order, on the card's zone's clock at the
- * Objective's start (one offset for the whole chart, so every bar keeps its length across a daylight-saving change).
- * Stages with no recorded time are left out.
- */
-function gantt(d) {
-  const span = ms(d.merged) - ms(d.started);
-  const shift = zoneOffsetMs(ms(d.started), zoneOf(d));
-  const rows = [...d.stages.filter((s) => s.start).map((s) => [rowName(s), s.start, s.end]), ...d.queue.map((q) => [q.merged ? "Queue" : "Dropped", q.start, q.end])].sort((a, b) => ms(a[1]) - ms(b[1]));
-  if (!rows.length) return null;
-  const lines = ["gantt", "    dateFormat YYYY-MM-DDTHH:mm:ss", `    axisFormat ${spansDays(d) ? "%b %d %H:%M" : "%H:%M"}`, `    tickInterval ${tickFor(span)}`, "    todayMarker off"];
-  for (const [name, s, e] of rows) {
-    const end = Math.max(ms(e), ms(s) + SECOND);
-    lines.push(`    section ${name}`, `    ${durationShort(end - ms(s))} :active, ${isoSecond(ms(s) + shift)}, ${isoSecond(end + shift)}`);
+function timelineRows(d) {
+  const rows = [...d.stages.filter((s) => s.start).map((s) => ({ kind: "stage", name: stageName(s, d.planned), short: rowName(s), start: s.start, end: s.end, stage: s })), ...(d.holds ?? []).map((h) => ({ kind: "hold", name: "On hold", short: "On hold", start: h.start, end: h.end, hold: h })), ...d.queue.map((q) => ({ kind: "queue", name: "Merge queue", short: q.merged ? "Queue" : "Dropped", start: q.start, end: q.end, queue: q }))].sort((a, b) => ms(a.start) - ms(b.start));
+  const count = new Map();
+  for (const r of rows) if (r.kind !== "queue") count.set(r.name, (count.get(r.name) ?? 0) + 1);
+  const seen = new Map();
+  for (const r of rows) {
+    if (r.kind === "queue" || count.get(r.name) < 2) continue;
+    seen.set(r.name, (seen.get(r.name) ?? 0) + 1);
+    r.name = `${r.name} ${seen.get(r.name)}`;
   }
-  return ["```mermaid", init(GANTT_THEME), ...lines, "```"].join("\n");
+  return rows;
 }
+
+/** The most stage rows the table shows before like stages fold, and the most timeline rows the chart draws. */
+export const TABLE_ROWS = 20;
+
+/** The timeline chart (card-kit.mjs ganttChart): stages amber, a Blocked or Question stage red with its word, time on hold grey. */
+function gantt(d, rows) {
+  const drawn = rows.filter((r) => r.start);
+  if (!drawn.length) return null;
+  if (drawn.length > TABLE_ROWS) return `Timeline chart left out: ${many(drawn.filter((r) => r.kind === "stage").length, "stage")}; the table has every figure.`;
+  return ganttChart(
+    drawn.map((r) => ({ section: r.short, bars: [{ start: ms(r.start), end: ms(r.end), tag: r.kind === "hold" ? "done" : r.stage?.outcome ? "crit" : "active", label: r.stage?.outcome ? { blocked: "Blocked", question: "Question" }[r.stage.outcome] : "" }] })),
+    { zone: zoneOf(d), days: spansDays(d) },
+  );
+}
+
+/** A stage row's cost cell: its cents and runs of unknown cost, "unknown" with no known figure. */
+const stageCost = (r) => (r.usd === null ? "unknown" : r.usd === 0 && !r.unknown ? "—" : cellCost(r.usd > 0 && !r.cents ? r.usd : (r.cents ?? 0) / 100, r.unknown));
+
+/**
+ * The stage table (`| Time | Stage | Took | Cost |`), the timeline's figures: each stage, each time on hold, the merge
+ * queue, the cloud sandbox, and the Total. Past TABLE_ROWS stage rows, consecutive stages of one kind, model and result
+ * fold into one row (`Review ×3 · Fable 5.2`), their times and dollars summed; `folded` says so (the per-stage list
+ * moves to Run details).
+ */
+function stageTable(d, t, rows, costs) {
+  const cost = new Map(d.stages.map((s, i) => [s, costs[i]]));
+  let lines = [];
+  const stageRows = rows.filter((r) => r.kind === "stage");
+  const fold = stageRows.length > TABLE_ROWS;
+  for (const r of rows) {
+    if (r.kind === "queue") continue;
+    if (r.kind === "hold") {
+      lines.push({ at: r.start, name: r.hold.cause ? `${r.name} · waiting for ${r.hold.cause}` : r.name, took: ms(r.end) - ms(r.start), cost: "—" });
+      continue;
+    }
+    const s = r.stage;
+    const c = cost.get(s);
+    const prev = lines.at(-1);
+    if (fold && prev?.stage && prev.stage.kind === s.kind && prev.stage.model === s.model && prev.stage.outcome === s.outcome) {
+      prev.n += 1;
+      prev.took += ms(s.end) - ms(s.start);
+      prev.usd = prev.usd === null || c.usd === null ? (prev.usd ?? c.usd) : prev.usd + c.usd;
+      prev.cents = (prev.cents ?? 0) + (c.cents ?? 0);
+      prev.unknown += c.unknown;
+      continue;
+    }
+    lines.push({ at: r.start, base: fold ? stageName(s, d.planned) : r.name, stage: s, n: 1, took: ms(s.end) - ms(s.start), usd: c.usd, cents: c.cents, unknown: c.unknown });
+  }
+  // Stages with no recorded time (a sandbox stage that left only its vendor comment): last, their time unknown.
+  for (const s of d.stages.filter((x) => !x.start)) {
+    const c = cost.get(s);
+    lines.push({ at: null, base: stageName(s, d.planned), stage: s, n: 1, took: null, usd: c.usd, cents: c.cents, unknown: c.unknown });
+  }
+  const out = lines.map((l) => {
+    if (!l.stage) return `| ${atOf(d, l.at)} | ${l.name} | ${durationText(l.took)} | ${l.cost} |`;
+    const name = `${l.base}${l.n > 1 ? ` ×${l.n}` : ""}${l.stage.model ? ` · ${modelName(l.stage.model)}` : ""}${l.stage.outcome ? ` · ${OUTCOME[l.stage.outcome]}` : ""}`;
+    return `| ${l.at ? atOf(d, l.at) : "—"} | ${tableCell(name)} | ${l.took === null ? "—" : durationText(l.took)} | ${stageCost(l)} |`;
+  });
+  if (!d.stages.length) out.push(`| — | Pendulum's stages, no record found | — | unknown |`);
+  if (d.sandbox) out.push(`| — | Cloud sandbox | — | ${stageCost(costs.at(-1))} |`);
+  if (d.queue.length) {
+    const queued = d.queue.reduce((n, q) => n + (ms(q.end) - ms(q.start)), 0);
+    out.push(`| ${atOf(d, d.queue[0].start)} | Merge queue${d.queue.length > 1 ? ` ×${d.queue.length}` : ""} · your CI | ${durationText(queued)} | — |`);
+  }
+  const total = `| | **Total** | **${t.wall === null ? "not known" : durationText(t.wall)}** | **${cellCost(t.usd, t.unknown)}** |`;
+  return { table: ["| Time | Stage | Took | Cost |", "| :-- | :-- | --: | --: |", ...out, total].join("\n"), folded: fold };
+}
+
+/** Each stage's line for Run details, when the table folded them. */
+const stageList = (d, costs) => d.stages.map((s, i) => `- ${s.start ? atOf(d, s.start) : "—"} ${stageName(s, d.planned)}${s.model ? ` · ${modelName(s.model)}` : ""}${s.outcome ? ` · ${OUTCOME[s.outcome]}` : ""}: ${s.start ? durationText(ms(s.end) - ms(s.start)) : "time not recorded"}, ${stageCost(costs[i])}`).join("\n");
 
 /** The cost rows: each stage, then the cloud sandbox's own cost: {name, model, time, usd, unknown, byBilling, cents}. */
 function costRows(d) {
@@ -682,50 +760,15 @@ function costRows(d) {
   return rows.map((r, i) => ({ ...r, cents: c[i] }));
 }
 
-/**
- * The cost chart: each row's known cents, only when every figure is known and two or more rows have a cent to show.
- * Rows under a cent are left out of it, and a line under it says so.
- */
-function pie(rows, t) {
-  if (t.unknown > 0 || !(t.usd > 0)) return null;
-  const slices = new Map();
-  for (const r of rows) if (r.cents > 0) slices.set(r.name, (slices.get(r.name) ?? 0) + r.cents);
-  if (slices.size < 2) return null;
-  const small = rows.some((r) => r.usd > 0 && !r.cents);
-  const chart = ["```mermaid", init(PIE_THEME), "pie showData", ...[...slices].map(([name, c]) => `    "${name}" : ${(c / 100).toFixed(2)}`), "```"].join("\n");
-  return small ? `${chart}\n\n<sub>Stages that cost under a cent are left out of the chart.</sub>` : chart;
-}
-
-// ------------------------------------------------------------------ card
-
-/** The cost table by stage and model, with the merge queue's time and the total. */
-/** What the whole run's dollars are when they are all of one kind other than billed spend (the column then says it once), else null. */
-const oneKind = (t) => {
-  const all = kindsOf(t.usd, t.byBilling);
-  return all.length === 1 && SHORT[all[0]] ? SHORT[all[0]] : null;
-};
-/** A cost cell: a row's cents, "+ unknown" beside them, "unknown" alone, and what its dollars are unless `one` says it. */
-const costCell = (r, one) => (r.usd === null ? "unknown" : `${r.unknown > 0 ? `${cents(r.cents)} + unknown` : cents(r.cents)}${one ? "" : billingWords(r.usd, r.byBilling)}`);
-
-function costTable(d, t, rows) {
-  // All of one kind other than billed spend: the column says what the dollars are, once; otherwise each cell does.
-  const one = oneKind(t);
-  const cell = (r) => costCell(r, one);
-  const lines = rows.map((r) => `| ${r.name}${r.model ? ` · ${modelName(r.model)}` : ""} | ${r.time} | ${cell(r)} |`);
-  const queued = d.queue.reduce((s, q) => s + (ms(q.end) - ms(q.start)), 0);
-  if (d.queue.length) lines.push(`| Merge queue · your CI | ${durationText(queued)} | — |`);
-  return [`| Stage | Time | ${one ? `Cost (${one})` : "Cost"} |`, "| --- | ---: | ---: |", ...lines, `| **Total** | **${t.wall === null ? "not known" : durationText(t.wall)}** | **${costText(t.usd, t.unknown)}${t.usd > 0 && !one ? billingWords(t.usd, t.byBilling) : ""}** |`].join("\n");
-}
-
 /** The pass kinds' and stages' words in the breakdown (usage.mjs PASS_KEYS less `conflict`, which is churn), in its order. */
-export const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answer passes", fix: "Fix passes", decision: "Decision calls" });
+export const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answering the review", fix: "Fixing CI", decision: "AI judge calls" });
 /** The churn the breakdown names apart (markChurn), in its order. */
 export const CHURN = Object.freeze({
-  "rebase-conflict": "Conflict rebases after other PRs merged",
-  "rebase-clean": "Clean rebases after other PRs merged",
-  "catch-up": "Catch-up passes after the default branch changed a workflow",
-  judge: "Reviews run again only to judge answers already made",
-  block: "Passes run again after a Block",
+  "rebase-conflict": "Rebases after other PRs merged (conflict)",
+  "rebase-clean": "Rebases after other PRs merged (clean)",
+  "catch-up": "Catch-up runs after a workflow changed on the default branch",
+  judge: "Reviews run again only to judge answers",
+  block: "Runs repeated after a Block",
 });
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
@@ -794,7 +837,7 @@ export function spendBreakdown(d) {
     return { ...row, usd: known ? r.usd : r.unknown ? null : 0, ...(from ? { stages: from.size } : {}) };
   };
   const word = (what) => ASKED[what] ?? ASKED.work;
-  const askedRows = [...asked.values()].sort((a, b) => a.part - b.part || order.indexOf(a.what) - order.indexOf(b.what)).map((r) => done({ ...r, name: parts ? `Part ${r.part}: ${word(r.what).toLowerCase()}` : word(r.what) }));
+  const askedRows = [...asked.values()].sort((a, b) => a.part - b.part || order.indexOf(a.what) - order.indexOf(b.what)).map((r) => done({ ...r, name: parts ? `Part ${r.part}: ${word(r.what)[0].toLowerCase()}${word(r.what).slice(1)}` : word(r.what) }));
   if (d.sandbox) askedRows.push({ name: "Cloud sandbox, every stage", usd: d.sandbox.unknown && !d.sandbox.usd ? null : d.sandbox.usd, unknown: d.sandbox.unknown, byBilling: {} });
   const churnRows = Object.keys(CHURN).filter((k) => churn.has(k)).map((k) => done({ ...churn.get(k), row: k, name: CHURN[k] }));
   const c = centsOf([...askedRows, ...churnRows].map((r) => r.usd));
@@ -803,17 +846,37 @@ export function spendBreakdown(d) {
   return { asked: askedRows, churn: churnRows, shown: parts || churnRows.length > 0 || askedRows.some((r) => r.what === "answer" || r.what === "fix") };
 }
 
-/** The breakdown's tables (spendBreakdown): the work the issue asked for, then the churn apart, and where each item comes from. */
-function breakdownTables(b, t) {
-  const one = oneKind(t);
-  const head = one ? `Cost (${one})` : "Cost";
-  const out = [[`| What the issue asked for | ${head} |`, "| --- | ---: |", ...b.asked.map((r) => `| ${r.name} | ${costCell(r, one)} |`)].join("\n")];
-  if (b.churn.length) out.push([`| Churn Pendulum caused | Stages | ${head} |`, "| --- | ---: | ---: |", ...b.churn.map((r) => `| ${r.name} | ${r.stages} | ${costCell(r, one)} |`)].join("\n"));
-  out.push("<sub>Each item comes from a stage's own record, never a guess. A stage is in the part after the PRs merged before it started; its passes are split by the kinds its spend record names. Churn is a send-back's rebase (its rebase line), a catch-up pass after the default branch changed a workflow, the passes a stage records it ran again after a Block, and a review that records it was started only to judge answers already made (all of it but its answer and fix passes). Anything else stays in its stage, as that stage.</sub>");
+/** The breakdown's rows as the cost chart labels them: short names, each with its figure. */
+const CHART_CHURN = Object.freeze({ "rebase-conflict": "Overhead: rebases", "rebase-clean": "Overhead: rebases", "catch-up": "Overhead: catch-up runs", judge: "Overhead: judging again", block: "Overhead: after a Block" });
+
+/** The breakdown's tables (spendBreakdown): the work the issue asked for, then the overhead apart. */
+function breakdownTables(b) {
+  const out = [["| What the issue asked for | Cost |", "| :-- | --: |", ...b.asked.map((r) => `| ${r.name} | ${stageCost(r)} |`)].join("\n")];
+  if (b.churn.length) out.push(["| Overhead Pendulum caused | Stages | Cost |", "| :-- | --: | --: |", ...b.churn.map((r) => `| ${r.name} | ${r.stages} | ${stageCost(r)} |`)].join("\n"));
   return out;
 }
 
-/** The run log: every recorded event, oldest first, in the card's zone (its summary line names it). */
+/** The cost chart (card-kit.mjs costChart): one bar per breakdown row with recorded dollars, its figure in its label. */
+function costBars(b) {
+  const bar = (name, r) => {
+    const label = `${name} ${stageCost(r)}`;
+    return { label, usd: (r.cents ?? 0) / 100 };
+  };
+  return costChart([...b.asked.map((r) => bar(r.name, r)), ...b.churn.map((r) => bar(CHART_CHURN[r.row] ?? r.name, r))]);
+}
+
+/** The notes line under the money: what the bars show and what they leave out. */
+function notesLine(t, b, drawn) {
+  const none = [...b.asked, ...b.churn].filter((r) => r.usd === null).map((r) => r.name);
+  const unknown = t.unknown ? `; ${many(t.unknown, "AI run")} of unknown cost ${t.unknown === 1 ? "is" : "are"} not drawn` : "";
+  const named = none.length ? ` ${none.join(", ")} ${none.length === 1 ? "has" : "have"} no recorded dollars.` : "";
+  return drawn ? `Bars show recorded dollars only${unknown}.${named} CI minutes are not included.` : "CI minutes are not included.";
+}
+
+/** How overhead is counted, for Run details. */
+const OVERHEAD_NOTE = "Each item comes from a stage's own record, never a guess. A stage is in the part after the PRs merged before it started; its runs are split by the kinds its spend record names. Overhead is a rebase after other PRs merged (its rebase line), a catch-up run after the default branch changed a workflow, the runs a stage records it ran again after a Block, and a review that records it was started only to judge answers already made (all of it but answering the review and fixing CI). Anything else stays in its stage, as that stage.";
+
+/** The run log: every recorded event, oldest first, in the card's zone (its heading names it). */
 function runLog(d) {
   const day = spansDays(d);
   const zone = zoneOf(d);
@@ -823,16 +886,19 @@ function runLog(d) {
     if (!s.start) continue;
     const name = stageName(s, d.planned).toLowerCase();
     out.push([s.start, `${name} stage started${s.model ? ` (${s.model})` : ""}`]);
-    out.push([s.end, `${name} stage's last line: ${s.usd === null ? "unknown" : costText(s.usd, s.unknown)}`]);
+    out.push([s.end, `${name} stage's last line: ${s.usd === null ? "unknown" : costText(s.usd, s.unknown)}${s.outcome ? `, ${OUTCOME[s.outcome].slice(2)}` : ""}`]);
   }
+  for (const h of d.holds ?? []) out.push([h.start, `${h.kind === "blocked" ? "Blocked" : "Question"} notice: on hold until the next stage`]);
   for (const p of d.prs) out.push([p.opened, `PR #${p.number} opened`]);
   for (const q of d.queue) {
     out.push([q.start, "added to the merge queue"]);
     if (!q.merged) out.push([q.end, "removed from the merge queue"]);
   }
   if (d.reviews) out.push([d.reviews.last, `last review: ${many(d.reviews.count, "review")} in all, ${d.reviews.findings ? many(d.reviews.findings, "finding") : "no findings"}`]);
-  const last = d.prs.at(-1);
-  out.push([d.merged, `PR #${last.number} merged${d.checks ? `, ${many(d.checks.passed, d.checks.required ? "required check" : "check")} green` : ""}`]);
+  if (d.end === "merged") {
+    const last = d.prs.at(-1);
+    out.push([d.merged, `PR #${last.number} merged${d.checks ? `, ${many(d.checks.passed, CHECK(d.checks))} green` : ""}`]);
+  } else out.push([d.ended, { closed: "the issue closed", blocked: "Blocked", question: "Question asked" }[d.end]]);
   return out
     .map(([t, text], i) => [ms(t), i, `- ${at(t)} ${text}`])
     .sort((a, b) => a[0] - b[0] || a[1] - b[1])
@@ -840,31 +906,60 @@ function runLog(d) {
     .join("\n");
 }
 
-/** The PR line: the issue, the PRs and when it landed. */
-function landedLine(d) {
-  const prs = d.prs.map((p) => `<a href="${p.url}">PR #${p.number}</a>`).join(", ");
-  const how = d.queue.some((q) => q.merged) ? "landed through your merge queue" : "landed";
-  return `<p align="center"><sub><b>Clockgrove Pendulum</b> · issue #${d.issue} → ${prs} · ${how} at ${clockText(ms(d.merged), { zone: zoneOf(d) })}</sub></p>`;
-}
-
-/** The headline and badges, centred: the top of the card and of the merged PR's body. */
+/** The headline block: the top of the card and of the merged PR's body (#589: text only, no image). */
 export function finishBlock(d) {
-  return [`<h3 align="center">${headline(d)}</h3>`, "", `<p align="center">\n${badges(d).join("\n")}\n</p>`].join("\n");
+  const hold = holdLine(d);
+  return [headline(d), subline(d), ...(hold ? [hold] : [])].join("\n");
 }
 
-/** The finish card's markdown (pure): see the module comment, and USAGE.md "The finish card". */
-export function renderFinishCard(d) {
+/** The unknown cost by cause, with its counts: one sentence per cause (card-kit.mjs causeSentences). */
+function unknownSentence(d, t) {
+  const counts = d.stages.filter((s) => s.unknown).map((s) => [s.why?.[0] ?? "no-record", s.unknown]);
+  if (d.sandbox?.unknown) counts.push([sandboxWhy(d)[0] ?? "sandbox", d.sandbox.unknown]);
+  if (!d.stages.length) counts.push(["no-record", 1]);
+  return t.unknown ? causeSentences(counts) : "";
+}
+
+/**
+ * The finish card's markdown (pure): see the module comment, and USAGE.md "The finish card". `fit` (finishCardBody's
+ * size rule): drop the run log (`log: false`), the per-stage list (`list: false`), the cost chart (`chart: false`).
+ */
+export function renderFinishCard(d, { log = true, list = true, chart = true } = {}) {
   const t = finishTotals(d);
-  const rows = costRows(d);
-  const parts = [`<p align="center"><img src="${MARK_URL}" width="96" alt="Pendulum"></p>`, `<h3 align="center">${headline(d)}</h3>`, landedLine(d), `<p align="center">\n${badges(d).join("\n")}\n</p>`, summary(d)];
-  const timeline = gantt(d);
-  if (timeline) parts.push(`**How the time went** (${zoneOf(d)})`, timeline);
-  parts.push("**What it cost**", costTable(d, t, rows));
-  const chart = pie(rows, t);
-  if (chart) parts.push(chart);
+  const costs = costRows(d);
+  const parts = [finishBlock(d)];
+  const act = actionLines(d);
+  if (act.length) parts.push(act.join("\n"));
+  parts.push(summary(d));
+  const rows = timelineRows(d);
+  const timeline = gantt(d, rows);
+  if (timeline) parts.push(`**Timeline** (${zoneName(d)})`, timeline);
+  const { table, folded } = stageTable(d, t, rows, costs);
+  parts.push(table);
   const where = spendBreakdown(d);
-  if (where.shown) parts.push("**Where the dollars went**", ...breakdownTables(where, t));
-  parts.push(`<sub>${sources(d, t)}</sub>`, `<details><summary>Full run log (${zoneOf(d)})</summary>\n\n${runLog(d)}\n\n</details>`);
+  let drawn = false;
+  if (where.shown) {
+    const bars = chart ? costBars(where) : null;
+    drawn = !!bars;
+    parts.push("**Where the money went**", ...(bars ? [bars] : []), ...breakdownTables(where));
+  }
+  parts.push(notesLine(t, where, drawn));
+  const named = t.usd > 0 ? kindsOf(t.usd, t.byBilling) : [];
+  // Dollars no record names a billing for: not recorded, never called billed or API-equivalent.
+  const kinds = t.usd > 0 && !named.length ? ["unknown"] : named;
+  const details = [];
+  const basis = [...new Set(kinds.map((k) => BASIS_NOTE[k || "unknown"]).filter(Boolean))];
+  if (basis.length) details.push(`- **Cost basis:** ${basis.join(" ")}`);
+  const unknown = unknownSentence(d, t);
+  if (unknown) details.push(`- **Unknown cost:** ${unknown}`);
+  details.push("- **Where figures come from:** times from the issue, the PR and each stage's own record; dollars from each stage's own record. Nothing is estimated.");
+  details.push("- — in Took means no time was recorded for that row; in Cost, that no AI dollars were (a stage that ran no AI, the merge queue, time on hold).");
+  if (where.churn.length) details.push(`- **How overhead is counted:** ${OVERHEAD_NOTE}`);
+  const version = d.stages.find((s) => s.version)?.version;
+  if (version) details.push(`- **Pendulum** ${version}`);
+  if (folded && list) details.push("", "**Each stage**", stageList(d, costs));
+  if (log) details.push("", `**Run log** (${zoneName(d)})`, runLog(d));
+  parts.push(`<details><summary>Run details</summary>\n\n${details.join("\n")}\n\n</details>`);
   return parts.join("\n\n");
 }
 
@@ -930,6 +1025,8 @@ export function finishSummary(d) {
     stages: d.stages.map((s, i) => ({ kind: s.kind, key: s.key ?? null, part: s.part, model: s.model, harness: s.harness, version: s.version ?? null, ms: s.start ? ms(s.end) - ms(s.start) : null, ...money({ ...s, cents: rows[i].cents }), why: s.why, sandbox: s.sandbox, churn: s.churn.map((c) => c.row), tokens: s.tokens ?? zeroTokens(), passes: Array.isArray(s.ledger) ? stagePassFigures(s.ledger) : null, ...(s.noPass ? { noPass: true } : {}), ...(s.unattributed ? { unattributed: true } : {}) })),
     asked: b.asked.map((r) => ({ part: r.part ?? null, what: r.what ?? "sandbox", ...money(r) })),
     churn: b.churn.map((r) => ({ row: r.row, stages: r.stages, ...money(r) })),
+    // An end other than a merge (#589): its kind and time; `merged` is then null, so no reader takes it for a merge.
+    ...(d.end && d.end !== "merged" ? { end: d.end, ended: d.ended } : {}),
   };
 }
 
@@ -959,17 +1056,39 @@ export function summaryMarker(d) {
 /** The most characters GitHub takes in a comment's body. */
 export const COMMENT_MAX = 65_536;
 
+/** The line under a card's markers that says how its run ended and when (#589): what a later write compares. */
+export const finishEndMarker = (d) => `<!-- pendulum:${d.issue}:finish-end ${JSON.stringify({ end: d.end ?? "merged", at: d.ended ?? d.merged })} -->`;
 /**
- * The finish card comment's whole body: its `finish` marker on its first line, its summary marker on its second, and the
- * card. With no summary that fits (summaryMarker null), or a body over COMMENT_MAX with it, the card is posted without it.
+ * How the run a card's `body` shows ended (finishEndMarker), for Objective `n`: {end, at}; a card written before the line
+ * was only ever posted on a merge, so it reads as one. Null for a body that is no card.
  */
-export function finishCardBody(d) {
-  const card = renderFinishCard(d);
-  const summary = summaryMarker(d);
-  const body = summary ? `${finishMarker(d.issue)}\n${summary}\n${card}` : null;
-  return body && body.length <= COMMENT_MAX ? body : `${finishMarker(d.issue)}\n${card}`;
+export function finishEndOf(body, n) {
+  const text = String(body ?? "");
+  if (!text.startsWith(finishMarker(n))) return null;
+  const m = new RegExp(`^<!-- pendulum:${n}:finish-end (\\{[^\\n]*\\}) -->$`, "m").exec(text);
+  if (!m) return { end: "merged", at: null };
+  try {
+    const v = JSON.parse(m[1]);
+    return { end: v.end === "merged" || ENDS.includes(v.end) ? v.end : "merged", at: typeof v.at === "string" ? v.at : null };
+  } catch {
+    return { end: "merged", at: null };
+  }
 }
 
+/**
+ * The finish card comment's whole body: its `finish` marker on its first line, its summary marker on its second, the
+ * end line, and the card. Over COMMENT_MAX, the card leaves out its run log, then its per-stage list, then its cost
+ * chart; with no summary that fits (summaryMarker null), or a body still over COMMENT_MAX with it, it goes without it.
+ */
+export function finishCardBody(d) {
+  const summary = summaryMarker(d);
+  const head = (withSummary) => [finishMarker(d.issue), ...(withSummary && summary ? [summary] : []), finishEndMarker(d)].join("\n");
+  for (const fit of [{}, { log: false }, { log: false, list: false }, { log: false, list: false, chart: false }]) {
+    const body = `${head(true)}\n${renderFinishCard(d, fit)}`;
+    if (body.length <= COMMENT_MAX) return body;
+  }
+  return `${head(false)}\n${renderFinishCard(d, { log: false, list: false, chart: false })}`;
+}
 const usdOf = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
 const countOf = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : undefined);
 const whyRead = (v) => (Array.isArray(v) && v.every((w) => typeof w === "string" && Object.hasOwn(UNKNOWN_WHY, w)) ? [...new Set(v)].sort() : undefined);
@@ -1030,6 +1149,8 @@ export function readSummary(body, n) {
     return null;
   }
   if (!v || v.v !== SUMMARY_VERSION || v.issue !== n || !Array.isArray(v.stages) || !Array.isArray(v.prs)) return null;
+  // A card on an end other than a merge (#589) is no merged Objective's summary: its stages are read instead.
+  if (v.end !== undefined && v.end !== "merged") return null;
   const cost = moneyRead(v.cost);
   const why = whyRead(v.cost?.why);
   const sandbox = v.sandbox === null ? null : moneyRead(v.sandbox);
@@ -1146,74 +1267,132 @@ export async function objectiveRecords(repo, n, { token, download, want = [] }) 
 }
 
 /**
- * Post the finish card of closed Objective `issue` ({number, labels, user}) once: none for one that ended Blocked or on
- * a Question, or whose newest PR on its branch did not merge, or that already has its card (its `finish` marker, by
- * Pendulum itself, pendulumOwn: a reopened and merged-again Objective gets no second one). `appId`: Pendulum's App
- * (the Action's app_id, or a local loop's PENDULUM_LOCAL_APP_ID), whose comments are Pendulum's too. With `prBody` (not when Pendulum acts
- * under a person's login), the merged PR's body gets the headline and badges at its top first, read just before it is
- * written; a refusal of that write (not a passing failure) leaves the PR as it is and the card is still posted.
- * Returns "posted", "had" (posted before), or why none is due: "not merged", "blocked", "no self" (Pendulum's own login
- * unknown, so no marker can be trusted). `records(n, want)`: the usage records (objectiveRecords) of its stages with no spend line, for their
- * dollars, and of its stages whose harness line names no model, for their model; read only when there is such a stage.
- * A failed read or write throws.
+ * Post or update the finish card of Objective `issue` ({number, labels, user, state, closed_at}): one card per Objective
+ * (its `finish` marker, by Pendulum itself, pendulumOwn), written in place as the run ends again (#589).
+ * - A closed Objective (the dispatcher's Done pass, `end` null): merged when the newest PR on its branch merged
+ *   (wait.mjs closedAs), else closed without merging, at its close.
+ * - `end` ({kind: blocked or question, at, reason, form, next}): a Block or a Question applied (session.mjs applyExit).
+ *   Its PRs are the run's own: those merged since its clock (a split Objective's earlier parts) and the newest unmerged
+ *   one; a PR merged before the clock (a reopened Objective's) is no part of it.
+ * A card that shows a merge stays as it is ("had"): a merge is final, and a reopened Objective merged again gets no second
+ * card. A card of a close stays for the same close, and is written again for a later one. A Blocked or Question card is
+ * written again with the new end, never over a card of a later end. The card is read again just before the write, so a
+ * write that raced another (two routes, a stage and the Done pass) never puts an older end over a newer one; when it
+ * finds more than one card of Pendulum's, it writes the first and deletes the rest. With `prBody` (not when Pendulum acts
+ * under a person's login), a merged card's PR gets the headline block at the top of its body first, read just before it
+ * is written; a refusal of that write (not a passing failure) leaves the PR as it is and the card is still written.
+ * Returns "posted", "updated", "had", "nothing ran" (no stage and no PR: nothing to show), or "no self" (Pendulum's own
+ * login unknown, so no marker can be trusted). `records(n, want)`: the usage records (objectiveRecords) of its stages
+ * with no spend line, for their dollars, and of its stages whose harness line names no model, for their model; read
+ * only when there is such a stage. A failed read or write throws.
  */
-/**
- * Whether the newest PR on Objective `n`'s branch (`pendulum/<n>`) merged: when a finish card is due (postFinishCard's
- * test, wait.mjs closedAs). One read. A failed read throws.
- */
-export async function newestPrMerged(repo, n, opts) {
-  const branch = (await rest(`repos/${repo.full}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${n}`)}&sort=created&direction=desc&per_page=1`, opts)) || [];
-  return !!branch[0]?.merged_at;
-}
-
-export async function postFinishCard(repo, issue, opts, { records = async () => [], label = OBJECTIVE, prBody = true, appId = null, log = () => {} } = {}) {
+export async function postFinishCard(repo, issue, opts, { records = async () => [], label = OBJECTIVE, prBody = true, appId = null, log = () => {}, end = null } = {}) {
   const n = issue.number;
-  const names = (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name));
-  if (!cardable(names)) return "blocked";
   if (!selfLogin()) await primeSelf(opts);
   if (!selfLogin()) return "no self";
-  // Merged when the newest PR on its branch merged (wait.mjs closedAs): a person who closed the issue with a later part's
-  // PR still open, or its PR closed unmerged, gets no card.
   const branch = (await rest(`repos/${repo.full}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${n}`)}&sort=created&direction=desc&per_page=20`, opts)) || [];
-  if (!branch[0]?.merged_at) return "not merged";
-  const prs = branch.filter((p) => p.merged_at);
+  // How the run ended: a Block or a Question applied; else, closed, merged when the newest PR on its branch merged.
+  const merged = !end && !!branch[0]?.merged_at;
+  const ending = end ? end : merged ? null : { kind: "closed", at: issue.closed_at };
   const comments = await listComments(repo, n, opts);
   const timeline = (await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
   // Pendulum's own comments only (pendulumOwn): its login here, or its App by id.
   const mine = pendulumOwn(appId);
-  if (comments.some((c) => mine(c) && (c.body || "").startsWith(finishMarker(n)))) return "had";
+  const cardsOf = (list) => list.filter((c) => mine(c) && (c.body || "").startsWith(finishMarker(n))).sort((a, b) => ms(a.created_at) - ms(b.created_at) || a.id - b.id);
+  // Whether a card already there stands: a merge is final; a close stays for the same close or a later one; a Block or
+  // Question card stands over an older end of this kind.
+  const stands = (had) => !!had && (had.end === "merged" || (had.end === "closed" && ending?.kind === "closed" && (!had.at || ms(had.at) >= ms(ending.at))) || (ending && had.end !== "closed" && !!had.at && ms(had.at) > ms(ending.at)));
+  if (stands(cardsOf(comments)[0] && finishEndOf(cardsOf(comments)[0].body, n))) return "had";
   const started = labelTime(issue, timeline, label, objectiveWindow(comments.filter((c) => mine(c)), timeline));
-  // The Objective's merged PRs since its clock (a split Objective's parts), oldest first, each read whole.
-  const parts = prs.filter((p) => !started || ms(p.merged_at) >= ms(started)).sort((a, b) => ms(a.merged_at) - ms(b.merged_at));
+  // The PRs to read whole: the Objective's merged PRs since its clock (a split Objective's parts), oldest first; at another
+  // end, then, the newest unmerged one on its branch.
+  const sinceClock = (p) => !started || ms(p.merged_at) >= ms(started);
+  const prs = branch.filter((p) => p.merged_at);
+  const parts = prs.filter(sinceClock).sort((a, b) => ms(a.merged_at) - ms(b.merged_at));
+  // The run's own open or closed PR: one opened since the clock, never an older one left from before a restart.
+  const unmerged = branch.find((p) => !p.merged_at && (!started || ms(p.created_at) >= ms(started)));
+  const reads = merged ? (parts.length ? parts : prs.slice(0, 1)) : [...parts, ...(unmerged ? [unmerged] : [])];
   const pulls = [];
-  for (const p of parts.length ? parts : prs.slice(0, 1)) {
+  for (const p of reads) {
     const [pr, t, reviews, reviewComments] = await Promise.all([getPr(repo, p.number, opts), rest(`repos/${repo.full}/issues/${p.number}/timeline?per_page=100`, { ...opts, paginate: true }), rest(`repos/${repo.full}/pulls/${p.number}/reviews?per_page=100`, { ...opts, paginate: true }), listReviewComments(repo, p.number, opts)]);
     pulls.push({ pr, timeline: t || [], reviews: reviews || [], reviewComments });
   }
   const last = pulls.at(-1);
   // The checks that gated the merge: the merge queue's, on the merge commit it made; without a queue, the head's.
-  const queued = (last.timeline || []).some((e) => e.event === "added_to_merge_queue");
-  const gateSha = queued && last.pr.merge_commit_sha ? last.pr.merge_commit_sha : last.pr.head?.sha;
-  const checks = gateSha ? await checkRuns(repo, gateSha, opts, { all: true }) : [];
-  // The required checks, when the repository's rules can be read (a token that may not read them counts every check).
-  const required = await requiredCheckSpecs(repo, opts).catch((e) => {
-    if (transientError(e)) throw e;
-    return [];
-  });
+  let checks = [];
+  let required = [];
+  if (merged) {
+    const queued = (last.timeline || []).some((e) => e.event === "added_to_merge_queue");
+    const gateSha = queued && last.pr.merge_commit_sha ? last.pr.merge_commit_sha : last.pr.head?.sha;
+    checks = gateSha ? await checkRuns(repo, gateSha, opts, { all: true }) : [];
+    // The required checks, when the repository's rules can be read (a token that may not read them counts every check).
+    required = await requiredCheckSpecs(repo, opts).catch((e) => {
+      if (transientError(e)) throw e;
+      return [];
+    });
+  }
   // The usage artifacts of the stages with no spend line of their own (their dollars) or whose harness line names no
   // model (their model), and only theirs.
   const since = comments.filter((c) => ms(c.created_at) >= ms(started));
   const unlined = unlinedStages(since, n, mine);
   const want = [...unlined, ...modellessStages(since, n, mine).filter((w) => !unlined.some((u) => u.stage === w.stage && u.key === w.key))];
-  const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: want.length ? await records(n, want) : [], label, mine });
-  if (!d) return "not merged";
-  if (prBody) {
-    const now = await getPr(repo, last.pr.number, opts);
-    await updatePr(repo, last.pr.number, { body: withFinishBlock(now.body, d) }, opts).catch((e) => {
+  const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: want.length ? await records(n, want) : [], label, mine, end: ending });
+  if (!d) return "nothing ran";
+  if (!merged && !d.stages.length && !d.prs.length) return "nothing ran";
+  const body = finishCardBody(d);
+  // Read again just before the write: a card another writer wrote meanwhile decides as one there from the start.
+  const now = cardsOf(await listComments(repo, n, opts));
+  if (stands(now[0] && finishEndOf(now[0].body, n))) return "had";
+  if (merged && prBody) {
+    const pr = await getPr(repo, last.pr.number, opts);
+    await updatePr(repo, last.pr.number, { body: withFinishBlock(pr.body, d) }, opts).catch((e) => {
       if (transientError(e)) throw e;
       log(`  #${n}: PR #${last.pr.number}'s body was not updated (${Number.isInteger(e?.status) ? `HTTP ${e.status}` : "error"}); the card is posted without it`);
     });
   }
-  await rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body: finishCardBody(d) } });
-  return "posted";
+  if (!now.length) {
+    await rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body } });
+    return "posted";
+  }
+  await rest(`repos/${repo.full}/issues/comments/${now[0].id}`, { ...opts, method: "PATCH", body: { body } });
+  // Two writers that both found none posted one each: the first stays, the rest go.
+  for (const extra of now.slice(1)) await rest(`repos/${repo.full}/issues/comments/${extra.id}`, { ...opts, method: "DELETE" }).catch((e) => log(`  #${n}: a second finish card (${extra.id}) was not deleted (${Number.isInteger(e?.status) ? `HTTP ${e.status}` : "error"})`));
+  return "updated";
+}
+
+/** How long a Block's or a Question's card may take before its caller goes on without it (endCard). */
+export const END_CARD_MS = 20_000;
+
+/**
+ * The finish card of a Block or a Question applied (#589; session.mjs applyExit, in a stage or outside one): `exit`
+ * (blocked or question), its `reason`, a Question's `form` (logic.mjs questionForm), a Block's way on (`next`: session.mjs
+ * nextStep's code). `issue`: the issue object, or its number (then read here, one call). Bounded by `timeoutMs`: past it
+ * the caller goes on and the card's own writes finish or fail by themselves. Never throws: a card that cannot be written
+ * is logged, and the Blocked or Question notice stands alone. Returns postFinishCard's answer, "timed out", "no end" (an
+ * exit that gets no card here), or the error.
+ */
+export async function endCard(repo, issue, opts, { exit, reason = "", form = null, next = null, appId = null, log = () => {}, timeoutMs = END_CARD_MS, now = Date.now() } = {}) {
+  if (exit !== "blocked" && exit !== "question") return "no end";
+  const number = typeof issue === "object" && issue ? issue.number : Number(issue);
+  const fail = (e) => {
+    log(`  #${number}: its ${exit === "blocked" ? "Blocked" : "Question"} card was not written (${String(e?.message || e).slice(0, 120)})`);
+    return e;
+  };
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      log(`  #${number}: its ${exit === "blocked" ? "Blocked" : "Question"} card took over ${Math.round(timeoutMs / 1000)} s; going on without waiting for it`);
+      resolve("timed out");
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  const work = (async () => {
+    const data = typeof issue === "object" && issue ? issue : await rest(`repos/${repo.full}/issues/${number}`, opts);
+    return postFinishCard(repo, data, opts, { prBody: false, appId, log, end: { kind: exit, at: new Date(now).toISOString(), reason, form, next } });
+  })().catch(fail);
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

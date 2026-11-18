@@ -390,9 +390,13 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
   const how = new Map();
   const unjudged = [];
   const found = [];
-  const say = async (line) => {
+  // Each part of the check's span, for the progress comment's Took (progress-card.mjs): from its start to its line.
+  let from = Date.now();
+  const say = async (line, step) => {
+    if (step) Object.assign(step, { start: from, end: Date.now() });
+    from = Date.now();
     log(line);
-    if (progress) await progress(line);
+    if (progress) await progress(line, step);
   };
   // The exact check: the test the reply names fails without the fix and passes with it (namedTestRunner). One that fails
   // on the head leaves the finding open; one that passes without the fix too, or cannot be checked, is no evidence, so
@@ -412,11 +416,11 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
   if (tested.length) {
     const failed = found.filter((x) => x.kind === FOUND.testFailed);
     const at = (x) => findingPlace(tested.find((f) => String(f.id) === String(x.id)));
-    await say(`finding check: ${tested.length - failed.length - pre.size} of ${tested.length} named test(s) fail without the fix and pass with it${failed.length ? `; failed on the head: ${failed.slice(0, 5).map(at).join(", ")}${failed.length > 5 ? ` and ${failed.length - 5} more` : ""}` : ""}${pre.size ? `; no evidence from ${pre.size}, judged by the decision model` : ""}`);
+    await say(`finding check: ${tested.length - failed.length - pre.size} of ${tested.length} named test(s) fail without the fix and pass with it${failed.length ? `; failed on the head: ${failed.slice(0, 5).map(at).join(", ")}${failed.length > 5 ? ` and ${failed.length - 5} more` : ""}` : ""}${pre.size ? `; no evidence from ${pre.size}, judged by the decision model` : ""}`, { step: "check", tests: { proven: tested.length - failed.length - pre.size, of: tested.length, failed: failed.length } });
   }
   const judged = answered.filter((f) => !replies.get(String(f.id)).test || pre.has(String(f.id)));
   if (judged.length && !check?.judge) {
-    await say(`finding check: off (${check?.off || "no-key"}); a reply answers its finding`);
+    await say(`finding check: off (${check?.off || "no-key"}); a reply answers its finding`, { step: "check", off: true });
     for (const f of judged) {
       yes.set(String(f.id), null);
       how.set(String(f.id), "not-checkable");
@@ -458,7 +462,7 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
         left.push(it);
       }
     }
-    await say(`finding check (${check.model}): ${items.length - left.length} of ${items.length} answer(s) resolve their findings${left.length ? `; still open: ${left.slice(0, 5).map(findingPlace).join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}` : ""}${unjudged.length ? `; no verdict on ${unjudged.length} (${[...new Set(unjudged.map((u) => u.error))].join(", ")})` : ""}`);
+    await say(`finding check (${check.model}): ${items.length - left.length} of ${items.length} answer(s) resolve their findings${left.length ? `; still open: ${left.slice(0, 5).map(findingPlace).join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}` : ""}${unjudged.length ? `; no verdict on ${unjudged.length} (${[...new Set(unjudged.map((u) => u.error))].join(", ")})` : ""}`, { step: "check", judged: { resolved: items.length - left.length, of: items.length, unjudged: unjudged.length }, open: left.map(findingPlace), model: check.model, verdicts: items.map((it) => ({ place: findingPlace(it), verdict: byId.get(String(it.id))?.verdict ?? null, confidence: byId.get(String(it.id))?.confidence ?? null })), floor: floor.text });
   }
   const resolved = [];
   const lines = answered.filter((f) => yes.has(String(f.id)) && !isBodyFindingId(f.id));

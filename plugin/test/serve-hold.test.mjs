@@ -1298,7 +1298,7 @@ test("#575: run --wait exits 0 only once its PR merged: a reviewed PR whose merg
 for (const [path, setup] of [
   ["work", () => {
     const pr = reviewPr(true);
-    return { pr, ends: [pausedOnDns, delivers(pr), delivers(pr)], stages: ["work", "work", "review"], read: /#7: who holds it is unknown here, so it stays as it is; this run reads it again at its next poll/ };
+    return { pr, ends: [pausedOnDns, delivers(pr), delivers(pr)], stages: ["work", "work", "review"], read: /#7: who holds it is unknown here, so it stays as it is; this run reads it again after 2026-11-17T09:\d\d:00\.000Z/ };
   }],
   ["review", () => {
     const pr = reviewPr();
@@ -1323,8 +1323,10 @@ for (const [path, setup] of [
           }
         };
       };
-      const { code, log, started } = await runPaused({ ends: s.ends, up: () => true, at: () => lostSince + 20 * 60_000, prep, ...(s.go ? { go: s.go } : {}) });
-      assert.equal(resumes, 2, "resumed again at the next poll");
+      // A minute a poll: the work path's failed start holds the next resume for its backoff.
+      let t = lostSince + 20 * 60_000;
+      const { code, log, started } = await runPaused({ ends: s.ends, up: () => ((t += 60_000), true), at: () => t, prep, ...(s.go ? { go: s.go } : {}) });
+      assert.equal(resumes, 2, "resumed again at a later poll");
       assert.deepEqual(started, s.stages);
       assert.equal(code, 0);
       assert.match(log, s.read);
@@ -1333,6 +1335,77 @@ for (const [path, setup] of [
     }
   });
 }
+
+test("#575 follow-up: run --wait honours a failed work start's backoff between resumes, as serve does, so claim reads that keep failing Block only after 5 + 10 minutes, never within a few polls", async () => {
+  const { START_BACKOFF_MS } = await import("../scripts/local.mjs");
+  let failing = false;
+  const gh = claimGitHub({ fail: (what) => failing && what === "comments" });
+  try {
+    let t = lostSince + 20 * 60_000;
+    const at = [];
+    const prep = (loop) => {
+      const real = loop.resume.bind(loop);
+      // Every resume meets GitHub failing each read of the claim (502), past readClaim's tries.
+      loop.resume = async (...a) => {
+        at.push(t);
+        failing = true;
+        try {
+          return await real(...a);
+        } finally {
+          failing = false;
+        }
+      };
+      // GitHub answers again once the start has failed, so its settling (the Block, at the third) is written.
+      const unstart = loop.unstart.bind(loop);
+      loop.unstart = (...a) => ((failing = false), unstart(...a));
+    };
+    // Thirty seconds a poll, serve's tick.
+    const { r, code, log, started } = await runPaused({ ends: [pausedOnDns], up: () => ((t += 30_000), true), at: () => t, prep });
+    assert.deepEqual(started, ["work"], "no resume ever started");
+    assert.equal(at.length, 3, "three resumes, the third failed start Blocks");
+    assert.ok(at[1] - at[0] >= START_BACKOFF_MS, `${(at[1] - at[0]) / 1000} s between the first two`);
+    assert.ok(at[2] - at[1] >= 2 * START_BACKOFF_MS, `${(at[2] - at[1]) / 1000} s between the last two`);
+    assert.equal(r.exit, "blocked");
+    assert.equal(code, 1);
+    assert.match(log, /#7: its last resume could not start; the next waits for its backoff, until /);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#575 follow-up: run --wait writes its claim's heartbeat on a due poll whose resume started nothing, so a resume that keeps failing never lets the claim go stale", async () => {
+  const { CLAIM_FRESH_MS } = await import("../scripts/lib/local.mjs");
+  const start = Date.now();
+  let t = start;
+  let failing = false;
+  const pr = reviewPr();
+  const gh = claimGitHub({ pr, now: () => t, fail: (what) => failing && what === "comments" });
+  try {
+    const since = start - 20 * 60_000;
+    const paused = { ...reviewPausedOnDns, outage: { ...reviewPausedOnDns.outage, since: new Date(since).toISOString() } };
+    const prep = (loop) => {
+      const real = loop.resume.bind(loop);
+      // Every resume of the review meets GitHub failing each read of the claim: withClaim throws before any stage.
+      loop.resume = async (...a) => {
+        failing = true;
+        try {
+          return await real(...a);
+        } finally {
+          failing = false;
+        }
+      };
+    };
+    // The provider answers every probe (each due), five minutes apart, up to the bound.
+    const { code, started } = await runPaused({ ends: [paused], up: () => ((t += 5 * 60_000), true), at: () => t, prep, go: (loop) => loop.reviewToEnd(5, { wait: true }) });
+    assert.equal(code, 75);
+    assert.deepEqual(started, ["review"]);
+    const claim = gh.comments.find((c) => c.body.includes(":local -->"));
+    assert.ok(claim, "the claim stays");
+    assert.ok(t - Date.parse(claim.updated_at) < CLAIM_FRESH_MS, `fresh when the run stops waiting (${(t - Date.parse(claim.updated_at)) / 60_000} min old)`);
+  } finally {
+    gh.restore();
+  }
+});
 
 test("#575: run --wait keeps its claim fresh while it waits with GitHub answering: written at least every heartbeat, so no serve here takes it for a loop gone away", async () => {
   const { CLAIM_FRESH_MS, HEARTBEAT_MS } = await import("../scripts/lib/local.mjs");

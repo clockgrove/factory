@@ -2799,7 +2799,7 @@ export class Local {
       return new Date(retryAt).toISOString();
     };
     // Only serve reads its failed starts again (recheckStarts); `run --wait` waiting a pause out polls again (waitPaused).
-    const readAgain = (at) => (this.serving ? `this loop reads its claim again after ${at}` : this.waitingOn === issue ? "this run reads it again at its next poll" : "a later `pendulum run` or serve on this machine reads it again");
+    const readAgain = (at) => (this.serving ? `this loop reads its claim again after ${at}` : this.waitingOn === issue ? `this run reads it again after ${at}` : "a later `pendulum run` or serve on this machine reads it again");
     try {
       const data = await getIssue(this.repo, issue, this.opts);
       if (!(data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "pendulum:running")) {
@@ -3109,9 +3109,10 @@ export class Local {
    * heartbeat is due (HEARTBEAT_MS, so no loop takes the claim for a loop gone away: CLAIM_FRESH_MS), reads the issue and
    * its claim as serve's tick does. A stopped Objective is not resumed and its claim goes, as a stage stopped under
    * withClaim drops it; a claim no longer this run's is left to its holder; one still this run's is written again when
-   * its heartbeat is due (beatPaused), and resumed when the pause is (resume, judged at the same moment). A resume that
-   * starts nothing (a read that fails, a claim it cannot read, a stage of it still running here) leaves the pause as it
-   * stands, for the next poll, as serve's next tick; a stage that pauses again is waited out the same way. Past the
+   * its heartbeat is due (beatPaused, on any poll that resumes nothing), and resumed when the pause is (resume, judged at
+   * the same moment) and no failed start's backoff holds it (unstart's retryAt, as serve's tick). A resume that starts
+   * nothing (a read that fails, a claim it cannot read, a stage of it still running here) leaves the pause as it stands,
+   * for the next poll, as serve's next tick; a stage that pauses again is waited out the same way. Past the
    * bound it stops waiting and returns the paused end: where serve Blocks it with the cause `outage`, a run leaves its
    * claim for the command that resumes it (toEnd). A pause on a usage limit or on account labels is returned as it is.
    */
@@ -3119,6 +3120,7 @@ export class Local {
     const clock = this.clock ?? Date.now;
     const beatEvery = this.heartbeatMs ?? HEARTBEAT_MS;
     let said = false;
+    let heldSaid = null;
     let beatAt = clock();
     this.waitingOn = issue;
     try {
@@ -3136,7 +3138,7 @@ export class Local {
         const due = await this.outageDue(off, now);
         if (due || now - beatAt >= beatEvery) {
           const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
-          const c = data ? await localClaim(this.repo, issue, this.opts).catch(() => undefined) : undefined;
+          let c = data ? await localClaim(this.repo, issue, this.opts).catch(() => undefined) : undefined;
           if (data && stopCause(data, this.objectiveLabel())) {
             this.offline.delete(issue);
             if (c?.holder === this.holder) await dropClaim(this.repo, issue, this.holder, this.opts).catch((e) => log(`#${issue}: its claim could not be dropped (${String(e?.message || e).slice(0, 120)})`));
@@ -3148,11 +3150,14 @@ export class Local {
             log(`#${issue}: its claim is no longer this run's (${c?.holder ?? "none"}); not resuming it`);
             return { exit: "skipped" };
           }
-          if (c !== undefined && !due) {
-            beatAt = now;
-            await this.beatPaused(issue, c, beatEvery);
+          // A failed start's backoff (unstart's retryAt, which serve's tick honours too): no resume before it.
+          const held = this.startFailures?.get(issue);
+          const backoff = !!held && Number.isFinite(held.retryAt) && now < held.retryAt;
+          if (due && backoff && heldSaid !== held.retryAt) {
+            heldSaid = held.retryAt;
+            log(`#${issue}: its last resume could not start; the next waits for its backoff, until ${new Date(held.retryAt).toISOString()}`);
           }
-          if (c !== undefined && due) {
+          if (c !== undefined && due && !backoff) {
             log(`#${issue}: resuming (${off.host} answers again)`);
             const was = r;
             try {
@@ -3172,6 +3177,15 @@ export class Local {
               continue;
             }
             r = was;
+            // Read again: a start that failed may have put it back to Queued, its claim dropped (unstart), and that
+            // claim is not written back here.
+            c = await localClaim(this.repo, issue, this.opts).catch(() => undefined);
+            if (c && c.holder !== this.holder) c = undefined;
+          }
+          // Waiting on (not due, held for a backoff, or a resume that started nothing): the claim's heartbeat, when due.
+          if (c !== undefined) {
+            beatAt = now;
+            await this.beatPaused(issue, c, beatEvery);
           }
         }
         await this.pause(this.resumePollMs ?? RESUME_POLL_MS);

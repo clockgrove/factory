@@ -21,7 +21,7 @@ For a first run, recommend `--preset first-run` as the answer to the caps and au
 - `max_concurrent` 1: one Objective at a time, so each can be followed.
 - `auto_merge` false: Pendulum's pull requests wait for the user's merge, so they read each first.
 
-A flag beside the preset wins; everything else takes its default. Show the rendered file; on yes, write it (After lands it). Then list the defaults it took as "You can change these later", with where, from [reference.md](reference.md), Workflow settings (also re-renders and the cloud sandbox). Recommend listing the test runner in `--validation`, taking a test file or filter, so answer rounds can settle findings by test.
+A flag beside the preset wins; everything else takes its default. Show the rendered file; on yes, write it (After lands it). Then list the defaults it took as "You can change these later", with where, from [reference.md](reference.md), Workflow settings (also re-renders and the cloud sandbox).
 
 ## 2. The GitHub App
 
@@ -47,4 +47,4 @@ Adding or removing accounts: [reference.md](reference.md).
 
 ## After
 
-On a yes, land the workflow file by pull request ([reference.md](reference.md)). Then run the pendulum-doctor skill; show its lines. End with what is left: the user merges it, then says what to build (the pendulum-file skill).
+On a yes, land the workflow file by pull request ([reference.md](reference.md)). Then run the pendulum-doctor skill; show its lines. Recommend listing the test runner in `--validation`, taking a test file or filter, so answer rounds can settle findings by test. End with what is left: the user merges it, then says what to build (the pendulum-file skill).

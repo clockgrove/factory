@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { whenText } from "../scripts/lib/clock.mjs";
 
 // Per-account holds and automatic account choice on GitHub Actions and the cloud sandbox (#268). GitHub is a fetch
 // stand-in at this URL, set before the clients read it; every secret value here is a fake, and nothing reaches GitHub.
@@ -480,7 +481,7 @@ test("with every other account held, a usage limit Blocks provider-quota naming 
     await usageLimitExit(limitError(reset), { local: false, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a), goOn: limits.limit });
     assert.equal(ends[0][0], "blocked");
     assert.equal(blocks[0][1], "provider-quota");
-    assert.match(blocks[0][0], new RegExp(`which resets at ${iso(reset).replaceAll(".", "\\.")}.* Every other Claude Code account this repository declares is held too, the first until ${iso(other).replaceAll(".", "\\.")}\\.$`));
+    assert.match(blocks[0][0], new RegExp(`which resets at ${whenText(reset)}.* Every other Claude Code account this repository declares is held too, the first until ${whenText(other)}\\.$`));
     assert.ok(st.issue.has("pendulum:running"), "no requeue");
   });
   // The holds unwritable (GitHub refuses): the Block as with the setting off.
@@ -746,7 +747,7 @@ test("a Copilot quota with no reset reported, another account free, goes on ther
     const t = Date.now();
     await usageLimitExit(quotaError(), { local: false, records: [], finish: async (...a) => ends.push(a), block: async () => assert.fail("no Block"), goOn: limits.limit });
     assert.equal(ends[0][0], "waiting");
-    assert.match(ends[0][1], /^Copilot reached its usage limit or quota on account `copilot` with no reset reported, so automatic account choice passes it over until about \S+; back to Queued, to go on on another account$/);
+    assert.match(ends[0][1], /^Copilot reached its usage limit or quota on account `copilot` with no reset reported, so automatic account choice passes it over until about \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+; back to Queued, to go on on another account$/);
     assert.deepEqual([ends[0][3].reset, ends[0][3].noReset], [null, true]);
     assert.ok(!st.issue.has("pendulum:running"), "back to Queued");
     const store = (await readHolds(REPO, { token: "t" })).store;
@@ -775,7 +776,7 @@ test("a limit with no reset and every other account held or passed over Blocks o
     await usageLimitExit(quotaError("claude"), { local: false, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a), goOn: limits.limit });
     assert.equal(blocks.length, 1);
     assert.equal(blocks[0][1], "provider-quota");
-    assert.match(blocks[0][0], new RegExp(`Every other Claude Code account this repository declares is held too: \`claude-2\` held until ${iso(held).replaceAll(".", "\\.")}; \`claude-3\` passed over until about ${iso(guess.until).replaceAll(".", "\\.")} \\(no reset reported\\)\\.$`));
+    assert.match(blocks[0][0], new RegExp(`Every other Claude Code account this repository declares is held too: \`claude-2\` held until ${whenText(held)}; \`claude-3\` passed over until about ${whenText(guess.until)} \\(no reset reported\\)\\.$`));
     assert.equal(ends[0][0], "blocked");
     assert.ok(st.issue.has("pendulum:running"), "no requeue");
     assert.equal((await readHolds(REPO, { token: "t" })).store.avoidUntil("claude", t), t + H, "its own guess is written too");
@@ -890,7 +891,7 @@ test("#376: pendulum hold --repo lists and releases on the holds issue with the 
       const said = [];
       const io = { now, out: (s) => said.push(s), err: (s) => said.push(`ERR ${s}`) };
       assert.equal(await holdCommand({ _: ["hold", "list"], repo: "acme/app" }, io), 0);
-      assert.match(said.pop(), /^claude-2 \(Claude Code\): held until \S+ \(five_hour\), back-off count 0\n$/);
+      assert.match(said.pop(), /^claude-2 \(Claude Code\): held until \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+ \(five_hour\), back-off count 0\n$/);
       assert.equal(await holdCommand({ _: ["hold", "release", "claude"], repo: "acme/app" }, io), 1);
       assert.match(said.pop(), /^ERR pendulum: nothing is held or passed over for "claude" on acme\/app's holds issue .*; the accounts that are: claude-2\n$/);
       st.poster = { login: "kirk", association: "COLLABORATOR" };

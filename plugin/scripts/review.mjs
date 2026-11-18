@@ -20,7 +20,7 @@ import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
-import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
+import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, markReady, postReview, prBodyHistory, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor } from "./lib/logic.mjs";
@@ -82,6 +82,7 @@ import {
   remainingMs,
   unaddressedReviewComments,
   answerDiff,
+  bodyChanges,
   checkState,
   openFindingsExit,
   readAnswerRounds,
@@ -113,6 +114,7 @@ import { claimExit, commitExit, confirmRunning, holdIfStopped, goTrust, labelTru
 import { timelineOf } from "./lib/relaunch.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
+import { useObjectiveZone, whenText } from "./lib/clock.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
 
@@ -125,6 +127,24 @@ const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
  */
 export const sinceBrief = (since, { judge = true } = {}) =>
   `Pendulum's reviewer already reviewed this PR at ${since.slice(0, 7)}, and commits were written after that review. This pass reviews those changes: the diff below is the PR's head against that reviewed head's change replayed on the current default branch, so neither the code reviewed then nor the default branch's changes are in it. Comment only on what this diff adds or changes; read the rest of the PR in the checkout as you need to${judge ? ", and still judge every acceptance entry on the PR as it now stands" : ""}.`;
+
+/**
+ * What the finding check reads each answer against (finding-check.mjs checkAnswers), in Pendulum's mirror (`git`, the
+ * outbox's): `diffOf(from)`, what the PR changed from the commit a finding was raised on to `head` without the default
+ * branch's changes (session.mjs answerDiff), and `bodyDiffOf(at)`, what the PR body changed since a finding was raised,
+ * from GitHub's record of the body's edits, read once per check and only for a reply that says its fix is in the body
+ * (session.mjs bodyChanges, github.mjs prBodyHistory, #584).
+ */
+/**
+ * The replies a check again judges (#368): Pendulum's earlier answers to the findings the last stage got no verdict on,
+ * as replies.json, each still saying its fix is in the PR body when it said so (`earlierPrBody`, #584).
+ */
+export const againReplies = (again) => JSON.stringify(again.map((c) => ({ id: c.id, body: c.earlier, ...(c.earlierPrBody ? { fixed: true, pr_body: true } : {}) })));
+
+export const findingReads = ({ git, base, head, repo, prNumber, token }) => ({
+  diffOf: (from) => answerDiff(git, { base, from, head }),
+  bodyDiffOf: bodyChanges(git, () => prBodyHistory(repo, prNumber, token)),
+});
 
 /**
  * The reviewer's prompt: the skill does the work; the JSON shape is what the job
@@ -813,7 +833,7 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
     ? `${red.queue ? `The merge queue's run of the required checks on its integrated commit ${String(red.sha || "").slice(0, 7)} (this PR on top of the default branch and the PRs queued ahead of it) failed in this PR's own change, and Pendulum took the PR out of the queue.` : `Pendulum's validation found the required checks red on the head the reviewer read (${String(red.sha || "").slice(0, 7)}).`} Fix that cause in the code too (never weaken, skip or delete a test unless the issue asks) and update the Validation section of \`$PENDULUM_OUT/pr.md\`; the failures are below, each whole output in \`$PENDULUM_IN/checks/\`. A failing policy check is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy.`
     : "";
   const ask = comments.length
-    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$PENDULUM_IN/review-comments.json\`). Load the $pendulum-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$PENDULUM_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}], adding "fixed": true to a reply whose fix is in the code${namedTests ? ` and, when a test fails without the fix and passes with it, "test": {"command": "<one validation command, exactly as the task card lists it>", "args": ["<what makes it run only that test>"]}; Pendulum runs that test without the fix and with it before it spends another round on the finding` : ""}; Pendulum posts them.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}${red ? ` ${redAsk}` : ""}`
+    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$PENDULUM_IN/review-comments.json\`). Load the $pendulum-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$PENDULUM_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}], adding "fixed": true to a reply whose fix is in the code, or "fixed": true and "pr_body": true to one whose fix is in the PR body (pr.md)${namedTests ? ` and, when a test fails without the fix and passes with it, "test": {"command": "<one validation command, exactly as the task card lists it>", "args": ["<what makes it run only that test>"]}; Pendulum runs that test without the fix and with it before it spends another round on the finding` : ""}; Pendulum posts them.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}${red ? ` ${redAsk}` : ""}`
     : afterPush
       ? `A maintainer commented on PR #${prNumber} after the last pass read the decisions (new or edited comments). Apply the decisions below to the branch: they are the specification where they differ from the code or your assumptions. If a decision asks for nothing to change, change nothing for it.${red ? ` ${redAsk}` : ""}`
       : question
@@ -1128,6 +1148,8 @@ async function main() {
   // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review: the label comes off and nothing
   // else changes. From here on the stage stops when a person stops it (session.mjs stopStage).
   const issueNow = await getIssue(repo, issue, token);
+  // Its visible times from here on in the zone its body names, if any (lib/clock.mjs); the progress comment's too.
+  useObjectiveZone(issueNow?.body);
   const stopped = stopCause(issueNow, inputs.objectiveLabel);
   // A person's ready mark on a Question (readyMark): its answer, or no answer and the Question again.
   const humanReady = readyMark({ action: eventAction(), sender: eventSender(), local, issue: issueNow, pr });
@@ -1818,7 +1840,7 @@ async function main() {
   if (third.wait) {
     // What this stage covers so far (a fix pass after the reviewer), recorded for the stage that takes the wait up.
     await settleCover({ answerFrom: outbox.expected() || read.head, answerTo: outbox.expected() || read.head, comments: [] });
-    const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${new Date(third.wait.until).toISOString()}`;
+    const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${whenText(third.wait.until)}`;
     log(`${reason}; this stage ends, and the review goes on when the dispatcher puts the review label back`);
     await finish("waiting", reason);
     return;
@@ -1848,7 +1870,7 @@ async function main() {
     // marker is on it and it is no red the stage held (heldRed), which the answer pass may have fixed beside the finding.
     const beforeGreen = async (sha) => sha !== heldRed?.sha && (await isValidated(repo, pr.number, issue, sha, token));
     const runTest = namedTestRunner({ checkout, commands: inputs.validation, env: passEnv, head, beforeGreen, timeoutMs: () => remainingMs(deadlineAt) });
-    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, runTest, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [], found: [] }));
+    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, runTest, ...findingReads({ git: outbox.git, base: outbox.base, head, repo, prNumber: pr.number, token }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [], found: [] }));
     unjudged.push(...r.unjudged);
     checkFound.push(...(r.found || []));
   };
@@ -1864,7 +1886,7 @@ async function main() {
   const again = listedOpen.filter((c) => c.earlier && lastCheck.unjudged.some((id) => String(id) === String(c.id)));
   if (again.length) {
     await progress(`finding check: judging again ${again.length} answer(s) the last stage got no verdict on`);
-    await judgeAnswers(again, JSON.stringify(again.map((c) => ({ id: c.id, body: c.earlier }))));
+    await judgeAnswers(again, againReplies(again));
   }
   const held = new Set([...unjudged.map((u) => String(u.id)), ...(lastCheck.judgeOnly ? again.map((c) => String(c.id)) : [])]);
   const toAnswer = answerList(again.length ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty }) : listedOpen, { placeholder, first: scope.first }).filter((c) => !held.has(String(c.id)));

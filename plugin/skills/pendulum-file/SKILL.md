@@ -14,21 +14,21 @@ An Objective is a GitHub issue that is the whole specification: the worker canno
 - **`## Acceptance`:** a list under this exact heading. Each entry is one thing that must be true and that a reviewer can check through the real path: a command and its output, a request and its response, a behaviour a test proves. Give exact values where they matter.
 - **`## Context`,** when there is any: the user's decisions, contracts that must not change, what is out of scope (never under Acceptance: every item there is judged, sub-headings included).
 
-Ask only for what the issue cannot be written without. Where the user left a choice open, write the simplest reading and point it out.
+Ask only for what the issue cannot be written without. Where the user left a choice open, write the simplest reading and say so.
 
 ## Check it
 
 - **Doable now, here.** Every entry can be met from the default branch as it stands, in this repository; another repository's work is its own Objective.
 - **Labels and limits:** another harness or model than the workflow's, workflow files, network hosts, blockers and the draft label: [reference.md](reference.md).
 - **Trust.** Pendulum acts only on an issue whose author and last editor can push or are maintainers the workflow names: unless `gh api repos/OWNER/NAME --jq .permissions.push` prints `true`, a maintainer files it.
-- **Nothing private.** No token, key or secret goes in an issue.
+- **Nothing private.** No token, key or secret.
 
 ## Create it
 
 Show the title, body and labels, and offer:
 
-- **Start it now:** write the body to a temporary file and run `gh issue create --repo OWNER/NAME --title "<title>" --body-file <file> --label pendulum:objective`. Add `--label pendulum:local` for the user's own machine's loop, and `P0`, `P1` or `P2` for a priority. One that must follow another Objective gets the label only after its dependency (reference.md, Blocking Objectives).
-- **Save it as a draft:** the same command with `--label pendulum:draft` in its place; Pendulum never runs an issue while it is on. A missing label: reference.md, The draft label.
+- **Start it now:** write the line `pendulum zone` prints (this machine's zone, for the Objective's times), a blank line and the body to a temporary file, and run `gh issue create --repo OWNER/NAME --title "<title>" --body-file <file> --label pendulum:objective`. Add `--label pendulum:local` for the user's own machine's loop, and `P0`, `P1` or `P2` for a priority. One that must follow another Objective gets the label only after its dependency (reference.md, Blocking Objectives).
+- **Save it as a draft:** the same command with `--label pendulum:draft` in its place; Pendulum never runs a draft. A missing label: reference.md, The draft label.
 - **Keep discussing:** nothing goes to GitHub; revise and show it again.
 
 Create any harness, model or host label first (`gh label create <label> --repo OWNER/NAME --force`), then add it: one added after the plan is an edit.
@@ -42,4 +42,4 @@ Run `gh issue view <issue> --repo OWNER/NAME --json number,title,body,state,labe
 
 ## After
 
-Print the issue's URL. Started: one comment on the issue shows its progress until it merges, Blocks or asks a Question; pendulum-status says where it stands. A draft: "Let's keep working on Pendulum Objective <number>" or "Start Pendulum Objective <number>" comes back here.
+Print the issue's URL. Started: its progress comment shows where it is until it merges, Blocks or asks; pendulum-status says where it stands. A draft: "Let's keep working on Pendulum Objective <number>" or "Start Pendulum Objective <number>" comes back here.

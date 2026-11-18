@@ -71,6 +71,9 @@ inputs:
   guess_hours:
     description: How many hours automatic account choice passes over an account whose usage limit or quota reported no reset, by how many in a row (the last for every one after); `1, 4, 24` when empty. A list of hours, comma or space separated, each a number above 0 and at most 192 (8 days, the longest hold kept). In local mode, machine.json's `guess_hours` wins on that machine.
     required: false
+  time_zone:
+    description: The IANA zone (America/Los_Angeles) the times Pendulum writes for people to read are in, with Intl's short name for the zone (PST, or GMT+1 where it has no abbreviation); hidden markers and records stay UTC. An Objective's own zone line (pendulum-file writes its filer's) wins over it; with neither, the machine's own zone in local mode, else UTC.
+    required: false
   rebase_limit:
     description: How many times in 24 hours a PR goes back to its worker to rebase after other PRs merged (each a worker run) before its Objective Blocks; 5 when empty. A whole number above 0. Scheduling only.
     required: false
@@ -105,7 +108,7 @@ inputs:
     description: '`auto` (default) installs the versions each lockfile in the repository''s root pins, one install per ecosystem, all of them: Node.js `pnpm install --frozen-lockfile` (offline from its store first, else online), `npm ci` or `yarn install --frozen-lockfile` (the one package.json''s `packageManager` names, else in that order); Rust `cargo fetch --locked`; Python `poetry install --no-root` or `uv sync --frozen` (in that order); Go `go mod download`. The list is closed: no file in the repository picks the command. It uses the network the stage allows and runs with no credential in its environment; npm, pnpm and yarn skip install scripts (`--ignore-scripts`), while a Python install that builds a source package runs its build. Each install''s program (`cargo`, `uv`, `go` and the rest) must be on PATH where the stage runs: setup installs it otherwise, and doctor''s lockfile row warns when it is not found. `none` skips; any other value is the command to run. An install that exits non-zero, or leaves a linked dependency or its declared binary missing, gets one clean reinstall (node_modules emptied, the package caches kept); still broken, the stage Blocks naming the install as infrastructure, before any validation runs. One whose program is not on PATH Blocks at once, naming the program.'
     required: false
   validation:
-    description: 'The repository''s validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` (and in local mode) they are also Pendulum''s own pass (two at most). A command marked `parallel: ` runs at the same time as the marked ones beside it; unmarked ones run in order. In a workflow''s env block, quote a value that holds such a mark.'
+    description: 'The repository''s validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` (and in local mode) they are also Pendulum''s own validation: the listed commands run in order, the run stopping after the first command (or `parallel: ` group) with a failure, and each red goes to a fix pass until it is green, a fix pass makes no progress, or `max_usd` or the wall clock runs out (no fixed count of passes). A command marked `parallel: ` runs at the same time as the marked ones beside it; unmarked ones run in order. In a workflow''s env block, quote a value that holds such a mark.'
     required: false
   budget_command:
     description: The test-budget command named in the task card, if the repository has one.
@@ -475,6 +478,7 @@ runs:
         PENDULUM_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}
         PENDULUM_INPUT_REBASE_LIMIT: ${{ inputs.rebase_limit }}
         PENDULUM_INPUT_GUESS_HOURS: ${{ inputs.guess_hours }}
+        PENDULUM_INPUT_TIME_ZONE: ${{ inputs.time_zone }}
         PENDULUM_INPUT_DAILY_USD: ${{ inputs.daily_usd }}
         PENDULUM_INPUT_MAX_USD: ${{ inputs.max_usd }}
         PENDULUM_INPUT_MAX_OBJECTIVE_USD: ${{ inputs.max_objective_usd }}

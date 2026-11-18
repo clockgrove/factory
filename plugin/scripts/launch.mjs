@@ -33,6 +33,7 @@ import { PLUGIN_ROOT, pluginDigest } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, objectiveLabeledAt, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI, CODEX_LOGIN_REFUSED } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
+import { clockText, whenText } from "./lib/clock.mjs";
 import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, pendulumSandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
@@ -113,7 +114,7 @@ export function refusedCredential(inputs) {
 /** The GitHub context a stage's scripts read, as an Actions job has it. */
 const GITHUB_CONTEXT = ["GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_REPOSITORY_OWNER", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SERVER_URL", "GITHUB_API_URL", "GITHUB_GRAPHQL_URL", "GITHUB_WORKFLOW_REF"];
 
-const clock = (t) => (t && Number.isFinite(Date.parse(t)) ? `${new Date(Date.parse(t)).toISOString().slice(11, 19)}Z` : "?");
+const clock = (t) => (t && Number.isFinite(Date.parse(t)) ? clockText(t, { seconds: true }) : "?");
 const secs = (ms) => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)} s` : "unknown");
 
 /** A stopwatch that books nothing, for a caller that times nothing. */
@@ -1219,7 +1220,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
  * is the dispatcher's, from other Objectives' records (logic.mjs vendorEvidence).
  */
 export function deferredNote({ stage, vendor, code, tries, next }) {
-  const when = Number.isFinite(next) ? new Date(next).toISOString().slice(0, 16).replace("T", " ") + "Z" : "soon";
+  const when = Number.isFinite(next) ? whenText(next) : "soon";
   const route = "Until another Objective starts on this route, new ones start one at a time, each once the try before it has its answer; once another starts, only this one's own tries go on.";
   return `Pendulum: the ${plain(stage)} stage did not start: the ${plain(vendor)} sandbox refused it (\`${plain(code)}\`), ${Number(tries) || 1} time(s) in a row. The next try is after ${when}, then every 30 minutes; it is never handed back Blocked for this. ${route}`;
 }

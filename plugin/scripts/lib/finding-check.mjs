@@ -2,15 +2,16 @@
 // reviewer's, code scanning's) is checked before any answer round is spent on it. An answer that says fixed and names a
 // test has that test run by the repository's validation command without the fix and with it (#516): failing without and
 // passing with is the exact check. Any other answer, and one whose test is no evidence, is judged by the decision model:
-// does it resolve the finding, fixed in the code, rebutted with an acceptance entry or repository rule that holds, or
-// settled by a maintainer's recorded decision (#474)? Only that test or a yes at the confidence floor resolves the
+// does it resolve the finding, fixed in the code (or, for a reply that says so, in the PR body, whose change since the
+// finding was raised the model then sees beside the code's, #584), rebutted with an acceptance entry or repository rule that
+// holds, or settled by a maintainer's recorded decision (#474)? Only that test or a yes at the confidence floor resolves the
 // finding's thread, with that evidence posted in it, which is what marks it answered (session.mjs
 // unaddressedReviewComments, github.mjs reviewThreads); a test failing on the head or a no leaves it open for the next
 // answer round within the bound, named with what was found, and no verdict (the gateway failed) for a check again in the
 // next stage, with no worker pass (session.mjs openFindingsExit). A person's answer is never judged here.
 // The decision model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md), with red-check triage's
 // key and model setting (triage.mjs). This runs in Pendulum's own process, never in a harness. Only the typed choice
-// reaches code; the finding, the reply, the diff, the rules and the decisions are data between random-tag markers,
+// reaches code; the finding, the reply, the diffs, the rules and the decisions are data between random-tag markers,
 // never instructions. The decisions are the caller's trusted ones only (session.mjs objectiveDecisions: authors with
 // write access), so a comment by anyone else never settles a finding, whatever it says.
 import { randomBytes } from "node:crypto";
@@ -48,13 +49,28 @@ export const FINDING_QUESTION = {
   ],
 };
 
+/**
+ * The question for a reply that says its fix is in the PR body (replies.json `"pr_body": true`, #584): FINDING_QUESTION
+ * with the body's change among what it reads, `fixed` taking a defect gone from the body, and the guard that a body
+ * change alone never fixes what asks for code or tests. Every other reply gets FINDING_QUESTION as it is.
+ */
+export const BODY_FINDING_QUESTION = Object.freeze({
+  ...FINDING_QUESTION,
+  instructions:
+    "A reviewer raised a finding on a pull request, and the pull request's author answered it with a reply saying the fix is in the pull request's body (its description), and possibly a code change. " +
+    "Using the finding, the reply, what the pull request changed since the finding was raised (its code, then its body), the issue's acceptance entries, the repository's rules and the maintainers' recorded decisions, decide whether the answer resolves the finding. " +
+    "A change to the body alone never fixes a finding that asks for a change to the code or tests, or says the code does not meet an acceptance entry or rule. " +
+    FINDING_QUESTION.instructions.slice(FINDING_QUESTION.instructions.indexOf("Only the decisions part holds")),
+  choices: FINDING_QUESTION.choices.map((c) => (c.value === "fixed" ? { ...c, description: "The change shown does what the finding asks: the defect it names is gone from the code, or, for a finding on what the pull request's body says, from the body." } : c)),
+});
+
 /** The verdicts that resolve a finding. */
 const RESOLVING = new Set(["fixed", "rebutted", "decided"]);
 /** Whether a verdict resolves its finding: one of RESOLVING at the floor (`min`, triage.mjs confidenceFloor) or more; a missing confidence never does. */
 export const resolves = (v, min = MIN_CONFIDENCE) => RESOLVING.has(v?.verdict) && typeof v.confidence === "number" && v.confidence >= min;
 
 /** The most characters of each part of one question's input. */
-export const INPUT_CAPS = Object.freeze({ finding: 4000, reply: 4000, diff: 12_000, other: 8000, entries: 4000, rules: 8000, decisions: 8000, decision: 2000 });
+export const INPUT_CAPS = Object.freeze({ finding: 4000, reply: 4000, diff: 12_000, other: 8000, body: 16_000, entries: 4000, rules: 8000, decisions: 8000, decision: 2000 });
 /** The most questions in flight at once. */
 export const CONCURRENCY = 4;
 
@@ -154,13 +170,15 @@ export function changeOf(diff, path) {
 /**
  * What one answered finding is asked about: the finding (its reviewer, file and line, and its body, which names the
  * acceptance entry or rule), the reply, the change since the finding was raised (`diff`, changeOf), the issue's
- * acceptance entries (logic.mjs acceptanceEntries), the repository's rules (`rules`: AGENTS.md, protected paths,
+ * acceptance entries (logic.mjs acceptanceEntries), for a reply that says its fix is in the PR body only, what the body
+ * changed since the finding was raised (`bodyDiff`, #584: its diff, "" for none, null when that could not be read; no
+ * part at all when undefined, so every other question is as it was), the repository's rules (`rules`: AGENTS.md, protected paths,
  * validation commands) and the maintainers' recorded decisions (`decisions`: session.mjs objectiveDecisions' only, by
  * authors with write access; decisionsPart). Each part is fenced by
  * markers with a random tag, so no text inside can close it. No held secret (inputs.mjs redactSecrets) goes to the
  * gateway in it.
  */
-export function findingInput({ repo, prNumber, finding, reply, diff, issue = "", rules = "", decisions = [] }, tag = randomBytes(8).toString("hex")) {
+export function findingInput({ repo, prNumber, finding, reply, diff, bodyDiff, issue = "", rules = "", decisions = [] }, tag = randomBytes(8).toString("hex")) {
   const data = (title, text) => [title, `<<<BEGIN ${tag}>>>`, String(text).trimEnd(), `<<<END ${tag}>>>`, ""];
   const by = finding.from ? `${finding.from}, a reviewer outside Pendulum` : "Pendulum's reviewer";
   const { own, other } = changeOf(diff, finding.path);
@@ -174,6 +192,7 @@ export function findingInput({ repo, prNumber, finding, reply, diff, issue = "",
       ...data("The author's reply:", cut(reply, INPUT_CAPS.reply)),
       ...data(`What the pull request changed in ${finding.path || "its files"} since the finding was raised (the default branch's own changes left out):`, own === null ? "(the change could not be read)" : own.trim() ? cut(own, INPUT_CAPS.diff) : "(no change)"),
       ...data("What it changed in its other files since then:", own === null ? "(the change could not be read)" : other.trim() ? cut(other, INPUT_CAPS.other) : "(no change)"),
+      ...(bodyDiff === undefined ? [] : data("What it changed in its body (the pull request's description) since then:", bodyDiff === null ? "(whether the body changed could not be read)" : bodyDiff.trim() ? cut(bodyDiff, INPUT_CAPS.body) : "(no change)")),
       ...data("The issue's acceptance entries:", entries.length ? cut(entries.map((e) => `${e.id}. ${e.text}`).join("\n"), INPUT_CAPS.entries) : String(issue || "").trim() ? cut(issue, INPUT_CAPS.entries) : "(none stated)"),
       ...data("The repository's rules:", String(rules || "").trim() ? cut(rules, INPUT_CAPS.rules) : "(none given)"),
       ...data("Decisions recorded on the issue and the pull request by maintainers (people with write access to the repository), oldest first:", decisionsPart(decisions).text),
@@ -185,7 +204,7 @@ export function findingInput({ repo, prNumber, finding, reply, diff, issue = "",
  * The finding check: `{model, off, judge}`, asked through the one decision interface (decider.mjs openDecider): the
  * AI Gateway's `triage_model` with a key, else the stage's own harness (`stage`). With neither, `off` is why (the key's
  * code, or `route-off`) and there is no `judge`: a reply then answers its finding (checkAnswers). `judge(items, ctx)`
- * asks one question per item ({id, path, line, body, from?, raisedAt?, reply, diff}, findingInput's), CONCURRENCY at a time, and
+ * asks one question per item ({id, path, line, body, from?, raisedAt?, reply, diff, bodyDiff?}, findingInput's), CONCURRENCY at a time, and
  * returns `[{id, verdict, confidence, error}]` in their order (`ctx`: {repo, prNumber, issue, rules, decisions}); a call
  * that fails is no verdict with its code, and once the decider refuses (`auth`, `billing`, or the stage harness's `rate_limited`), no further question is asked in this process.
  */
@@ -197,7 +216,7 @@ export function openFindingCheck({ inputs = {}, env = process.env, home = homedi
   const state = { refused: null };
   const one = async (it, ctx) => {
     if (state.refused) return { id: it.id, verdict: null, confidence: null, error: state.refused };
-    const a = await Promise.resolve(ask.decide(findingInput({ ...ctx, finding: it, reply: it.reply, diff: it.diff }), FINDING_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
+    const a = await Promise.resolve(ask.decide(findingInput({ ...ctx, finding: it, reply: it.reply, diff: it.diff, bodyDiff: it.bodyDiff }), it.bodyDiff === undefined ? FINDING_QUESTION : BODY_FINDING_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
     // A refused key or credits, or the stage harness's usage limit, ends the questions; a gateway's 429 does not.
     if (a?.error === "auth" || a?.error === "billing" || (a?.error === "rate_limited" && ask.asked?.().name === "harness")) state.refused = a.error;
     const verdict = FINDING_QUESTION.choices.some((c) => c.value === a?.verdict) ? a.verdict : null;
@@ -349,7 +368,10 @@ export const FOUND = Object.freeze({ testFailed: "test-failed", notFixed: "not-f
  * marker, `<!-- pendulum:<issue>:resolved:<id> -->`), then its thread resolved (GraphQL resolveReviewThread); a finding in
  * the review body gets the evidence in a PR comment under that marker, which is what resolves it. `diffOf(from)` gives
  * git's diff of what the pull request changed from `from` to its head (session.mjs answerDiff), `from` the commit a
- * finding was raised on (`raisedOn`, else `since`). `decisions`: the maintainers' recorded decisions the check may read a
+ * finding was raised on (`raisedOn`, else `since`). `bodyDiffOf(at)` gives what the PR body changed from the time a
+ * finding was raised (`raisedAt`) to now (session.mjs bodyChanges, #584): a reply that says its fix is in the body
+ * (parseReplies' `prBody`) is asked BODY_FINDING_QUESTION with it beside the code's change; every other reply's question
+ * is as it was. `decisions`: the maintainers' recorded decisions the check may read a
  * finding as settled by, only as session.mjs objectiveDecisions returns them (authors with write access).
  * Returns {resolved, open, unjudged, found, outcomes}: ids; `unjudged`, the ones the decider gave no verdict on, each {id,
  * error}; `found`, what the check found on each finding it left open, each {id, kind (FOUND), note}; `outcomes`, how
@@ -358,7 +380,7 @@ export const FOUND = Object.freeze({ testFailed: "test-failed", notFixed: "not-f
  * no evidence post), never from a note. The stage's progress reporter, when it keeps a findings record
  * (`progress.findings`), gets them in it, written at once.
  */
-export async function checkAnswers({ repo, issue, prNumber, findings = [], repliesText, check, runTest = null, diffOf = async () => null, since = null, issueBody = "", rules = "", decisions = [], opts, progress = null }) {
+export async function checkAnswers({ repo, issue, prNumber, findings = [], repliesText, check, runTest = null, diffOf = async () => null, bodyDiffOf = null, since = null, issueBody = "", rules = "", decisions = [], opts, progress = null }) {
   const replies = new Map(parseReplies(repliesText, findings.map((f) => f.id)).map((r) => [String(r.id), r]));
   const answered = findings.filter((f) => replies.has(String(f.id)));
   if (!answered.length) return { resolved: [], open: [], unjudged: [], found: [], outcomes: [] };
@@ -402,7 +424,12 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
   } else if (judged.length) {
     const diffs = new Map();
     for (const from of new Set(judged.map((f) => f.raisedOn || since))) diffs.set(from, from ? await Promise.resolve(diffOf(from)).catch(() => null) : null);
-    const items = judged.map((f) => ({ id: f.id, path: f.path ?? null, line: f.line ?? f.original_line ?? null, body: f.body, ...(f.from ? { from: f.from } : {}), ...(f.raisedAt ? { raisedAt: f.raisedAt } : {}), reply: replies.get(String(f.id)).body, fixed: !!replies.get(String(f.id)).fixed, diff: diffs.get(f.raisedOn || since) ?? null }));
+    // What the body changed since each finding was raised (#584), for the replies that say their fix is in the body only,
+    // asked once per time.
+    const inBody = (f) => !!bodyDiffOf && !!replies.get(String(f.id)).prBody;
+    const bodies = new Map();
+    for (const at of new Set(judged.filter(inBody).map((f) => f.raisedAt ?? null))) bodies.set(at, at ? await Promise.resolve(bodyDiffOf(at)).catch(() => null) : null);
+    const items = judged.map((f) => ({ id: f.id, path: f.path ?? null, line: f.line ?? f.original_line ?? null, body: f.body, ...(f.from ? { from: f.from } : {}), ...(f.raisedAt ? { raisedAt: f.raisedAt } : {}), reply: replies.get(String(f.id)).body, fixed: !!replies.get(String(f.id)).fixed, diff: diffs.get(f.raisedOn || since) ?? null, ...(inBody(f) ? { bodyDiff: bodies.get(f.raisedAt ?? null) ?? null } : {}) }));
     const verdicts = await check.judge(items, { repo: repo.full, prNumber, issue: issueBody, rules, decisions });
     // The question may have shown a decision a later one, left out for length, overruled: then `decided` settles nothing.
     const overruled = newerLeftOut(decisionsPart(decisions));

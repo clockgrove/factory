@@ -63,7 +63,7 @@ test("finish card: the merged run, every figure from the run's own records (scra
   assert.ok(md.startsWith('<p align="center"><img src="https://raw.githubusercontent.com/clockgrove/pendulum/main/assets/brand/pendulum/web/mark-240.png" width="96" alt="Pendulum"></p>'));
   assert.match(md, /^<h3 align="center">Merged in 3 min 54 s for \$0\.52\.<\/h3>$/m);
   assert.doesNotMatch(md, /^#{1,2} |<h[12]\b/m, "an h3 headline, no h1 or h2");
-  assert.match(md, /issue #3 → <a href="https:\/\/github\.com\/clockgrove\/pendulum-scratch\/pull\/4">PR #4<\/a> · landed through your merge queue at 02:27 UTC/);
+  assert.match(md, /issue #3 → <a href="https:\/\/github\.com\/clockgrove\/pendulum-scratch\/pull\/4">PR #4<\/a> · landed through your merge queue at 2:27 AM UTC/);
   assert.ok(md.includes(badge("status", "merged", "4a7a3a")));
   assert.ok(md.includes('<img alt="wall clock: 3m 54s" src="https://img.shields.io/badge/wall_clock-3m_54s-7a4a24?style=for-the-badge">'));
   assert.ok(md.includes('<img alt="cost: $0.52" src="https://img.shields.io/badge/cost-%240.52-c9822e?style=for-the-badge">'));
@@ -75,8 +75,8 @@ test("finish card: the merged run, every figure from the run's own records (scra
   assert.match(md, /pie showData\n {4}"Plan \+ build" : 0\.36\n {4}"Review" : 0\.16\n```/);
   // No billing recorded: the card says so rather than call it billed or API-equivalent.
   assert.match(md, /<sub>These are the costs Pendulum recorded for this run\. Pendulum did not record how these dollars were billed\./);
-  assert.match(md, /<details><summary>Full run log<\/summary>\n\n- 02:23:42 labelled `pendulum:objective`: the clock starts\n- 02:24:34 plan \+ build stage started \(claude-opus-5-5\)\n/);
-  assert.match(md, /- 02:27:36 PR #4 merged, 1 check green\n\n<\/details>$/);
+  assert.match(md, /<details><summary>Full run log \(UTC\)<\/summary>\n\n- 2:23:42 AM labelled `pendulum:objective`: the clock starts\n- 2:24:34 AM plan \+ build stage started \(claude-opus-5-5\)\n/);
+  assert.match(md, /- 2:27:36 AM PR #4 merged, 1 check green\n\n<\/details>$/);
 
   // Someone else filed the issue: each is named, and a PR Pendulum did not open is described, not claimed.
   const other = renderFinishCard(withSelf(() => data({ issue: { ...real.issue, user: { login: "filer" } }, pulls: pulls({ pr: { ...real.pr, user: { login: "someone" } } }) })));

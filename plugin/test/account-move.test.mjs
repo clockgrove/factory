@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { whenText } from "../scripts/lib/clock.mjs";
 
 // The stage script serve starts is this file's fake worker: it notes the account its env was made for, waits for FAKE_GO
 // when told to (a stage still running), then writes the result.json a test gives it, with that account's name as the real
@@ -212,7 +213,7 @@ test("#264/#265: a hold keeps the limit's window, and the pause notice names the
   assert.equal(holds.window("beta", t), null);
   const body = pauseNoticeBody({ harness: "claude", account: "alpha", reset: t + 60 * MIN, window: "five_hour", free: ["beta", "gamma"] });
   assert.match(body, /Claude Code account `alpha` reached it \(window `five_hour`\), which resets at /);
-  assert.ok(body.includes(new Date(t + 60 * MIN).toISOString()));
+  assert.ok(body.includes(whenText(t + 60 * MIN)));
   assert.match(body, /Free now: `beta` \(apply `pendulum:account:beta`\), `gamma` \(apply `pendulum:account:gamma`\)\./);
   assert.ok(!body.includes("@"));
   assert.match(pauseNoticeBody({ harness: "claude", account: "alpha", reset: t, window: "`@someone` ran" }), /\(its window was not reported\)/, "harness text in no other form is not shown");
@@ -791,7 +792,7 @@ test("#266: on, a paused Objective resumes on a free account with no label and n
       loop.holds.limit({ harness: "claude", account: "beta", reset: t + 120 * MIN, now: t });
       loop.holds.limit({ harness: "claude", account: "gamma", reset: t + 90 * MIN, now: t });
       const line = loop.limitHold(["pendulum:objective"], 8, "u1");
-      assert.equal(line, `every Claude Code account on this machine has its usage limit spent; the first, claude account gamma, resets at ${new Date(t + 90 * MIN).toISOString()}`);
+      assert.equal(line, `every Claude Code account on this machine has its usage limit spent; the first, claude account gamma, resets at ${whenText(t + 90 * MIN)}`);
       loop.auto = false;
       assert.match(loop.limitHold(["pendulum:objective"], 8, "u1"), /^claude account alpha's usage limit is spent until /, "off: the default's hold, as before");
       loop.auto = true;
@@ -1048,7 +1049,7 @@ test("#266: with every account held and the first to end a guess, the pause says
       const held = await work(loop);
       assert.deepEqual([held.exit, held.account, held.usageLimit.guessed], ["paused", "alpha", true]);
       const body = gh.notices()[0].body;
-      assert.match(body, /Claude Code account `alpha` reached its limit with no reset reported, and is passed over until about \S+, an estimate/);
+      assert.match(body, /Claude Code account `alpha` reached its limit with no reset reported, and is passed over until about [^,]+, [^,]+, an estimate/);
       assert.ok(!body.includes("resets at"), body);
     });
   } finally {
@@ -1074,7 +1075,7 @@ test("#332: on, a limit with no reset reported moves the Objective to a free acc
       assert.equal(loop.holds.until("alpha", t), null, "a guess, no hold");
       assert.equal(loop.offline.get(8).reset, t + 60 * MIN, "paused at most until the guess's end");
       const notice = gh.notices()[0].body;
-      assert.match(notice, /Claude Code account `alpha` reached its limit with no reset reported, and is passed over until about \S+, an estimate\./);
+      assert.match(notice, /Claude Code account `alpha` reached its limit with no reset reported, and is passed over until about [^,]+, [^,]+, an estimate\./);
       assert.match(notice, /Free now: `beta`, `gamma`\. This machine chooses accounts by itself/);
       assert.ok(!notice.includes("Every Claude Code account"), notice);
       // The next tick moves it, and its stage starts on a free account, not alpha.
@@ -1106,7 +1107,7 @@ test("#332: on, with every other account held or passed over, a limit with no re
       assert.deepEqual([end.exit, end.account], ["paused", "alpha"], "alpha, free, was chosen");
       const blocks = gh.blocked();
       assert.equal(blocks.length, 1, "one Block");
-      const at = (ms) => new Date(ms).toISOString().replaceAll(".", "\\.");
+      const at = (ms) => whenText(ms).replaceAll("+", "\\+");
       assert.match(blocks[0].body, new RegExp(`Claude Code account \`alpha\` reached its usage limit or quota with no reset reported, and no other Claude Code account on this machine is free: \`alpha\` passed over until about ${at(t + 60 * MIN)} \\(no reset reported\\); \`beta\` held until ${at(t + 120 * MIN)}; \`gamma\` passed over until about ${at(t + 59 * MIN)} \\(no reset reported\\)\\. Re-apply \`pendulum:objective\` once a Claude Code account is free again\\.`));
       assert.match(blocks[0].body, /"cause":"provider-quota"/);
       assert.equal(loop.offline?.has(8) ?? false, false, "not kept paused");

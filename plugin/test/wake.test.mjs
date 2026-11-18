@@ -704,7 +704,7 @@ test("a deferred stage's note: the vendor's code, the try count, the next try, a
   const note = deferredNote({ stage: "work", vendor: "vercel", code: "unavailable", tries: 5, next: Date.parse("2026-11-10T12:30:00Z") });
   assert.match(note, /`unavailable`/);
   assert.match(note, /5 time\(s\) in a row/);
-  assert.match(note, /2026-11-10 12:30Z/);
+  assert.match(note, /Nov 10, 12:30 PM UTC/);
   assert.match(deferredNote({ stage: "work", vendor: "vercel", code: "<script>", tries: 1, next: NaN }), /`\?`.*new ones start one at a time, each once the try before it has its answer/);
 });
 

@@ -6,8 +6,9 @@
 // setup and the lockfile's install; render the task card and $PENDULUM_IN, and launch the
 // harness headless under a wall clock; read what it left in $PENDULUM_OUT (lib/handoff.mjs),
 // push its commits and open or update the PR from pr.md, the plan comment from plan.md;
-// run the repository's validation as Pendulum's own pass (two at most, failures sent
-// back to the same harness); decide the exit (delivered, question, blocked); move the
+// run the repository's validation as Pendulum's own pass (the listed commands in order, up
+// to the first red; each red goes back to the same harness while its fix passes make
+// progress, no fixed count of passes); decide the exit (delivered, question, blocked); move the
 // card, set the label, draft/comment/request as the exit says; write usage/events.jsonl
 // and usage/result.json for the artifact. The harness writes nothing to GitHub.
 import { agentServicePorts, noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";
@@ -19,6 +20,7 @@ import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { useObjectiveZone } from "./lib/clock.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, workValidation, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
@@ -362,6 +364,8 @@ async function main() {
   }
   // 1. The issue.
   let issueData = await getIssue(repo, issue, token);
+  // Its visible times from here on in the zone its body names, if any (lib/clock.mjs); the progress comment's too.
+  useObjectiveZone(issueData?.body);
   const labels = (issueData.labels || []).map((l) => l.name);
   // A draft (pendulum:draft) never runs, its Objective label on or not (lib/stop.mjs stopCause): nothing is claimed or spent.
   if (stopCause(issueData, inputs.objectiveLabel) === "draft") {

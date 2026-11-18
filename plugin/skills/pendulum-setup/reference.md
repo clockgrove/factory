@@ -21,11 +21,12 @@ A first setup asks only the harness and its credential, the caps and auto-merge 
 | `--notify` | none | no | The GitHub handle Blocked and Question reach; setup pins it as `login#id`. |
 | `--setup` | none | no | The toolchain command run before the worker. |
 | `--install` | `auto` | no | `auto` installs from the lockfiles, `none`, or a command. |
-| `--validation` | none | `PENDULUM_VALIDATION` | The validation commands, comma-separated. |
+| `--validation` | none | `PENDULUM_VALIDATION` | The validation commands, comma-separated. List the test runner among them as a command that takes a test file or filter, not only lint or a typecheck (`npm run lint, npx vitest run`): an answer round settles a finding by test only when a reply can name one of these commands with arguments that run one test; a reproduction in a reply's prose is never run. |
 | `--budget-command` | none | no | The repository's test-budget command. |
 | `--protected-paths` | none | no | Paths added to the protected list; workers' commits may not touch them. |
 | `--ci-checks` | none | no | The CI's required check names, also the protection step's; only this flag writes them into the workflow, and `--ci-checks=` clears them. Without it the protection step keeps the default branch's existing required checks, else requires none, and its preview lists candidates: the checks that passed on the latest pull request, else the job names of the workflows on pull_request, each marked when its workflow has no `merge_group` trigger (with a merge queue) or a `paths` filter. The user picks; pass exactly those. |
 | `--node-version` | `22` | no | The Node.js the runner sets up; match your CI's. |
+| `--time-zone` | the machine's in local mode, else UTC | `PENDULUM_TIME_ZONE` | The IANA zone (`America/Los_Angeles`) of the times Pendulum writes for people; an Objective's own zone line wins. |
 | `--runs-on` | the CI's Linux runner | no | The work and review jobs' runner. |
 | `--preset first-run` | none | no | `max_usd` 5, `max_concurrent` 1, `auto_merge` false; `daily_usd` stays at its own value ($100 by default); a flag beside it wins. A `PENDULUM_MAX_USD` or `PENDULUM_MAX_CONCURRENT` repository variable sets its value over the preset: setup warns of one. |
 | `--sandbox vercel` | none | no | The cloud-sandbox jobs instead of runner jobs (Cloud sandbox, below). |

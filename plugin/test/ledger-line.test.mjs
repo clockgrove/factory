@@ -154,7 +154,7 @@ test("ledger line (#543): a ledger line that would take the comment past PROGRES
   assert.ok(stageSpendLine(usage).ledger.length > 4_000 && stageSpendLine(usage).ledger.length <= LEDGER_MAX, "the line fits its own bound");
   const body = await endStage(usage, { phases });
   assert.ok(body, "GitHub took the stage's last write");
-  assert.match(body, /- \d\d:\d\dZ exit: delivered$/m, "the exit line landed");
+  assert.match(body, /- [^\n]*<!-- \d\d:\d\dZ --> exit: delivered$/m, "the exit line landed");
   assert.equal(spendParts(body).usd, usage.usd, "with the final spend line");
   assert.deepEqual(ledgerOfComment(body), { cut: 40 });
   assert.match(body, new RegExp(`^Per-pass ledger: 40 passes, left out to keep this comment under ${PROGRESS_LEDGER_ROOM} characters; the stage's usage record holds it\\.$`, "m"));

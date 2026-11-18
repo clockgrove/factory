@@ -1,5 +1,6 @@
 import "./temp.mjs";
 import { test } from "node:test";
+import { whenText } from "../scripts/lib/clock.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -1115,7 +1116,7 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
     t = since + OUTAGE.blockMs;
     assert.equal((await loop.resume(7)).exit, "blocked");
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-14T08:47:00\.000Z for 12 h, past Pendulum's 12 h bound for an outage\. The network is back: re-apply the label/);
+    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from Nov 14, 8:47 AM UTC for 12 h, past Pendulum's 12 h bound for an outage\. The network is back: re-apply the label/);
     assert.match(notice, /<!-- pendulum:block \{"cause":"outage"\} -->/);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     // A later pause long after a resume is a new outage: its own since.
@@ -1182,7 +1183,7 @@ test("#575: run --wait waits in place for a stage paused on this machine's netwo
     assert.equal(probes, 3, "one probe a poll until the host answers");
     assert.equal(r.exit, "delivered");
     assert.equal(code, 0);
-    assert.match(log, /#7: waiting here for api\.anthropic\.test to answer, as serve would, up to 12 h from 2026-11-17T08:47:00\.000Z/);
+    assert.match(log, /#7: waiting here for api\.anthropic\.test to answer, as serve would, up to 12 h from Nov 17, 8:47:00 AM UTC/);
     assert.match(log, /#7: resuming \(api\.anthropic\.test answers again\)/);
     assert.ok(!/#7: paused, resumable/.test(log));
     assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
@@ -1204,7 +1205,7 @@ test("#575: run --wait on a stage paused on this machine's network stops at serv
     assert.equal(code, 75);
     assert.deepEqual(started, ["work"], "never resumed while its host does not answer");
     assert.equal(probes, 3);
-    assert.match(log, /#7: still paused on this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-17T08:47:00\.000Z, past Pendulum's 12 h bound for an outage; this run stops waiting/);
+    assert.match(log, /#7: still paused on this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from Nov 17, 8:47:00 AM UTC, past Pendulum's 12 h bound for an outage; this run stops waiting/);
     assert.match(log, /#7: paused, resumable \(exit 75\): its claim stays on this machine; `pendulum run 7 --wait --repo acme\/app` resumes it here/);
     assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
@@ -1298,7 +1299,7 @@ test("#575: run --wait exits 0 only once its PR merged: a reviewed PR whose merg
 for (const [path, setup] of [
   ["work", () => {
     const pr = reviewPr(true);
-    return { pr, ends: [pausedOnDns, delivers(pr), delivers(pr)], stages: ["work", "work", "review"], read: /#7: who holds it is unknown here, so it stays as it is; this run reads it again at its next poll/ };
+    return { pr, ends: [pausedOnDns, delivers(pr), delivers(pr)], stages: ["work", "work", "review"], read: /#7: who holds it is unknown here, so it stays as it is; this run reads it again after Nov 17, 9:\d\d:00 AM UTC/ };
   }],
   ["review", () => {
     const pr = reviewPr();
@@ -1323,8 +1324,10 @@ for (const [path, setup] of [
           }
         };
       };
-      const { code, log, started } = await runPaused({ ends: s.ends, up: () => true, at: () => lostSince + 20 * 60_000, prep, ...(s.go ? { go: s.go } : {}) });
-      assert.equal(resumes, 2, "resumed again at the next poll");
+      // A minute a poll: the work path's failed start holds the next resume for its backoff.
+      let t = lostSince + 20 * 60_000;
+      const { code, log, started } = await runPaused({ ends: s.ends, up: () => ((t += 60_000), true), at: () => t, prep, ...(s.go ? { go: s.go } : {}) });
+      assert.equal(resumes, 2, "resumed again at a later poll");
       assert.deepEqual(started, s.stages);
       assert.equal(code, 0);
       assert.match(log, s.read);
@@ -1333,6 +1336,77 @@ for (const [path, setup] of [
     }
   });
 }
+
+test("#575 follow-up: run --wait honours a failed work start's backoff between resumes, as serve does, so claim reads that keep failing Block only after 5 + 10 minutes, never within a few polls", async () => {
+  const { START_BACKOFF_MS } = await import("../scripts/local.mjs");
+  let failing = false;
+  const gh = claimGitHub({ fail: (what) => failing && what === "comments" });
+  try {
+    let t = lostSince + 20 * 60_000;
+    const at = [];
+    const prep = (loop) => {
+      const real = loop.resume.bind(loop);
+      // Every resume meets GitHub failing each read of the claim (502), past readClaim's tries.
+      loop.resume = async (...a) => {
+        at.push(t);
+        failing = true;
+        try {
+          return await real(...a);
+        } finally {
+          failing = false;
+        }
+      };
+      // GitHub answers again once the start has failed, so its settling (the Block, at the third) is written.
+      const unstart = loop.unstart.bind(loop);
+      loop.unstart = (...a) => ((failing = false), unstart(...a));
+    };
+    // Thirty seconds a poll, serve's tick.
+    const { r, code, log, started } = await runPaused({ ends: [pausedOnDns], up: () => ((t += 30_000), true), at: () => t, prep });
+    assert.deepEqual(started, ["work"], "no resume ever started");
+    assert.equal(at.length, 3, "three resumes, the third failed start Blocks");
+    assert.ok(at[1] - at[0] >= START_BACKOFF_MS, `${(at[1] - at[0]) / 1000} s between the first two`);
+    assert.ok(at[2] - at[1] >= 2 * START_BACKOFF_MS, `${(at[2] - at[1]) / 1000} s between the last two`);
+    assert.equal(r.exit, "blocked");
+    assert.equal(code, 1);
+    assert.match(log, /#7: its last resume could not start; the next waits for its backoff, until /);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#575 follow-up: run --wait writes its claim's heartbeat on a due poll whose resume started nothing, so a resume that keeps failing never lets the claim go stale", async () => {
+  const { CLAIM_FRESH_MS } = await import("../scripts/lib/local.mjs");
+  const start = Date.now();
+  let t = start;
+  let failing = false;
+  const pr = reviewPr();
+  const gh = claimGitHub({ pr, now: () => t, fail: (what) => failing && what === "comments" });
+  try {
+    const since = start - 20 * 60_000;
+    const paused = { ...reviewPausedOnDns, outage: { ...reviewPausedOnDns.outage, since: new Date(since).toISOString() } };
+    const prep = (loop) => {
+      const real = loop.resume.bind(loop);
+      // Every resume of the review meets GitHub failing each read of the claim: withClaim throws before any stage.
+      loop.resume = async (...a) => {
+        failing = true;
+        try {
+          return await real(...a);
+        } finally {
+          failing = false;
+        }
+      };
+    };
+    // The provider answers every probe (each due), five minutes apart, up to the bound.
+    const { code, started } = await runPaused({ ends: [paused], up: () => ((t += 5 * 60_000), true), at: () => t, prep, go: (loop) => loop.reviewToEnd(5, { wait: true }) });
+    assert.equal(code, 75);
+    assert.deepEqual(started, ["review"]);
+    const claim = gh.comments.find((c) => c.body.includes(":local -->"));
+    assert.ok(claim, "the claim stays");
+    assert.ok(t - Date.parse(claim.updated_at) < CLAIM_FRESH_MS, `fresh when the run stops waiting (${(t - Date.parse(claim.updated_at)) / 60_000} min old)`);
+  } finally {
+    gh.restore();
+  }
+});
 
 test("#575: run --wait keeps its claim fresh while it waits with GitHub answering: written at least every heartbeat, so no serve here takes it for a loop gone away", async () => {
   const { CLAIM_FRESH_MS, HEARTBEAT_MS } = await import("../scripts/lib/local.mjs");
@@ -1494,7 +1568,7 @@ test("#389: a stage paused on GitHub's 5xx waits on while GitHub's status page r
     assert.equal((await loop.resume(7)).exit, "blocked");
     assert.equal(tries(), 12);
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 13 pauses over 12 h, past Pendulum's 12 h bound for github\.test failing/);
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from Nov 14, 8:47 AM UTC, through 13 pauses over 12 h, past Pendulum's 12 h bound for github\.test failing/);
     assert.match(notice, /<!-- pendulum:block \{"cause":"outage"\} -->/);
     assert.ok(!loop.offline.has(7));
   } finally {
@@ -1523,7 +1597,7 @@ test("#389: a stage paused on GitHub's 5xx while GitHub's status page reports it
     assert.equal(page.asked(), 4);
     assert.ok(page.paths.every((u) => u === "/api/v2/summary.json"), page.paths.join(" "));
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z; GitHub's status page reported API Requests operational, Issues operational, Pull Requests operational, before and after one more try, so the failure is this request's/);
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from Nov 14, 8:47 AM UTC; GitHub's status page reported API Requests operational, Issues operational, Pull Requests operational, before and after one more try, so the failure is this request's/);
     assert.match(notice, /<!-- pendulum:block \{"cause":"pendulum"\} -->/);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     assert.ok(!loop.offline.has(7));
@@ -1608,8 +1682,8 @@ test("#389: the one more try belongs to the request that failed: a 5xx on anothe
     assert.equal((await next()).exit, "blocked");
     assert.equal(tries(), 3);
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.ok(notice.includes(`github.test answered HTTP 500 to every try of GET repos/acme/app/pulls from ${new Date(fresh).toISOString()};`), notice);
-    assert.doesNotMatch(notice, /from 2026-11-14T08:47:00\.000Z/, "not the first pause's request time");
+    assert.ok(notice.includes(`github.test answered HTTP 500 to every try of GET repos/acme/app/pulls from ${whenText(fresh)};`), notice);
+    assert.doesNotMatch(notice, /from Nov 14, 8:47 AM UTC/, "not the first pause's request time");
   } finally {
     await page.close();
     gh.restore();

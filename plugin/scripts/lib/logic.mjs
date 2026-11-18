@@ -6,6 +6,7 @@ import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, passRead, rerunRead, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
+import { lineClock, logTime, whenText } from "./clock.mjs";
 
 /** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
 export { refusalCause };
@@ -990,7 +991,7 @@ export function refusalReason(r) {
  */
 export function usageLimitReason(r, { waited = false } = {}) {
   const fields = refusalFields(r);
-  const reset = Number.isFinite(r.resetAt) ? new Date(r.resetAt).toISOString() : null;
+  const reset = Number.isFinite(r.resetAt) ? whenText(r.resetAt) : null;
   const why = `${r.harness} reached its subscription's usage limit${fields ? ` (${fields})` : ""}${reset ? `, which resets at ${reset}` : ", with no reset time reported"}`;
   if (waited) return `${why}; the stage waited for the reset until its time ran out. Re-apply the label to run it again.`;
   return `${why}; not run again on another model, since every model of the subscription draws on the same limit. Re-apply the label ${reset ? "after the reset" : "once the limit has reset"}.`;
@@ -3112,7 +3113,7 @@ const word = (s) => (typeof s === "string" && /^[A-Za-z0-9._:/-]{1,40}$/.test(s)
  * stopped stretch's storage. `cost` is adapters/sandbox.mjs stageVendorCost's; `error` a code when the usage could not be read.
  */
 export function vendorLine({ id, state, cost, rates, at = new Date().toISOString(), error = null }) {
-  const clock = `${new Date(Date.parse(at) || Date.now()).toISOString().slice(11, 16)}Z`;
+  const clock = lineClock(Date.parse(at) || Date.now());
   const secs = (ms) => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)} s` : "?");
   const size = Number.isFinite(cost.vcpus) || Number.isFinite(cost.memoryMb) ? `${cost.vcpus ?? "?"} vCPU / ${Number.isFinite(cost.memoryMb) ? Math.round(cost.memoryMb / 1024) : "?"} GB` : "size unknown";
   const r = rates || {};
@@ -3576,7 +3577,7 @@ export function launchDecision({ ev, state, record = null, trusted = false, from
   }
   // The per-Objective concurrency group serialises launchers; a stage still running in the sandbox outlives its
   // launcher, so the record says whether one holds it. Past staleMs the holder is taken for gone.
-  if (stageHolds(record, now, staleMs)) return { skip: `stage ${record.stage} is running in the sandbox since ${record.at}` };
+  if (stageHolds(record, now, staleMs)) return { skip: `stage ${record.stage} is running in the sandbox since ${logTime(record.at)}` };
   if (ev.kind === "swept") {
     // A stage that stopped to wait for CI on its branch's head, whose checks finished with no launch (the event lost).
     if (record?.waiting === "checks" && record.head && record.head === headSha && checksDone) return { stage: record.stage };

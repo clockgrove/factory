@@ -41,6 +41,7 @@ import { waitOnAccounts } from "./account-wait.mjs";
 import { addLabels, collaboratorPermission, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
 import { HOLD_MAX_MS, accountHolds, clamped, forgotten as forgottenAt, heldRecord, holdKey, liveWindows, readingOf } from "./holds.mjs";
 import { guessHoursMs, input, log } from "./inputs.mjs";
+import { logTime, repositoryZone, whenText } from "./clock.mjs";
 import { isSelf, pushAuthor, selfLogin } from "./logic.mjs";
 
 /** Pendulum's holds issue: the label is a hint to find it, the exact title and Pendulum's own login are what count. */
@@ -48,7 +49,6 @@ export const HOLDS_LABEL = "pendulum:holds";
 export const HOLDS_TITLE = "Pendulum: account holds";
 const HOLDS_BODY = "Pendulum keeps the usage-limit holds of this repository's accounts on GitHub Actions and the cloud sandbox here: one comment per limit met, and each account's latest quota reading, which automatic account choice (`PENDULUM_AUTO_ACCOUNT`) reads. Pendulum reads only its own comments, and a release by a person who can push (`pendulum hold release <account> --repo OWNER/NAME`), which lifts that account's holds. Do not reopen.";
 
-const iso = (ms) => new Date(ms).toISOString();
 const LINE = /^<!-- pendulum:hold (\{[^\n]*\}) -->(?:\r?\n|$)/;
 /** A hold record's first line (`<` and `>` escaped, as the image record's). */
 export const holdLine = (r) => `<!-- pendulum:hold ${JSON.stringify(r).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
@@ -304,7 +304,7 @@ export async function writeReading(repo, { harness, account, windows = {}, silen
   if (!r) return null;
   const pct = (w) => `${Math.round(w.used * 100)}%`;
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
-  const text = silent ? `Pendulum: ${name} ran a stage and its provider reported no quota reading, so automatic account choice puts it after the accounts that report one.` : `Pendulum: ${name} has used ${Object.entries(r.windows).map(([w, v]) => `${pct(v)} of ${w} until ${iso(v.resetsAt)}`).join(", ")}, as its provider last reported.`;
+  const text = silent ? `Pendulum: ${name} ran a stage and its provider reported no quota reading, so automatic account choice puts it after the accounts that report one.` : `Pendulum: ${name} has used ${Object.entries(r.windows).map(([w, v]) => `${pct(v)} of ${w} until ${whenText(v.resetsAt, { zone: repositoryZone() })}`).join(", ")}, as its provider last reported.`;
   await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${quotaLine(r)}\n${text}` } });
   if (found.relabel) await addLabels(repo, issue, [HOLDS_LABEL], opts).catch(() => {});
   const gone = read.readings.filter((x) => x.account === account || (declared && !declared.includes(x.account))).map((x) => x.id);
@@ -334,8 +334,8 @@ export async function writeHold(repo, { kind, harness, account, reset = null, wi
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
   const human =
     kind === "spent"
-      ? `Pendulum: ${name} reached its usage limit with no reset reported; automatic account choice passes it over until ${iso(until)}.`
-      : `Pendulum: ${name} reached its usage limit${made?.window ? ` (${made.window})` : ""}; it is held until ${iso(until)}.`;
+      ? `Pendulum: ${name} reached its usage limit with no reset reported; automatic account choice passes it over until ${whenText(until, { zone: repositoryZone() })}.`
+      : `Pendulum: ${name} reached its usage limit${made?.window ? ` (${made.window})` : ""}; it is held until ${whenText(until, { zone: repositoryZone() })}.`;
   const post = (r, text) => rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${holdLine(r)}\n${text}` } });
   await post(made, human);
   // Its record is written: the clean-up, each step on its own, none failing the hold.
@@ -428,7 +428,7 @@ export function pickRouteAccount({ names, store, issue, models = [], starts = nu
 const heldText = (store, name, t) => {
   const hard = store.until(name, t);
   const end = store.avoidUntil(name, t);
-  return end !== null && end !== hard ? `\`${name}\` passed over until about ${iso(end)} (no reset reported)` : `\`${name}\` held until ${iso(end ?? t)}`;
+  return end !== null && end !== hard ? `\`${name}\` passed over until about ${whenText(end)} (no reset reported)` : `\`${name}\` held until ${whenText(end ?? t)}`;
 };
 
 /**
@@ -478,7 +478,7 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
       const t = now();
       const noReset = !Number.isFinite(e.resetAt);
       const { until, store } = await writeHold(repo, { kind: noReset ? "spent" : "limit", harness, account, reset: e.resetAt, window: e.refusal?.limitType ?? null, now: t, steps }, opts);
-      const line = noReset ? `${who} reached its usage limit or quota on account \`${account}\` with no reset reported, so automatic account choice passes it over until about ${iso(until)}` : `${who} reached its usage limit on account \`${account}\`, which is held until ${iso(until)}`;
+      const line = noReset ? `${who} reached its usage limit or quota on account \`${account}\` with no reset reported, so automatic account choice passes it over until about ${whenText(until)}` : `${who} reached its usage limit on account \`${account}\`, which is held until ${whenText(until)}`;
       if (pinned) return {};
       if (free(store, t).length) {
         try {
@@ -490,15 +490,15 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
       }
       if (noReset) return { note: `Every other ${who} account this repository declares is held too: ${others.map((n) => heldText(store, n, t)).join("; ")}.` };
       const first = Math.min(...others.map((n) => store.avoidUntil(n, t)));
-      return { note: `Every other ${who} account this repository declares is held too, the first until ${iso(first)}.` };
+      return { note: `Every other ${who} account this repository declares is held too, the first until ${whenText(first)}.` };
     },
     async hold(r) {
       const { until } = await writeHold(repo, { kind: "limit", harness, account, reset: r.resetAt, window: r.limitType ?? null, now: now() }, opts);
-      log(`${who} account ${account} is busy until ${iso(r.resetAt)}; held until ${iso(until)} while this stage waits for it`);
+      log(`${who} account ${account} is busy until ${logTime(r.resetAt)}; held until ${logTime(until)} while this stage waits for it`);
     },
     async spent(limitRefused) {
       const { until } = await writeHold(repo, { kind: "spent", harness, account, window: limitRefused?.limitType ?? null, now: now(), steps }, opts);
-      log(`${who} account ${account} reached its usage limit with no reset reported; automatic account choice passes it over until ${iso(until)}`);
+      log(`${who} account ${account} reached its usage limit with no reset reported; automatic account choice passes it over until ${logTime(until)}`);
     },
     async reading(quota, { warmUntil = null } = {}) {
       if (!quota || quota.harness !== harness || (!quota.windows && quota.silent !== true)) return null;

@@ -4,6 +4,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSyn
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { whenText } from "../scripts/lib/clock.mjs";
 import { parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
 import { BLOCK_CAUSES, blockMarker, decideExit, refusalCause, refusalReason } from "../scripts/lib/logic.mjs";
 import { crashed, usageLimitExit } from "../scripts/lib/session.mjs";
@@ -34,7 +35,7 @@ test("claude: the usage limit is a refusal read from api_error, with the reset f
   assert.equal(d.exit, "blocked");
   assert.equal(d.cause, "provider-quota");
   assert.ok(BLOCK_CAUSES[d.cause].external);
-  assert.match(d.reason, new RegExp(`^claude reached its subscription's usage limit \\(HTTP 429 rate_limit usage_limit_reached\\), which resets at ${RESET.replaceAll(".", "\\.")}; not run again on another model`));
+  assert.match(d.reason, new RegExp(`^claude reached its subscription's usage limit \\(HTTP 429 rate_limit usage_limit_reached\\), which resets at ${whenText(RESET)}; not run again on another model`));
   assert.ok(!/crash|5-hour|3pm/.test(d.reason), "structure only: no crash wording, none of the provider's prose");
   // The reset from the last rejected rate_limit_event when the API error message carries none.
   const noParams = LIMIT_RUN.replace(/,"api_error_params":\{"rate_limit_info":\{[^}]*\}\}/, "");
@@ -141,7 +142,7 @@ test("reviewer path, real, fake claude: a usage limit never runs the fallback mo
     assert.equal(missed, true);
     assert.equal(reviewRerun({ missed, refusal: rec.refusal, retryTimeout: 10 * 60_000 }), false, "no rerun on claude-opus-5-5: the same subscription's limit");
     assert.equal(refusalCause(rec.refusal), "provider-quota");
-    assert.match(refusalReason(rec.refusal), new RegExp(`resets at ${RESET.replaceAll(".", "\\.")}`));
+    assert.match(refusalReason(rec.refusal), new RegExp(`resets at ${whenText(RESET)}`));
     // In a stage, past the bound: the stage ends on it before review.mjs could pick a fallback.
     waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
     await assert.rejects(runHarness(pass(bin, { label: "review", reviewer: true, agent: "reviewer" })), (e) => e.code === USAGE_LIMIT);
@@ -166,7 +167,7 @@ test("usageLimitExit: locally the stage ends paused with the reset and writes no
   const [reason, cause] = blocks[0];
   assert.equal(cause, "provider-quota");
   assert.equal(blockMarker(cause), '<!-- pendulum:block {"cause":"provider-quota"} -->');
-  assert.match(reason, new RegExp(`usage limit \\(HTTP 429 rate_limit usage_limit_reached\\), which resets at ${RESET.replaceAll(".", "\\.")}`));
+  assert.match(reason, new RegExp(`usage limit \\(HTTP 429 rate_limit usage_limit_reached\\), which resets at ${whenText(RESET)}`));
   assert.equal(ends[1][0], "blocked");
 });
 
@@ -305,7 +306,7 @@ test("codex: the usage limit is read from the rollout's rate-limit snapshot, nev
   const d = decideExit({ harness: { ...rec, died: 0 }, pr: null, commits: 0 });
   assert.equal(d.exit, "blocked");
   assert.equal(d.cause, "provider-quota");
-  assert.match(d.reason, new RegExp(`^codex reached its subscription's usage limit \\(usage_limit_reached\\), which resets at ${RESET.replaceAll(".", "\\.")}; not run again on another model`));
+  assert.match(d.reason, new RegExp(`^codex reached its subscription's usage limit \\(usage_limit_reached\\), which resets at ${whenText(RESET)}; not run again on another model`));
   assert.ok(!/crash|3:00 PM|credits/.test(d.reason), "structure only: none of the provider's prose");
   // The stream alone (no rollout read) holds no structure: the failure stays a death, as before.
   const bare = { ...parseUsage("codex", CODEX_STREAM, null, 1), exitCode: 1, signal: null, timedOut: false };

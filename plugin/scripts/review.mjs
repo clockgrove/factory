@@ -114,6 +114,7 @@ import { claimExit, commitExit, confirmRunning, holdIfStopped, goTrust, labelTru
 import { timelineOf } from "./lib/relaunch.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
+import { useObjectiveZone, whenText } from "./lib/clock.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
 
@@ -1147,6 +1148,8 @@ async function main() {
   // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review: the label comes off and nothing
   // else changes. From here on the stage stops when a person stops it (session.mjs stopStage).
   const issueNow = await getIssue(repo, issue, token);
+  // Its visible times from here on in the zone its body names, if any (lib/clock.mjs); the progress comment's too.
+  useObjectiveZone(issueNow?.body);
   const stopped = stopCause(issueNow, inputs.objectiveLabel);
   // A person's ready mark on a Question (readyMark): its answer, or no answer and the Question again.
   const humanReady = readyMark({ action: eventAction(), sender: eventSender(), local, issue: issueNow, pr });
@@ -1837,7 +1840,7 @@ async function main() {
   if (third.wait) {
     // What this stage covers so far (a fix pass after the reviewer), recorded for the stage that takes the wait up.
     await settleCover({ answerFrom: outbox.expected() || read.head, answerTo: outbox.expected() || read.head, comments: [] });
-    const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${new Date(third.wait.until).toISOString()}`;
+    const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${whenText(third.wait.until)}`;
     log(`${reason}; this stage ends, and the review goes on when the dispatcher puts the review label back`);
     await finish("waiting", reason);
     return;

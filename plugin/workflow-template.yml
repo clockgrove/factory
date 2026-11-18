@@ -75,6 +75,7 @@ env:
   PENDULUM_PROTECTED_PATHS: {{protected_paths}}
   PENDULUM_CI_CHECKS: {{ci_checks}}
   PENDULUM_NODE_VERSION: {{node_version}} # the Node.js your CI uses
+  PENDULUM_TIME_ZONE: {{time_zone}} # the IANA zone visible times are written in (America/Los_Angeles); empty: the machine's own in local mode, UTC on Actions and in the cloud sandbox
   # {{#project}}
   PENDULUM_PROJECT: {{project}} # the Pendulum board's node id (setup records it with the board)
   # {{/project}}

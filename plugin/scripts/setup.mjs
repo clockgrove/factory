@@ -601,6 +601,7 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     protected_paths: protectedList.join(", "),
     ci_checks: inputs.ciChecks.join(", "),
     node_version: args.node_version || "22",
+    time_zone: inputs.timeZone,
     project: String(args.project || "").trim(),
     action: workflowAction({ explicit, before, latest }),
     sandbox,

@@ -12,6 +12,7 @@
 import { addLabels, listComments, objectiveLabeledAt, removeLabel, rest, setStateLabel } from "./github.mjs";
 import { sanitize } from "./handoff.mjs";
 import { THIRD_PARTY_WAIT_MAX_MINUTES, log } from "./inputs.mjs";
+import { clockText } from "./clock.mjs";
 import { CODE_SCANNING, REVIEW_LABEL, isSelf, selfLogin, trustedAuthor } from "./logic.mjs";
 
 /**
@@ -241,7 +242,7 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
     return { logins, wait: null };
   }
   const until = since + waitMs;
-  await progress(`third-party review: waiting until ${new Date(until).toISOString().slice(11, 16)} UTC for ${seen.missing.join(", ")} to review ${head}; this stage ends here, holding no slot, and the review goes on once that review is posted or then`);
+  await progress(`third-party review: waiting until ${clockText(until)} for ${seen.missing.join(", ")} to review ${head}; this stage ends here, holding no slot, and the review goes on once that review is posted or then`);
   return { logins, wait: { missing: seen.missing, until } };
 }
 

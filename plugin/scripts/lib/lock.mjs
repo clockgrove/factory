@@ -12,6 +12,7 @@
 // launch.mjs takes one per stage start and releases it, the dispatcher's tick (sweepLocks) clears stale and foreign ones.
 import { randomBytes } from "node:crypto";
 import { graphql, rest } from "./github.mjs";
+import { logTime } from "./clock.mjs";
 
 export const LOCK_NAMESPACE = "pendulum-launch";
 /**
@@ -126,9 +127,9 @@ export async function sweepLocks(repo, { base, locks = null, staleMs = LOCK_STAL
     }
     try {
       const held = await lockOf(repo, l.ref, l.object, opts, api);
-      const why = held.foreign ? "foreign lock" : now() - Date.parse(held.at) > staleMs ? `stale since ${held.at}` : null;
+      const why = held.foreign ? "foreign lock" : now() - Date.parse(held.at) > staleMs ? `stale since ${logTime(held.at)}` : null;
       if (!why) {
-        out.push({ ref: l.ref, action: "kept", reason: `held since ${held.at}` });
+        out.push({ ref: l.ref, action: "kept", reason: `held since ${logTime(held.at)}` });
         continue;
       }
       out.push((await releaseLock(repo, l.ref, { ...opts, oid: held.oid, base, api })) ? { ref: l.ref, action: "released", reason: why } : { ref: l.ref, action: "skipped", reason: `${why}; changed meanwhile` });

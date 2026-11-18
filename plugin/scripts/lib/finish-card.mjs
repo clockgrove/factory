@@ -11,6 +11,7 @@
 import { pendulumBuild } from "./release.mjs";
 import { DRAFT_LABEL } from "./stop.mjs";
 import { DEFAULTS } from "./inputs.mjs";
+import { clockText, objectiveZone, timeZone, zoneDay, zoneOffsetMs } from "./clock.mjs";
 import { stageHarnessOf } from "./cost-join.mjs";
 import { addTokens, isAnswer, isFix, stagePassFigures, zeroTokens } from "./pass-figures.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
@@ -435,6 +436,8 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     queue,
     sandbox,
     foreignVendors,
+    // The zone its filer's machine recorded in its body (clock.mjs objectiveZone), null with none: the card's times only.
+    zone: objectiveZone(issue.body),
   };
 }
 
@@ -572,7 +575,8 @@ export function badges(d) {
 }
 
 const many = (n, one, more = `${one}s`) => `${n} ${n === 1 ? one : more}`;
-const utc = (at) => new Date(ms(at)).toISOString().slice(11, 16);
+/** The zone the card's times are written in (clock.mjs timeZone): the Objective's own, else the repository's, else the default. */
+const zoneOf = (d) => timeZone(process.env, { objective: d.zone ?? null }).zone;
 const prList = (prs) => (prs.length === 1 ? `PR #${prs[0].number}` : `PRs ${prs.map((p) => `#${p.number}`).join(", ")}`);
 
 /** Who did what, and what Pendulum did, in plain sentences: only what the records say. */
@@ -645,18 +649,23 @@ function tickFor(span) {
 }
 
 const isoSecond = (t) => new Date(ms(t)).toISOString().slice(0, 19);
-/** Whether the Objective's clock and its merge fall on different UTC days (the times then carry their dates). */
-const spansDays = (d) => new Date(ms(d.started)).toISOString().slice(0, 10) !== new Date(ms(d.merged)).toISOString().slice(0, 10);
+/** Whether the Objective's clock and its merge fall on different days in the card's zone (the times then carry their dates). */
+const spansDays = (d) => zoneDay(ms(d.started), zoneOf(d)) !== zoneDay(ms(d.merged), zoneOf(d));
 
-/** The timeline: one row per stage and per merge queue entry, in time order, in UTC. Stages with no recorded time are left out. */
+/**
+ * The timeline: one row per stage and per merge queue entry, in time order, on the card's zone's clock at the
+ * Objective's start (one offset for the whole chart, so every bar keeps its length across a daylight-saving change).
+ * Stages with no recorded time are left out.
+ */
 function gantt(d) {
   const span = ms(d.merged) - ms(d.started);
+  const shift = zoneOffsetMs(ms(d.started), zoneOf(d));
   const rows = [...d.stages.filter((s) => s.start).map((s) => [rowName(s), s.start, s.end]), ...d.queue.map((q) => [q.merged ? "Queue" : "Dropped", q.start, q.end])].sort((a, b) => ms(a[1]) - ms(b[1]));
   if (!rows.length) return null;
   const lines = ["gantt", "    dateFormat YYYY-MM-DDTHH:mm:ss", `    axisFormat ${spansDays(d) ? "%b %d %H:%M" : "%H:%M"}`, `    tickInterval ${tickFor(span)}`, "    todayMarker off"];
   for (const [name, s, e] of rows) {
     const end = Math.max(ms(e), ms(s) + SECOND);
-    lines.push(`    section ${name}`, `    ${durationShort(end - ms(s))} :active, ${isoSecond(s)}, ${isoSecond(end)}`);
+    lines.push(`    section ${name}`, `    ${durationShort(end - ms(s))} :active, ${isoSecond(ms(s) + shift)}, ${isoSecond(end + shift)}`);
   }
   return ["```mermaid", init(GANTT_THEME), ...lines, "```"].join("\n");
 }
@@ -801,10 +810,11 @@ function breakdownTables(b, t) {
   return out;
 }
 
-/** The run log: every recorded event, oldest first. */
+/** The run log: every recorded event, oldest first, in the card's zone (its summary line names it). */
 function runLog(d) {
   const day = spansDays(d);
-  const at = (t) => (day ? new Date(ms(t)).toISOString().slice(0, 19).replace("T", " ") : new Date(ms(t)).toISOString().slice(11, 19));
+  const zone = zoneOf(d);
+  const at = (t) => clockText(ms(t), { zone, seconds: true, date: day, abbr: false });
   const out = [[d.started, "labelled `pendulum:objective`: the clock starts"]];
   for (const s of d.stages) {
     if (!s.start) continue;
@@ -831,7 +841,7 @@ function runLog(d) {
 function landedLine(d) {
   const prs = d.prs.map((p) => `<a href="${p.url}">PR #${p.number}</a>`).join(", ");
   const how = d.queue.some((q) => q.merged) ? "landed through your merge queue" : "landed";
-  return `<p align="center"><sub><b>Clockgrove Pendulum</b> · issue #${d.issue} → ${prs} · ${how} at ${utc(d.merged)} UTC</sub></p>`;
+  return `<p align="center"><sub><b>Clockgrove Pendulum</b> · issue #${d.issue} → ${prs} · ${how} at ${clockText(ms(d.merged), { zone: zoneOf(d) })}</sub></p>`;
 }
 
 /** The headline and badges, centred: the top of the card and of the merged PR's body. */
@@ -845,13 +855,13 @@ export function renderFinishCard(d) {
   const rows = costRows(d);
   const parts = [`<p align="center"><img src="${MARK_URL}" width="96" alt="Pendulum"></p>`, `<h3 align="center">${headline(d)}</h3>`, landedLine(d), `<p align="center">\n${badges(d).join("\n")}\n</p>`, summary(d)];
   const timeline = gantt(d);
-  if (timeline) parts.push("**How the time went** (UTC)", timeline);
+  if (timeline) parts.push(`**How the time went** (${zoneOf(d)})`, timeline);
   parts.push("**What it cost**", costTable(d, t, rows));
   const chart = pie(rows, t);
   if (chart) parts.push(chart);
   const where = spendBreakdown(d);
   if (where.shown) parts.push("**Where the dollars went**", ...breakdownTables(where, t));
-  parts.push(`<sub>${sources(d, t)}</sub>`, `<details><summary>Full run log</summary>\n\n${runLog(d)}\n\n</details>`);
+  parts.push(`<sub>${sources(d, t)}</sub>`, `<details><summary>Full run log (${zoneOf(d)})</summary>\n\n${runLog(d)}\n\n</details>`);
   return parts.join("\n\n");
 }
 

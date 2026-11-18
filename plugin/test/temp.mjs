@@ -48,6 +48,8 @@ export const DEVELOPER_ENV = [
   // (GITHUB_RUN_ATTEMPT 2) keys no progress comment or usage record differently from the first run.
   "GITHUB_RUN_ID",
   "GITHUB_RUN_ATTEMPT",
+  // The zone visible times are written in (lib/clock.mjs): a test that wants one sets it.
+  "PENDULUM_TIME_ZONE",
   // Whether the process runs on GitHub Actions or in a cloud sandbox: a stage records its route from them (backend.mjs
   // stageRoute), so a test that wants one sets its own, and the suite runs the same in CI as on a laptop.
   "GITHUB_ACTIONS",
@@ -60,6 +62,8 @@ mkdirSync(home, { mode: 0o700 });
 // Its real path: local mode compares a home's folders with their real paths (lib/accounts.mjs).
 process.env.HOME = realpathSync(home);
 for (const k of Object.keys(process.env)) if (DEVELOPER_ENV.includes(k) || DEVELOPER_ENV_PREFIX.test(k)) delete process.env[k];
+// The machine's zone is UTC here, whatever the shell's: visible times (lib/clock.mjs) read the same on every machine.
+process.env.TZ = "UTC";
 // The git server Pendulum fetches commits from by URL (overlap.mjs gitRemote, its trial merges): a folder in this root,
 // never github.com, whatever the shell or CI sets. A test that serves a repository puts a bare one at <it>/<owner>/<name>.git.
 process.env.GITHUB_SERVER_URL = join(root, "git-server");

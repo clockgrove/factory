@@ -1,16 +1,18 @@
 // phases.mjs: minutes per phase of an Objective, and each run's dispatch latency, read from Pendulum's progress comments.
 //
 // Each run (work, review) edits one `<!-- pendulum:N:progress:... -->` comment with a line per
-// phase: `- HH:MMZ <phase>`. The minutes between consecutive lines belong to the earlier line's
+// phase: `- <time> <phase>`, its UTC minute in the line's hidden `HH:MMZ` stamp (LINE_CLOCK; a bare `HH:MMZ` before
+// the visible time was in the repository's zone). The minutes between consecutive lines belong to the earlier line's
 // phase. Categories: firstSetup (a local Objective's first stage on a machine: the clone, whose seconds its line
 // carries, and the cold install), setup (setup, install), model (harness, fix runs, reviewer, answer passes,
 // rebase), ciWait (waiting for required checks), overlap (the reviewer running while the required checks it runs beside
 // are still going: review.mjs reviewOverlap's lines), other. The exit line ends a run. Each minute counts once, in the
 // phase of the line before it, so the overlap's minutes are in neither model nor ciWait.
 import { sandboxRecord } from "../../plugin/scripts/lib/logic.mjs";
+import { LINE_CLOCK } from "../../plugin/scripts/lib/clock.mjs";
 
 const MARK = (issue) => `<!-- pendulum:${issue}:progress`;
-const LINE = /^- (\d\d):(\d\d)Z (.*)$/gm;
+const LINE = new RegExp(`^- ${LINE_CLOCK} (.*)$`, "gm");
 
 export function phaseOf(text) {
   if (/^first-time setup\b|^install \(first time/.test(text)) return "firstSetup";
@@ -29,7 +31,7 @@ export function phaseMinutes(comments, issue) {
   for (const c of runs) {
     const lines = [...c.body.matchAll(LINE)].map((m) => ({ t: Number(m[1]) * 60 + Number(m[2]), phase: phaseOf(m[3]) }));
     // The clone happened before the run's first line: its seconds ride the line.
-    for (const m of c.body.matchAll(/^- \d\d:\d\dZ first-time setup: cloned in (\d+) s$/gm)) sums.firstSetup += Number(m[1]) / 60;
+    for (const m of c.body.matchAll(new RegExp(`^- ${LINE_CLOCK} first-time setup: cloned in (\\d+) s$`, "gm"))) sums.firstSetup += Number(m[3]) / 60;
     for (let i = 0; i + 1 < lines.length; i++) {
       let d = lines[i + 1].t - lines[i].t;
       if (d < 0) d += 24 * 60; // the run crossed midnight UTC
@@ -93,7 +95,7 @@ function progressRuns(comments, issue) {
   return (comments || [])
     .filter((c) => (c.body || "").startsWith(MARK(issue)))
     // A run that only logged `exit: skipped` was a duplicate trigger (ready_for_review beside the label) and did no work.
-    .filter((c) => !/^- \d\d:\d\dZ exit: skipped/m.test(c.body) || /^- \d\d:\d\dZ (?!exit:)/m.test(c.body))
+    .filter((c) => !new RegExp(`^- ${LINE_CLOCK} exit: skipped`, "m").test(c.body) || new RegExp(`^- ${LINE_CLOCK} (?!exit:)`, "m").test(c.body))
     .map((c) => {
       const m = /^<!-- pendulum:\d+:progress:(\w+):?([A-Za-z0-9-]*)/.exec(c.body);
       return { stage: m?.[1] ?? "?", run: /^(\d{1,20})(?:-|$)/.exec(m?.[2] ?? "")?.[1] ?? null, at: Date.parse(c.created_at), comment: c };
@@ -159,7 +161,7 @@ export function lastWrite(comment) {
 }
 
 /**
- * When the stage itself last wrote its progress comment, in ms, from the comment's own header (`started HH:MMZ, N min
+ * When the stage itself last wrote its progress comment, in ms, from the comment's own header (`started <time>, N min
  * at the last line`, which every write of the stage's reporter, the exit line's included, sets), within a minute and a
  * half. Not its `updated_at`: an older stage's comment had a lost stage's sandbox cost booked into it (now its own
  * vendor comment) hours later, an edit that left the header alone. Falls back to lastWrite when the header is absent
@@ -168,7 +170,7 @@ export function lastWrite(comment) {
 export function stageLastWrite(comment) {
   const created = Date.parse(comment?.created_at);
   const last = lastWrite(comment);
-  const m = /: started (\d\d):(\d\d)Z, (\d+) min at the last line\./.exec(comment?.body || "");
+  const m = new RegExp(`: started ${LINE_CLOCK}, (\\d+) min at the last line\\.`).exec(comment?.body || "");
   if (!m || !Number.isFinite(created)) return last;
   const day = new Date(created);
   let start = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), Number(m[1]), Number(m[2]));

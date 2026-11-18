@@ -78,7 +78,7 @@ test("ceiling: every vCPU busy for the whole session plus its memory, so compute
 test("vendor comment: the vendor line carries state, seconds, size and dated rates; its spend line the vendor's dollars", () => {
   const cost = stageVendorCost(R, { before: { wallMs: 0, activeCpuMs: 0 }, after: { wallMs: 212_000, activeCpuMs: 41_200, memoryMb: 4096, vcpus: 2 }, stored: { ms: 3 * H, bytes: 1.2e9 } });
   const line = vendorLine({ id: "pendulum-a0dd", state: "stopped", cost, rates: R, at: "2026-11-09T01:16:30Z" });
-  assert.match(line, /^- 01:16Z sandbox `pendulum-a0dd` stopped: 41\.2 s active CPU in 212\.0 s, 2 vCPU \/ 4 GB; vercel Pro list rates \(iad1, read 2026-11-08\): \$0\.1280\/CPU-hour, \$0\.0212\/GB-hour, \$0\.0800\/GB-month stored; vendor \$0\.\d{4} this stage; stopped 3\.0 h before it with 1\.20 GB saved: \$0\.\d{4}$/);
+  assert.match(line, /^- 1:16 AM UTC<!-- 01:16Z --> sandbox `pendulum-a0dd` stopped: 41\.2 s active CPU in 212\.0 s, 2 vCPU \/ 4 GB; vercel Pro list rates \(iad1, read 2026-11-08\): \$0\.1280\/CPU-hour, \$0\.0212\/GB-hour, \$0\.0800\/GB-month stored; vendor \$0\.\d{4} this stage; stopped 3\.0 h before it with 1\.20 GB saved: \$0\.\d{4}$/);
   const body = vendorBody({ line, vendorUsd: cost.usd });
   assert.ok(body.includes(line));
   close(spendOf(body).usd, cost.usd, "daily_usd adds the vendor's dollars to the progress comment's model dollars");

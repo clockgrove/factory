@@ -19,6 +19,7 @@ import { choiceOf } from "./lib/choice.mjs";
 import { getIssue, repoOf } from "./lib/github.mjs";
 import { setMaintainers, setSelf } from "./lib/logic.mjs";
 import { MODEL_DEFAULTS, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { whenText } from "./lib/clock.mjs";
 import { labelsVouched, trustedRoutePin } from "./lib/objective-trust.mjs";
 import { pickRouteAccount, readHolds, routeStarts } from "./lib/route-holds.mjs";
 
@@ -87,8 +88,8 @@ export async function stageAccount({ repo, issue = null, branch = "", harness, a
 const autoLine = (r) => {
   const a = r.auto;
   if (a.unread) return `automatic account choice could not read the account holds (${a.unread}), so it picks as if none is held: account ${r.account}`;
-  if (a.until) return `automatic account choice: every account of this harness is held, so this stage runs on account ${r.account}, whose hold ends first (${a.until}); the provider then decides, as with one account: a reset within the job's time is waited for, a later one Blocks`;
-  const passed = a.held.map((x) => `${x.name} held until ${x.until}`).join(", ");
+  if (a.until) return `automatic account choice: every account of this harness is held, so this stage runs on account ${r.account}, whose hold ends first (${whenText(a.until)}); the provider then decides, as with one account: a reset within the job's time is waited for, a later one Blocks`;
+  const passed = a.held.map((x) => `${x.name} held until ${whenText(x.until)}`).join(", ");
   const left = `${a.warm ? ", where this Objective's previous stage's prompt cache is still warm" : ""}${a.left !== undefined ? `, ${Math.round(a.left * 100)}% of its quota left as its provider last reported` : ""}`;
   return `automatic account choice: account ${r.account}${left}${passed ? ` (${passed})` : ""}`;
 };

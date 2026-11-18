@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { whenText } from "../scripts/lib/clock.mjs";
 import { RETRY, rest } from "../scripts/lib/github.mjs";
 import { OUTAGE, RATE_LIMIT_SPENT, quotaKey, quotaResource, resetNetwork, spentUntil, waitOutages } from "../scripts/lib/network.mjs";
 
@@ -133,7 +134,7 @@ test("a waiting process: a spent primary limit waits to its reset for all caller
       assert.ok(seen.slice(1).every((r) => r.at >= reset), "every later request after the reset");
       assert.equal(seen.filter((r) => r.method === "POST").length, 1, "the create once");
       assert.equal(limitLines(lines).length, 2, lines.join(""));
-      assert.match(limitLines(lines)[0], /rate limit on api\.github\.test is spent until 2026-11-14T09:07:00\.000Z; no request goes against it until then/);
+      assert.match(limitLines(lines)[0], /rate limit on api\.github\.test is spent until Nov 14, 9:07:00 AM UTC; no request goes against it until then/);
       assert.match(limitLines(lines)[1], /has reset; requests go again after 20 min/);
       assert.deepEqual(retryLines(lines), [], "no try spent on it");
       assert.ok(now() >= reset);
@@ -229,7 +230,7 @@ async function worker(gh, { env = {}, virtual = false } = {}) {
   const pre = join(root, "pre.mjs");
   writeFileSync(pre, `import { OUTAGE } from ${JSON.stringify(pathToFileURL(join(SCRIPTS, "lib", "network.mjs")).href)};\nimport { RETRY } from ${JSON.stringify(pathToFileURL(join(SCRIPTS, "lib", "github.mjs")).href)};\n${virtual ? "let ahead = 0;\nOUTAGE.now = RETRY.now = () => Date.now() + ahead;\nOUTAGE.sleep = RETRY.sleep = async (ms) => { ahead += Math.max(0, ms); };\n" : ""}`);
   const child = spawn(process.execPath, ["--import", pathToFileURL(pre).href, join(SCRIPTS, "worker.mjs"), "--repo", "o/r", "--issue", "7", "--checkout", join(root, "co"), "--usage-dir", join(root, "u")], {
-    env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, PENDULUM_APP_TOKEN: "t", ...env },
+    env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, TZ: process.env.TZ, GITHUB_API_URL: gh.url, PENDULUM_APP_TOKEN: "t", ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let out = "";
@@ -254,7 +255,7 @@ test("worker.mjs, run for real on the local route: a reset 20 minutes ahead (pas
     assert.ok(at >= reset && at < reset + 1500, `serve resumes it after this: ${result.outage.reset}`);
     assert.equal(result.outage.quota, "core");
     assert.equal(result.outage.origin, gh.url);
-    assert.ok(result.reason.startsWith(`GitHub's core API rate limit on 127.0.0.1:`) && result.reason.includes(`is spent until ${result.outage.reset}`), result.reason);
+    assert.ok(result.reason.startsWith(`GitHub's core API rate limit on 127.0.0.1:`) && result.reason.includes(`is spent until ${whenText(result.outage.reset)}`), result.reason);
     assert.match(out, /past this process's wait \(until .*\); no longer waiting for it/);
     assert.match(out, /paused: .*serve resumes the stage after the reset/);
     assert.doesNotMatch(out, /crashed/);
@@ -281,7 +282,7 @@ test("worker.mjs, run for real off the local route: a reset 20 minutes ahead is 
   try {
     const { out, result } = await worker(gh, { virtual: true });
     assert.equal(refused, 1);
-    assert.match(out, /network: GitHub's core API rate limit on \S+ is spent until \S+; no request goes against it until then/);
+    assert.match(out, /network: GitHub's core API rate limit on \S+ is spent until \w{3} \d{1,2}, \d{1,2}:\d\d:\d\d [AP]M \S+; no request goes against it until then/);
     assert.match(out, /network: GitHub's core API rate limit on \S+ has reset; requests go again after 20 min/);
     assert.equal(gh.seen.filter((r) => /\/issues\/7$/.test(r.url)).length >= 2, true, "the issue read again after the reset");
     // The stage went on to its own end (the fake names no author: its own Block), not a crash or a rate-limit end.
@@ -309,11 +310,11 @@ test("worker.mjs, run for real off the local route: a reset past the stage's dea
     const { out, result } = await worker(gh, { virtual: true, env: { PENDULUM_INPUT_TIMEOUT_MINUTES: "5" } });
     assert.equal(result?.exit, "blocked", out);
     assert.ok(Math.abs(Date.parse(result.outage.reset) - reset) < 1500, result.outage.reset);
-    assert.match(out, /waiting for the rate limit's reset at \S+ to write the Block/);
+    assert.match(out, /waiting for the rate limit's reset at \w{3} \d{1,2}, \d{1,2}:\d\d:\d\d [AP]M \S+ to write the Block/);
     const notice = gh.seen.find((r) => r.method === "POST" && /\/issues\/7\/comments$/.test(r.url) && r.body.includes("pendulum:block"));
     assert.ok(notice, `${out}\n${gh.seen.map((r) => `${r.method} ${r.url} ${r.body.slice(0, 200)}`).join("\n")}`);
     assert.match(JSON.parse(notice.body).body, /<!-- pendulum:block \{"cause":"provider-quota"\} -->/);
-    assert.ok(JSON.parse(notice.body).body.includes(`is spent until ${result.outage.reset}`), notice.body);
+    assert.ok(JSON.parse(notice.body).body.includes(`is spent until ${whenText(result.outage.reset)}`), notice.body);
     assert.doesNotMatch(out, /worker crashed/);
   } finally {
     gh.close();
@@ -327,15 +328,15 @@ test("dispatch.mjs, run for real: a spent limit starts nothing, says so once, an
   const output = join(root, "out");
   writeFileSync(output, "");
   try {
-    const child = spawn(process.execPath, [join(SCRIPTS, "dispatch.mjs"), "--repo", "o/r"], { env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, PENDULUM_APP_TOKEN: "t", GITHUB_OUTPUT: output }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [join(SCRIPTS, "dispatch.mjs"), "--repo", "o/r"], { env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, TZ: process.env.TZ, GITHUB_API_URL: gh.url, PENDULUM_APP_TOKEN: "t", GITHUB_OUTPUT: output }, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (c) => (out += c));
     child.stderr.on("data", (c) => (out += c));
     const code = await new Promise((r) => child.on("exit", r));
     assert.equal(code, 0, out);
-    const said = out.split("\n").filter((l) => /^\[pendulum\] GitHub's API rate limit is spent until \S+; no new stage starts until then$/.test(l));
+    const said = out.split("\n").filter((l) => /^\[pendulum\] GitHub's API rate limit is spent until \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M \S+; no new stage starts until then$/.test(l));
     assert.equal(said.length, 1, out);
-    assert.ok(Math.abs(Date.parse(/until (\S+);/.exec(said[0])[1]) - reset) < 1500, said[0]);
+    assert.ok([reset - 1500, reset, reset + 1500].map((t) => whenText(t)).includes(/until (.+); no new/.exec(said[0])[1]), said[0]);
     assert.doesNotMatch(out, /dispatch failed/);
     const outputs = readFileSync(output, "utf8");
     assert.match(outputs, /^count=0$/m, outputs);
@@ -374,7 +375,7 @@ test("dispatch: a tick that met its token's REST quota spent in a read it went o
   assert.deepEqual(graphqlOnly.r.ready, [5], graphqlOnly.lines.join(""));
   const restOut = await tickWith(restRunsOut());
   assert.deepEqual(restOut.r.ready, [], restOut.lines.join(""));
-  assert.match(restOut.r.reason, /^GitHub's API rate limit is spent until 2026-11-14T09:07:00\.000Z; no new stage starts until then$/);
+  assert.match(restOut.r.reason, /^GitHub's API rate limit is spent until Nov 14, 9:07 AM UTC; no new stage starts until then$/);
   assert.deepEqual(restOut.r.skipped.find((s) => s.number === 5)?.reason, restOut.r.reason);
   assert.equal(restOut.lines.filter((l) => l.includes("no new stage starts until then")).length, 1);
 });
@@ -436,7 +437,7 @@ test("a quota drained again soon after its reset, until a later reset, is a new 
       const p = rest("repos/o/r/issues/7", { token: "t" });
       await settle(p, release);
       assert.equal(limitLines(lines).length, 4, lines.join(""));
-      assert.match(limitLines(lines)[2], /is spent until 2026-11-14T09:57:\d\d\.000Z; no request goes against it until then \(50 min\)/);
+      assert.match(limitLines(lines)[2], /is spent until Nov 14, 9:57:\d\d AM UTC; no request goes against it until then \(50 min\)/);
     },
   );
 });

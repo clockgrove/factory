@@ -100,7 +100,7 @@ test("#266: the row gives each local account its stages, dollars and usage-limit
   assert.match(markdownTable([score(bare)]), /accounts alpha \(1 stage, unknown\), beta \(2 stages, unknown, 2 runs\)/);
   assert.deepEqual(score(localMerge(64)).accountUse, [], "no account named: none");
   assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", usageLimit: { harness: "claude" } }).parts, { limitPaused: true, exit: "paused" }, "the spend line marks a usage-limit pause");
-  assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", outage: { host: "github.com" } }).parts, { exit: "paused" }, "not an outage's");
+  assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", outage: { host: "github.com" } }).parts, { outagePaused: true, exit: "paused" }, "an outage's pause is its own mark (#614), never a usage-limit pause");
   // On GitHub Actions and the cloud sandbox (#268), a stage that went on on another account is that account's limit pause.
   assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "waiting", usageLimit: { harness: "claude" } }).parts, { limitPaused: true, exit: "waiting" });
   assert.deepEqual(accountUse([{ account: "claude-2", usd: 0.5, exit: "waiting", usageLimit: { harness: "claude" } }, { account: "claude-2", usd: 0.2, exit: "waiting" }]), [{ account: "claude-2", stages: 2, usd: 0.7, unknown: 0, limitPauses: 1 }]);

@@ -92,7 +92,7 @@ import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { ranModels, stageAccountName } from "./choice.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, passLedger, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, rerunRead, BILLING, addBilling, stageBilling, passKind, copilotRan } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, passLedger, passMillionths, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, rerunRead, BILLING, addBilling, stageBilling, passKind, copilotRan } from "./usage.mjs";
 import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, redCancels, unplacedCancelReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
@@ -1081,6 +1081,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let triage = null;
   let asked = null;
   let rebase = null;
+  // The stage is a send-back's rebase (progress.rebaseStage), known before its rebase line: the card names it so.
+  let rebasing = false;
   // A review stage's findings record (#546): the reviews it posted and how each finding it handled ended.
   let findings = null;
   // The decision calls' spend this comment carries (progress.decisionSpend): text at its end, "" for none.
@@ -1136,7 +1138,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const own = spend === null ? null : ledger;
     // The AI runs that ended: the ledger line's once the stage has written it, else this process's passes so far.
     const passes = (own && ledgerOfComment(own)?.ledger) || (passesOf ? passesOf() : []);
-    const cardOf = (opts) => progressCard({ stage, subject, issue, started, now, lines, status, exit: ended, live, spend: interim.spend ?? null, parts: interim.spendParts ?? null, passes, snap: liveNow, rebase: rebase !== null, ran, harness, runId, runUrl, where: runWhere, zone: timeZone(env).zone, ...opts });
+    const cardOf = (opts) => progressCard({ stage, subject, issue, started, now, lines, status, exit: ended, live, spend: interim.spend ?? null, parts: interim.spendParts ?? null, passes, snap: liveNow, rebase: rebasing || rebase !== null, ran, harness, runId, runUrl, where: runWhere, zone: timeZone(env).zone, ...opts });
     const size = (b) => key.length + 1 + b.length;
     // Near GitHub's limit (past PROGRESS_LEDGER_ROOM), in order: no timeline chart, shorter Step cells, no explanatory
     // sentences, then the ledger line's cut form (logic.mjs ledgerCut: the final spend line is never lost to it), and
@@ -1232,6 +1234,14 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     await queued();
   };
   /**
+   * A line and its step that go out with the stage's next write, not one of their own: what a stage says before it knows
+   * what it is (a work stage that may be a send-back's rebase, #617), so no write names it wrongly.
+   */
+  progress.note = (phase, step = null) => {
+    addLine(phase, step);
+    status = "";
+  };
+  /**
    * The harness and models the stage runs on (choice.mjs ranWith), as the Objective's labels chose them: the harness line
    * names them from the next write. `model` stays the stage's own: the reviewer's on a review stage.
    */
@@ -1299,6 +1309,13 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
    */
   progress.rebase = (r) => {
     rebase = r;
+  };
+  /**
+   * The stage is a send-back's rebase, said as soon as the stage knows it (#617): the card's headline names it a Rebase
+   * from the next write, and its work passes are its Rebased row, before any pass or its rebase line says so.
+   */
+  progress.rebaseStage = () => {
+    rebasing = true;
   };
   /** Whether the rebase line is set (progress.rebase). */
   progress.rebased = () => rebase !== null;
@@ -1436,8 +1453,10 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
  * - `checksOnlyFirst`: the first pass reads the required checks only, the commands not run again (a head the worker
  *   handed off ran them). `onRead(state)`: each reading of the checks as awaitChecks makes it. `signal` (an AbortSignal)
  *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
+ * `regeneration` (checkout.mjs openRegeneration, with a `regenerate` command): the regeneration check, first on every
+ *   pass, before the commands and before any push for the checks: its red is the pass's red, like a failed command's.
  */
-export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null, handed: handedIn = null, returnAfterFix = false, recurOnFirst = false }) {
+export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null, handed: handedIn = null, returnAfterFix = false, recurOnFirst = false, regeneration = null }) {
   // The decision calls' spend during this loop (triage and the rest: decisionSpend) is taken off what is left too; the
   // drift advisory's is not, since its reserve is no part of `maxUsd` here (harness.mjs passMaxUsd).
   const passDecisions = () => decisionSpend() - reservedSpend();
@@ -1494,14 +1513,14 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // pushed and the named checks are awaited, instead of re-running serially what CI runs in
   // parallel. The commands stay the harness's own tool (the task card names them).
   const byChecks = !!(checks && checks.names?.length && checks.prNumber);
-  if (!byChecks && !commands.length) return { green: true, passes: 0, lastOutput: "", usage, skipped: "no validation commands" };
+  if (!byChecks && !commands.length && !regeneration) return { green: true, passes: 0, lastOutput: "", usage, skipped: "no validation commands" };
   // The backend's gate: locally the heavy suites run on the box, not in CI (the commands first, then the checks).
   const localFirst = byChecks && commands.length && backend().gate.commandsFirst;
   // The pass's first line, once its head is known: a head a fix pass left unchanged is no pass (said where it is caught).
   const begin = async (sha = null) => {
     if (sha && sha === redHead) return;
     log(`${label} pass ${passes}: ${byChecks ? `${checks.what || "required checks"} ${checks.names.join(checks.request ? "; " : ", ")}` : `${commands.length} command(s)`}`);
-    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? checks.what || "required checks" : `${commands.length} commands`})`, byChecks ? { step: "ci", begin: true } : { step: "commands", commands: commands.length });
+    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? checks.what || "required checks" : `${commands.length} commands`})`, byChecks ? { step: "ci", begin: true, crossOs: !!checks.request } : { step: "commands", commands: commands.length });
   };
   const validate = async () => {
     // The CI wait's step (progress-card.mjs): its end and its outcome are set on it as the wait returns.
@@ -1511,6 +1530,15 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all). A failed command's output stays in
     // memory and reaches the fix run in $PENDULUM_IN/checks/; the prompt carries each one's tail.
     if (!byChecks || commandsNow) await begin();
+    // The regeneration check (checkout.mjs openRegeneration): on a head whose change touches a declared generated path
+    // and that it has not passed yet; null when it has nothing to check.
+    if (regeneration) {
+      const g = await regeneration.check(checkout, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
+      if (g && !g.green) {
+        if (byChecks && !commandsNow) await begin();
+        return g;
+      }
+    }
     if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
     if (commandsNow) {
       const local = await runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
@@ -2458,6 +2486,8 @@ export function gatewayDecisionFields(records) {
 
 export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false, rerun = null, judgeOnly = false, env = process.env }) {
   mkdirSync(usageDir, { recursive: true });
+  // Each pass's dollars to the millionth, as its ledger entry has them: every figure below is summed from these (#617).
+  records = passMillionths(records);
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
   // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
   // choice passes that account over for a while.

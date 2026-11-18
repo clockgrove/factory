@@ -198,17 +198,19 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
   const path = process.env.PATH;
   process.env.PATH = env.PATH;
   const log = [];
+  // Each line's step (progress-card.mjs stepOf), as the stage's progress reporter gets it.
+  const steps = [];
   try {
     const inputs = resolveInputs({ env: { ...settings, PENDULUM_DECISION_ROUTE: "off" } });
     const set = crossOs(inputs);
     const cross = set.setting || set.problem ? { problem: set.problem, checks: set.setting ? { ...crossOsChecks({ setting: set.setting, repo: REPO, issue: 4, prNumber: 5, branch: "pendulum/4", token: "t", route, ...(relay !== undefined ? { relay } : {}) }), appearMs: 60_000, pollMs: 1, maxPollMs: 4, stuckWaitMs: 40, guardMs: 0, ...checks } : null } : null;
     return await withGitHub({ work, legs: () => ({}), ...github, log }, async (seen) => {
-      const result = await workValidation({ checkout: work, commands, checks: null, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, spentUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), onPhase: async (l) => log.push(l), handOff: false, ...(progress ? { progressCheck: openProgressCheck({ inputs, stage: null }) } : {}) }, cross);
+      const result = await workValidation({ checkout: work, commands, checks: null, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, spentUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), onPhase: async (l, step = null) => { log.push(l); steps.push(step); }, handOff: false, ...(progress ? { progressCheck: openProgressCheck({ inputs, stage: null }) } : {}) }, cross);
       let made = [];
       try {
         made = readFileSync(prompts, "utf8").trim().split("\n").map((l) => JSON.parse(l));
       } catch {}
-      return { result, log, phases: log, prompts: made, dispatches: seen.dispatches, tokens: seen.tokens, head: g("rev-parse", "HEAD").trim() };
+      return { result, log, steps, phases: log, prompts: made, dispatches: seen.dispatches, tokens: seen.tokens, head: g("rev-parse", "HEAD").trim() };
     });
   } finally {
     process.env.PATH = path;
@@ -245,6 +247,13 @@ test("#518: on, with macOS and Windows green: the workflow is dispatched on the 
   assert.deepEqual(r.dispatches, [{ ref: "pendulum/4", return_run_details: true }]);
   assert.equal(r.prompts.length, 0, "no fix pass");
   assert.deepEqual(r.log.map(anyHead), ["validation pass 1 (1 commands)", "cross-os-validation pass 1 (cross-OS legs)", "dispatch X", `waiting for cross-OS legs (${MAC}; ${WIN}) on X`, anyHead(legLine(r.head, "success", "success"))]);
+  // #617: the line that begins the cross-OS round is that wait's own, so the progress card gives the wait one row: both
+  // are cross-OS steps, in its "Waited for cross-OS CI" row (progress-card.mjs), with no "Waited for CI" row beside it.
+  const { ROWS, progressCard } = await import("../scripts/lib/progress-card.mjs");
+  const round = r.steps.filter((x) => x?.step === "ci" && (x.begin || x.wait));
+  assert.deepEqual(round.map((x) => [x.begin === true, x.wait === true, x.crossOs]), [[true, false, true], [false, true, true]]);
+  const card = progressCard({ stage: "work", issue: 4, started: 0, now: 600_000, exit: "delivered", lines: r.steps.map((x, i) => [60_000 + i, r.log[i], x]) }).card;
+  assert.deepEqual(card.split("\n").filter((l) => /CI/.test(l)).map((l) => l.split(" | ")[1].split(" · ")[0]), [ROWS.crossOs[0]]);
 });
 
 test("#518 B1: a same-name pull_request check that was skipped, and a dispatched run GitHub lists late, never stand for the dispatched Windows leg that failed", async () => {

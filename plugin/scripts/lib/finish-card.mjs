@@ -1,6 +1,7 @@
 // The finish card (#498, #589): when an Objective's run ends (merged, Blocked, on a Question, closed without merging), one
 // comment on its issue says what happened, how long it took, what it cost and who did what, built only from what GitHub
-// and Pendulum's own records hold. Text only (no image): a two-line headline block, the action lines of a Blocked or
+// and Pendulum's own records hold. Text only (no image): a headline block (a third line for a run that waited, #614:
+// how long it worked and how long it waited, each wait with its cause), the action lines of a Blocked or
 // Question end, the timeline (a Mermaid gantt) with the stage table that holds its figures, where the money went (a
 // one-colour bar chart beside its tables), and Run details. Three parts:
 //   finishData      the card's figures from GitHub's answers (pure: the issue's timeline and comments, the PRs with their
@@ -149,6 +150,18 @@ export function gateChecks(checks, mergedAt, required = []) {
 export const artifactStage = (name) => (typeof name !== "string" ? null : /(^|[-/])review([-/]|$)/.test(name) ? "review" : "work");
 
 /**
+ * What a stage records it ended paused on (#614), from its spend line (logic.mjs stageSpendLine: `limitPaused`,
+ * `outagePaused`), else its usage record (its `usageLimit` or `outage` beside a `paused` or `waiting` exit): `usage-limit`
+ * (its account's usage limit, held until a reset or until another account takes the Objective), `outage`, or null.
+ */
+function pauseOf(line, rec) {
+  if (line) return line.limitPaused ? "usage-limit" : line.outagePaused ? "outage" : null;
+  const has = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+  if ((rec?.exit === "paused" || rec?.exit === "waiting") && has(rec.usageLimit)) return "usage-limit";
+  return rec?.exit === "paused" && has(rec.outage) ? "outage" : null;
+}
+
+/**
  * An Objective's stages from its issue's comments and its stages' usage records (pure), each counted once: the card's
  * rows and the Objective's spend that max_objective_usd compares (objectiveSpend).
  *  comments   the issue's comments: each stage's progress comment (logic.mjs progress marker, its harness, spend and
@@ -169,7 +182,7 @@ export const artifactStage = (name) => (typeof name !== "string" ? null : /(^|[-
  * sandbox (its own vendor comment's cost {usd, unknown}, or null), ledger (its per-pass ledger: the ledger line beside
  * its spend line, else its usage record's; null for none), version (the Pendulum release that ran it, or null), tokens
  * (its ledger line's passes' or its usage record's), unattributed (true for a stage Pendulum cannot attribute), key (its
- * progress comment's run key, as its usage record and its findings name it)}, in time order; and the cloud sandbox's own cost
+ * progress comment's run key, as its usage record and its findings name it), pause (pauseOf, when it ended paused)}, in time order; and the cloud sandbox's own cost
  * {usd, unknown}, every vendor comment's, or null: beyond its stages' own, the runs of unknown cost of vendor comments
  * Pendulum cannot attribute (sandboxWhy), whose stage kinds are `foreignVendors`, one per comment (a vendor comment of a
  * stage that has a progress comment, Pendulum's or not, is that stage's).
@@ -223,7 +236,8 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     const ledger = onComment?.ledger ?? (Array.isArray(record?.ledger) ? record.ledger : null);
     const version = [rec?.ran?.pendulum, onComment?.version, record?.ran?.pendulum].find((v) => typeof v === "string" && VERSION.test(v)) ?? null;
     const tokens = onComment ? onComment.ledger.reduce((t, p) => addTokens(t, p.tokens), zeroTokens()) : tokensOf(record?.tokens);
-    const s = { stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? ledgerModel(c.body) ?? (record?.byok === true ? null : modelId(record?.model)), harness, usd, unknown, why, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true, sandbox: null, ledger, version, tokens, key, ...(from.noPass === true ? { noPass: true } : {}) };
+    const pause = pauseOf(line, rec);
+    const s = { stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? ledgerModel(c.body) ?? (record?.byok === true ? null : modelId(record?.model)), harness, usd, unknown, why, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true, sandbox: null, ledger, version, tokens, key, ...(from.noPass === true ? { noPass: true } : {}), ...(pause ? { pause } : {}) };
     stages.push(s);
     byKey.set(`${stage}:${key}`, s);
   }
@@ -349,36 +363,132 @@ export const ENDS = Object.freeze(["blocked", "question", "closed"]);
 /** When a notice of Pendulum's was last written (its latest write: a repeated Block edits its notice in place). */
 const noticeAt = (c) => (c.updated_at && ms(c.updated_at) >= ms(c.created_at) ? c.updated_at : c.created_at);
 
+/** Why an Objective waited, as the card and its summary name it (#614): each from a record that says so, never worked out. */
+export const WAIT_WHY = Object.freeze(["blocked-by", "usage-limit", "outage", "you"]);
+/** A wait's cause as the card words it after "waiting for" (a blocked-by wait names its issues instead). */
+const WAIT_CAUSE = Object.freeze({ "usage-limit": "a usage limit", outage: "an outage", you: "you" });
+
 /**
- * The run's Blocked and Question notices of Pendulum's own (`own`, in the run) and the time on hold after each (#589), from
- * their markers and times alone: a notice (session.mjs applyExit: `<!-- pendulum:<n>:blocked:… -->`, logic.mjs
- * questionMarker) marks the stage whose span holds it as ended that way (`stage.outcome`), and the hold runs from the
- * notice to the next stage's start. A notice no later stage follows has no recorded end: no hold. Notices inside a hold
- * already counted add none. Returns [{kind, start, end}], oldest first.
+ * What a notice's hold waited on (WAIT_WHY), from its structure alone: a Question waits for you; a Block by its cause line
+ * (logic.mjs blockMarker): an outage, a provider's usage limit or quota, or you for a cause a person fixes (the work, a
+ * setup gap, Pendulum itself). A notice with no cause line, or one of a cap or budget, names none.
  */
-/**
- * What a hold waited on, from its notice's structure alone: a Question waits for you; a Block by its cause line (logic.mjs
- * blockMarker): an outage, a provider's usage limit or quota, or you for a cause a person fixes (the work, a setup gap,
- * Pendulum itself). A notice with no cause line, or one of a cap or budget, names none.
- */
-function holdCause(x) {
+function holdWhy(x) {
   if (x.kind === "question") return "you";
-  return { outage: "an outage", "provider-quota": "a usage limit", work: "you", setup: "you", pendulum: "you" }[x.cause] ?? null;
+  return { outage: "outage", "provider-quota": "usage-limit", work: "you", setup: "you", pendulum: "you" }[x.cause] ?? null;
 }
 
+/**
+ * The time the run was on hold after a stage (#589, #614), from Pendulum's own records and their times alone:
+ * - a Blocked or Question notice of Pendulum's own (`own`, in the run; session.mjs applyExit: `<!-- pendulum:<n>:blocked:…
+ *   -->`, logic.mjs questionMarker) marks the stage whose span holds it as ended that way (`stage.outcome`), and the hold
+ *   runs from the notice to the next stage's start;
+ * - a stage that records it ended paused on a usage limit or an outage (`stage.pause`, pauseOf) is marked `paused`, and
+ *   the hold runs from its last write to the next stage's start.
+ * One no later stage follows has no recorded end: no hold. One inside a hold already counted adds none. Returns
+ * [{kind (blocked, question, paused), start, end, why (WAIT_WHY, when a record names it), cause (its words)}], oldest first.
+ */
 function holdsOf(n, own, stages) {
   const kindOf = (body) => (new RegExp(`^<!-- pendulum:${n}:blocked:[^\\n]* -->`).test(body) ? "blocked" : new RegExp(`^<!-- pendulum:${n}:question:\\S*:(issue|pr) -->`).test(body) ? "question" : null);
-  const notices = own.map((c) => ({ kind: kindOf(c.body || ""), at: noticeAt(c), cause: blockCauseOf(c.body) })).filter((x) => x.kind).sort((a, b) => ms(a.at) - ms(b.at));
+  const notices = own.map((c) => ({ kind: kindOf(c.body || ""), at: noticeAt(c), cause: blockCauseOf(c.body) })).filter((x) => x.kind);
   const timed = stages.filter((s) => s.start);
+  const pauses = timed.filter((s) => s.pause).map((s) => ({ kind: "paused", at: s.end, stage: s }));
   const holds = [];
-  for (const x of notices) {
-    const stage = timed.findLast((s) => ms(s.start) <= ms(x.at) && ms(x.at) <= ms(s.end));
-    if (stage) stage.outcome = x.kind;
+  // Oldest first; at one time, a stage's own pause before a notice about it.
+  for (const x of [...pauses, ...notices].sort((a, b) => ms(a.at) - ms(b.at))) {
+    const stage = x.stage ?? timed.findLast((s) => ms(s.start) <= ms(x.at) && ms(x.at) <= ms(s.end));
+    if (stage && (x.kind !== "paused" || !stage.outcome)) stage.outcome = x.kind;
     if (holds.some((h) => ms(h.start) <= ms(x.at) && ms(x.at) < ms(h.end))) continue;
-    const next = timed.find((s) => ms(s.start) > ms(x.at));
-    if (next) holds.push({ kind: x.kind, start: x.at, end: next.start, ...(holdCause(x) ? { cause: holdCause(x) } : {}) });
+    const next = timed.find((s) => s !== x.stage && (x.stage ? ms(s.start) >= ms(x.at) : ms(s.start) > ms(x.at)));
+    const why = x.stage ? x.stage.pause : holdWhy(x);
+    if (next) holds.push({ kind: x.kind, start: x.at, end: next.start, ...(why ? { why, cause: WAIT_CAUSE[why] } : {}) });
   }
   return holds;
+}
+
+// An owner as GitHub names one: letters, digits and dashes, and for a managed user (Enterprise Managed Users) an
+// underscore and its enterprise's short code of three to eight letters and digits at the end; 39 characters in all.
+const OWNER = "(?=[^/]{1,39}/)[A-Za-z0-9][A-Za-z0-9-]*(?:_[A-Za-z0-9]{3,8})?";
+/** A repository's `owner/name` as the card may print it, else null. */
+const repoName = (v) => (typeof v === "string" && new RegExp(`^${OWNER}/[A-Za-z0-9._-]{1,100}$`).test(v) ? v : null);
+/**
+ * The repository of a blocking issue (a timeline event's `blocked_by`, or a `blockers` entry): the one it names, this
+ * repository (`repo`) when it names none, and null for a name the card would not print: that issue is then left out,
+ * never read as this repository's issue of the same number.
+ */
+const blockerRepo = (b, repo) => {
+  const named = b?.repository?.full_name ?? b?.repo;
+  return named === undefined || named === null ? repo : repoName(named);
+};
+/** A blocking issue's id, `owner/name#n`, or null for one that names no issue or a repository the card would not print. */
+const blockerId = (b, repo) => (Number.isSafeInteger(b?.number) && b.number > 0 && blockerRepo(b, repo) ? `${blockerRepo(b, repo)}#${b.number}` : null);
+const isoTime = (t) => new Date(t).toISOString().replace(".000Z", "Z");
+
+/**
+ * The issues that blocked the run before its first stage (#614), from recorded times alone (pure). A wait starts at the
+ * issue timeline's `blocked_by_added` event, or at the clock (`started`) when the relation was already there, and ends at
+ * the first of that relation's `blocked_by_removed` event and the blocking issue's close (`blockers`: each {repo, number,
+ * state, closed_at}, as GitHub answers for it now). It counts only with both, and only when it ended by the first
+ * stage's start: a blocker with no close read, one closed after the first stage began (reopened and closed again, so its
+ * first close is not what GitHub holds), or a run with no timed stage, shows no wait. Waits that overlap are one, naming
+ * each issue. Returns [{kind: "blocked-by", why, start, end, blockers, cause}], oldest first.
+ */
+function blockedWaits({ repo, timeline, blockers, started, stages }) {
+  const first = stages.filter((s) => s.start).sort((a, b) => ms(a.start) - ms(b.start))[0];
+  if (!first) return [];
+  const idOf = (b) => blockerId(b, repo);
+  const events = (timeline || []).filter((e) => (e?.event === "blocked_by_added" || e?.event === "blocked_by_removed") && idOf(e.blocked_by) && Number.isFinite(ms(e.created_at))).sort((a, b) => ms(a.created_at) - ms(b.created_at));
+  const spans = [];
+  for (const [i, e] of events.entries()) {
+    if (e.event !== "blocked_by_added") continue;
+    const id = idOf(e.blocked_by);
+    const removed = events.slice(i + 1).find((x) => x.event === "blocked_by_removed" && idOf(x.blocked_by) === id);
+    const closed = (blockers || []).find((b) => idOf(b) === id && b.state === "closed" && Number.isFinite(ms(b.closed_at)));
+    const ends = [removed?.created_at, closed?.closed_at].filter(Boolean).map(ms);
+    const start = Math.max(ms(e.created_at), ms(started));
+    const end = Math.min(...ends);
+    if (!ends.length || !(end > start) || end > ms(first.start)) continue;
+    spans.push({ start, end, name: id.startsWith(`${repo}#`) ? id.slice(repo.length) : id });
+  }
+  const out = [];
+  for (const x of spans.sort((a, b) => a.start - b.start)) {
+    const last = out.at(-1);
+    if (last && x.start <= last.end) {
+      last.end = Math.max(last.end, x.end);
+      if (!last.blockers.includes(x.name)) last.blockers.push(x.name);
+    } else out.push({ start: x.start, end: x.end, blockers: [x.name] });
+  }
+  return out.map((w) => ({ kind: "blocked-by", why: "blocked-by", start: isoTime(w.start), end: isoTime(w.end), blockers: w.blockers, cause: w.blockers.join(", ") }));
+}
+
+/**
+ * The blocking issues a card's blocked-by waits need read (postFinishCard): each one a `blocked_by_added` event of the
+ * issue timeline names before `before` (the first stage's start: a relation added later is no wait before it), once, as
+ * {repo (owner/name), number}. None with no `before`.
+ */
+export function blockersToRead(repo, timeline, before) {
+  const seen = new Map();
+  for (const e of timeline || []) {
+    const id = e?.event === "blocked_by_added" && ms(e.created_at) < ms(before) ? blockerId(e.blocked_by, repo) : null;
+    if (id) seen.set(id, { repo: blockerRepo(e.blocked_by, repo), number: e.blocked_by.number });
+  }
+  return [...seen.values()];
+}
+
+/**
+ * The run's waits with no time counted twice (pure): oldest first, each cut to the part no earlier wait covers (its
+ * start then the earlier one's end, a recorded time too), and left out when nothing of it is left. Their lengths then
+ * add up to the time the run waited (waitedMs).
+ */
+function apart(holds) {
+  const out = [];
+  let upTo = -Infinity;
+  for (const h of [...holds].sort((a, b) => ms(a.start) - ms(b.start))) {
+    if (ms(h.end) <= upTo) continue;
+    out.push(ms(h.start) < upTo ? { ...h, start: isoTime(upTo) } : h);
+    upTo = ms(h.end);
+  }
+  return out;
 }
 
 /**
@@ -402,8 +512,10 @@ function holdsOf(n, own, stages) {
  *               maintainer, only on the writer list or once a permission read verified it, github.mjs verifyAuthors) or came through a GitHub App other than
  *               Actions (throughApp): a progress or vendor comment of theirs that is not Pendulum's is a stage of unknown
  *               cost (its time shown, never its figures)
+ *  blockers     the issues the timeline's `blocked_by_added` events name (blockersToRead), as GitHub answers for each
+ *               now: {repo, number, state, closed_at}; one not read is left out, and its wait is then not shown
  */
-export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf, pushed = (c) => githubWriter(c) || throughApp(c), end = null }) {
+export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], blockers = [], label = OBJECTIVE, mine = isSelf, pushed = (c) => githubWriter(c) || throughApp(c), end = null }) {
   const n = issue.number;
   // An end other than a merge (#589: Blocked, a Question, closed without merging) is the caller's, at its recorded time,
   // and wins: a split Objective's earlier part, merged before this run's Block, is no merge of this run.
@@ -473,7 +585,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
   // Who filed the issue, and who applied the label that started the clock (its latest application by then).
   const labelled = (timeline || []).filter((e) => e.event === "labeled" && e.label?.name === label && ms(e.created_at) <= ms(started)).sort((a, b) => ms(a.created_at) - ms(b.created_at)).at(-1);
   const sum = (k) => shown.reduce((s, p) => s + (Number.isInteger(p.pr[k]) ? p.pr[k] : 0), 0);
-  const holds = holdsOf(n, own.filter((c) => inRun(noticeAt(c))), stages);
+  const holds = apart([...blockedWaits({ repo, timeline, blockers, started, stages }), ...holdsOf(n, own.filter((c) => inRun(noticeAt(c))), stages)]);
   const closer = (timeline || []).filter((e) => e.event === "closed").sort((a, b) => ms(a.created_at) - ms(b.created_at)).at(-1)?.actor?.login;
   return {
     repo,
@@ -492,7 +604,8 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     // A Block's way on (session.mjs nextStep's code: resume, work, restart, none), when the caller knows it.
     next: ["resume", "work", "restart", "none"].includes(other?.next) ? other.next : null,
     closer: login(closer),
-    // Pendulum's Blocked and Question notices in the run, and the time on hold after each until the next stage started.
+    // The run's recorded waits (#589, #614): the issues that blocked it before its first stage, and the time on hold after
+    // each Blocked or Question notice and each paused stage until the next stage started, no time in two of them (apart).
     holds,
     planned: own.some((c) => (c.body || "").startsWith(marker(n, "plan")) && inRun(c.created_at)),
     // The scorer's start of the clock: the first label with no restart window (labelTime), null with no label event.
@@ -526,15 +639,36 @@ export function sandboxWhy(d) {
 }
 
 /**
+ * How long the run waited (#614), in ms: its recorded waits (`d.holds`) inside its clock, time two of them share counted
+ * once.
+ */
+export function waitedMs(d) {
+  const from = ms(d.started);
+  const to = ms(d.ended ?? d.merged);
+  const spans = (d.holds ?? []).map((h) => [Math.max(ms(h.start), from), Math.min(ms(h.end), to)]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let upTo = -Infinity;
+  for (const [a, b] of spans) {
+    if (b <= upTo) continue;
+    total += b - Math.max(a, upTo);
+    upTo = b;
+  }
+  return total;
+}
+
+/**
  * The totals the card shows: the wall clock (ms), the known dollars, the runs of unknown cost with their reason codes
- * (`why`) and the dollars by billing.
+ * (`why`) and the dollars by billing; and the wall clock's two parts (#614): `waited`, its recorded waits (waitedMs), and
+ * `worked`, the rest of it (null with no wall clock).
  */
 export function finishTotals(d) {
   const usd = d.stages.reduce((s, x) => s + (x.usd ?? 0), 0) + (d.sandbox?.usd ?? 0);
   // No stage found at all: the run's cost was not read, so it is unknown, never $0.
   const unknown = d.stages.reduce((s, x) => s + (x.unknown || 0), 0) + (d.sandbox?.unknown ?? 0) + (d.stages.length ? 0 : 1);
   const why = [...new Set([...d.stages.flatMap((x) => (x.unknown ? x.why ?? [] : [])), ...sandboxWhy(d), ...(d.stages.length ? [] : ["no-record"])])].sort();
-  return { wall: d.clockRenamed ? null : ms(d.ended ?? d.merged) - ms(d.started), usd: Math.round(usd * 1e6) / 1e6, unknown, why, byBilling: addBilling(...d.stages.map((s) => s.byBilling)) };
+  const wall = d.clockRenamed ? null : ms(d.ended ?? d.merged) - ms(d.started);
+  const waited = waitedMs(d);
+  return { wall, waited, worked: wall === null ? null : Math.max(0, wall - waited), usd: Math.round(usd * 1e6) / 1e6, unknown, why, byBilling: addBilling(...d.stages.map((s) => s.byBilling)) };
 }
 
 /** The zone the card's times are written in (clock.mjs timeZone): the Objective's own, else the repository's, else the default. */
@@ -547,7 +681,6 @@ const zoneName = (d) => clockText(ms(d.ended), { zone: zoneOf(d) }).split(" ").a
 /** A time as the card writes it: in its zone, the date when the run crosses midnight, the zone's name with `abbr`. */
 const atOf = (d, t, { abbr = false } = {}) => clockText(ms(t), { zone: zoneOf(d), date: spansDays(d), abbr });
 const CHECK = () => "CI check";
-const once = (n, word) => (n === 1 ? `${word} once` : n === 2 ? `${word} twice` : `${word} ${n} times`);
 
 /** The headline's figure: the known dollars and runs of unknown cost ("$3.67 + unknown", "unknown"), "so far" when not final. */
 function headlineMoney(d, t) {
@@ -555,10 +688,13 @@ function headlineMoney(d, t) {
   return `${figure}${d.end === "blocked" || d.end === "question" ? " so far" : ""}`;
 }
 
-/** The headline (`### …`): the end, how long, what it cost. */
+/**
+ * The headline (`### …`): the end, how long, what it cost. A run with a recorded wait says how long it worked and how
+ * long it waited, apart (#614), never the two as one figure.
+ */
 export function headline(d) {
   const t = finishTotals(d);
-  const how = t.wall === null ? "" : ` ${d.end === "merged" ? "in" : "after"} ${durationText(t.wall)}`;
+  const how = t.wall === null ? "" : t.waited > 0 ? ` · ${durationText(t.worked)} working, ${durationText(t.waited)} waiting` : ` ${d.end === "merged" ? "in" : "after"} ${durationText(t.wall)}`;
   const what = { merged: "✅ Merged", closed: "⏹️ Closed without merging", blocked: "⛔ Blocked", question: "❓ Question" }[d.end];
   return `### ${what}${how} · ${headlineMoney(d, t)}`;
 }
@@ -590,17 +726,29 @@ export function subline(d) {
   return parts.join(" · ");
 }
 
-/** The headline's third line, when the run waited on a person: how long it was on hold, and why. */
+/** What a wait was for, in the card's words: "blocked by #12", "waiting for a usage limit"; null when no record names it. */
+const waitWords = (h) => (h.why === "blocked-by" ? `blocked by ${h.cause}` : h.cause ? `waiting for ${h.cause}` : null);
+/** The same after a duration in the headline's third line: "blocked by #12", "on a usage limit", "for you"; "on hold" when no record names it. */
+const waitedWords = (h) => (h.why === "blocked-by" ? `blocked by ${h.cause}` : { "usage-limit": "on a usage limit", outage: "on an outage", you: "for you" }[h.why] ?? "on hold");
+const listed = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]);
+
+/**
+ * The headline's third line, when the run has a recorded wait (#614): how long it waited on each cause (one figure per
+ * cause, in the order they first came; "on hold" for a wait whose record names none), then the whole span the headline's
+ * two figures add up to.
+ */
 function holdLine(d) {
   const holds = d.holds ?? [];
   if (!holds.length) return null;
-  const held = holds.reduce((n, h) => n + (ms(h.end) - ms(h.start)), 0);
-  const blocked = holds.filter((h) => h.kind === "blocked").length;
-  const questions = holds.filter((h) => h.kind === "question").length;
-  if (holds.length === 1) return `${blocked ? "Blocked once" : "Asked a Question once"}: ${durationText(held)} on hold${holds[0].cause ? `, waiting for ${holds[0].cause}` : ""}.`;
-  const ran = d.stages.filter((s) => s.start).reduce((n, s) => n + (ms(s.end) - ms(s.start)), 0);
-  const why = [...(blocked ? [once(blocked, "Blocked")] : []), ...(questions ? [many(questions, "Question")] : [])].join(", ");
-  return `Stages ran for ${durationText(ran)} in all; ${durationText(held)} on hold (${why}).`;
+  const t = finishTotals(d);
+  const by = new Map();
+  for (const h of holds) {
+    const words = waitedWords(h);
+    by.set(words, (by.get(words) ?? 0) + (ms(h.end) - ms(h.start)));
+  }
+  const waits = listed([...by].map(([words, took]) => `${durationText(took)} ${words}`));
+  const span = t.wall === null ? "" : `; ${durationText(t.wall)} from the label to ${{ merged: "the merge", closed: "the close", blocked: "the Block", question: "the Question" }[d.end]}`;
+  return `Waited ${waits}${span}.`;
 }
 
 /**
@@ -643,7 +791,6 @@ export function summary(d) {
     did.push(`got ${whose}${d.checks.passed > 1 && !d.checks.failed ? "all " : ""}**${what}** green${d.checks.failed ? ` (${d.checks.failed} red)` : ""}`);
   }
   if (d.reviews) did.push(`had the change reviewed (${d.reviews.findings ? many(d.reviews.findings, "finding") : "no findings"})`);
-  const list = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]);
   const theirs = ours || !d.prs.length ? "" : ` ${prList(d.prs)} ${d.prs.length === 1 ? "has" : "have"} **${change}**.`;
   let pendulum;
   if (d.end === "merged") {
@@ -651,7 +798,7 @@ export function summary(d) {
     pendulum = did.length ? `Pendulum ${did.join(", ")}, and ${how}.` : `${how[0].toUpperCase()}${how.slice(1)}.`;
   } else if (d.end === "closed") {
     const who = d.closer && d.closer === d.author && d.author === d.labeller ? "you closed the issue" : d.closer ? `**${d.closer}** closed the issue` : "the issue was closed";
-    pendulum = did.length ? `Pendulum ${list(did)}; ${who} before it merged.` : `${who[0].toUpperCase()}${who.slice(1)} before it merged.`;
+    pendulum = did.length ? `Pendulum ${listed(did)}; ${who} before it merged.` : `${who[0].toUpperCase()}${who.slice(1)} before it merged.`;
   } else pendulum = `Pendulum ${did.length ? `${did.join(", ")}, and ` : ""}${d.end === "blocked" ? "is Blocked" : "asked a Question"}.`;
   return `${person ? `${person} ` : ""}${pendulum}${theirs}`;
 }
@@ -663,7 +810,9 @@ const stageName = (s, planned) => ({ build: planned ? "Plan + build" : "Build", 
 /** The same, short, for a timeline row (Mermaid section names: short, so the stock themes' margin fits them). */
 const rowName = (s) => ({ build: "Build", part: `Part ${s.part}`, work: "Work", rebase: "Rebase", review: "Review" })[s.kind];
 /** A stage's result words in the table, when it ended Blocked or on a Question. */
-const OUTCOME = Object.freeze({ blocked: "⛔ Blocked", question: "❓ Question" });
+const OUTCOME = Object.freeze({ blocked: "⛔ Blocked", question: "❓ Question", paused: "⏸️ Paused" });
+/** The same on a timeline bar. */
+const BAR_OUTCOME = Object.freeze({ blocked: "Blocked", question: "Question", paused: "Paused" });
 
 /**
  * The timeline's rows and the stage table's (pure), in time order: each stage with a recorded time, its name numbered
@@ -685,13 +834,16 @@ function timelineRows(d) {
 /** The most stage rows the table shows before like stages fold, and the most timeline rows the chart draws. */
 export const TABLE_ROWS = 20;
 
-/** The timeline chart (card-kit.mjs ganttChart): stages amber, a Blocked or Question stage red with its word, time on hold grey. */
+/**
+ * The timeline chart (card-kit.mjs ganttChart): stages amber, a Blocked or Question stage red with its word, a paused one
+ * amber with its word, time on hold grey.
+ */
 function gantt(d, rows) {
   const drawn = rows.filter((r) => r.start);
   if (!drawn.length) return null;
   if (drawn.length > TABLE_ROWS) return `Timeline chart left out: ${many(drawn.filter((r) => r.kind === "stage").length, "stage")}; the table has every figure.`;
   return ganttChart(
-    drawn.map((r) => ({ section: r.short, bars: [{ start: ms(r.start), end: ms(r.end), tag: r.kind === "hold" ? "done" : r.stage?.outcome ? "crit" : "active", label: r.stage?.outcome ? { blocked: "Blocked", question: "Question" }[r.stage.outcome] : "" }] })),
+    drawn.map((r) => ({ section: r.short, bars: [{ start: ms(r.start), end: ms(r.end), tag: r.kind === "hold" ? "done" : r.stage?.outcome && r.stage.outcome !== "paused" ? "crit" : "active", label: r.stage?.outcome ? BAR_OUTCOME[r.stage.outcome] : "" }] })),
     { zone: zoneOf(d), days: spansDays(d) },
   );
 }
@@ -713,7 +865,7 @@ function stageTable(d, t, rows, costs) {
   for (const r of rows) {
     if (r.kind === "queue") continue;
     if (r.kind === "hold") {
-      lines.push({ at: r.start, name: r.hold.cause ? `${r.name} · waiting for ${r.hold.cause}` : r.name, took: ms(r.end) - ms(r.start), cost: "—" });
+      lines.push({ at: r.start, name: waitWords(r.hold) ? `${r.name} · ${waitWords(r.hold)}` : r.name, took: ms(r.end) - ms(r.start), cost: "—" });
       continue;
     }
     const s = r.stage;
@@ -735,7 +887,7 @@ function stageTable(d, t, rows, costs) {
     lines.push({ at: null, base: stageName(s, d.planned), stage: s, n: 1, took: null, usd: c.usd, cents: c.cents, unknown: c.unknown });
   }
   const out = lines.map((l) => {
-    if (!l.stage) return `| ${atOf(d, l.at)} | ${l.name} | ${durationText(l.took)} | ${l.cost} |`;
+    if (!l.stage) return `| ${atOf(d, l.at)} | ${tableCell(l.name)} | ${durationText(l.took)} | ${l.cost} |`;
     const name = `${l.base}${l.n > 1 ? ` ×${l.n}` : ""}${l.stage.model ? ` · ${modelName(l.stage.model)}` : ""}${l.stage.outcome ? ` · ${OUTCOME[l.stage.outcome]}` : ""}`;
     return `| ${l.at ? atOf(d, l.at) : "—"} | ${tableCell(name)} | ${l.took === null ? "—" : durationText(l.took)} | ${stageCost(l)} |`;
   });
@@ -745,6 +897,8 @@ function stageTable(d, t, rows, costs) {
     const queued = d.queue.reduce((n, q) => n + (ms(q.end) - ms(q.start)), 0);
     out.push(`| ${atOf(d, d.queue[0].start)} | Merge queue${d.queue.length > 1 ? ` ×${d.queue.length}` : ""} · your CI | ${durationText(queued)} | — |`);
   }
+  // A run that waited (#614): the Total's two parts, each its own row above it.
+  if (t.waited > 0 && t.wall !== null) out.push(`| | Working | ${durationText(t.worked)} | |`, `| | Waiting | ${durationText(t.waited)} | |`);
   const total = `| | **Total** | **${t.wall === null ? "not known" : durationText(t.wall)}** | **${cellCost(t.usd, t.unknown)}** |`;
   return { table: ["| Time | Stage | Took | Cost |", "| :-- | :-- | --: | --: |", ...out, total].join("\n"), folded: fold };
 }
@@ -866,13 +1020,26 @@ function costBars(b) {
   return costChart([...b.asked.map((r) => bar(r.name, r)), ...b.churn.map((r) => bar(CHART_CHURN[r.row] ?? r.name, r))]);
 }
 
-/** The notes line under the money: what the bars show and what they leave out. */
-function notesLine(t, b, drawn) {
+/** What the money note says, once, when a row's cents are not its own figure's (sharedOut). */
+export const SHARED_NOTE = "The rows' cents are shared out to add up to the total, so a row can be a cent off its stage's own figure.";
+/**
+ * Whether any of `rows` (costRows', spendBreakdown's) shows cents other than its own dollars' (#617): centsOf gave it a
+ * cent, or took one, so the rows add up to the total's cents, where the stage's own record, its progress comment and the
+ * run log show its own figure.
+ */
+const sharedOut = (rows) => rows.some((r) => r.usd > 0 && r.cents && cellCost(r.cents / 100) !== cellCost(r.usd));
+
+/** The notes line under the money: what the bars show and what they leave out, and that rows are shared out when one is. */
+function notesLine(t, b, drawn, shared = false) {
   const none = [...b.asked, ...b.churn].filter((r) => r.usd === null).map((r) => r.name);
   const unknown = t.unknown ? `; ${many(t.unknown, "AI run")} of unknown cost ${t.unknown === 1 ? "is" : "are"} not drawn` : "";
   const named = none.length ? ` ${none.join(", ")} ${none.length === 1 ? "has" : "have"} no recorded dollars.` : "";
-  return drawn ? `Bars show recorded dollars only${unknown}.${named} CI minutes are not included.` : "CI minutes are not included.";
+  const said = shared ? `${SHARED_NOTE} ` : "";
+  return drawn ? `Bars show recorded dollars only${unknown}.${named} ${said}CI minutes are not included.` : `${said}CI minutes are not included.`;
 }
+
+/** How the wall clock's two parts are counted (#614), for Run details. */
+const WAIT_NOTE = "Waiting is the time on hold in the table, each from a recorded start and end: an issue that blocked this one, from the blocked-by relation (or the label, when later) to that issue's close or the relation's removal; a stage that recorded a pause for a usage limit or an outage, and a Blocked or Question notice, each until the next stage started. A wait with no recorded start and end is not counted. Working is the rest of the time from the label to the end.";
 
 /** How overhead is counted, for Run details. */
 const OVERHEAD_NOTE = "Each item comes from a stage's own record, never a guess. A stage is in the part after the PRs merged before it started; its runs are split by the kinds its spend record names. Overhead is a rebase after other PRs merged (its rebase line), a catch-up run after the default branch changed a workflow, the runs a stage records it ran again after a Block, and a review that records it was started only to judge answers already made (all of it but answering the review and fixing CI). Anything else stays in its stage, as that stage.";
@@ -888,9 +1055,12 @@ function runLog(d) {
     const name = stageName(s, d.planned).toLowerCase();
     // The model's id as the report names it (usage.mjs modelName, with claude-models.json alone).
     out.push([s.start, `${name} stage started${s.model ? ` (${reportName(s.model, null)})` : ""}`]);
-    out.push([s.end, `${name} stage's last line: ${s.usd === null ? "unknown" : costText(s.usd, s.unknown)}${s.outcome ? `, ${OUTCOME[s.outcome].slice(2)}` : ""}`]);
+    out.push([s.end, `${name} stage's last line: ${s.usd === null ? "unknown" : costText(s.usd, s.unknown)}${s.outcome ? `, ${BAR_OUTCOME[s.outcome]}` : ""}`]);
   }
-  for (const h of d.holds ?? []) out.push([h.start, `${h.kind === "blocked" ? "Blocked" : "Question"} notice: on hold until the next stage`]);
+  for (const h of d.holds ?? []) {
+    if (h.kind === "blocked-by") out.push([h.start, `blocked by ${h.cause}: on hold`], [h.end, `no longer blocked by ${h.cause}`]);
+    else out.push([h.start, `${{ blocked: "Blocked notice", question: "Question notice", paused: h.cause ? `paused for ${h.cause}` : "paused" }[h.kind]}: on hold until the next stage`]);
+  }
   for (const p of d.prs) out.push([p.opened, `PR #${p.number} opened`]);
   for (const q of d.queue) {
     out.push([q.start, "added to the merge queue"]);
@@ -945,7 +1115,7 @@ export function renderFinishCard(d, { log = true, list = true, chart = true } = 
     drawn = !!bars;
     parts.push("**Where the money went**", ...(bars ? [bars] : []), ...breakdownTables(where));
   }
-  parts.push(notesLine(t, where, drawn));
+  parts.push(notesLine(t, where, drawn, sharedOut([...costs, ...(where.shown ? [...where.asked, ...where.churn] : [])])));
   const named = t.usd > 0 ? kindsOf(t.usd, t.byBilling) : [];
   // Dollars no record names a billing for: not recorded, never called billed or API-equivalent.
   const kinds = t.usd > 0 && !named.length ? ["unknown"] : named;
@@ -955,6 +1125,7 @@ export function renderFinishCard(d, { log = true, list = true, chart = true } = 
   const unknown = unknownSentence(d, t);
   if (unknown) details.push(`- **Unknown cost:** ${unknown}`);
   details.push("- **Where figures come from:** times from the issue, the PR and each stage's own record; dollars from each stage's own record. Nothing is estimated.");
+  if (t.waited > 0) details.push(`- **Working and waiting:** ${WAIT_NOTE}`);
   details.push("- — in Took means no time was recorded for that row; in Cost, that no AI dollars were (a stage that ran no AI, the merge queue, time on hold).");
   if (where.churn.length) details.push(`- **How overhead is counted:** ${OVERHEAD_NOTE}`);
   const version = d.stages.find((s) => s.version)?.version;
@@ -975,8 +1146,10 @@ export const reportStageKind = (kind) => (kind === "review" || kind === "rebase"
 
 /**
  * The Objective's own pass measures, from its stages' ledgers (stagePassFigures), for a reader that compares Objectives
- * (#545's arms): `passes` ({total, answer, fix}, null unless every stage's passes are known: each of Pendulum's stages has
- * a ledger and none is one Pendulum cannot attribute), `modelMinutes` (the minutes of every harness pass, null unless
+ * (#545's arms): `passes` ({total, answer, fix}: its harness passes, null unless every stage's passes are known: each of
+ * Pendulum's stages has a ledger and none is one Pendulum cannot attribute), `decisionRecords` (its stages' decision
+ * records, which are no pass and are counted apart as the report counts them, report.mjs foldPasses, #617; null as
+ * `passes` is), `modelMinutes` (the minutes of every harness pass, null unless
  * `passes` is known and each harness pass has its times), `tokens` (every stage's, summed), and `labelled` and
  * `labelledWallMs` (the scorer's start of the clock, the first `pendulum:objective` label with no restart window, and the
  * wall clock from it to the merge; null with no label event, or one labelled before the rename to Pendulum: clockRenamed),
@@ -988,10 +1161,12 @@ function objectivePasses(d) {
   const whole = d.stages.length > 0 && d.stages.every((s, i) => !s.unattributed && figures[i]);
   const kinds = whole ? figures.flat() : [];
   const count = (keep) => kinds.filter((k) => keep(k.kind)).reduce((t, k) => t + k.passes, 0);
-  const passes = whole ? { total: count(() => true), answer: count(isAnswer), fix: count(isFix) } : null;
+  const isDecision = (kind) => kind === "decision";
+  const passes = whole ? { total: count((kind) => !isDecision(kind)), answer: count(isAnswer), fix: count(isFix) } : null;
+  const decisionRecords = whole ? count(isDecision) : null;
   const modelMinutes = whole && !kinds.some((k) => k.untimed) ? kinds.reduce((t, k) => t + (k.harnessMinutes ?? 0), 0) : null;
   const wall = !d.clockRenamed && d.labelled && ms(d.merged) >= ms(d.labelled) ? ms(d.merged) - ms(d.labelled) : null;
-  return { passes, modelMinutes, tokens: d.stages.reduce((t, s) => addTokens(t, s.tokens), zeroTokens()), labelled: d.labelled ?? null, labelledWallMs: wall, clockWhy: d.clockRenamed ? "renamed" : null };
+  return { passes, decisionRecords, modelMinutes, tokens: d.stages.reduce((t, s) => addTokens(t, s.tokens), zeroTokens()), labelled: d.labelled ?? null, labelledWallMs: wall, clockWhy: d.clockRenamed ? "renamed" : null };
 }
 
 /**
@@ -1013,6 +1188,10 @@ export function finishSummary(d) {
     started: d.started,
     merged: d.merged,
     wallMs: t.wall,
+    // The wall clock's two parts and the recorded waits behind them (#614), as the card shows them.
+    workMs: t.worked,
+    waitMs: t.waited,
+    waits: (d.holds ?? []).map((h) => ({ kind: h.kind, why: h.why ?? null, start: h.start, end: h.end, ...(h.blockers ? { blockers: [...h.blockers] } : {}) })),
     prs: d.prs.map((p) => p.number),
     commits: d.commits,
     additions: d.additions,
@@ -1124,6 +1303,25 @@ const passesRead = (list) => {
   });
   return out.includes(null) ? undefined : out;
 };
+/** The kinds of wait a summary names (finishData's holds): what recorded it. */
+export const WAIT_KINDS = Object.freeze(["blocked-by", "blocked", "question", "paused"]);
+const BLOCKER = new RegExp(`^(?:${OWNER}/[A-Za-z0-9._-]{1,100})?#[1-9]\\d{0,15}$`);
+/**
+ * A summary's waits read back (#614): each {kind (WAIT_KINDS), why (WAIT_WHY, or null), start, end, blockers (a blocked-by
+ * wait's issues, "#12" or "owner/name#12")}. Null for a card written before waits were recorded, undefined for a broken list.
+ */
+const waitsRead = (list) => {
+  if (list === undefined) return null;
+  if (!Array.isArray(list)) return undefined;
+  const out = list.map((w) => {
+    const start = timeOf(w?.start);
+    const end = timeOf(w?.end);
+    const blockers = w?.blockers === undefined ? [] : Array.isArray(w.blockers) && w.blockers.every((b) => typeof b === "string" && BLOCKER.test(b)) ? w.blockers : null;
+    if (!start || !end || !(Date.parse(end) >= Date.parse(start)) || !WAIT_KINDS.includes(w.kind) || (w.why !== null && !WAIT_WHY.includes(w.why)) || !blockers) return null;
+    return { kind: w.kind, why: w.why, start, end, ...(blockers.length ? { blockers: [...blockers] } : {}) };
+  });
+  return out.includes(null) ? undefined : out;
+};
 /** A summary's money fields read back, or undefined for a broken one. */
 const moneyRead = (r, { nullable = false } = {}) => {
   const usd = nullable && r?.usd === null ? null : usdOf(r?.usd);
@@ -1177,8 +1375,22 @@ export function readSummary(body, n) {
   });
   const started = timeOf(v.started);
   const merged = timeOf(v.merged);
+  // The waits (#614): null on a card from before they were recorded, as are its two parts of the wall clock; a broken
+  // list reads as none recorded, never as no wait.
+  const waits = waitsRead(v.waits) ?? null;
   if (!cost || !why || sandbox === undefined || !sandboxWhy || !foreign || [...stages, ...asked, ...churn].includes(null) || !started || !merged || !v.prs.every((p) => countOf(p))) return null;
   const counts = v.stageCounts && typeof v.stageCounts === "object" ? v.stageCounts : {};
+  const passes = v.passes && ["total", "answer", "fix"].every((f) => countOf(v.passes[f]) !== undefined) ? { total: v.passes.total, answer: v.passes.answer, fix: v.passes.fix } : null;
+  // Its decision records, apart from its passes (#617). A card from before they were counted apart has no such field and
+  // counted them in `passes.total`: they are taken back out of it from its stages' passes, which hold each decision
+  // record by kind. Such a card written with no stage's passes (summaryMarker's short form) cannot say how many of its
+  // total they are: its total stays as written and `decisionRecords` is undefined, never 0.
+  let decisionRecords = null;
+  if (passes && Object.hasOwn(v, "decisionRecords")) decisionRecords = countOf(v.decisionRecords) ?? null;
+  else if (passes && stages.every((s) => s.passes)) {
+    decisionRecords = stages.reduce((t, s) => t + s.passes.filter((k) => k.kind === "decision").reduce((n, k) => n + k.passes, 0), 0);
+    passes.total = Math.max(0, passes.total - decisionRecords);
+  } else if (passes) decisionRecords = undefined;
   return {
     v: v.v,
     pendulum: typeof v.pendulum === "string" && /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?$/.test(v.pendulum) ? v.pendulum : null,
@@ -1186,6 +1398,9 @@ export function readSummary(body, n) {
     started,
     merged,
     wallMs: countOf(v.wallMs) ?? null,
+    workMs: waits ? (countOf(v.workMs) ?? null) : null,
+    waitMs: waits ? (countOf(v.waitMs) ?? null) : null,
+    waits,
     prs: v.prs,
     commits: countOf(v.commits) ?? null,
     additions: countOf(v.additions) ?? null,
@@ -1194,7 +1409,8 @@ export function readSummary(body, n) {
     checks: v.checks && countOf(v.checks.passed) !== undefined && countOf(v.checks.failed) !== undefined ? { passed: v.checks.passed, failed: v.checks.failed, required: v.checks.required === true } : null,
     reviews: v.reviews && countOf(v.reviews.count) !== undefined && countOf(v.reviews.findings) !== undefined ? { count: v.reviews.count, findings: v.reviews.findings } : null,
     stageCounts: { work: countOf(counts.work) ?? 0, rebase: countOf(counts.rebase) ?? 0, review: countOf(counts.review) ?? 0 },
-    passes: v.passes && ["total", "answer", "fix"].every((f) => countOf(v.passes[f]) !== undefined) ? { total: v.passes.total, answer: v.passes.answer, fix: v.passes.fix } : null,
+    passes,
+    decisionRecords,
     modelMinutes: usdOf(v.modelMinutes) ?? null,
     tokens: tokensRead(v.tokens ?? {}) ?? zeroTokens(),
     labelled: timeOf(v.labelled) ?? null,
@@ -1342,7 +1558,24 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
   const since = comments.filter((c) => ms(c.created_at) >= ms(started));
   const unlined = unlinedStages(since, n, mine);
   const want = [...unlined, ...modellessStages(since, n, mine).filter((w) => !unlined.some((u) => u.stage === w.stage && u.key === w.key))];
-  const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: want.length ? await records(n, want) : [], label, mine, pushed, end: ending });
+  // The issues the timeline says blocked this one before its first stage (#614: the first progress comment of the run,
+  // Pendulum's or one by someone who can push), each read once for its close, together: one GitHub will not show (403,
+  // 404, 410: another repository's, or one deleted) is left out, and its wait is then not shown; a rate limit or any
+  // other failure throws, for a later write to read again.
+  const stageAt = new RegExp(`^<!-- pendulum:${n}:progress:(?:work|review):`);
+  const firstStage = since.filter((c) => (mine(c) || pushed(c)) && stageAt.test(c.body || "")).map((c) => c.created_at).sort((a, b) => ms(a) - ms(b))[0];
+  const blockers = (
+    await Promise.all(
+      blockersToRead(repo.full, timeline, firstStage).map(async (b) => {
+        const read = await rest(`repos/${b.repo}/issues/${b.number}`, opts).catch((e) => {
+          if (!e?.rateLimited && [403, 404, 410].includes(e?.status)) return null;
+          throw e;
+        });
+        return read ? { repo: b.repo, number: b.number, state: read.state, closed_at: read.closed_at ?? null } : null;
+      }),
+    )
+  ).filter(Boolean);
+  const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: want.length ? await records(n, want) : [], blockers, label, mine, pushed, end: ending });
   if (!d) return "nothing ran";
   if (!merged && !d.stages.length && !d.prs.length) return "nothing ran";
   const body = finishCardBody(d);

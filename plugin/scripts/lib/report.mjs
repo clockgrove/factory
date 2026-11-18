@@ -27,7 +27,7 @@ import { DEFAULTS } from "./inputs.mjs";
 import { appIdSetLine, appIdWhyText, readAppIdVariable } from "./app-id.mjs";
 import { PREVIOUS_NAME } from "./local.mjs";
 import { FINDING_OUTCOMES, STATE_LABELS, findingsOf, ledgerOfComment, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
-import { finishMarker, labelTime, modellessStages, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
+import { clockRenamed, finishMarker, labelTime, modellessStages, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, bareModel, codexRow, longShare, sumLong } from "./usage.mjs";
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
 import { labelsVouched } from "./objective-trust.mjs";
@@ -778,7 +778,8 @@ async function vetArms(repo, arms, { budget, opts, started, objectiveLabel }) {
   };
   for (const n of all) {
     const events = await paged(`repos/${repo.full}/issues/${n}/timeline`, budget, "timelines", opts);
-    const start = labelTime(null, events, objectiveLabel);
+    // Labelled before the rename to Pendulum (finish-card.mjs clockRenamed): no start, so no wall clock, as on its card.
+    const start = clockRenamed(events) ? null : labelTime(null, events, objectiveLabel);
     if (start) started.set(n, start);
     for (const arm of arms.filter((a) => a.listed.includes(n))) {
       const last = latestLabeled(events, arm.label);
@@ -1283,8 +1284,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
  * clock, the review rounds and the fix passes (a merged Objective whose measure is not recorded left out of it), and the
  * runs of unknown cost; and the review findings of its Objectives with a findings record (armFindings), counts only. A
  * merged Objective with stages from before the rename to Pendulum (`legacyStages`, #567) has figures that leave those
- * stages out, a lower bound: it is left out of every measure but the wall clock and of the findings, counted in each
- * `leftOut` and listed in `legacy`. No total across kinds, no difference between the arms and no significance: the
+ * stages out, a lower bound (its wall clock too: its first label is under the old name): it is left out of every measure
+ * and of the findings, counted in each `leftOut` and listed in `legacy`. No total across kinds, no difference between the arms and no significance: the
  * figures only, with n in every measure and every arm's rows.
  */
 function comparisonOf(arms, objectives, measures) {
@@ -1314,7 +1315,7 @@ function comparisonOf(arms, objectives, measures) {
         merged: merged.length,
         usdPerMerged: Object.fromEntries(COST_KINDS.map((k) => [k, { ...measured(known, (o) => o.cost.usd[k], 6), leftOut: merged.length - known.length }])),
         modelMinutes: measured(whole, (o) => m(o).modelMinutes ?? null, 2, merged),
-        wallMinutes: measured(merged, (o) => m(o).wallMinutes ?? null, 2),
+        wallMinutes: measured(whole, (o) => m(o).wallMinutes ?? null, 2, merged),
         reviewRounds: measured(whole, (o) => o.stages.review, 2, merged),
         fixPasses: measured(whole, (o) => m(o).fixPasses ?? null, 2, merged),
         findings: armFindings(rows.filter((o) => !o.legacyStages)),
@@ -1813,7 +1814,7 @@ function renderComparison(c, words) {
     if (arm.untrusted.length) out.push(`- Not counted for ${name(arm)}, its label applied by someone who cannot push: ${issues(arm.untrusted)}.`);
     if (arm.unverifiable.length) out.push(`- Not counted for ${name(arm)}, its labeller's permission unreadable with this token: ${issues(arm.unverifiable)}.`);
     if (arm.unchecked.length) out.push(`- Not counted for ${name(arm)}, its labeller not read before the call budget ran out: ${issues(arm.unchecked)}.`);
-    if (arm.legacy.length) out.push(`- Left out of ${name(arm)}'s measures but the wall clock, and of its findings, with stages from before the rename to Pendulum not read: ${issues(arm.legacy)}.`);
+    if (arm.legacy.length) out.push(`- Left out of ${name(arm)}'s measures and findings, with stages from before the rename to Pendulum not read: ${issues(arm.legacy)}.`);
   }
   for (const arm of [a, b]) {
     out.push("", `**${name(arm)}**: ${arm.n} Objective(s), ${arm.merged} merged.`, "", table(["Issue", "Outcome", ...COST_KINDS.map((k) => kindName[k]), "Unknown runs", "Model min", "Wall min", "Review rounds", "Fix passes", "Findings"], arm.objectives.map((o) => [`#${o.issue}`, o.outcome ?? "unread", ...COST_KINDS.map((k) => (o.usd[k] ? money(o.usd[k]) : "—")), o.unknownRuns, o.modelMinutes ?? "—", o.wallMinutes ?? "—", o.reviewRounds, o.fixPasses ?? "—", o.findings ?? "—"])));

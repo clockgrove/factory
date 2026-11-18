@@ -87,6 +87,22 @@ function experiment() {
   return w;
 }
 
+/**
+ * Each merged Objective's finish card in `w`, as Pendulum's App posts it: the real card (`card`, the finish-card module)
+ * from its comments, timeline, PR and the usage records the card reads (its stages have no spend line, so every one).
+ */
+function carded(w, card) {
+  const mine = card.pendulumOwn(APP.id);
+  for (const pr of w.pulls.filter((p) => p.merged_at)) {
+    const n = pr.number - 1000;
+    const comments = w.comments.filter((c) => c.issue_url === issueUrl(n));
+    const records = Object.entries(w.artifacts).filter(([name]) => name === `pendulum-usage-${n}` || name === `pendulum-usage-${n}-review`).flatMap(([name, list]) => list.map((a) => ({ ...a.record, artifact: name })));
+    const d = card.finishData({ repo: REPO.full, issue: w.issues.find((i) => i.number === n), timeline: w.timelines[n], comments, pulls: [{ pr, timeline: [], reviews: [], reviewComments: [] }], checks: [], records, mine });
+    w.comments.push({ id: (nextId += 1), issue_url: issueUrl(n), user: BOT, author_association: "CONTRIBUTOR", performed_via_github_app: { id: APP.id, slug: APP.slug }, created_at: pr.merged_at, updated_at: pr.merged_at, body: card.finishCardBody(d) });
+  }
+  return w;
+}
+
 /** A fake GitHub over `w`, page by page with Link headers as GitHub answers; `calls` lists every request. */
 function fakeGitHub(w) {
   const calls = [];
@@ -407,20 +423,7 @@ test("report --compare (#546): each arm counts the review findings of its Object
 test("report --compare (#544): a merged Objective read from its finish card gives the same arm measures as its stages, with no artifact read", async () => {
   // Through the module's namespace, so the suite loads on a tree without the summary and this test alone fails there.
   const card = await import("../scripts/lib/finish-card.mjs");
-  const mine = card.pendulumOwn(APP.id);
-  // Each merged Objective's finish card, as Pendulum's App posts it: the real card from its comments, timeline, PR and
-  // the usage records the card reads (its stages have no spend line, so every one).
-  const withCards = () => {
-    const w = experiment();
-    for (const pr of w.pulls.filter((p) => p.merged_at)) {
-      const n = pr.number - 1000;
-      const comments = w.comments.filter((c) => c.issue_url === issueUrl(n));
-      const records = Object.entries(w.artifacts).filter(([name]) => name === `pendulum-usage-${n}` || name === `pendulum-usage-${n}-review`).flatMap(([name, list]) => list.map((a) => ({ ...a.record, artifact: name })));
-      const d = card.finishData({ repo: REPO.full, issue: w.issues.find((i) => i.number === n), timeline: w.timelines[n], comments, pulls: [{ pr, timeline: [], reviews: [], reviewComments: [] }], checks: [], records, mine });
-      w.comments.push({ id: (nextId += 1), issue_url: issueUrl(n), user: BOT, author_association: "CONTRIBUTOR", performed_via_github_app: { id: APP.id, slug: APP.slug }, created_at: pr.merged_at, updated_at: pr.merged_at, body: card.finishCardBody(d) });
-    }
-    return w;
-  };
+  const withCards = () => carded(experiment(), card);
   const stages = await report(experiment(), ["--compare", "fast,slow", "--json"]);
   const cards = await report(withCards(), ["--compare", "fast,slow", "--json"]);
   assert.equal(cards.code, 0, cards.err);
@@ -434,25 +437,35 @@ test("report --compare (#544): a merged Objective read from its finish card give
   assert.deepEqual(fast.objectives.filter((o) => o.outcome === "merged").map((o) => [o.issue, o.modelMinutes, o.fixPasses, o.wallMinutes]), [[11, 10, 0, 60], [12, 25, 1, 90], [13, 32, 0, 180]]);
 });
 
-test("report --compare (#567): a merged Objective with stages from before the rename is a lower bound: left out of every measure but the wall clock, counted in leftOut and listed in legacy", async () => {
-  const w = experiment();
-  // The App's work stage on #11 under the previous marker; the same on #16 (in both arms) and #15 (its label not vouched for).
-  const old = (n) => ({ id: (nextId += 1), issue_url: issueUrl(n), user: BOT, author_association: "CONTRIBUTOR", performed_via_github_app: { id: APP.id, slug: APP.slug }, created_at: at(2), updated_at: at(2), body: [`<!-- ${PREVIOUS_NAME}:${n}:progress:work:8800 -->`, "work: started.", `<!-- ${PREVIOUS_NAME}:spend {"usd":40} -->`].join("\n") });
-  w.comments.push(old(11), old(15), old(16));
-  const { code, json: r, out } = await report(w, ["--compare", "fast,slow", "--json"]);
+test("report --compare (#567): a merged Objective with stages from before the rename is a lower bound: left out of every measure, its wall clock too, counted in leftOut and listed in legacy; its card says the same", async () => {
+  // #11 straddles the rename: its first label under the old name (GitHub keeps it on the event), then the current one,
+  // and the App's work stage under the previous marker. The same stage on #16 (in both arms) and #15 (label not vouched).
+  const straddle = () => {
+    const w = experiment();
+    w.timelines[11] = [{ event: "labeled", label: { name: `${PREVIOUS_NAME}:objective` }, actor: ME, created_at: at(-20) }, ...w.timelines[11]];
+    const old = (n) => ({ id: (nextId += 1), issue_url: issueUrl(n), user: BOT, author_association: "CONTRIBUTOR", performed_via_github_app: { id: APP.id, slug: APP.slug }, created_at: at(2), updated_at: at(2), body: [`<!-- ${PREVIOUS_NAME}:${n}:progress:work:8800 -->`, "work: started.", `<!-- ${PREVIOUS_NAME}:spend {"usd":40} -->`].join("\n") });
+    w.comments.push(old(11), old(15), old(16));
+    return w;
+  };
+  const { code, json: r, out } = await report(straddle(), ["--compare", "fast,slow", "--json"]);
   assert.equal(code, 0);
   const [fast, slow] = r.comparison.arms;
   assert.deepEqual(r.source.missing.find((m) => m.code === "legacy-records")?.issues, [11]);
   assert.equal(r.source.complete, false);
   assert.deepEqual([fast.legacy, slow.legacy], [[11], []]);
-  // #11's row keeps its own figures, marked; the measures leave it out, but the wall clock, which no stage gives.
-  assert.deepEqual(fast.objectives.find((o) => o.issue === 11), { issue: 11, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, modelMinutes: 10, wallMinutes: 60, reviewRounds: 0, fixPasses: 0, findings: null, legacyStages: 1 });
+  // #11's row keeps its own figures, marked, with no wall clock (its start is under the old name); the measures leave it out.
+  assert.deepEqual(fast.objectives.find((o) => o.issue === 11), { issue: 11, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, modelMinutes: 10, wallMinutes: null, reviewRounds: 0, fixPasses: 0, findings: null, legacyStages: 1 });
   assert.deepEqual(fast.usdPerMerged.api, { median: 3.25, p25: 2.875, p75: 3.625, n: 2, leftOut: 1 });
   assert.deepEqual(fast.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
   assert.deepEqual(fast.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
   assert.deepEqual(fast.reviewRounds, { median: 1.5, p25: 1.25, p75: 1.75, n: 2, leftOut: 1 });
-  assert.deepEqual(fast.wallMinutes, { median: 90, p25: 75, p75: 135, n: 3, leftOut: 0 });
+  assert.deepEqual(fast.wallMinutes, { median: 135, p25: 112.5, p75: 157.5, n: 2, leftOut: 1 });
   assert.deepEqual(slow.usdPerMerged.subscription, { median: 4, p25: 3.5, p75: 4.5, n: 2, leftOut: 1 });
   const md = renderReport(JSON.parse(out));
-  assert.match(md, /^- Left out of fast's measures but the wall clock, and of its findings, with stages from before the rename to Pendulum not read: #11\.$/m);
+  assert.match(md, /^- Left out of fast's measures and findings, with stages from before the rename to Pendulum not read: #11\.$/m);
+  // Read from the finish cards instead, the same comparison: #11's card has no wall clock either.
+  const card = await import("../scripts/lib/finish-card.mjs");
+  const cards = await report(carded(straddle(), card), ["--compare", "fast,slow", "--json"]);
+  assert.equal(cards.json.source.read.summaries, 6);
+  assert.deepEqual(cards.json.comparison, r.comparison);
 });

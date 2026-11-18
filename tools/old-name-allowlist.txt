@@ -6,4 +6,4 @@
 plugin/scripts/lib/local.mjs:export const PREVIOUS_NAME = "factory";
 
 # REPORT.md names the marker of the stages recorded before the rename, which the report lists unread (#567).
-docs/REPORT.md:- **Before the rename.** A stage recorded before Clockgrove Factory became Pendulum has a progress comment headed `<!-- factory:<n>:progress:<work|review>:<key> -->`. The report reads none of it: no dollars, tokens or passes.
+docs/REPORT.md:- **Before the rename.** A stage recorded before Clockgrove Factory became Pendulum has a progress comment headed `<!-- factory:<n>:progress:<work|review>:<key> -->`, and an issue labelled then has `factory:objective` or `factory:running` label events (GitHub keeps a renamed label's old name on its events). The report reads none of them: no dollars, tokens, passes or start of the clock.

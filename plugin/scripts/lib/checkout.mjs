@@ -11,7 +11,7 @@ import { scrubbedEnv } from "./harness.mjs";
 import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { AGENT_MODELS, validationGroups } from "./logic.mjs";
-import { noReplace, serverBase } from "./lfs.mjs";
+import { noReplace, noSmudge, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { log } from "./inputs.mjs";
 import { NetworkDown, OUTAGE, downFor, githubOrigin, machineDown, machineKey, networkBack, pastKeys, stepCutOff, stoppedWaiting, waitingOutages } from "./network.mjs";
@@ -328,7 +328,7 @@ export async function runValidation(checkout, commands, opts = {}) {
  * declared ones (`generated(paths)`: outbox.mjs box.generated, as the default branch declares them), and leaves every
  * declared path as HEAD has it: the committed generated files are then what the command writes on this tree. Anything
  * else is a red with runValidation's shape, its output naming the paths: one of `paths` the command did not write
- * (put back as HEAD has it), a path outside the declared ones, a declared file not committed as written (the command's
+ * (put back as HEAD has it, a Git LFS file as its pointer), a path outside the declared ones, a declared file not committed as written (the command's
  * output stays in the checkout for the fix pass). The checkout's tree before and after is a tree object written through
  * a scratch index (ignored files are no part of it).
  */
@@ -362,7 +362,8 @@ export async function runRegeneration(checkout, command, { generated, paths = []
   // A path of `paths` the command left unwritten goes back as HEAD has it, whatever the command's end.
   const unwritten = after ? await names("HEAD", after, ["--diff-filter=D"]) : null;
   const missing = (unwritten || []).filter((p) => paths.includes(p));
-  if (missing.length) await inBox(["sh", "-c", 'cd "$1" && xargs -0 git checkout -q HEAD --', "sh", checkout], nul(missing));
+  // No Git LFS smudge (lfs.mjs noSmudge): a media file comes back as its pointer, as Pendulum's other moves leave it.
+  const restored = missing.length ? await inBox(noSmudge(["sh", "-c", 'cd "$1" && xargs -0 git checkout -q HEAD --', "sh", checkout]), nul(missing)) : { code: 0 };
   if (!r.ok) return red(r, `regeneration: the command ${r.timedOut ? "timed out" : `exited ${r.code}`}, so the generated files are not regenerated`);
   const wrote = after ? await names(before, after) : null;
   const uncommitted = after ? await names("HEAD", after) : null;
@@ -371,7 +372,7 @@ export async function runRegeneration(checkout, command, { generated, paths = []
   const outside = wrote.filter((p) => !declared.has(p));
   const stale = uncommitted.filter((p) => declared.has(p) && !missing.includes(p));
   const why = [
-    missing.length ? `regeneration: the command did not write ${missing.length} generated file(s) the branch's change touches: ${missing.join(", ")}. Pendulum removes each before the command, which must write it again` : "",
+    missing.length ? `regeneration: the command did not write ${missing.length} generated file(s) the branch's change touches: ${missing.join(", ")}. Pendulum removes each before the command, which must write it again${restored.code === 0 ? "" : "; Pendulum could not put them back as HEAD has them (`git checkout HEAD -- <path>` does)"}` : "",
     outside.length ? `regeneration: the command changed ${outside.length} path(s) outside the declared \`pendulum-generated\` paths: ${outside.join(", ")}. It may write only paths the default branch's .gitattributes declares; those changes are still in the checkout, uncommitted` : "",
     stale.length ? `regeneration: ${stale.length} generated file(s) are not committed as the command writes them on this tree: ${stale.join(", ")}. The command's output is in the checkout: commit those files as it left them` : "",
   ].filter(Boolean);
@@ -382,27 +383,25 @@ export async function runRegeneration(checkout, command, { generated, paths = []
 /**
  * The regeneration check of a stage (validationLoop's `regeneration`), for a repository with a `regenerate` command.
  * Whether it runs is read from git alone, in every stage: `check(checkout, opts)` runs the command (runRegeneration)
- * when the branch's change (`base()`'s merge base with HEAD, to HEAD, read in the agent's sandbox) touches a path the
- * default branch declares generated (`generated(paths)`), and HEAD is not the head it last passed on; null otherwise.
+ * when the branch's change (`touched()`: outbox.mjs box.touched, the agent's HEAD against the default branch, read in
+ * Pendulum's mirror) touches a path the default branch declares generated (`generated(paths)`), and that head is not
+ * the one it last passed on; null otherwise.
  * So a head a conflict pass, a fix pass or an answer pass made is checked before its validation, whatever stage it is
  * and however the stage before it ended. `also()`: paths counted with the change's (the declared paths a conflict pass
  * of this stage took the default branch's side of, which the head no longer changes). A change that cannot be read is a
  * red, never a pass.
  */
-export function openRegeneration({ command, generated, base, also = () => [] }) {
+export function openRegeneration({ command, generated, touched, also = () => [] }) {
   let passed = "";
   const check = async (checkout, opts = {}) => {
-    const gitEnv = scrubbedEnv(opts.env || process.env);
-    const git = (args) => exec(...backend(gitEnv).sandbox.git(["git", "-C", checkout, ...args], gitEnv), { env: gitEnv, maxBytes: 64 * 1024 * 1024 }).catch(() => ({ code: null, stdout: "" }));
-    const head = (await git(["rev-parse", "HEAD"])).stdout.trim();
-    if (head && head === passed) return null;
-    const touched = await git(["diff", "--name-only", "--no-renames", "-z", `${base()}...HEAD`]);
-    if (touched.code !== 0) {
+    const change = await touched();
+    if (!change) {
       const failed = { command, ok: false, code: 1, timedOut: false, output: "regeneration: Pendulum could not read the branch's change against the default branch, so the generated files are not checked" };
       failed.full = failed.output;
-      return { green: false, results: [failed], failed, failures: [failed], head };
+      return { green: false, results: [failed], failed, failures: [failed], head: "" };
     }
-    const all = [...new Set([...touched.stdout.split("\0").filter(Boolean), ...also()])];
+    if (change.head === passed) return null;
+    const all = [...new Set([...change.paths, ...also()])];
     const declared = await generated(all);
     const paths = all.filter((p) => declared.has(p));
     if (!paths.length) return null;

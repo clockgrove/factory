@@ -706,7 +706,7 @@ async function main() {
   // The declared paths a conflict pass of this stage took the default branch's side of: checked though the head no
   // longer differs from the default branch there.
   let regenerateMet = [];
-  const regeneration = inputs.regenerate ? openRegeneration({ command: inputs.regenerate, generated: (paths) => outbox.generated(paths, regenerateAt()), base: regenerateAt, also: () => regenerateMet }) : null;
+  const regeneration = inputs.regenerate ? openRegeneration({ command: inputs.regenerate, generated: (paths) => outbox.generated(paths, regenerateAt()), touched: () => outbox.touched(regenerateAt()), also: () => regenerateMet }) : null;
   // Only the dispatcher's send-back (its rebase marker on the PR) means "rebase and nothing else";
   // a relabel after a Question or Blocked exit brings new decisions and runs the harness.
   // Pendulum's own marker only (isSelf): a writer's pasted one is no send-back.
@@ -1011,6 +1011,7 @@ async function main() {
     regenerateMet = met;
     const g = await validationLoop({ onPhase: progress, progress, outbox, checkout, commands: [], checks: null, regeneration, harness: inputs.harness, effort: inputs.effort, model: inputs.model, maxUsd: passCap(), spentUsd: sumSpend(records).usd, session, taskCard: prompt, env: harnessEnv, deadlineAt, eventsFile, io, drift, progressCheck: openProgressCheck({ inputs, stage: decisionStage }) });
     records.push(...g.usage);
+    passes += g.passes || 0;
     if (g.died) died += 1;
     if (g.harness?.timedOut) rec.timedOut = true;
     if (g.harness?.budgetExceeded) rec.budgetExceeded = true;
@@ -1136,7 +1137,7 @@ async function main() {
       handOff: !!rec.ok && !rebaseMode && !!pr,
     }, cross);
     records.push(...validation.usage);
-    passes = validation.passes;
+    passes += validation.passes;
     if (validation.died) died += 1;
     if (validation.usage.length) {
       await outbox.push();

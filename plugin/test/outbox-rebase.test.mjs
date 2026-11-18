@@ -971,7 +971,7 @@ test("#619: a declared generated file both sides changed takes the base's side u
   const env = { ...process.env, ...quiet };
   // The stage's check, as any stage opens it: no rebase state, the trigger read from git.
   // `met`: what the stage's own conflict pass adds (the declared paths it took main's side of).
-  const stage = (command, met = []) => openRegeneration({ command, generated: (paths) => t.box.generated(paths), base: () => t.onto, also: () => met }).check(t.r.work, { env, echo: false });
+  const stage = (command, met = []) => openRegeneration({ command, generated: (paths) => t.box.generated(paths), touched: () => t.box.touched(t.onto), also: () => met }).check(t.r.work, { env, echo: false });
   // No Block (nothing judged); the check is red on the head that holds main's golden.json, naming it.
   assert.equal(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge, regenerate: true }), "");
   assert.deepEqual([asked, t.box.regenerated], [[], ["golden.json"]]);
@@ -988,6 +988,10 @@ test("#619: a declared generated file both sides changed takes the base's side u
   const outside = await stage("sh gen.sh && echo stray > stray.txt");
   assert.ok(outside.green === false && outside.failed.output.includes("stray.txt"), outside.failed?.output);
   assert.equal((await stage("exit 3")).failed.code, 3);
+  // The guard: a red from the check on the paths the pass met leaves the pass unresolved, and nothing is pushed.
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  assert.ok(await sendBackGuard({ outbox: t.box, onto: { from: t.from, base: t.onto, files: ["golden.json"] }, defaultBranch: "main", judge, regenerate: { paths: [], check: async () => "red" } }));
+  assert.equal(await t.box.push(), false);
 });
 
 test("#452: the file a hunk is judged against: an empty file is shown empty, a missing one as missing", () => {

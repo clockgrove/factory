@@ -1584,7 +1584,7 @@ async function main() {
   // A PR reviewed before its Objective was labelled a foundation one gets the foundation pass alone, as its own review.
   // The regeneration check (checkout.mjs openRegeneration): on every head this stage validates whose change touches a
   // declared generated path, as in the work stage.
-  const regeneration = inputs.regenerate ? openRegeneration({ command: inputs.regenerate, generated: (paths) => outbox.generated(paths), base: () => outbox.base }) : null;
+  const regeneration = inputs.regenerate ? openRegeneration({ command: inputs.regenerate, generated: (paths) => outbox.generated(paths), touched: () => outbox.touched() }) : null;
   const startHead = outbox.expected() || pr.head.sha;
   const scope = await reviewScope(outbox.git, { reviews, comments: marks.comments, issue, base: outbox.base, head: startHead, maxBytes: REVIEW_DIFF_BYTES });
   const alreadyReviewed = scope.covered;

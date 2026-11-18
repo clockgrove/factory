@@ -507,6 +507,18 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
+   * The paths the branch's change touches, read in Pendulum's mirror: the agent's HEAD taken into it (take), against its
+   * merge base with `rev` (the default branch as fetched, by default). {head, paths}; null when it cannot be read. The
+   * checkout's own view of the default branch plays no part (one that could not take a merge of it, `synced` false).
+   */
+  box.touched = async (rev = base) => {
+    const head = await take().catch(() => "");
+    if (!head) return null;
+    const r = await git(["diff", "--name-only", "--no-renames", "-z", `${rev}...${head}`]);
+    return r.code === 0 ? { head, paths: r.stdout.split("\0").filter(Boolean) } : null;
+  };
+
+  /**
    * What a send-back's conflict pass left in the checkout, read before anything of it is pushed: why it is not the
    * branch at `from` rebased onto `onto` (the default branch's head Pendulum's own rebase conflicted on), or "" when it
    * is. Not: a rebase, merge or cherry-pick left in progress (HEAD is then the default branch plus some of the commits);

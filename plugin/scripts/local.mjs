@@ -4298,8 +4298,7 @@ async function deliver(issue, flags) {
   const open = await findPr(repo, branch, opts).catch(() => null);
   const left = record.part ? record.part.remaining.length : open && isSplitPart(prior, open.number) ? prior.remaining : 0;
   let pr = await publishPr(repo, { branch, base: defaultBranch, issue, issueTitle: issueData.title, prText: files["pr.md"], splitPart: left > 0, pr: open, handover }, opts);
-  const toAnswer = await unaddressedReviewComments(repo, pr.number, null, { ...opts, reviewIds: await ownReviewIds(repo, pr.number, issue, opts) }).catch(() => []);
-  const replied = await postReplies(repo, pr.number, issue, files["replies.json"], toAnswer.map((c) => c.id), opts);
+  const replied = await deliverReplies(repo, pr.number, issue, files["replies.json"], opts);
   await postNote(repo, issue, files["note.md"], opts);
   if (record.exit === "delivered") {
     const rec = await recordPart(repo, issue, pr.number, left, opts);
@@ -4312,6 +4311,40 @@ async function deliver(issue, flags) {
   await applyExit(repo, { issue, pr, exit: record.exit, reason: record.exit === "question" ? `question: ${clip(record.questions[0] || "")}` : record.reason, cause: "work", notify: inputs.notify, stage: "work" }, opts);
   log(`#${issue}: ${record.exit}; PR #${pr.number} ${pr.html_url}${replied ? `; ${replied} repl${replied === 1 ? "y" : "ies"} posted` : ""}`);
   return record.exit === "delivered" ? 0 : 1;
+}
+
+/**
+ * The session's replies (replies.json) on delivery, posted as the review stage's answer pass posts them: only to the open
+ * findings of Pendulum's own reviews on the PR (session.mjs ownReviewIds, unaddressedReviewComments). A reply to any
+ * other comment is not posted, and the log says how many and which: a stranger's comment, a finding already answered,
+ * or a review by an App this login cannot tell is Pendulum's (the Action's own App, say); every reply, when the PR's
+ * review comments cannot be read. Returns how many were posted.
+ */
+export async function deliverReplies(repo, prNumber, issue, text, opts) {
+  let open;
+  let unread = null;
+  try {
+    open = await unaddressedReviewComments(repo, prNumber, null, { ...opts, reviewIds: await ownReviewIds(repo, prNumber, issue, opts) });
+  } catch (e) {
+    open = [];
+    unread = String(e?.message || e).slice(0, 120);
+  }
+  const allowed = open.map((c) => c.id);
+  const named = (() => {
+    try {
+      const list = JSON.parse(String(text ?? ""));
+      return Array.isArray(list) ? [...new Set(list.map((r) => String(r?.id ?? "")).filter(Boolean))] : [];
+    } catch {
+      return [];
+    }
+  })();
+  const dropped = named.filter((id) => !allowed.some((a) => String(a) === id));
+  if (dropped.length) {
+    const which = `${dropped.slice(0, 10).map((id) => id.slice(0, 40)).join(", ")}${dropped.length > 10 ? ", …" : ""}`;
+    const why = unread ? `the PR's review comments could not be read (${unread})` : "not an open finding of a review this login can tell is Pendulum's own";
+    log(`PR #${prNumber}: ${dropped.length} repl${dropped.length === 1 ? "y" : "ies"} not posted (${which}): ${why}`);
+  }
+  return postReplies(repo, prNumber, issue, text, allowed, opts);
 }
 
 /** Why pushing a handed-over workflow waits for a person's read. */

@@ -1843,7 +1843,7 @@ async function main() {
   const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
   // A pass with nothing to answer (the reviewer's JSON had no comments: Pendulum's placeholder went up) skips the worker pass.
   // Pendulum's own reviews on this PR (the marker in the body, from Pendulum or someone who can push): their comments are the reviewer's.
-  // A failed read falls back to the author filter (null), not a crashed review run.
+  // A failed read gives null: the App's login decides then, or, with none (local mode), the reviews the list reads itself.
   const pendulumReviewIds = () => ownReviewIds(repo, pr.number, issue, token);
   // The repository's third-party reviewers (third-party-review.mjs): each one's review of the head Pendulum's reviewer
   // read comes before the answer pass, within a bound; without one in time the stage goes on and the progress says so.

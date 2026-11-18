@@ -1527,3 +1527,25 @@ test("an Objective labelled before the rename to Pendulum (#567): what its later
     assert.deepEqual([pooled.finished, pooled.walkAway, pooled.sequence.map((x) => x.ok)], [1, 0, [false]], what);
   }
 });
+
+test("an Objective labelled before the rename to Pendulum (#567): an External result seen after its later label stays External, skipped like any other", async () => {
+  const { streaks, pooledStreak, verdict } = await import("../lib/streak.mjs");
+  const { blockMarker } = await import("../../plugin/scripts/lib/logic.mjs");
+  const stopped = () => {
+    const c = blocked(80);
+    c.bodyEdits = [];
+    c.workflowRuns = [];
+    c.issueComments[1].body += `\n${blockMarker("max-usd")}`;
+    return c;
+  };
+  const known = scoreObjective(stopped(), { prices, now: NOW });
+  const row = scoreObjective(renamed(stopped()), { prices, now: NOW });
+  assert.equal(known.walkAway.bucket, "external");
+  assert.deepEqual([row.walkAway.bucket, row.walkAway.value, row.walkAway.clockRenamed, row.walkAway.blocks, row.walkAway.blocked], ["external", false, true, known.walkAway.blocks, known.walkAway.blocked]);
+  assert.equal(row.walkAway.reason, `${known.walkAway.reason} (${RENAMED_NOTE})`);
+  assert.deepEqual(verdict(row), verdict(known));
+  const h = Object.values(streaks([row], { from: "2031-02-01T00:00:00Z" }).harnesses)[0];
+  assert.deepEqual([h.finished, h.external, h.sequence.map((x) => [x.ok, x.external])], [0, 1, [[null, true]]]);
+  const pooled = pooledStreak([{ ...row, repository: REPO }], { from: "2031-02-01T00:00:00Z" });
+  assert.deepEqual([pooled.finished, pooled.external], [0, 1]);
+});

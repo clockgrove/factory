@@ -818,10 +818,10 @@ export function scoreObjective(collected, opts = {}) {
     missing.push("label event");
   }
   // Labelled before the rename to Pendulum (finish-card.mjs clockRenamed): GitHub keeps the old label name on those
-  // events, so the clock above starts at a later label. Everything seen after it is a fact and is scored as read (a
-  // miss stays a miss, its Blocks, Question and human actions kept, with a note that the window starts late); only what
-  // the unread start could change is not known: a walk-away or External result (bucket `unknown`, in no walk-away
-  // count; lib/streak.mjs skips it), an asked-only yes, the operator minutes, the waiting and the wall clock.
+  // events, so the clock above starts at a later label. Everything seen after it is a fact and is scored as read (a miss
+  // stays a miss and an External result External, their Blocks, Question and human actions kept, with a note that the
+  // window starts late); only what the unread start could change is not known: a walk-away (bucket `unknown`, in no
+  // walk-away count; lib/streak.mjs skips it), an asked-only yes, the operator minutes, the waiting and the wall clock.
   const renamed = clockRenamed(collected.issueTimeline);
   if (renamed) missing.push("clock start (labelled before the rename to Pendulum)");
   const pulls = branchPulls(collected);
@@ -920,11 +920,11 @@ export function scoreObjective(collected, opts = {}) {
             ? `merged; ${unprompted.length} unprompted human action(s), none asked for`
             : `merged with no human action after the label${ownerNote}`,
   };
-  // Labelled before the rename (`renamed`): a walk-away or External result, and an asked-only yes, are not known; a miss
-  // stays one, as read, noted.
+  // Labelled before the rename (`renamed`): a walk-away, and an asked-only yes, are not known; a miss or an External
+  // result stays one, as read, noted.
   if (renamed) {
     walkAway.clockRenamed = true;
-    if (walkAway.bucket === "walk-away" || walkAway.bucket === "external") Object.assign(walkAway, { value: null, bucket: "unknown", reason: RENAMED_WHY });
+    if (walkAway.bucket === "walk-away") Object.assign(walkAway, { value: null, bucket: "unknown", reason: RENAMED_WHY });
     else walkAway.reason = `${walkAway.reason} (${RENAMED_NOTE})`;
     if (walkAway.askedOnly.value) walkAway.askedOnly = { value: null, reason: RENAMED_WHY };
     else walkAway.askedOnly.reason = `${walkAway.askedOnly.reason} (${RENAMED_NOTE})`;

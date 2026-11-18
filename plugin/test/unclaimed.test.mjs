@@ -397,6 +397,39 @@ test("a start with no other loop about claims and starts as before (#304 review)
   }
 });
 
+test("a heartbeat in flight when its stage ends is ended before the claim is dropped, and writes no claim back (#626)", async () => {
+  let end = null;
+  let read = false;
+  let drop;
+  let over;
+  const dropped = new Promise((r) => (drop = r));
+  // The beat is over: its request was ended by the loop, or it went on to write.
+  const beatOver = new Promise((r) => (over = r));
+  const fake = await fakeGitHub({
+    hook: (req, p) => {
+      // The heartbeat's claim read: the stage ends on it, and its answer (unread) comes only once the claim is dropped.
+      if (end && !read && req.method === "GET" && p === "/repos/o/r/issues/7/comments") {
+        read = true;
+        req.socket.once("close", over);
+        end({ exit: "delivered" });
+        return dropped.then(() => ({ status: 404 }));
+      }
+      if (read && req.method === "DELETE") drop();
+      else if (read && req.method !== "GET") over();
+    },
+  });
+  const { loop, restore } = await startLoop(fake);
+  try {
+    loop.heartbeatMs = 1;
+    assert.equal((await loop.withClaim(7, () => new Promise((done) => (end = done)))).exit, "delivered");
+    await beatOver;
+    assert.deepEqual(claims(fake.state), [], fake.state.writes.join("\n"));
+  } finally {
+    restore();
+    await fake.close();
+  }
+});
+
 test("serve stopped while its dispatch marks a pick that another loop has claimed meanwhile leaves that loop's Objective Running (#310 review)", { skip: process.platform === "win32" }, async () => {
   let run = null;
   let signalled = false;

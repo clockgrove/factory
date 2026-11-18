@@ -129,6 +129,14 @@ function fakeGitHub(w) {
     if (p === "/issues") return page(w.issues.filter((i) => i.labels.some((l) => l.name.toLowerCase() === String(u.searchParams.get("labels")).toLowerCase())), u);
     let m = /^\/issues\/(\d+)\/timeline$/.exec(p);
     if (m) return page(w.timelines[m[1]] || [], u);
+    // One issue and its own comments, as --issue reads them.
+    m = /^\/issues\/(\d+)$/.exec(p);
+    if (m) {
+      const i = w.issues.find((x) => x.number === Number(m[1]));
+      return i ? json({ ...i, comments: w.comments.filter((c) => c.issue_url === issueUrl(i.number)).length }) : json({ message: "Not Found" }, 404);
+    }
+    m = /^\/issues\/(\d+)\/comments$/.exec(p);
+    if (m) return page(w.comments.filter((c) => c.issue_url === issueUrl(Number(m[1]))), u);
     m = /^\/collaborators\/([^/]+)\/permission$/.exec(p);
     if (m) return w.permissions[decodeURIComponent(m[1])] === 403 ? json({ message: "Must have push access to view repository collaborators." }, 403) : json({ permission: w.permissions[decodeURIComponent(m[1])] ?? "read" });
     if (p === "/pulls") return page(w.pulls, u);
@@ -487,4 +495,45 @@ test("report --compare (#567): an Objective labelled before the rename, with no 
   assert.deepEqual(fast.wallMinutes, { median: 120, p25: 90, p75: 150, n: 2, leftOut: 1 });
   // Its other measures stand: it has no stage from before the rename.
   assert.equal(fast.modelMinutes.n, 3);
+});
+
+test("report (#587): an Objective labelled before the rename is clocked `renamed` in every scope, from its card's own record or, for a card from before it recorded why, from its timeline, read and planned", async () => {
+  const card = await import("../scripts/lib/finish-card.mjs");
+  // #12's first label under the old name, which its card's timeline did not show.
+  const renamed = (w) => {
+    w.timelines[12] = [{ event: "labeled", label: { name: `${PREVIOUS_NAME}:objective` }, actor: ME, created_at: at(-20) }, ...w.timelines[12]];
+    return w;
+  };
+  // Every card as a release before #587 wrote it: no `clockWhy` in its summary, its release 0.10.2.
+  const old = (w) => {
+    for (const c of w.comments.filter((x) => /^<!-- pendulum:\d+:finish -->/.test(x.body))) {
+      assert.match(c.body, /,"clockWhy":null/);
+      c.body = c.body.replace(/,"clockWhy":null/, "").replace(/"pendulum":"[^"]*"/, '"pendulum":"0.10.2"');
+    }
+    return w;
+  };
+  const clock = (r, n) => {
+    const o = r.objectives.find((x) => x.issue === n);
+    return [o.started, o.wallMinutes, o.clockWhy];
+  };
+  const world = () => renamed(old(carded(experiment(), card)));
+  for (const [scope, args] of [["a period", ["--since", "2026-11-16"]], ["--issue", ["--issue", "12"]], ["--compare", ["--compare", "fast,slow"]]]) {
+    const { json: r, calls } = await report(world(), [...args, "--json"]);
+    assert.deepEqual(clock(r, 12), [null, null, "renamed"], scope);
+    assert.equal(calls.filter((c) => c.includes("/issues/12/timeline")).length, 1, `${scope}: its timeline read once`);
+    assert.equal(r.source.calls.planned, r.source.calls.made, `${scope}: planned`);
+    // An old card on an issue labelled after the rename keeps its clock: its timeline says so.
+    if (scope !== "--issue") assert.deepEqual(clock(r, 11), [at(0), 60, null], scope);
+  }
+  // A card that records why: `renamed` from the card itself, no timeline read for it.
+  const fresh = renamed(experiment());
+  // The card's own writer sees the old label: it records the reason.
+  const { json: own, calls: ownCalls } = await report(carded(fresh, card), ["--issue", "12", "--json"]);
+  assert.deepEqual(clock(own, 12), [null, null, "renamed"]);
+  assert.ok(!ownCalls.some((c) => c.includes("/timeline")), "no timeline read");
+  // A budget that stops before the timeline: the clock is not known, never the card's short one.
+  const { json: full } = await report(world(), ["--issue", "12", "--json"]);
+  const { code, json: cut } = await report(world(), ["--issue", "12", "--json", "--max-calls", String(full.source.calls.made - 1)]);
+  assert.equal(code, 3);
+  assert.deepEqual(clock(cut, 12), [null, null, "timeline-unread"]);
 });

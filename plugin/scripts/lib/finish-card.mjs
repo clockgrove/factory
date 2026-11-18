@@ -57,6 +57,9 @@ export function labelTime(issue, timeline, label = OBJECTIVE, clockAfter = null)
  */
 export const clockRenamed = (timeline) => (timeline || []).some((e) => (e?.event === "labeled" || e?.event === "unlabeled") && [`${PREVIOUS_NAME}:objective`, `${PREVIOUS_NAME}:running`].includes(e.label?.name));
 
+/** The reasons a finish card summary records for a wall clock it does not know (`clockWhy`, #587). */
+export const CLOCK_WHY = Object.freeze(["renamed"]);
+
 /** Why a card's wall clock is not known (clockRenamed), as the card says it. */
 export const RENAMED_CLOCK_WHY = "its wall clock is not known: it was labelled before the rename to Pendulum";
 
@@ -869,7 +872,9 @@ export const reportStageKind = (kind) => (kind === "review" || kind === "rebase"
  * a ledger and none is one Pendulum cannot attribute), `modelMinutes` (the minutes of every harness pass, null unless
  * `passes` is known and each harness pass has its times), `tokens` (every stage's, summed), and `labelled` and
  * `labelledWallMs` (the scorer's start of the clock, the first `pendulum:objective` label with no restart window, and the
- * wall clock from it to the merge; null with no label event, or one labelled before the rename to Pendulum: clockRenamed).
+ * wall clock from it to the merge; null with no label event, or one labelled before the rename to Pendulum: clockRenamed),
+ * and `clockWhy`, why the wall clock is not known when that is the rename (`renamed`; null otherwise), so a reader takes
+ * it from the card (#587) rather than from the shape of its other fields.
  */
 function objectivePasses(d) {
   const figures = d.stages.map((s) => (Array.isArray(s.ledger) ? stagePassFigures(s.ledger) : null));
@@ -879,7 +884,7 @@ function objectivePasses(d) {
   const passes = whole ? { total: count(() => true), answer: count(isAnswer), fix: count(isFix) } : null;
   const modelMinutes = whole && !kinds.some((k) => k.untimed) ? kinds.reduce((t, k) => t + (k.harnessMinutes ?? 0), 0) : null;
   const wall = !d.clockRenamed && d.labelled && ms(d.merged) >= ms(d.labelled) ? ms(d.merged) - ms(d.labelled) : null;
-  return { passes, modelMinutes, tokens: d.stages.reduce((t, s) => addTokens(t, s.tokens), zeroTokens()), labelled: d.labelled ?? null, labelledWallMs: wall };
+  return { passes, modelMinutes, tokens: d.stages.reduce((t, s) => addTokens(t, s.tokens), zeroTokens()), labelled: d.labelled ?? null, labelledWallMs: wall, clockWhy: d.clockRenamed ? "renamed" : null };
 }
 
 /**
@@ -1061,6 +1066,9 @@ export function readSummary(body, n) {
     tokens: tokensRead(v.tokens ?? {}) ?? zeroTokens(),
     labelled: timeOf(v.labelled) ?? null,
     labelledWallMs: countOf(v.labelledWallMs) ?? null,
+    // Why its wall clock is not known, as the card records it (#587): `renamed`, else null; undefined on a card from before
+    // it recorded the reason, whose reader checks the issue's timeline itself.
+    clockWhy: !Object.hasOwn(v, "clockWhy") ? undefined : CLOCK_WHY.includes(v.clockWhy) ? v.clockWhy : null,
     cost: { ...cost, why },
     sandbox: sandbox ? { usd: sandbox.usd, cents: sandbox.cents, unknown: sandbox.unknown, why: sandboxWhy, foreign: [...foreign] } : null,
     stages,

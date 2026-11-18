@@ -133,7 +133,9 @@ test("report (#569 R7, R6): passes are harness passes, and a decision record, co
   assert.equal(o.decisionRecords, 1);
   assert.deepEqual([r.totals.passes, r.totals.decisionRecords], [4, 1]);
   const row = (k) => r.breakdowns.pass.find((x) => x.key === k);
-  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.decisionRecords, x.modelMinutes]), [["work", 1, 0, 5], ["decision", 0, 1, null], ["review", 1, 0, 2], ["answer", 1, 0, 1], ["validation-fix", 1, 0, 1]]);
+  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.decisionRecords, x.modelMinutes]), [["work", 1, 0, 5], ["decision", 0, 1, null], ["review", 1, 0, 2], ["answer", 1, 0, 1], ["validation-fix", 1, 0, 1], [null, null, null, null]]);
+  // The decision calls outside a stage name no pass: the row of no pass (#570 V2) holds them, so the rows cover the totals.
+  assert.deepEqual([row(null).cost.usd.api, row(null).cost.unknownDecisionCalls], [0.01, 2]);
   // The decision record's span (its first call to its last: 24 minutes) is in no model minutes.
   assert.equal(row("decision").cost.unknownRuns, 3);
   assert.equal(r.breakdowns.pass.reduce((t, x) => t + x.passes, 0), r.totals.passes);
@@ -246,6 +248,20 @@ async function noPassWorld({ card = false } = {}) {
   return w;
 }
 
+/**
+ * A report section less what only a finish card records (#570): each Objective's clock, and the per-merged wall clock,
+ * for comparing a world with a card to the same world without one.
+ */
+const clockless = (r, k) => {
+  const x = structuredClone(r[k]);
+  if (k === "objectives") for (const o of x) for (const f of ["started", "wallMinutes", "clockWhy"]) delete o[f];
+  if (k === "totals") {
+    delete x.perMerged.wallMinutes;
+    x.perMerged.leftOut = x.perMerged.leftOut.map((o) => ({ ...o, why: o.why.filter((w) => w !== "no-clock") })).filter((o) => o.why.length);
+  }
+  return x;
+};
+
 test("report (#569 W5): a review stage whose spend line says it ran no pass is a stage but no review round, on the stage path and the card path alike", async () => {
   const { json: r } = await report(await noPassWorld(), ["--issue", "21"]);
   const o = byIssue(r, 21);
@@ -254,7 +270,7 @@ test("report (#569 W5): a review stage whose spend line says it ran no pass is a
   // Read from its finish card's summary: the same figures.
   const { json: card } = await report(await noPassWorld({ card: true }), ["--issue", "21"]);
   assert.equal(card.source.read.summaries, 1);
-  for (const k of ["objectives", "totals", "unknown", "breakdowns", "hotSpots"]) assert.deepEqual(card[k], r[k], k);
+  for (const k of ["objectives", "totals", "unknown", "breakdowns", "hotSpots"]) assert.deepEqual(clockless(card, k), clockless(r, k), k);
 });
 
 test("report (#569 W4): a spend line written while its stage ran is in flight while its Objective is Running, and read as it stands once it is not", async () => {
@@ -310,7 +326,7 @@ test("report (#569 W5): a review stage whose usage record says it ran no pass (n
   assert.deepEqual([byIssue(r, 26).stages.review, byIssue(r, 26).reviewRounds], [2, 1]);
   const { json: card } = await report(await make({ card: true }), ["--issue", "26"]);
   assert.equal(card.source.read.summaries, 1);
-  for (const k of ["objectives", "totals", "hotSpots"]) assert.deepEqual(card[k], r[k], k);
+  for (const k of ["objectives", "totals", "hotSpots"]) assert.deepEqual(clockless(card, k), clockless(r, k), k);
   // The same rows, each path in the order it meets the stages (an Actions record's stage last on the stage path).
   const rows = (x) => Object.fromEntries(Object.entries(x.breakdowns).map(([k, v]) => [k, [...v].sort((a, b) => String(a.key).localeCompare(String(b.key)))]));
   assert.deepEqual(rows(card), rows(r));

@@ -243,7 +243,8 @@ export function namedTest(test) {
  * replies.json as the replies Pendulum posts: one per comment id in `allowed`, the first for each id, bodies sanitised.
  * An id is a line comment's number, or the string id of a finding in a review body (logic.mjs bodyFindingId). A reply
  * with `"fixed": true` says the finding is fixed in the code, and carries the test it names (`test`, namedTest), if any,
- * for the finding check (finding-check.mjs).
+ * for the finding check (finding-check.mjs); `"pr_body": true` beside it says the fix is in the PR body (pr.md), so the
+ * check shows the body's change (`prBody`, #584).
  */
 export function parseReplies(text, allowed) {
   let list;
@@ -261,7 +262,7 @@ export function parseReplies(text, allowed) {
     if (id === undefined || seen.has(id) || typeof r.body !== "string" || !r.body.trim()) continue;
     seen.add(id);
     const test = r.fixed === true ? namedTest(r.test) : null;
-    out.push({ id, body: sanitize(r.body.trim()), ...(r.fixed === true ? { fixed: true } : {}), ...(test ? { test } : {}) });
+    out.push({ id, body: sanitize(r.body.trim()), ...(r.fixed === true ? { fixed: true } : {}), ...(r.fixed === true && r.pr_body === true ? { prBody: true } : {}), ...(test ? { test } : {}) });
   }
   return out;
 }
@@ -825,10 +826,13 @@ export async function postReplies(repo, prNumber, issue, text, allowed, opts) {
   const replies = parseReplies(text, allowed);
   let posted = 0;
   for (const r of replies) {
+    // A reply that says its fix is in the PR body carries that in its marker (`<id>:pr_body`), so a later stage that
+    // judges it again asks the body's question too (session.mjs unaddressedReviewComments `earlierPrBody`, #584).
+    const mark = marker(issue, "reply", r.prBody ? `${r.id}:pr_body` : r.id);
     // A finding in the review body has no thread: its answer is a PR comment under the reply marker, which is what
     // marks it answered (session.mjs unaddressedReviewComments).
-    if (isBodyFindingId(r.id)) await rest(`repos/${repo.full}/issues/${prNumber}/comments`, { ...opts, method: "POST", body: { body: `${marker(issue, "reply", r.id)}\nOn review finding ${r.id} (in the review body):\n\n${r.body}` } });
-    else await postReply(repo, prNumber, r.id, `${marker(issue, "reply", r.id)}\n${r.body}`, opts);
+    if (isBodyFindingId(r.id)) await rest(`repos/${repo.full}/issues/${prNumber}/comments`, { ...opts, method: "POST", body: { body: `${mark}\nOn review finding ${r.id} (in the review body):\n\n${r.body}` } });
+    else await postReply(repo, prNumber, r.id, `${mark}\n${r.body}`, opts);
     posted += 1;
   }
   return posted;

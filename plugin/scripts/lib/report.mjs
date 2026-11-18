@@ -26,8 +26,8 @@ import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } 
 import { DEFAULTS } from "./inputs.mjs";
 import { appIdSetLine, appIdWhyText, readAppIdVariable } from "./app-id.mjs";
 import { PREVIOUS_NAME } from "./local.mjs";
-import { FINDING_OUTCOMES, STATE_LABELS, findingsOf, ledgerOfComment, loginKey, publishedModels, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
-import { clockRenamed, finishMarker, labelTime, modellessStages, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
+import { FINDING_OUTCOMES, STATE_LABELS, decisionSpendEntries, findingsOf, ledgerOfComment, loginKey, publishedModels, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
+import { ASKED, CHURN, clockRenamed, finishMarker, labelTime, markChurn, modellessStages, pendulumOwn, readSummary, reportStageKind, spendBreakdown, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, bareModel, codexRow, longShare, passKind, sumLong } from "./usage.mjs";
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
 import { labelsVouched } from "./objective-trust.mjs";
@@ -87,6 +87,15 @@ export function modelName(model, prices, claude = CLAUDE_MODELS) {
   return Object.hasOwn(aliases, bare) && typeof aliases[bare] === "string" ? aliases[bare] : bare;
 }
 
+/** Adds a breakdown row's money (`{usd, unknownRuns}`, and `stages` where it has them) into `map` under `key`. */
+const addRow = (map, key, r) => {
+  const t = map.get(key) ?? { ...(r.stages !== undefined ? { stages: 0 } : {}), usd: Object.fromEntries(COST_KINDS.map((k) => [k, 0])), unknownRuns: 0 };
+  if (r.stages !== undefined) t.stages += r.stages;
+  for (const k of COST_KINDS) t.usd[k] = round6(t.usd[k] + r.usd[k]);
+  t.unknownRuns += r.unknownRuns;
+  map.set(key, t);
+};
+
 /** A `source.missing` entry's Objectives and the stages among them (`add(n, stages)`, one stage by default). */
 const tally = () => {
   const t = {
@@ -103,6 +112,8 @@ const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
 const DAY_MS = 86_400_000;
 /** The UTC midnight at or before `t` (ms), as ISO. */
 const midnight = (t) => new Date(Math.floor(t / DAY_MS) * DAY_MS).toISOString().replace(/\.000Z$/, "Z");
+/** The UTC date (`YYYY-MM-DD`) of a time, or null for none. */
+const dayOf = (at) => (Number.isFinite(ms(at)) ? new Date(ms(at)).toISOString().slice(0, 10) : null);
 
 // ------------------------------------------------------------------ the command line
 
@@ -382,6 +393,18 @@ export function ownPredicate(appId = null, self = []) {
 }
 
 /**
+ * The summary of the newest finish card of Objective `n` among `own`, Pendulum's own comments, that carries one it reads
+ * (readSummary): a reopened Objective merged again has a card per merge, and the newest is its last; null for none.
+ */
+export function lastCard(n, own) {
+  for (const c of (own || []).filter((x) => markerIssue(x) === n && (x.body || "").startsWith(finishMarker(n))).sort((a, b) => ms(b.created_at) - ms(a.created_at))) {
+    const summary = readSummary(c.body, n);
+    if (summary) return summary;
+  }
+  return null;
+}
+
+/**
  * The finish card summary (#544) a report reads merged Objective `n` from in place of its stages, or null: with no
  * `--by` value that needs each stage's own records (STAGE_DETAIL) and no `stages` (`--rates`: a summary carries no
  * stage's sub-agent threads or long-context share, which its rate ratios weigh), the first comment of Pendulum's own (`mine`) on the
@@ -435,7 +458,7 @@ export function summaryFor(n, comments, scope, { mine, pushed = (c) => pushAutho
 export async function readReport(repo, scope, { token, fallback = null, maxCalls = DEFAULT_MAX_CALLS, appId = null, localCopy = null, envAppId = null, self = [], by = [], stages = false, download = downloadArtifactResult, checkout = null, cacheDir = reportCacheDir(repo.full), log = () => {} } = {}) {
   const opts = { token };
   const budget = new Budget(maxCalls, log);
-  const source = { stopped: null, comments: 0, pullsRead: false, artifactsRead: new Set(), artifacts: { listed: 0, downloaded: 0, cached: 0, expired: 0, noResult: 0, failed: 0, unreadable: 0, foreign: 0 }, foreignIssues: new Set(), cut: new Map(), localRecords: 0, selfKnown: false, login: null, appFrom: appId !== null ? "flag" : null };
+  const source = { stopped: null, comments: 0, pullsRead: false, artifactsRead: new Set(), artifacts: { listed: 0, downloaded: 0, cached: 0, expired: 0, noResult: 0, failed: 0, unreadable: 0, foreign: 0 }, foreignIssues: new Set(), cut: new Map(), threadsWhole: new Set(), localRecords: 0, selfKnown: false, login: null, appFrom: appId !== null ? "flag" : null };
   const issues = new Map();
   const pulls = [];
   let comments = [];
@@ -471,6 +494,23 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
   let floor = null;
   let reading = null;
   let threadsLeft = null;
+  // One Objective's thread from its start up to the floor, its comments the repository-wide read lacks each kept once;
+  // read in full, it is in source.threadsWhole. A BudgetStop keeps the pages read (source.cut, below).
+  const readThread = async (n) => {
+    const seen = new Set(comments.map((c) => c.id));
+    const theirs = [];
+    try {
+      await paged(`repos/${repo.full}/issues/${n}/comments`, budget, "comments", opts, { into: theirs, stop: (items) => !(ms(items.at(-1)?.created_at) < ms(floor)) });
+    } finally {
+      for (const c of theirs) {
+        if (seen.has(c.id)) continue;
+        seen.add(c.id);
+        comments.push(c);
+      }
+    }
+    threadsLeft.delete(n);
+    source.threadsWhole.add(n);
+  };
   let app = appId;
   try {
     // What is known before any read: Pendulum's own login and App, the set, the comments, the Objectives' issues and PRs.
@@ -535,6 +575,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
         reading = { n };
         await paged(`${base}/issues/${n}/comments`, budget, "comments", opts, { into: comments, planned: pages });
         reading = null;
+        source.threadsWhole.add(n);
       }
       for (const n of issues.keys()) pulls.push(...(await paged(`${base}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${n}`)}`, budget, "pulls", opts)));
       source.pullsRead = true;
@@ -588,26 +629,22 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
         const begun = [...issues.values()].filter((i) => recorded.has(i.number) && !(ms(i.created_at) >= ms(floor))).map((i) => i.number).sort((a, b) => a - b);
         threadsLeft = new Set(begun);
         if (begun.length) budget.plan(begun.length, `the comments from before ${floor} of ${begun.length} Objective(s) with a record since (a thread's first page each, each further page planned as it is reached)`, { atLeast: true });
-        const seen = new Set(comments.map((c) => c.id));
-        for (const n of begun) {
-          const theirs = [];
-          try {
-            await paged(`${base}/issues/${n}/comments`, budget, "comments", opts, { into: theirs, stop: (items) => !(ms(items.at(-1)?.created_at) < ms(floor)) });
-          } finally {
-            for (const c of theirs) {
-              if (seen.has(c.id)) continue;
-              seen.add(c.id);
-              comments.push(c);
-            }
-          }
-          threadsLeft.delete(n);
-        }
+        for (const n of begun) await readThread(n);
       }
       // The PRs on pendulum/<n> branches, newest first, until they are older than the comments read.
       let early = false;
       pulls.push(...(await paged(`${base}/pulls?state=all&sort=updated&direction=desc`, budget, "pulls", opts, { stop: (items) => (early = !!floor && ms(items.at(-1)?.updated_at) < ms(floor)) })));
       source.pullsRead = true;
       if (early) await olderPulls({ base, repo, floor, issues, pulls, comments, mine, setMode, budget, opts, source });
+      // Each Objective merged in the period whose thread from before the floor is still unread (#570 V5: the per-merged
+      // figures count every stage of it): read as above, planned the same way, so no merged Objective counts as $0.
+      if (floor) {
+        for (const i of issues.values()) if (ms(i.created_at) >= ms(floor)) source.threadsWhole.add(i.number);
+        const merged = [...issues.values()].filter((i) => !source.threadsWhole.has(i.number) && outcomeOf(i, pulls, { pullsRead: !source.pullsUnread?.has(i.number) }) === "merged" && inWindow(mergedAt(i.number, comments, pulls, mine), scope)).map((i) => i.number).sort((a, b) => a - b);
+        for (const n of merged) threadsLeft.add(n);
+        if (merged.length) budget.plan(merged.length, `the comments from before ${floor} of ${merged.length} Objective(s) merged in the period (a thread's first page each, each further page planned as it is reached)`, { atLeast: true });
+        for (const n of merged) await readThread(n);
+      } else for (const n of issues.keys()) source.threadsWhole.add(n);
     }
     source.comments = comments.length;
     // The merged Objectives read from their finish card's summary: none of their stages' usage artifacts is read.
@@ -826,16 +863,23 @@ function partCost(part, rec, books) {
   c.unknownRuns = Number.isInteger(part.usdUnknown) ? part.usdUnknown : 0;
   c.unknownWhy = c.unknownRuns ? [...(part.usdUnknownWhy?.length ? part.usdUnknownWhy : ["unreported"])] : [];
   // The sandbox vendor's cost, booked once per stage (its claim), beside the model's (cost-join.mjs vendorOf).
-  const v = rec.vendor;
-  if (v && typeof v === "object" && books) {
-    if (num(v.usd) !== null) c.usd.sandbox = round6(Math.max(0, v.usd));
-    if (num(v.usd) === null || v.usageUnknown === true || (v.usdUnknown ?? 0) > 0) {
+  const sandbox = sandboxOf(rec, books);
+  if (sandbox) {
+    c.usd.sandbox = sandbox.usd;
+    if (sandbox.unknown) {
       c.unknownRuns += 1;
       c.unknownWhy = [...new Set([...c.unknownWhy, "sandbox"])];
     }
   }
   c.unknownWhy = c.unknownWhy.filter((w) => Object.hasOwn(UNKNOWN_WHY, w)).sort();
   return c;
+}
+
+/** A record's sandbox booking as partCost counts it, `{usd, unknown}` (unknown: 1 when the vendor reported no usage), or null. */
+function sandboxOf(rec, books) {
+  const v = rec?.vendor;
+  if (!v || typeof v !== "object" || !books) return null;
+  return { usd: num(v.usd) !== null ? round6(Math.max(0, v.usd)) : 0, unknown: num(v.usd) === null || v.usageUnknown === true || (v.usdUnknown ?? 0) > 0 ? 1 : 0 };
 }
 
 /** A decision call's unknown-cost codes (usage.mjs UNKNOWN_WHY): `decision` and its `decision-*` kinds. */
@@ -903,6 +947,88 @@ function summaryCost(stage, sandbox, why, sandboxWhy) {
 }
 
 /**
+ * A stage as the finish card's breakdown takes it (finish-card.mjs markChurn, spendBreakdown), from its report cost `c`
+ * and its own sandbox booking (`sandbox`, `{usd, unknown}`, or null; its dollars and run are the cloud sandbox row's, not
+ * the stage's): its model's known dollars (null: none known), runs of unknown cost and dollars by billing; and from its
+ * progress comment (`progress`, null for none), its spend line's dollars by pass kind, what it ran again after a Block
+ * and whether it only judged answers, and its rebase line's conflict pass. The same figures on both paths: `c` is the
+ * card's or the stage's, the comment its own (#570).
+ */
+function cardStage(kind, c, sandbox, progress) {
+  const usd = round6(BILLING.reduce((t, k) => t + c.usd[k], 0));
+  const unknown = c.unknownRuns - (sandbox?.unknown ?? 0);
+  const line = progress ? spendParts(progress.body) : null;
+  return {
+    kind,
+    part: 1,
+    conflict: !!(progress && rebaseCostOf(progress.body)?.conflict),
+    usd: unknown && !usd ? null : usd,
+    unknown,
+    byBilling: Object.fromEntries(BILLING.filter((k) => c.usd[k] > 0).map((k) => [k, c.usd[k]])),
+    byPass: line?.usdByPass ?? {},
+    rerun: line?.rerun ?? null,
+    judgeOnly: line?.judgeOnly === true,
+  };
+}
+
+/**
+ * A finish card breakdown row's money (spendBreakdown's `{usd, unknown, byBilling}`) as the report's dollars by kind and
+ * runs of unknown cost: each billing kind it names, the dollars no billing names as `unknown`, and the cloud sandbox's
+ * row (`sandbox`) as `sandbox`.
+ */
+function rowMoney(r, sandbox = false) {
+  const usd = zeroCost().usd;
+  if (sandbox) usd.sandbox = round6(r.usd ?? 0);
+  else {
+    let named = 0;
+    for (const k of BILLING) {
+      const v = num(r.byBilling?.[k]);
+      if (v !== null) {
+        usd[k] = round6(v);
+        named += v;
+      }
+    }
+    if (num(r.usd) !== null && r.usd - named > 1e-9) usd.unknown = round6(usd.unknown + r.usd - named);
+  }
+  return { usd, unknownRuns: r.unknown ?? 0 };
+}
+
+/**
+ * A stage's dollars by pass kind from its spend line (`usdByPass`, usage.mjs passRead), as the pass breakdown's costs:
+ * each kind's dollars by billing, those no billing names as `unknown`; its runs of unknown cost, with the stage's own
+ * reasons (`why`: a pass kind's runs name none of their own).
+ */
+function byPassCosts(byPass, why) {
+  return Object.entries(byPass || {}).map(([kind, p]) => {
+    const { usd, unknownRuns } = rowMoney({ usd: p.usd, unknown: p.usdUnknown ?? 0, byBilling: p.usdByBilling });
+    return { kind, cost: { usd, unknownRuns, unknownWhy: unknownRuns ? [...why] : [] } };
+  });
+}
+
+/** Whether `parts` (a stage's passes' costs) name more dollars of a kind, or more runs of unknown cost, than its own cost `c`. */
+const overruns = (c, parts) => COST_KINDS.some((k) => round6(parts.reduce((t, p) => t - p.usd[k], c.usd[k])) < 0) || parts.reduce((t, p) => t - p.unknownRuns, c.unknownRuns) < 0;
+
+/**
+ * A stage's passes' costs (pass-figures.mjs stagePassFigures, or spend-line dollars by pass kind), as the pass breakdown
+ * books them: a `decision` row's runs of unknown cost are decision calls (#569).
+ */
+const passCosts = (kinds) => kinds.map((k) => (k.kind === "decision" ? { ...k.cost, unknownDecisionCalls: k.cost.unknownRuns } : k.cost));
+
+/**
+ * `c` less `parts` (costs), kind by kind and in runs of unknown cost, the decision calls and unsplit runs among them
+ * too; its reasons `c`'s while any run is left.
+ */
+function lessCost(c, parts) {
+  const out = zeroCost();
+  for (const k of COST_KINDS) out.usd[k] = round6(parts.reduce((t, p) => t - p.usd[k], c.usd[k]));
+  out.unknownRuns = parts.reduce((t, p) => t - p.unknownRuns, c.unknownRuns);
+  out.unknownDecisionCalls = parts.reduce((t, p) => t - (p.unknownDecisionCalls ?? 0), c.unknownDecisionCalls ?? 0);
+  out.unknownUnsplitRuns = parts.reduce((t, p) => t - (p.unknownUnsplitRuns ?? 0), c.unknownUnsplitRuns ?? 0);
+  out.unknownWhy = out.unknownRuns ? [...c.unknownWhy] : [];
+  return out;
+}
+
+/**
  * An Objective's end (OUTCOMES): Blocked or Question by its state label; else open while its issue is open; else merged
  * when the newest PR on its branch from this repository itself (not a fork's: `head.repo.id` is `base.repo.id`) merged,
  * else closed unmerged. Null for a closed one whose PRs were not read (`pullsRead` false: the call budget stopped first).
@@ -915,6 +1041,16 @@ export function outcomeOf(issue, pulls, { pullsRead = true } = {}) {
   if (!pullsRead) return null;
   return newestPull(issue.number, pulls)?.merged_at ? "merged" : "closed-unmerged";
 }
+
+/**
+ * When merged Objective `n` last merged, as its row says it (#570 V6): its newest finish card's merge (Pendulum's own,
+ * `mine`: lastCard), else its last merged PR's (lastMerge), whichever is later.
+ */
+const mergedAt = (n, comments, pulls, mine) => lastOf(lastCard(n, (comments || []).filter((c) => markerIssue(c) === n && mine(c)))?.merged, lastMerge(n, pulls));
+/** The later of two times (ISO, or null), or null for neither. */
+const lastOf = (a, b) => [a, b].filter((t) => Number.isFinite(ms(t))).sort((x, y) => ms(y) - ms(x))[0] ?? null;
+/** The last merge of a PR on Objective `n`'s branch from this repository itself (not a fork's), or null. */
+const lastMerge = (n, pulls) => (pulls || []).filter((p) => p?.head?.ref === `pendulum/${n}` && p.head?.repo?.id === p.base?.repo?.id && Number.isFinite(ms(p.merged_at))).map((p) => p.merged_at).sort((a, b) => ms(b) - ms(a))[0] ?? null;
 
 /** The newest PR on Objective `n`'s branch from this repository itself (not a fork's), or undefined. */
 const newestPull = (n, pulls) => (pulls || []).filter((p) => p?.head?.ref === `pendulum/${n}` && p.head?.repo?.id === p.base?.repo?.id).sort((a, b) => ms(b.created_at) - ms(a.created_at))[0];
@@ -1147,7 +1283,7 @@ function breakdown() {
  * `by`: the extra breakdowns asked for (`account`). `rates`: the candidate models of `--rates` (rateRatios), or null.
  * `tables`: the published rate tables (rateTables). `now`: when it was made (ISO).
  */
-export function buildReport(read, { prices = loadPrices(), by = [], rates = null, tables = rateTables(prices), now = new Date().toISOString() } = {}) {
+export function buildReport(read, { prices = loadPrices(), by = [], rates = null, tables = rateTables(prices), now = new Date().toISOString(), wholePass = false } = {}) {
   const { repo, scope, issues, pulls, comments, artifacts, local, source } = read;
   const mine = ownPredicate(read.appId ?? null, read.self ?? []);
   const pushed = (c) => pushAuthor(c) || throughApp(c);
@@ -1157,7 +1293,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   // The stages among them (a decision record, or a vendor comment with no stage of its own, is none).
   let unknownStages = 0;
   const mixes = mixBook(prices);
-  const views = { stage: breakdown(), pass: breakdown(), model: modelBreakdown(), harness: breakdown(), version: breakdown(), account: breakdown() };
+  const views = { stage: breakdown(), pass: breakdown(), model: modelBreakdown(), harness: breakdown(), version: breakdown(), route: breakdown(), day: breakdown(), account: breakdown() };
   // Per pass label: its harness passes' model minutes, and its decision records (the `decision` row's, which are no passes).
   const passMinutes = new Map();
   const passDecisionRecords = new Map();
@@ -1165,6 +1301,16 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   const modelPriced = new Map();
   // Per Objective: its reviewer's passes (each review stage's `review` passes), for the review loops.
   const reviewerPassesOf = new Map();
+  // The pass breakdown's rows from spend lines' dollars by pass (#570 V2), by key, and the dollars no pass names.
+  const spendLineStages = new Map();
+  const passRest = zeroCost();
+  const restTokens = zeroTokens();
+  // The finish card's breakdown over every Objective (#570 V1): the work asked for and the churn, by row.
+  const askedTotals = new Map();
+  const churnTotals = new Map();
+  // The stages whose spend line says they ended Blocked, per Objective, and the Objectives with a stage that says not (#570 V8).
+  const blockedItems = [];
+  const exitUnrecorded = new Set();
   const cacheByKind = new Map();
   const objectives = [];
   // Review findings (#546): by reviewer and by review stage, beside the review stages' dollars.
@@ -1172,7 +1318,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   const findingStages = [];
   const findingTotals = { findings: 0, outcomes: zeroOutcomes(), reviewStages: 0, cost: zeroCost(), unnamed: 0 };
   const trust = { own: 0, vouched: 0, ignored: 0 };
-  const missing = { legacy: tally(), noRecord: tally(), stopped: tally(), unattributed: tally(), noLedger: tally(), noVersion: tally(), noModel: tally(), modelStopped: tally(), unreadIssue: new Set(), commentsStopped: new Set() };
+  const missing = { legacy: tally(), noRecord: tally(), stopped: tally(), unattributed: tally(), noLedger: tally(), noVersion: tally(), noModel: tally(), modelStopped: tally(), unreadIssue: new Set(), routeUnrecorded: tally(), commentsStopped: new Set() };
   // The merged Objectives read from their finish card's summary (readReport, summaryFor), unless `by` or `rates` needs
   // their stages.
   const summaries = rates || by.some((b) => STAGE_DETAIL.includes(b)) ? new Map() : read.summaries ?? new Map();
@@ -1180,7 +1326,9 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   let summariesUsed = 0;
   let passesSeen = 0;
   let decisionRecordsSeen = 0;
-  // The arms' measures that are no field of an Objective's row (#545): the minutes of every harness pass, and the wall clock.
+  // Each Objective's measures that are no field of its row (#545, #570): the minutes of every harness pass, its fix
+  // passes as its ledgers count them, its wall clock and its decision records; the arms and the per-merged figures read
+  // them.
   const armMeasures = new Map();
   // With vetted labels, only the Objectives exactly one of them counts for (readReport vetArms): in an arm, not in both.
   const counted = read.arms ? new Set([...issues.keys()].filter((n) => armCounted(read.arms, n))) : null;
@@ -1228,6 +1376,63 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     const keyOf = (body, kind) => new RegExp(`^<!-- pendulum:${n}:${kind}:([A-Za-z0-9:-]{1,100}) -->`).exec(body || "")?.[1] ?? null;
     // A progress comment's run key, as its stage's usage record names it (`progressRun`; stageSpendRecords reads it so).
     const runOf = (body) => new RegExp(`^<!-- pendulum:${n}:progress:(?:work|review):([A-Za-z0-9-]{1,100}) -->`).exec(body || "")?.[1] ?? null;
+    // Each stage's own comments by its kind and key (#570): its progress and vendor comments, Pendulum's own and those it
+    // cannot attribute, oldest first, for its start, its route and its spend and rebase lines, read the same on both
+    // paths (the card's stages name their keys).
+    const keyed = (list, marker) => {
+      const re = new RegExp(`^<!-- pendulum:${n}:${marker}:((?:work|review):[A-Za-z0-9:-]{1,100}) -->`);
+      const out = new Map();
+      for (const c of sorted(list)) {
+        const k = re.exec(c.body || "")?.[1];
+        if (k && !out.has(k)) out.set(k, c);
+      }
+      return out;
+    };
+    const mineBy = { progress: keyed(ownAll, "progress"), vendor: keyed(ownAll, "vendor") };
+    const theirsBy = { progress: keyed(vouchedAll, "progress"), vendor: keyed(vouchedAll, "vendor") };
+    /**
+     * A stage's own comments (`sk` work or review, `key` its run key): its progress comment, its start (its progress
+     * comment's, else its vendor comment's) and the route its spend line records (logic.mjs spendParts `route`: its
+     * progress comment's, else its vendor comment's), null when none does (a line written before it, or none). A stage
+     * Pendulum cannot attribute (`theirs`) has none.
+     */
+    const stageOwn = (sk, key, theirs = false) => {
+      const by = theirs ? theirsBy : mineBy;
+      const p = by.progress.get(`${sk}:${key}`) ?? null;
+      const v = by.vendor.get(`${sk}:${key}`) ?? null;
+      return { progress: theirs ? null : p, start: (p ?? v)?.created_at ?? null, route: theirs ? null : ((p && spendParts(p.body)?.route) ?? (v && spendParts(v.body)?.route) ?? null) };
+    };
+    const cardStages = [];
+    let sandboxRow = null;
+    const routes = [];
+    const blockedHere = { keys: [], cost: zeroCost() };
+    let exitsUnknown = 0;
+    /**
+     * One part of the Objective's cost (#570), the same on both paths: its UTC day and route; the dollars no pass names
+     * (all of it with no passes known, else its own less its passes'); for a stage or a sandbox booking with none, its
+     * place in the finish card's breakdown; and for a stage, its route and how its spend line says it ended. `outside`: a
+     * part of no stage's (decision calls, a run the call budget stopped before), in no card row.
+     */
+    const note = ({ kind, key = null, c, tokens, count, stage, info, sandbox = null, passesCost = null, inPasses = false, unattributed = false, foreign = false, outside = false, day = true }) => {
+      if (day) views.day.add(dayOf(info.start), c, tokens, stage ? 1 : 0);
+      views.route.add(info.route, c, tokens, count);
+      addCost(passRest, passesCost ? lessCost(c, passesCost) : c);
+      if (!inPasses) addTokens(restTokens, tokens);
+      if (outside) return;
+      // A vendor comment Pendulum cannot attribute, of no stage: a run of unknown cost in the sandbox's row, as on the card.
+      const book = foreign ? { usd: 0, unknown: c.unknownRuns } : sandbox;
+      if (book) sandboxRow = { usd: round6((sandboxRow?.usd ?? 0) + book.usd), unknown: (sandboxRow?.unknown ?? 0) + book.unknown };
+      if (foreign) return;
+      cardStages.push(cardStage(kind, c, sandbox, unattributed ? null : info.progress));
+      if (!stage) return;
+      routes.push(info.route);
+      if (!info.route && !unattributed) missing.routeUnrecorded.add(n);
+      const exit = unattributed || !info.progress ? null : (spendParts(info.progress.body)?.exit ?? null);
+      if (exit === "blocked") {
+        blockedHere.keys.push({ stage: kind, key });
+        addCost(blockedHere.cost, c);
+      } else if (exit === null) exitsUnknown += 1;
+    };
     const allStages = sorted(own.filter((c) => progress.test(c.body || "")));
     const allVendors = sorted(own.filter((c) => vendorHead.test(c.body || "")));
     const stages = allStages.filter((c) => inWindow(c.created_at, scope));
@@ -1294,7 +1499,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       }
     }
     // What Pendulum cannot attribute to itself: runs of unknown cost, never their figures.
-    const unattributedRec = (c, stage, extra = {}) => ({ source: "spend", unattributed: true, harness: null, model: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unattributed"], tokens: zeroTokens(), runs: 1, artifact: `spend/${stage}/${c.id}`, ...extra });
+    const unattributedRec = (c, stage, extra = {}) => ({ source: "spend", unattributed: true, harness: null, model: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unattributed"], tokens: zeroTokens(), runs: 1, artifact: `spend/${stage}/${c.id}`, commentAt: c.created_at, ...extra });
     const unattributed = [...theirStages.map((c) => unattributedRec(c, progress.exec(c.body || "")[1])), ...theirVendors.map((c) => unattributedRec(c, vendorHead.exec(c.body || "")[1], { notStage: true }))];
     const theirCalls = theirDecisions.map((c) => ({ source: "decisions", unattributed: true, harness: null, model: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unattributed"], tokens: zeroTokens(), basis: `unknown: decision-spend lines in comment ${c.id}, not attributed` }));
     if (unattributed.length || theirCalls.length) missing.unattributed.add(n, theirStages.length);
@@ -1322,8 +1527,9 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     let reviewerPasses = 0;
     // A stage's passes (pass-figures.mjs stagePassFigures, by kind) into the Objective's and the report's figures, its
     // priced passes' minutes under `model`, as the model breakdown keys the stage. A decision record is no pass: it is
-    // counted apart, and its times (its first call to its last) are no model minutes.
-    const foldPasses = (figures) => {
+    // counted apart, and its times (its first call to its last) are no model minutes. `dollars` false: a stage whose
+    // passes name more than its own figure (overruns, #570), its dollars in the pass breakdown's row of no pass instead.
+    const foldPasses = (figures, dollars = true) => {
       ledgered += 1;
       row.passes ??= { total: 0, answer: 0, fix: 0 };
       row.decisionRecords ??= 0;
@@ -1332,7 +1538,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
           decisionRecordsSeen += k.passes;
           row.decisionRecords += k.passes;
           passDecisionRecords.set(k.kind, (passDecisionRecords.get(k.kind) ?? 0) + k.passes);
-          views.pass.add(k.kind, { ...k.cost, unknownDecisionCalls: k.cost.unknownRuns }, k.tokens, 0);
+          views.pass.add(k.kind, dollars ? { ...k.cost, unknownDecisionCalls: k.cost.unknownRuns } : zeroCost(), k.tokens, 0);
           continue;
         }
         passesSeen += k.passes;
@@ -1340,7 +1546,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
         if (isAnswer(k.kind)) row.passes.answer += k.passes;
         if (isFix(k.kind)) row.passes.fix += k.passes;
         if (passKind(k.kind) === "review") reviewerPasses += k.passes;
-        views.pass.add(k.kind, k.cost, k.tokens, k.passes);
+        views.pass.add(k.kind, dollars ? k.cost : zeroCost(), k.tokens, k.passes);
         if (k.cache) {
           const c = cacheByKind.get(k.kind) ?? { passLabel: k.kind, passes: 0, written: 0, input: 0 };
           c.passes += k.cache.passes;
@@ -1368,7 +1574,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       summariesUsed += 1;
       // Each of its stages' ledger lines, by run key: the card's per-stage passes carry no model.
       const lineLedgers = new Map(sorted(ownAll.filter((c) => progress.test(c.body || "") && spendParts(c.body))).reverse().map((c) => [runOf(c.body), ledgerOfComment(c.body)?.ledger]).filter(([k, l]) => k && Array.isArray(l)));
-      const count = (kind, c, s, stage) => {
+      const count = (kind, c, s, stage, info = null) => {
         const tokens = s.tokens ?? zeroTokens();
         const model = modelName(s.model, prices);
         addCost(row.cost, c);
@@ -1405,16 +1611,26 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
         }
         // Its passes (summaryFor reads a card only when every stage of Pendulum's own has them).
         if (stage && s.unattributed) unattributedStages += 1;
-        else if (stage) foldPasses(s.passes);
+        let passesCost = null;
+        if (stage && !s.unattributed) {
+          const fits = !overruns(c, s.passes.map((k) => k.cost));
+          foldPasses(s.passes, fits);
+          if (fits) passesCost = passCosts(s.passes);
+          else (missing.ledgerOverruns ??= []).push({ issue: n, stage: kind, key: s.key ?? null });
+        }
+        const sk = s.kind === "review" ? "review" : "work";
+        note({ kind, key: s.key ?? null, c, tokens, count: stage ? 1 : 0, stage, info: info ?? stageOwn(sk, s.key, !!s.unattributed), sandbox: s.sandbox ?? null, passesCost, inPasses: stage && !s.unattributed, unattributed: !!s.unattributed, foreign: !stage });
       };
       const ordered = [...summary.stages.filter((s) => !s.unattributed && s.ms !== null), ...summary.stages.filter((s) => !s.unattributed && s.ms === null), ...summary.stages.filter((s) => s.unattributed)];
       for (const s of ordered) {
         const c = splitUnknown(summaryCost(s, s.sandbox, s.why, s.sandbox?.unknown ? ["sandbox"] : []), { figures: s.passes, unattributed: !!s.unattributed });
         count(reportStageKind(s.kind), c, s, true);
       }
-      // Each vendor comment Pendulum cannot attribute, with no stage of its own: a run of unknown cost of its stage's kind.
-      const foreign = summary.sandbox?.foreign ?? [];
-      for (const kind of foreign) count(kind, splitUnknown(summaryCost({ usd: 0, unknown: 0, byBilling: {} }, { usd: 0, unknown: 1 }, [], ["unattributed"]), { unattributed: true }), {}, false);
+      // Each vendor comment Pendulum cannot attribute, with no stage of its own: a run of unknown cost of its stage's kind,
+      // on the day of its comment. The comments themselves, as the stage path reads them: the card counted each one in
+      // the period (summaryFor), and its summary keeps only their kinds.
+      const foreign = sorted(vouchedAll.filter((c) => vendorHead.test(c.body || "") && !theirsBy.progress.has(keyOf(c.body, "vendor")) && !mineBy.progress.has(keyOf(c.body, "vendor")) && inWindow(c.created_at, scope)));
+      for (const c of foreign) count(vendorHead.exec(c.body)[1], splitUnknown(summaryCost({ usd: 0, unknown: 0, byBilling: {} }, { usd: 0, unknown: 1 }, [], ["unattributed"]), { unattributed: true }), {}, false, { progress: null, start: c.created_at, route: null });
       if (foreign.length || summary.stages.some((s) => s.unattributed)) missing.unattributed.add(n, summary.stages.filter((s) => s.unattributed).length);
     }
     cost.parts.forEach((part, i) => {
@@ -1513,18 +1729,68 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       if (c.unknownRuns) unknownItems.push({ issue: n, stage: stageKind, runs: c.unknownRuns, decisionCalls: c.unknownDecisionCalls, unsplitRuns: c.unknownUnsplitRuns, why: c.unknownWhy });
       if (c.unknownRuns && rec.source !== "decisions" && !rec.notStage) unknownStages += 1;
       // The stage's passes, from its per-pass ledger.
+      // A comment of decision lines Pendulum cannot attribute is no stage: it leaves the Objective's passes known.
       if (rec.unattributed && !rec.notStage && rec.source !== "decisions") unattributedStages += 1;
-      if (rec.source === "decisions" || rec.unattributed || rec.stopped || unmatched) return;
-      if (!ledger) {
-        unledgered += 1;
-        // The call budget stopped before this Objective's usage records were read: said by stage, apart from a record
-        // that holds no ledger.
-        if (notReached && source.artifactsWanted?.has(n)) (missing.ledgerStopped ??= []).push({ issue: n, stage: stageKind, key });
-        else missing.noLedger.add(n);
-        return;
+      let passesCost = null;
+      let inPasses = false;
+      if (!(rec.source === "decisions" || rec.unattributed || rec.stopped || unmatched)) {
+        if (!ledger) {
+          unledgered += 1;
+          // The call budget stopped before this Objective's usage records were read: said by stage, apart from a record
+          // that holds no ledger.
+          if (notReached && source.artifactsWanted?.has(n)) (missing.ledgerStopped ??= []).push({ issue: n, stage: stageKind, key });
+          else missing.noLedger.add(n);
+          // With no ledger, its spend line's dollars by pass kind (#570 V2): those pass rows' dollars, no pass counted.
+          const byPass = spend?.usdByPass ?? null;
+          const kinds = byPass && Object.keys(byPass).length ? byPassCosts(byPass, c.unknownWhy) : [];
+          if (kinds.length && overruns(c, kinds.map((k) => k.cost))) (missing.ledgerOverruns ??= []).push({ issue: n, stage: stageKind, key });
+          else if (kinds.length) {
+            for (const k of kinds) {
+              views.pass.add(k.kind, passCosts([k])[0], zeroTokens(), 0);
+              spendLineStages.set(k.kind, (spendLineStages.get(k.kind) ?? 0) + 1);
+            }
+            passesCost = passCosts(kinds);
+          }
+        } else {
+          const fits = !overruns(c, figures.map((k) => k.cost));
+          foldPasses(figures, fits);
+          inPasses = true;
+          if (fits) passesCost = passCosts(figures);
+          else (missing.ledgerOverruns ??= []).push({ issue: n, stage: stageKind, key });
+        }
       }
-      foldPasses(figures);
+      // Its day, route and place in the finish card's breakdown (#570): decision calls outside a stage by their own days
+      // (below), a part of no stage of Pendulum's (one it cannot attribute, a record naming no stage) by its comment's or
+      // record's own time.
+      const sk = stageOf(rec) === "review" ? "review" : "work";
+      const ofStage = rec.source === "decisions" || rec.unattributed || rec.stopped || !key ? null : stageOwn(sk, key);
+      const info = ofStage?.start ? ofStage : { progress: null, start: rec.unattributed ? (rec.commentAt ?? null) : rec.source === "decisions" || rec.stopped ? null : (rec.started ?? rec.ended ?? null), route: rec.source === "decisions" ? "decisions" : null };
+      note({ kind: stageKind, key, c, tokens, count, stage: count === 1 && rec.source !== "decisions", info, sandbox: sandboxOf(rec, claimOf(rec) === null || lastByClaim.get(claimOf(rec)) === i), passesCost, inPasses, unattributed: !!rec.unattributed, foreign: !!(rec.unattributed && rec.notStage), outside: rec.source === "decisions" || !!rec.stopped, day: !(rec.source === "decisions" && !rec.unattributed) });
     });
+    // Decision calls outside a stage, Pendulum's own, under the UTC day each decision-spend line records (#570 V7): each
+    // comment's lines of a day summed and rounded once, as cost-join.mjs decisionSpendRecords rounds a comment's.
+    for (const c of sorted(own)) {
+      if (!(c.body || "").startsWith(`<!-- pendulum:${n}:`)) continue;
+      const days = new Map();
+      for (const e of decisionSpendEntries(c.body).filter((x) => dayInWindow(x.date, scope))) days.set(e.date, [...(days.get(e.date) ?? []), e]);
+      for (const [date, entries] of days) {
+        const d = zeroCost();
+        d.usd.api = Math.round(entries.reduce((t, e) => t + e.usd, 0) * 1e6) / 1e6;
+        d.unknownRuns = entries.reduce((t, e) => t + (e.usdUnknown ?? 0), 0);
+        d.unknownDecisionCalls = d.unknownRuns;
+        d.unknownWhy = d.unknownRuns ? [...new Set(entries.flatMap((e) => (e.usdUnknown ? (e.usdUnknownWhy?.length ? e.usdUnknownWhy : ["unreported"]) : [])))].filter((w) => Object.hasOwn(UNKNOWN_WHY, w)).sort() : [];
+        views.day.add(date, d, zeroTokens(), 0);
+      }
+    }
+    // The finish card's breakdown of its stages (#570 V1): the work the issue asked for and the churn Pendulum caused, by
+    // the card's own rules (finish-card.mjs markChurn, spendBreakdown), from the same figures on both paths.
+    const breakdownOf = spendBreakdown({ stages: markChurn(cardStages), prs: [], sandbox: sandboxRow });
+    const askedRows = breakdownOf.asked.map((r) => ({ what: r.what ?? "sandbox", ...rowMoney(r, !r.what) }));
+    const churnRows = breakdownOf.churn.map((r) => ({ row: r.row, stages: r.stages, ...rowMoney(r) }));
+    for (const r of askedRows) addRow(askedTotals, r.what, r);
+    for (const r of churnRows) addRow(churnTotals, r.row, r);
+    if (blockedHere.keys.length) blockedItems.push({ issue: n, stages: blockedHere.keys.length, keys: blockedHere.keys, cost: blockedHere.cost });
+    if (exitsUnknown) exitUnrecorded.add(n);
     // Known only when each stage has a ledger (a stage Pendulum cannot attribute to itself has none it reads).
     // Stages from before the rename to Pendulum (`legacyStages`) are not read: the row's figures leave them out (#567).
     const whole = ledgered && !unledgered && !unattributedStages;
@@ -1542,25 +1808,52 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     }
     // Its findings records are its review stages' own comments, read whatever its figures come from (its card or its stages).
     row.findings = findingsFor({ n, own: summary ? sorted(ownAll.filter((c) => progress.test(c.body || ""))) : allStages, scope, runOf, reviewStages, rows: findingRows, stageRows: findingStages, totals: findingTotals });
+    // Where its dollars went, by the finish card's rules (#570 V1).
+    row.asked = askedRows;
+    row.churn = churnRows;
+    // Its clock (#570 V6): the scorer's start (its first `pendulum:objective` label) from its newest finish card's summary
+    // (lastCard: a reopened Objective's last, the same card on both paths, whichever its figures were read from), else from
+    // its timeline where the report read it (a labelled set's arms); its last merge, that card's, else its last merged
+    // PR's, whichever is later; and the wall clock between them. Null with why (`clockWhy`) where no record gives one.
+    // An issue labelled before the rename to Pendulum (readReport `renamed`, read with an arm's label check) has no start
+    // the report can trust: its card may be from before cards knew the old label (#567).
+    const card = lastCard(n, ownAll);
+    const renamed = !!read.renamed?.has(n);
+    const started = renamed ? null : card ? card.labelled : (read.started?.get(n) ?? null);
+    const mergedAt = row.outcome === "merged" ? lastOf(card?.merged, lastMerge(n, pulls)) : null;
+    row.started = started;
+    row.merged = mergedAt;
+    row.wallMinutes = started && mergedAt && ms(mergedAt) >= ms(started) ? round2((ms(mergedAt) - ms(started)) / 60_000) : null;
+    row.clockWhy = row.wallMinutes !== null ? null : row.outcome === null ? "outcome-unread" : row.outcome !== "merged" ? "not-merged" : renamed ? "renamed" : !card && !read.started?.has(n) ? "no-card" : "no-label";
+    // The route its stages ran on (#570 V6): one, `mixed` for more than one, null when a stage's is not recorded (a
+    // stage Pendulum cannot attribute, a record naming no stage) and the rest name at most one.
+    const known = [...new Set(routes.filter(Boolean))];
+    row.route = known.length > 1 ? "mixed" : routes.length && routes.every(Boolean) ? known[0] : null;
+    // Its Blocked notices: Pendulum's own on the issue, written in the period (a Block that repeats one condition updates
+    // its notice, so it counts once); and whether it is Running now, by its state label as the issue was read.
+    row.blockedNotices = ownAll.filter((c) => (c.body || "").startsWith(`<!-- pendulum:${n}:blocked:`) && inWindow(c.created_at, scope)).length;
+    row.running = issue ? (issue.labels || []).some((l) => STATE_LABELS[typeof l === "string" ? l : l?.name] === "Running") : null;
     objectives.push(row);
-    if (counted && summary) {
-      // Read from its finish card: the measures its summary carries, from the same ledgers and the scorer's start; no wall
-      // clock for an issue labelled before the rename, whose card may be from before cards knew it (readReport `renamed`).
-      armMeasures.set(n, { modelMinutes: summary.modelMinutes === null ? null : round2(summary.modelMinutes), fixPasses: summary.passes?.fix ?? null, wallMinutes: summary.labelledWallMs === null || read.renamed?.has(n) ? null : round2(summary.labelledWallMs / 60_000) });
-    } else if (counted) {
-      const start = read.started?.get(n);
-      const mergedAt = row.outcome === "merged" ? newestPull(n, pulls)?.merged_at : null;
-      armMeasures.set(n, {
-        modelMinutes: row.modelMinutes,
-        fixPasses: whole ? row.passes.fix : null,
-        // From the Objective's start (finish-card.mjs labelTime) to the merge, as the scorer counts it.
-        wallMinutes: start && mergedAt && ms(mergedAt) >= ms(start) ? round2((ms(mergedAt) - ms(start)) / 60_000) : null,
-      });
-    }
+    armMeasures.set(n, {
+      // Read from its finish card: the measures its summary carries, from the same ledgers. Else every harness pass's
+      // minutes (its row's), known only when each pass has its start and end too.
+      modelMinutes: summary ? (summary.modelMinutes === null ? null : round2(summary.modelMinutes)) : row.modelMinutes,
+      fixPasses: summary ? (summary.passes?.fix ?? null) : whole ? row.passes.fix : null,
+      wallMinutes: row.wallMinutes,
+      // Its decision records outside a stage (decision-spend lines, its own and those it cannot attribute), for the
+      // per-merged figures' check that a row with no stage still has a record of cost (perMergedOf).
+      decisionRecords: decisions.length + theirCalls.length,
+    });
   }
+  // The whole-Objective pass perMergedOf makes: its rows and measures, nothing else.
+  if (wholePass) return { objectives, measures: armMeasures };
 
   const rank = (items, field) => items.sort((a, b) => b[field] - a[field] || (a.issue ?? 0) - (b.issue ?? 0) || String(a.passLabel ?? a.model ?? "").localeCompare(String(b.passLabel ?? b.model ?? "")));
-  const passRows = views.pass.rows().map((r) => ({ key: r.key, passes: r.stages, decisionRecords: passDecisionRecords.get(r.key) ?? 0, cost: r.cost, tokens: r.tokens, modelMinutes: passMinutes.has(r.key) ? round2(passMinutes.get(r.key)) : null }));
+  const passRows = views.pass.rows().map((r) => ({ key: r.key, passes: r.stages, decisionRecords: passDecisionRecords.get(r.key) ?? 0, spendLineStages: spendLineStages.get(r.key) ?? 0, cost: r.cost, tokens: r.tokens, modelMinutes: passMinutes.has(r.key) ? round2(passMinutes.get(r.key)) : null }));
+  // The dollars no pass names (#570 V2): decision calls outside a stage, stages with no passes known, and what a stage's
+  // own figure holds beyond its passes' (its cloud sandbox's, its runs of unknown cost); with it the rows cover the totals.
+  if (COST_KINDS.some((k) => passRest.usd[k] !== 0) || passRest.unknownRuns !== 0) passRows.push({ key: null, passes: null, decisionRecords: null, spendLineStages: 0, cost: passRest, tokens: restTokens, modelMinutes: null });
+  const byKey = (map, order) => [...order.filter((k) => map.has(k)), ...[...map.keys()].filter((k) => !order.includes(k))].map((k) => [k, map.get(k)]);
   // Cost per model minute on each model's row: over the priced harness passes of the stages the row counts.
   const modelRows = views.model.rows().map((r) => ({ ...r, usdPerModelMinute: perModelMinute(modelPriced.get(r.key) ?? { minutes: 0, passes: 0, cost: zeroCost() }) }));
   const report = {
@@ -1570,7 +1863,18 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     pendulum: pendulumBuild(),
     scope: { since: scope.since ?? null, until: scope.until ?? null, defaultPeriod: !!scope.defaultPeriod, issues: scope.issues, label: scope.label ?? null, parent: scope.parent ?? null, compare: scope.compare ?? null, by },
     words: { ...KIND_WORDS },
-    totals: { objectives: objectives.length, stages: stagesSeen, passes: passesSeen, decisionRecords: decisionRecordsSeen, cost: totals, tokens: totalTokens },
+    totals: {
+      objectives: objectives.length,
+      stages: stagesSeen,
+      passes: passesSeen,
+      decisionRecords: decisionRecordsSeen,
+      cost: totals,
+      tokens: totalTokens,
+      // Where the dollars went over every Objective (#570 V1), its rows' sums: the work asked for, then the churn.
+      asked: byKey(askedTotals, [...Object.keys(ASKED), "sandbox"]).map(([what, r]) => ({ what, ...r })),
+      churn: byKey(churnTotals, Object.keys(CHURN)).map(([row, r]) => ({ row, ...r })),
+      perMerged: perMergedOf(read, objectives, { prices, by, rates, tables, now }),
+    },
     unknown: {
       runs: totals.unknownRuns,
       decisionCalls: totals.unknownDecisionCalls,
@@ -1585,6 +1889,9 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       model: modelRows,
       harness: views.harness.rows(),
       version: views.version.rows(),
+      route: views.route.rows(),
+      // By the UTC date each stage started, its decision calls outside a stage by their own days; oldest first.
+      day: views.day.rows().sort((a, b) => (a.key === null) - (b.key === null) || String(a.key).localeCompare(String(b.key))),
       ...(by.includes("account") ? { account: views.account.rows() } : {}),
     },
     objectives,
@@ -1600,6 +1907,11 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       cacheWriteShare: { rankBy: "share", items: rank([...cacheByKind.values()].filter((k) => k.input > 0).map((k) => ({ ...k, share: Math.round((k.written / k.input) * 10000) / 10000 })), "share") },
       costPerModelMinute: { rankBy: "usdPerModelMinute", items: BILLING.flatMap((kind) => rank(modelRows.filter((m) => m.usdPerModelMinute[kind]).map((m) => ({ model: m.key, billing: kind, ...m.usdPerModelMinute[kind] })), "usdPerModelMinute")) },
       blockedOrUnmergedSpend: { rankBy: "stages", items: rank(objectives.filter((o) => o.outcome === "blocked" || o.outcome === "closed-unmerged").map((o) => ({ issue: o.issue, outcome: o.outcome, stages: o.stages.work + o.stages.rebase + o.stages.review, cost: o.cost })), "stages") },
+      // The stages whose spend line says they ended Blocked, per Objective, with their cost (#570 V8); `unrecorded`: the
+      // Objectives with a stage whose records do not say how it ended: no spend line, a line written while it ran (the
+      // last of a stage killed or stopped before its end; only the final line records the exit), one from before Pendulum
+      // recorded the exit, or a stage Pendulum cannot attribute.
+      blockedStages: { rankBy: "stages", items: rank(blockedItems, "stages"), unrecorded: issuesOf(exitUnrecorded) },
     },
     comparison: scope.compare && read.arms ? comparisonOf(read.arms, objectives, armMeasures) : null,
     rates: rates ? rateRatios(mixes.rows(), rates, tables, { at: now }) : null,
@@ -1662,6 +1974,78 @@ function comparisonOf(arms, objectives, measures) {
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+
+/**
+ * The figures per merged Objective (#570 V5), as `--compare` measures an arm's (spread.mjs: the median and p25..p75,
+ * interpolated between the closest ranks), over the Objectives merged in the period: their outcome `merged` and their
+ * merge (mergedAt) at or after `--since` and before `--until`; every merged Objective for a set with no period. Each
+ * counts with every stage's figures, the period aside (a stage before `--since`, or after `--until`, included): the
+ * report's figures again (buildReport) for those Objectives whole, from the same reads, whose threads readReport read
+ * in full (source.threadsWhole), from their finish card's summary where the whole run is on it. `n`, those Objectives;
+ * each cost kind's dollars over those with no run of unknown cost, the review rounds, the fix passes over those whose
+ * ledgers count them, and the wall clock over those with one; each `{median, p25, p75, n, leftOut}`. `leftOut` names
+ * each one left out of any measure, with why: `comments-stopped` (the call budget stopped before its comments were all
+ * read: every measure; readReport reads the thread of every Objective merged in the period it has not read whole, so
+ * one it has not is one the budget stopped), `no-records` (its comments hold no record of cost: every measure; never a
+ * $0), `legacy-records` (stages recorded before the rename to Pendulum, unread: its figures a lower bound, so every
+ * measure, as an arm leaves it out), `unknown-runs` (a run of unknown cost, such as a stage before
+ * the period whose usage record was not read: its dollars), `no-passes` (its fix passes), `no-clock` (its wall clock;
+ * its row's `clockWhy` says why).
+ */
+function perMergedOf(read, objectives, opts) {
+  const { scope, issues, pulls, source, comments } = read;
+  const mine = ownPredicate(read.appId ?? null, read.self ?? []);
+  const rowOf = new Map(objectives.map((o) => [o.issue, o]));
+  const merged = (n) => (rowOf.has(n) ? rowOf.get(n).outcome : issues?.get(n) ? outcomeOf(issues.get(n), pulls, { pullsRead: source.pullsRead !== false && !source.pullsUnread?.has(n) }) : null) === "merged";
+  const ns = [...new Set([...rowOf.keys(), ...(issues?.keys() ?? [])])].filter((n) => merged(n) && inWindow(mergedAt(n, comments, pulls, mine), scope)).sort((a, b) => a - b);
+  // The Objectives with a record of cost among the comments read, Pendulum's own or one it counts as unknown cost: a
+  // stage's progress or vendor comment, a decision-spend line, or a finish card with a summary. Any other marker (a
+  // plan, a notice) is no record of cost: a merged Objective with only that is `no-records`, never $0.
+  const pushed = (c) => mine(c) || pushAuthor(c) || throughApp(c);
+  const costed = (c) => {
+    const n = markerIssue(c);
+    const body = c.body || "";
+    return n !== null && (new RegExp(`^<!-- pendulum:${n}:(?:progress|vendor):(?:work|review):`).test(body) || decisionSpendEntries(body).length > 0 || (mine(c) && body.startsWith(finishMarker(n)) && !!readSummary(body, n)));
+  };
+  // A stage recorded before the rename to Pendulum (#567, legacyIssue) is a record of cost too, unread: `legacy-records`.
+  const recorded = new Set((comments || []).filter((c) => pushed(c) && costed(c)).map(markerIssue));
+  for (const c of comments || []) if (legacyIssue(c) !== null && pushed(c)) recorded.add(legacyIssue(c));
+  const whyNot = (n) => (source.cut?.has(n) || !source.threadsWhole?.has(n) ? "comments-stopped" : !recorded.has(n) ? "no-records" : null);
+  const whole = ns.filter((n) => !whyNot(n));
+  // The same reads, the Objectives whole: no period, and their finish card summaries for that scope.
+  const wholeScope = { ...scope, since: null, until: null, defaultPeriod: false, issues: whole, label: null, parent: null, compare: null };
+  const summaries = new Map();
+  for (const n of whole) {
+    const found = summaryFor(n, comments, wholeScope, { mine, by: opts.by, stages: !!opts.rates });
+    if (found) summaries.set(n, found);
+  }
+  const inner = whole.length ? buildReport({ ...read, issues: new Map([...(issues ?? new Map())].filter(([n]) => whole.includes(n))), scope: wholeScope, summaries, arms: undefined }, { ...opts, wholePass: true }) : { objectives: [], measures: new Map() };
+  const byN = new Map(inner.objectives.map((o) => [o.issue, o]));
+  const m = (n) => inner.measures.get(n) ?? {};
+  // A row with no stage, no dollars, no run of unknown cost and no decision record holds no record of cost either.
+  const empty = (o) => o.stages.work + o.stages.rebase + o.stages.review === 0 && COST_KINDS.every((k) => o.cost.usd[k] === 0) && !o.cost.unknownRuns && !m(o.issue).decisionRecords;
+  const why = (n) => {
+    if (whyNot(n)) return [whyNot(n)];
+    const o = byN.get(n);
+    if (o?.legacyStages > 0) return ["legacy-records"];
+    if (!o || empty(o)) return ["no-records"];
+    return [...(o.cost.unknownRuns ? ["unknown-runs"] : []), ...((m(n).fixPasses ?? null) === null ? ["no-passes"] : []), ...(o.wallMinutes === null ? ["no-clock"] : [])];
+  };
+  const counted = whole.filter((n) => byN.has(n) && !byN.get(n).legacyStages && !empty(byN.get(n))).map((n) => byN.get(n));
+  const known = counted.filter((o) => !o.cost.unknownRuns);
+  const measured = (list, pick, digits) => {
+    const s = spread(list.map(pick), digits);
+    return { median: s.median, p25: s.p25, p75: s.p75, n: s.n, leftOut: ns.length - s.n };
+  };
+  return {
+    n: ns.length,
+    usd: Object.fromEntries(COST_KINDS.map((k) => [k, measured(known, (o) => o.cost.usd[k], 6)])),
+    wallMinutes: measured(counted, (o) => o.wallMinutes, 2),
+    reviewRounds: measured(counted, (o) => o.reviewRounds, 2),
+    fixPasses: measured(counted, (o) => m(o.issue).fixPasses ?? null, 2),
+    leftOut: ns.map((n) => ({ issue: n, why: why(n) })).filter((x) => x.why.length),
+  };
+}
 
 /**
  * An arm's review findings (#546): over its Objectives with a findings record (`objectives`, their count), the findings,
@@ -1802,9 +2186,11 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   add("comments-stopped", missing.commentsStopped, "Objectives whose comments the call budget stopped the report before reading in full: the comments after those read, when unread, and each sandbox comment whose stage's progress comment was not read are runs of unknown cost, and their review findings may count an earlier round's again");
   add("artifact-foreign", source.foreignIssues ?? new Set(), `usage artifacts uploaded by runs from forks, or naming no repository (${source.artifacts.foreign}), never read as Pendulum's`);
   add("no-ledger", missing.noLedger, "stages with no per-pass ledger in their progress comment or usage record (an older stage, or a local stage whose ledger did not fit its comment and that has no local record on this machine): no pass breakdown, answer and fix passes or cost per model minute for them");
+  if (missing.ledgerOverruns?.length) out.push({ code: "ledger-overruns", count: missing.ledgerOverruns.length, counts: { objectives: new Set(missing.ledgerOverruns.map((x) => x.issue)).size, stages: missing.ledgerOverruns.length }, issues: issuesOf(new Set(missing.ledgerOverruns.map((x) => x.issue))), stages: missing.ledgerOverruns, text: "stages whose per-pass ledger, or spend line's dollars by pass, names more dollars of a kind or more runs of unknown cost than the stage's own figure: their passes, tokens and minutes stay counted in the pass rows, and only their dollars and runs of unknown cost move to the row of no pass, the stage's whole figure" });
   if (missing.ledgerStopped?.length) out.push({ code: "ledger-stopped", count: missing.ledgerStopped.length, counts: { objectives: new Set(missing.ledgerStopped.map((x) => x.issue)).size, stages: missing.ledgerStopped.length }, issues: issuesOf(new Set(missing.ledgerStopped.map((x) => x.issue))), stages: missing.ledgerStopped, text: "stages whose per-pass ledger is in a usage record the call budget stopped the report before reading: no pass breakdown for them" });
   add("no-model", missing.noModel, "stages whose harness line, ledger line and usage record name no model, or that have no usage record: in the model breakdown under no model, but for the passes their ledger names a model of");
   add("model-stopped", missing.modelStopped, "stages whose model only their usage record names, which the call budget stopped the report before reading: under no model in the model breakdown");
+  add("route-unrecorded", missing.routeUnrecorded, "stages of Pendulum's whose spend line records no route (a line written before Pendulum recorded it, final or written while the stage ran, or no spend line): under no route in the route breakdown");
   add("no-version", missing.noVersion, "stages whose record names no Pendulum version (an older record, or a spend line)");
   add("issue-unread", missing.unreadIssue, "issues with Pendulum's markers that could not be read: no outcome or title for them");
   // The vetted labels (#545): an issue whose label's last applier cannot push is not counted, nor one whose was not read.
@@ -2063,7 +2449,7 @@ export function renderReport(r) {
   if (t.input !== null || t.output !== null) out.push(`- Tokens reported: ${t.input ?? "?"} in (${t.cached ?? "?"} cache reads, ${t.written ?? "?"} cache writes), ${t.output ?? "?"} out.`);
   const view = (title, rows, name = "Key", count = "Stages") => {
     if (!rows.length) return;
-    out.push("", `## By ${title}`, "", table([name, count, ...COST_HEAD], rows.map((x) => [x.key ?? "not recorded", x.stages ?? (x.decisionRecords ? `${x.decisionRecords} decision record(s)` : x.passes), ...costCells(x.cost)])));
+    out.push("", `## By ${title}`, "", table([name, count, ...COST_HEAD], rows.map((x) => [x.key ?? (title === "pass" ? "no pass" : "not recorded"), x.stages ?? (x.decisionRecords ? `${x.decisionRecords} decision record(s)` : (x.passes ?? "—")), ...costCells(x.cost)])));
   };
   view("stage", r.breakdowns.stage, "Stage");
   view("pass", r.breakdowns.pass, "Pass", "Passes");
@@ -2071,8 +2457,24 @@ export function renderReport(r) {
   if (r.breakdowns.model.length) out.push("", "## By model", "", "Each pass's dollars are under the model it ran on, where its stage's per-pass ledger names it (by pass); the rest of a stage's are under the stage's model (by stage). A stage counts once, under its own model.", "", table(["Model", "Basis", "Stages", ...COST_HEAD], r.breakdowns.model.flatMap((x) => ["pass", "stage"].filter((b) => x.basis[b]).map((b) => [x.key ?? "not recorded", b, x.basis[b].stages, ...costCells(x.basis[b].cost)]))));
   view("harness", r.breakdowns.harness, "Harness");
   view("Pendulum version", r.breakdowns.version, "Version");
+  view("route", r.breakdowns.route, "Route");
+  view("UTC day a stage started", r.breakdowns.day, "Day");
   if (r.breakdowns.account) view("account", r.breakdowns.account, "Account");
-  if (r.objectives.length) out.push("", "## Objectives", "", table(["Issue", "Outcome", "Work", "Rebase", "Review", ...COST_HEAD], r.objectives.map((o) => [`#${o.issue}`, o.outcome ?? "unread", o.stages.work, o.stages.rebase, o.stages.review, ...costCells(o.cost)])));
+  // Where the dollars went, by the finish card's rules: the work asked for, then the churn apart.
+  const rowCells = (x) => [...COST_KINDS.map((k) => (x.usd[k] ? money(x.usd[k]) : "—")), String(x.unknownRuns)];
+  if (r.totals.asked.length || r.totals.churn.length) {
+    out.push("", "## Where the dollars went", "", "By the finish card's rules, over every Objective's stages (decision calls outside a stage are in neither table).", "", table(["What the issue asked for", ...COST_HEAD], r.totals.asked.map((x) => [x.what, ...rowCells(x)])));
+    if (r.totals.churn.length) out.push("", table(["Churn Pendulum caused", "Stages", ...COST_HEAD], r.totals.churn.map((x) => [x.row, x.stages, ...rowCells(x)])));
+  }
+  // Per merged Objective: each measure's median (p25..p75, n, left out).
+  const p = r.totals.perMerged;
+  if (p.n) {
+    const fmt = (m, unit = (x) => String(x)) => (m.median === null ? `none${m.leftOut ? ` (${m.leftOut} left out)` : ""}` : `${unit(m.median)} (${unit(m.p25)}..${unit(m.p75)}, n=${m.n}${m.leftOut ? `, ${m.leftOut} left out` : ""})`);
+    const kinds = COST_KINDS.filter((k) => p.usd[k].median);
+    out.push("", "## Per merged Objective", "", `${p.n} Objective(s) merged in the period, each with every stage's figures; medians with p25..p75. Dollars count only those with no run of unknown cost.`, "", table(["Measure", "Median (p25..p75, n)"], [...(kinds.length ? kinds : ["api"]).map((k) => [`$ ${COST_HEAD[COST_KINDS.indexOf(k)]}`, fmt(p.usd[k], money)]), ["Wall clock minutes", fmt(p.wallMinutes)], ["Review rounds", fmt(p.reviewRounds)], ["Fix passes", fmt(p.fixPasses)]]));
+    if (p.leftOut.length) out.push("", `- Left out: ${p.leftOut.map((x) => `#${x.issue} (${x.why.join(", ")})`).join("; ")}.`);
+  }
+  if (r.objectives.length) out.push("", "## Objectives", "", table(["Issue", "Outcome", "Route", "Blocked notices", "Wall min", "Work", "Rebase", "Review", ...COST_HEAD], r.objectives.map((o) => [`#${o.issue}`, `${o.outcome ?? "unread"}${o.running ? " (running)" : ""}`, o.route ?? "not recorded", o.blockedNotices, o.wallMinutes ?? "—", o.stages.work, o.stages.rebase, o.stages.review, ...costCells(o.cost)])));
   const older = r.objectives.filter((o) => o.legacyStages > 0);
   if (older.length) out.push("", `- Partial, stages recorded before the rename to Pendulum not read: ${older.map((o) => `#${o.issue} (${o.legacyStages} stage(s))`).join(", ")}.`);
   const f = r.findings;
@@ -2094,6 +2496,8 @@ export function renderReport(r) {
   if (h.answerAndFixPasses.unrecorded.length) out[out.length - 1] += `; not recorded (a stage with no per-pass ledger): ${h.answerAndFixPasses.unrecorded.map((n) => `#${n}`).join(", ")}`;
   list("Cache-write share by pass label", h.cacheWriteShare.items, (x) => `${x.passLabel} ${(x.share * 100).toFixed(1)}% (${x.written} of ${x.input} input tokens)`);
   list("Cost per model minute, by model", h.costPerModelMinute.items, (x) => `${x.model ?? "not recorded"} ${money(x.usdPerModelMinute)}/min ${x.billing} (${money(x.usd)} over ${x.pricedMinutes} min of ${x.pricedPasses} priced pass(es))`);
+  list("Stages that ended Blocked", h.blockedStages.items, (x) => `#${x.issue} ${x.stages} stage(s): ${COST_KINDS.filter((k) => x.cost.usd[k]).map((k) => `${money(x.cost.usd[k])} ${k}`).join(", ") || "$0.00"}${x.cost.unknownRuns ? ` plus ${x.cost.unknownRuns} run(s) of unknown cost` : ""}`);
+  if (h.blockedStages.unrecorded.length) out[out.length - 1] += `; not recorded (a stage whose records do not say how it ended): ${h.blockedStages.unrecorded.map((n) => `#${n}`).join(", ")}`;
   list("Spend in Objectives that ended Blocked or closed unmerged", h.blockedOrUnmergedSpend.items, (x) => `#${x.issue} ${x.outcome}, ${x.stages} stage(s): ${COST_KINDS.filter((k) => x.cost.usd[k]).map((k) => `${money(x.cost.usd[k])} ${k}`).join(", ") || "$0.00"}${x.cost.unknownRuns ? ` plus ${x.cost.unknownRuns} run(s) of unknown cost` : ""}`);
   return `${[...out, ...renderRates(r.rates), ...renderSource(r.source)].join("\n")}\n`;
 }

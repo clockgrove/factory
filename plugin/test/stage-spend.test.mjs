@@ -46,14 +46,25 @@ async function fakeGitHub() {
   return { progress, url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
 }
 
-const lineOf = (body) => JSON.parse(SPEND.exec(body)?.[1] ?? "null");
+/** A progress comment's spend line, read, less the route it records (#570), which routeOf reads. */
+const lineOf = (body) => {
+  const line = JSON.parse(SPEND.exec(body)?.[1] ?? "null");
+  if (!line) return line;
+  const { route: _route, ...rest } = line;
+  return rest;
+};
+/** The route a progress comment's spend line records, or null. */
+const routeOf = (body) => JSON.parse(SPEND.exec(body)?.[1] ?? "null")?.route ?? null;
 
-test("a local work stage that ran no harness pass ends with a $0 spend line, not none", async () => {
+// A real stage on the local route alone: on GitHub Actions and in a cloud sandbox the stage runs its harness as its own
+// user (agent.mjs), which a runner with passwordless sudo would set up and clone for; those routes' lines are checked
+// through the stage's own writers below (writeUsage, progressReporter), which take the stage's environment.
+for (const [route, env] of [["local", { PENDULUM_LOCAL: "1" }]]) test(`a ${route} work stage that ran no harness pass ends with a $0 spend line, not none, and the line records its route`, async () => {
   const gh = await fakeGitHub();
   const home = mkdtempSync(join(tmpdir(), "spend-"));
   // The fake GitHub names no author for the Objective: the stage Blocks before any harness pass.
   const child = spawn(process.execPath, [join(SCRIPTS, "worker.mjs"), "--repo", "owner/repo", "--issue", "7", "--checkout", home, "--usage-dir", join(home, "usage"), "--token-fd", "3"], {
-    env: { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, PENDULUM_LOCAL: "1" },
+    env: { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, ...env },
     stdio: ["ignore", "pipe", "pipe", "pipe"],
   });
   child.stdio[3].end("test-token");
@@ -66,7 +77,8 @@ test("a local work stage that ran no harness pass ends with a $0 spend line, not
   assert.ok(last, `the stage wrote no progress comment:\n${out}`);
   assert.match(last, /exit: blocked/, out);
   assert.doesNotMatch(last, /crashed/, "a Block by its own check, not a crash");
-  assert.deepEqual(lineOf(last), { usd: 0, noPass: true }, last);
+  assert.deepEqual(lineOf(last), { usd: 0, noPass: true, exit: "blocked" }, last);
+  assert.equal(routeOf(last), route, "the stage's final line records its route");
 });
 
 const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
@@ -404,6 +416,36 @@ test("the default progress writer of a local stage carries the stage's spend so 
     gh.close();
   }
   assert.deepEqual(gh.progress.map(lineOf), [{ usd: 0, running: true }, null]);
+  assert.equal(routeOf(gh.progress[0]), "local", "a line written while a local stage runs records its route (#570)");
+});
+
+test("the progress writer records the stage's route on every line from its start, on each route, from the stage's own environment (#570)", async () => {
+  const { progressReporter, writeUsage } = await import("../scripts/lib/session.mjs");
+  const { repoOf } = await import("../scripts/lib/github.mjs");
+  const gh = await fakeGitHub();
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = gh.url;
+  const routes = [["local", { PENDULUM_LOCAL: "1" }], ["actions", { GITHUB_ACTIONS: "true" }], ["sandbox", { GITHUB_ACTIONS: "true", PENDULUM_STAGE_SANDBOX: "1" }], [null, {}]];
+  try {
+    for (const [i, [, env]] of routes.entries()) {
+      const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: `r${i}`, soFar: async () => ({ usd: 0.5, unknown: 0 }), env });
+      await progress("setup");
+      progress.spend(0.5, stageSpendLine(writeUsage(mkdtempSync(join(tmpdir(), "usage-")), { harness: "claude", model: "m", records: [], passes: 0, exit: "delivered", reason: "", credentialBasis: "test", env })).parts);
+      await progress("exit: delivered");
+    }
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+    gh.close();
+  }
+  for (const [i, [route]] of routes.entries()) {
+    const lines = gh.progress.filter((b) => b.startsWith(`<!-- pendulum:7:progress:work:r${i} -->`));
+    assert.ok(lines.length >= 2, `the r${i} stage's writes landed`);
+    assert.equal(routeOf(lines[0]), route, `its interim line records ${route}`);
+    assert.equal(routeOf(lines.at(-1)), route, `its final line records ${route}`);
+    assert.equal(lineOf(lines.at(-1)).exit, "delivered", "only the final line records the exit");
+    assert.ok(!Object.hasOwn(lineOf(lines[0]), "exit"));
+  }
 });
 
 test("stageSpendLine: $0 for no pass; the record's known dollars and key share; runs of unknown cost named, never priced", () => {

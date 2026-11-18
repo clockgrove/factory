@@ -728,9 +728,9 @@ function costRows(d) {
 }
 
 /** The pass kinds' and stages' words in the breakdown (usage.mjs PASS_KEYS less `conflict`, which is churn), in its order. */
-const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answering the review", fix: "Fixing CI", decision: "AI judge calls" });
+export const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answering the review", fix: "Fixing CI", decision: "AI judge calls" });
 /** The churn the breakdown names apart (markChurn), in its order. */
-const CHURN = Object.freeze({
+export const CHURN = Object.freeze({
   "rebase-conflict": "Rebases after other PRs merged (conflict)",
   "rebase-clean": "Rebases after other PRs merged (clean)",
   "catch-up": "Catch-up runs after a workflow changed on the default branch",

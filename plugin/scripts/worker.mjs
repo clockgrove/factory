@@ -6,8 +6,9 @@
 // setup and the lockfile's install; render the task card and $PENDULUM_IN, and launch the
 // harness headless under a wall clock; read what it left in $PENDULUM_OUT (lib/handoff.mjs),
 // push its commits and open or update the PR from pr.md, the plan comment from plan.md;
-// run the repository's validation as Pendulum's own pass (two at most, failures sent
-// back to the same harness); decide the exit (delivered, question, blocked); move the
+// run the repository's validation as Pendulum's own pass (the listed commands in order, up
+// to the first red; each red goes back to the same harness while its fix passes make
+// progress, no fixed count of passes); decide the exit (delivered, question, blocked); move the
 // card, set the label, draft/comment/request as the exit says; write usage/events.jsonl
 // and usage/result.json for the artifact. The harness writes nothing to GitHub.
 import { agentServicePorts, noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";
@@ -311,10 +312,10 @@ async function main() {
       const passesRan = records.filter((r) => r && !r.noRun && !r.decision).length;
       rebaseText = `; ${await rebaseExitLine(progress, issue, { cost, conflict: rebaseStage.conflict, passes: passesRan }, read)}`;
     }
-    const end = endStep({ issue, exit, reason, applied: lastApplied, resetAt: usageLimit?.reset ?? null, rebase: rebaseText.replace(/^; /, "") || null });
-    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`, end);
+    const lastStep = endStep({ issue, exit, reason, applied: lastApplied, resetAt: usageLimit?.reset ?? null, rebase: rebaseText.replace(/^; /, "") || null });
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`, lastStep);
     // A Blocked or Question end gets the Objective's finish card too, upserted in place (finish-card.mjs endCard; never throws).
-    if ((exit === "blocked" || exit === "question") && cardIssue) await endCard(repo, { ...cardIssue, number: issue }, token, { exit, reason, form: end.form ?? null, appId: inputs.appId || process.env.PENDULUM_NOTICE_APP_ID || null, log });
+    if ((exit === "blocked" || exit === "question") && cardIssue) await endCard(repo, { ...cardIssue, number: issue }, token, { exit, reason, form: lastStep.form ?? null, appId: inputs.appId || process.env.PENDULUM_NOTICE_APP_ID || null, log });
     // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.
     stopWaiting();
     setOutput("exit", exit);

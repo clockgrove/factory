@@ -7,7 +7,7 @@ import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { backend, spendInProgress } from "./backend.mjs";
+import { backend, spendInProgress, stageRoute } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
 import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, reservedSpend, openPasses, passesRunning, runHarness, seedSessionTotal, setStageBilling, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
 import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
@@ -61,7 +61,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { lineClock, logTime, whenText } from "./clock.mjs";
+import { lineClock, logTime, timeZone, whenText } from "./clock.mjs";
 import { SHORT_DETAIL, progressBody, progressCard } from "./progress-card.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
 import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
@@ -766,7 +766,8 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * them out in the body of Pendulum's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one
  * is answered once a comment under Pendulum's resolved marker for it (finding-check.mjs) is on the PR. Pendulum's own
  * reviews and markers are those by Pendulum or someone who can push (trustedAuthor). An open finding Pendulum answered
- * before carries `earlier`, that answer's text, for the next answer pass, and each carries `raisedOn`, the commit it was
+ * before carries `earlier`, that answer's text, for the next answer pass (and `earlierPrBody` when it said its fix is in
+ * the PR body, for a check again), and each carries `raisedOn`, the commit it was
  * raised on, and `raisedAt`, when, as far as GitHub gives them.
  */
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
@@ -786,7 +787,8 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const resolved = candidates.length ? new Set((await reviewThreads(repo, prNumber, 0, { token })).filter((t) => t.resolved).map((t) => t.rootId)) : new Set();
   // `raisedOn`: the commit the finding was raised on, from which the finding check reads what changed since.
   // `raisedAt`: when it was raised, which the finding check sets beside the decisions' times.
-  const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)) } : {}) });
+  // `earlierPrBody`: that answer said its fix is in the PR body (its marker's `:pr_body`, handoff.mjs postReplies, #584).
+  const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)), ...(PR_BODY_REPLY.test(answer.get(c.id)) ? { earlierPrBody: true } : {}) } : {}) });
   const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, namedReviewer(c, thirdParty)), ...earlier(c) }));
   // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
@@ -796,7 +798,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const trusted = (await listComments(repo, prNumber, { token })).filter(trustedAuthor);
   const done = new Set(trusted.map((c) => BODY_RESOLVED.exec(c.body || "")?.[1]).filter(Boolean));
   const said = new Map(trusted.map((c) => [BODY_REPLY.exec(c.body || "")?.[1], c.body]).filter(([id]) => id));
-  return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)) } : f))];
+  return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)), ...(PR_BODY_REPLY.test(said.get(f.id)) ? { earlierPrBody: true } : {}) } : f))];
 }
 /** Pendulum's earlier answer as the next answer pass reads it: its marker and heading off, sanitised and cut. */
 const answerText = (body) =>
@@ -808,7 +810,9 @@ const answerText = (body) =>
     { max: 4000 },
   );
 const REVIEW_AT_START = /^<!-- pendulum:\d+:review -->/;
-const BODY_REPLY = /^<!-- pendulum:\d+:reply:(r\d+-\d+) -->/;
+const BODY_REPLY = /^<!-- pendulum:\d+:reply:(r\d+-\d+)(?::pr_body)? -->/;
+/** Pendulum's answer that said its fix is in the PR body (#584). */
+const PR_BODY_REPLY = /^<!-- pendulum:\d+:reply:\S+:pr_body -->/;
 const BODY_RESOLVED = /^<!-- pendulum:\d+:resolved:(r\d+-\d+) -->/;
 
 /**
@@ -1003,7 +1007,9 @@ export const GITHUB_COMMENT_MAX = 65_536;
  * harness's group already killed) writes it into the comment one last time, within STOP_WRITE_MS, when it differs from
  * what the comment's line shows, so a pass that ended before the next status write is not left at the last line's figure.
  */
-export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null, soFarNow = soFar === stageSpendSoFar ? stageSpendNow : null, passesOf = stage === "merge" ? null : stagePasses }) {
+export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null, soFarNow = soFar === stageSpendSoFar ? stageSpendNow : null, passesOf = stage === "merge" ? null : stagePasses, env = process.env }) {
+  // The route the stage runs on (backend.mjs stageRoute), known from its start: every spend line it writes records it.
+  const route = stageRoute(env);
   // Each line's time and text, written out at each write in the zone in force then (clock.mjs timeZone: the Objective's
   // own once the stage has read its issue), so one comment never mixes zones.
   // Each line also carries its step (progress-card.mjs stepOf), which the card's table reads.
@@ -1047,18 +1053,19 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let shownInterim = {};
   let rebaseShown = false;
   let stopHook = null;
-  const clock = (t) => lineClock(t);
+  const clock = (t) => lineClock(t, { env });
   const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
   // Not final: the known dollars so far, and the runs of unknown cost (those still running among them).
   // The dollars by billing as the passes booked them when they ended (harness.mjs meterPass: each at its own, the
   // relayed key's as `api`); a reading with no split books the passes' at the credential's. A line written while the
   // stage runs says so (`running: true`, #565) with how many of its unknown runs are still open (`usdRunning`), so a
   // reader takes those as in flight; the stage's final line, and the last one of a stage stopped by a signal
-  // (`stopped`: its harness killed, nothing open any more), carries neither.
+  // (`stopped`: its harness killed, nothing open any more), carries neither. Each records the stage's route (#570); only
+  // the final line, from the stage's usage record (logic.mjs stageSpendLine), records its exit.
   const interimOf = (live, { stopped = false } = {}) => {
     const byBilling = live.byBilling ? addBilling(live.byBilling) : addBilling(billing ? { [billing]: Math.max(0, live.usd - (live.keyUsd ?? 0)) } : {}, live.keyUsd > 0 ? { api: live.keyUsd } : {});
     const open = Number.isInteger(live.running) && live.running > 0 ? Math.min(live.running, live.unknown) : 0;
-    const parts = { ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...(live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : {}), ...(stopped ? {} : { running: true, ...(open ? { usdRunning: open } : {}) }) };
+    const parts = { ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...(live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : {}), ...(stopped ? {} : { running: true, ...(open ? { usdRunning: open } : {}) }), ...(route ? { route } : {}) };
     return { spend: live.usd, spendParts: Object.keys(parts).length ? parts : null };
   };
   const bodyOf = (interim) => {
@@ -1078,7 +1085,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const own = spend === null ? null : ledger;
     // The AI runs that ended: the ledger line's once the stage has written it, else this process's passes so far.
     const passes = (own && ledgerOfComment(own)?.ledger) || (passesOf ? passesOf() : []);
-    const cardOf = (opts) => progressCard({ stage, subject, issue, started, now, lines, status, exit: ended, live, spend: interim.spend ?? null, parts: interim.spendParts ?? null, passes, snap: liveNow, rebase: rebase !== null, ran, harness, runId, runUrl, where: runWhere, ...opts });
+    const cardOf = (opts) => progressCard({ stage, subject, issue, started, now, lines, status, exit: ended, live, spend: interim.spend ?? null, parts: interim.spendParts ?? null, passes, snap: liveNow, rebase: rebase !== null, ran, harness, runId, runUrl, where: runWhere, zone: timeZone(env).zone, ...opts });
     const size = (b) => key.length + 1 + b.length;
     // Near GitHub's limit (past PROGRESS_LEDGER_ROOM), in order: no timeline chart, shorter Step cells, no explanatory
     // sentences, then the ledger line's cut form (logic.mjs ledgerCut: the final spend line is never lost to it), and
@@ -2192,6 +2199,60 @@ export async function answerDiff(mgit, { base, from, head, maxBytes = 1024 * 102
 }
 
 /**
+ * The PR body as it stood at `at` (#584), from github.mjs prBodyHistory's `history`: the newest version edited at or
+ * before `at`, the body as it stands when it was never edited; null when that cannot be told (no `at`, a version a person
+ * deleted from the history, a history that does not reach back to `at`). Line ends as `\n`.
+ */
+export function bodyAt(history, at) {
+  const t = Date.parse(at);
+  if (!history || !Number.isFinite(t)) return null;
+  const lf = (s) => String(s).replace(/\r\n?/g, "\n");
+  if (!history.revisions.length) return history.complete ? lf(history.now) : null;
+  // GitHub's times are to the second. A version edited in the very second the finding was raised counts as before it:
+  // the body's change then leaves that edit out, so an edit made in that second never counts as the answer's (fails closed).
+  const v = history.revisions.find((r) => Date.parse(r.at) <= t);
+  return v && typeof v.body === "string" ? lf(v.body) : null;
+}
+
+/**
+ * git's diff of the PR body from `before` to `now` (#584), its hunks only: "" when they are the same, null when git
+ * could not make it. Both texts are written to the mirror as blobs (`mgit`, the outbox's git): data, never run.
+ */
+export async function bodyDiff(mgit, before, now, { maxBytes = 256 * 1024 } = {}) {
+  const lf = (s) => String(s ?? "").replace(/\r\n?/g, "\n");
+  if (lf(before) === lf(now)) return "";
+  const blob = async (text) => {
+    const r = await mgit(["hash-object", "-t", "blob", "-w", "--stdin"], { input: lf(text) });
+    return r.code === 0 ? r.stdout.trim() : null;
+  };
+  const [a, b] = [await blob(before), await blob(now)];
+  if (!a || !b) return null;
+  // One line of context: a body is mostly long table rows, and the finding check's cap is for the change.
+  const d = await mgit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U1", a, b, "--"], { maxBytes });
+  if (d.code !== 0 && !d.truncated) return null;
+  const text = String(d.stdout);
+  const hunk = text.search(/^@@ /m);
+  return hunk < 0 ? null : text.slice(hunk);
+}
+
+/**
+ * The finding check's `bodyDiffOf` (#584): `at` (when a finding was raised) to what the PR body changed since then
+ * (bodyDiff), "" when nothing, null when that cannot be told. The history is read once (`read`, prBodyHistory), on the
+ * first ask; a failed read is null for every finding.
+ */
+export function bodyChanges(mgit, read) {
+  let history = null;
+  return async (at) => {
+    history ??= Promise.resolve()
+      .then(read)
+      .catch((e) => (log(`finding check: the PR body's history could not be read (${e?.status ?? e?.code ?? "error"})`), null));
+    const h = await history;
+    const before = bodyAt(h, at);
+    return before === null ? null : bodyDiff(mgit, before, h.now);
+  };
+}
+
+/**
  * Whether the PR's head still needs a review pass (#350), on every route: `first` (no Pendulum review yet), `covered`
  * (the head is the head Pendulum's review covers, or only a rebase of it: no second pass), or neither, when commits were
  * written after it (the work stage answering a Question, a maintainer's push, an answer pass that applied maintainers'
@@ -2289,7 +2350,7 @@ export function gatewayDecisionFields(records) {
   return { gatewayDecisionUsd: priced.length ? Math.round(priced.reduce((s, r) => s + Math.max(0, r.usd), 0) * 1e6) / 1e6 : null, gatewayDecisionCalls: recs.reduce((s, r) => s + (Number(r.calls) || 0), 0) };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false, rerun = null, judgeOnly = false }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false, rerun = null, judgeOnly = false, env = process.env }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
   // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
@@ -2347,6 +2408,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once;
     // null when the stage had none (a stage the network ended before its comment, a local key only its reporter knows).
     progressRun: typeof progressRun === "string" && progressRun ? progressRun : null,
+    // The route the stage ran on (backend.mjs stageRoute, from `env`, the stage's environment), which its spend line
+    // records for the report (#570).
+    ...(stageRoute(env) ? { route: stageRoute(env) } : {}),
     // A record Pendulum wrote for a stage whose own process wrote none (killed before it could): the stage's progress
     // comment, when there is one, is the better record of it, and a scorer given both keeps the comment's (withLines).
     ...(standIn ? { standIn: true } : {}),

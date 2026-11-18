@@ -482,7 +482,8 @@ async function main() {
   // Automatic choice picked the account: a limit with no reset ends the stage, to move the Objective or Block (#332).
   LIMIT.moves = stageMoves({ local, limits, pinned: acct.pinned });
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
-  if (acct.note) await progress(acct.note, { step: "setup", account: acct.note });
+  // With the stage's first write, not one of its own: the stage does not know yet whether it is a send-back's rebase.
+  if (acct.note) progress.note(acct.note, { step: "setup", account: acct.note });
   if (chosen.labels.length) log(`this Objective's labels choose ${chosen.labels.join(", ")}: ${inputs.harness}${inputs.model ? ` ${inputs.model}` : ""}`);
 
   // 2. Doctor's job checks, for the harness this Objective runs on: a misconfigured repository Blocks with one line, not a run.
@@ -544,7 +545,9 @@ async function main() {
   // The text its plan was made from (objective-trust.mjs planGate), before anything acts on the text: changed since, with
   // no label applied after the last work stage started from it, the stage Blocks; with one, the plan is made again from
   // this text. An edit by people who vouch for it is judged first (the edit check): wording only keeps the plan.
-  const planned = await planGate({ repo, issue, sha: trusted.sha, text: { title: issueData.title, body: issueData.body, labels: trusted.labels }, editedAt: trusted.editedAt, labeledAt, work: true, pr: prNow, objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work", check: editCheck, progress });
+  // The edit check's line goes out with the stage's first write (progress.note): the stage does not know yet whether it is
+  // a send-back's rebase.
+  const planned = await planGate({ repo, issue, sha: trusted.sha, text: { title: issueData.title, body: issueData.body, labels: trusted.labels }, editedAt: trusted.editedAt, labeledAt, work: true, pr: prNow, objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work", check: editCheck, progress: progress.note });
   if (!planned.ok) {
     log(planned.reason);
     await finish("blocked", planned.reason);
@@ -695,6 +698,8 @@ async function main() {
       rebasedTo = await outbox.rebase(botWho);
       rebaseConflict = !rebasedTo;
       rebaseStage = { conflict: rebaseConflict };
+      // Before the stage's first progress write: its card is a Rebase's from that write on.
+      progress.rebaseStage();
       if (rebasedTo) {
         // Exactly the commit Pendulum's own rebase made is pushed (with its merge of a default branch that changed a
         // workflow file meanwhile, if any), and the checkout is put on it for validation.

@@ -325,3 +325,51 @@ test("report (#569 V10): the reviewer's passes are known only as the model minut
   assert.deepEqual([byIssue(r, 27).passes, byIssue(r, 27).modelMinutes], [{ total: 1, answer: 0, fix: 0 }, null]);
   assert.deepEqual(r.hotSpots.reviewLoops.items, [{ issue: 27, reviews: 1, reviewerPasses: null }]);
 });
+
+/** Every report cost in `r`, with where it is: totals, unknown items aside, each Objective, each breakdown row and basis part, findings. */
+function costsOf(r) {
+  const out = [["totals", r.totals.cost], ...r.objectives.map((o) => [`#${o.issue}`, o.cost])];
+  for (const [name, rows] of Object.entries(r.breakdowns)) {
+    for (const x of rows) {
+      out.push([`${name}[${x.key}]`, x.cost]);
+      for (const [b, part] of Object.entries(x.basis ?? {})) if (part) out.push([`${name}[${x.key}].${b}`, part.cost]);
+    }
+  }
+  out.push(["findings", r.findings.totals.cost]);
+  return out;
+}
+
+test("report (#569 V3): every cost in every breakdown keeps its split of unknown runs, and each breakdown's split adds up to the totals'", async () => {
+  // #20 (decisionsWorld) and #30: decision records of unknown cost in a stage booked by pass under the worker's model, a
+  // decision-spend line, stages with no ledger whose runs no record splits, and a member's decision-spend lines.
+  const w = decisionsWorld();
+  objective(w, 30);
+  stage(w, 30, "work", "local-x30", [pass("work-1", OPUS, [41, 42], null), decision(2, [43, 44])], { ledger: false, when: at(41) });
+  w.comments.push({ ...comment(30, `<!-- pendulum:30:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 4, usd: 0.02 })}`, { user: { login: "teammate", type: "User" }, when: at(45) }), author_association: "MEMBER" });
+  const { json: r } = await report(w, ["--issue", "20,30"]);
+  for (const [where, c] of costsOf(r)) {
+    assert.ok(Number.isInteger(c.unknownDecisionCalls) && Number.isInteger(c.unknownUnsplitRuns), where);
+    assert.ok(c.unknownDecisionCalls + c.unknownUnsplitRuns <= c.unknownRuns, `${where}: ${JSON.stringify(c)}`);
+  }
+  assert.deepEqual([r.totals.cost.unknownRuns, r.totals.cost.unknownDecisionCalls, r.totals.cost.unknownUnsplitRuns], [10, 5, 4]);
+  for (const name of ["stage", "model", "harness", "version"]) {
+    const sum = (k) => r.breakdowns[name].reduce((t, x) => t + x.cost[k], 0);
+    assert.deepEqual([sum("unknownRuns"), sum("unknownDecisionCalls"), sum("unknownUnsplitRuns")], [10, 5, 4], name);
+  }
+  // The worker's model: the review stage's answer pass by pass (a pass, no decision call); by stage, #20's decision record,
+  // which names no model, left under its stage's model with its 3 decision calls, and #30's stage with no ledger, its 3
+  // runs unsplit.
+  const opus = r.breakdowns.model.find((x) => x.key === OPUS);
+  const split = (c) => [c.unknownRuns, c.unknownDecisionCalls, c.unknownUnsplitRuns];
+  assert.deepEqual([split(opus.cost), split(opus.basis.pass.cost), split(opus.basis.stage.cost)], [[7, 3, 3], [1, 0, 0], [6, 3, 3]]);
+});
+
+test("report (#569 R5, V10): an Objective with stages from before the rename has no model minutes and no reviewer passes: those stages are not read", async () => {
+  const w = decisionsWorld();
+  w.comments.push(comment(20, ["<!-- factory:20:progress:work:local-old -->", "Factory work: started."].join("\n"), { when: at(-5) }));
+  const { json: r } = await report(w, ["--issue", "20"]);
+  const o = byIssue(r, 20);
+  assert.equal(o.legacyStages, 1);
+  assert.deepEqual([o.passes, o.modelMinutes], [{ total: 4, answer: 1, fix: 1 }, null]);
+  assert.deepEqual(r.hotSpots.reviewLoops.items, [{ issue: 20, reviews: 1, reviewerPasses: null }]);
+});

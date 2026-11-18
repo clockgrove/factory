@@ -971,6 +971,9 @@ function splitOf(cost, tokens, parts, n, unplaced = []) {
   }
   left.unknownRuns = cost.unknownRuns - out.reduce((t, x) => t + x.cost.unknownRuns, 0);
   if (left.unknownRuns < 0) return null;
+  // The stage's split of its runs (splitUnknown): what its parts' decision records took is theirs, the rest stays here.
+  left.unknownUnsplitRuns = Math.min(cost.unknownUnsplitRuns ?? 0, left.unknownRuns);
+  left.unknownDecisionCalls = Math.max(0, Math.min((cost.unknownDecisionCalls ?? 0) - out.reduce((t, x) => t + (x.cost.unknownDecisionCalls ?? 0), 0), left.unknownRuns - left.unknownUnsplitRuns));
   const named = new Set(out.flatMap((x) => x.cost.unknownWhy));
   const why = [...new Set([...cost.unknownWhy.filter((w) => !named.has(w)), ...unplaced])].sort();
   left.unknownWhy = !left.unknownRuns ? [] : why.length ? why : [...cost.unknownWhy];
@@ -1023,6 +1026,7 @@ function claudeModelParts(usage, entries, published, named) {
     const x = parts.find((y) => y.key === key) ?? parts[parts.push({ key, cost: zeroCost(), tokens: zeroTokens() }) - 1];
     addCost(x.cost, p.cost);
     addTokens(x.tokens, p.tokens);
+    x.cost.unknownDecisionCalls += p.cost.unknownRuns;
   }
   return { parts, unplaced };
 }
@@ -1059,6 +1063,8 @@ export function modelParts({ model, recorded = null, cost, tokens, stages, ledge
       const x = by.get(key) ?? { key, cost: zeroCost(), tokens: zeroTokens() };
       addCost(x.cost, p.cost);
       addTokens(x.tokens, p.tokens);
+      // A decision record's runs of unknown cost are decision calls (splitUnknown); a pass's are none.
+      if (p.decision) x.cost.unknownDecisionCalls += p.cost.unknownRuns;
       by.set(key, x);
     }
     return [...by.values()];
@@ -1453,7 +1459,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       // unreported; when every run of its line is open, the line's own codes are theirs. A stage killed after the write
       // and started again has a later stage comment; once the Objective is no longer Running, the line's runs are read as
       // they stand.
-      const open = stillRunning && spend?.running === true && key !== null && key === newestStage ? Math.min(spend.usdRunning ?? 0, c.unknownRuns) : 0;
+      // A thread the call budget cut (`cut`) may hold a later stage comment unread: none is taken as in flight.
+      const open = stillRunning && !cut && spend?.running === true && key !== null && key === newestStage ? Math.min(spend.usdRunning ?? 0, c.unknownRuns) : 0;
       if (open) {
         const all = open >= (spend.usdUnknown ?? 0);
         c.unknownWhy = [...new Set([...c.unknownWhy.filter((w) => !(all && (spend.usdUnknownWhy ?? []).includes(w) && w !== "sandbox")), "running"])].sort();
@@ -1478,7 +1485,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       const parts = modelParts({ ...asked, cost: c, tokens, stages: count, ledger: split, usage: split ? localRec : null, harness });
       views.model.add(parts);
       // Its priced passes' minutes and dollars by the model each ran on, as its dollars are booked (bookPriced).
-      if (figures && !unmatched) bookPriced(modelPriced, { model, parts, ledger: split, figures, names: ledgerNames(asked) });
+      if (figures && !unmatched && !rec.stopped) bookPriced(modelPriced, { model, parts, ledger: split, figures, names: ledgerNames(asked) });
       // The token mix `--rates` weighs (mixBook): a stage's whole tokens from its record when one is at hand (with its
       // long-context share and its sub-agent threads), else the stage's tokens as the totals count them; split by its ledger's
       // passes when they ran on more than one model. The Objective's worker and sub-agent models from its harness line's
@@ -1517,7 +1524,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       foldPasses(figures);
     });
     // Known only when each stage has a ledger (a stage Pendulum cannot attribute to itself has none it reads).
-    const whole = ledgered && !unledgered && !unattributedStages;
+    // Not with stages from before the rename to Pendulum (`legacyStages`), which are not read.
+    const whole = ledgered && !unledgered && !unattributedStages && !(legacy.get(n) > 0);
     if (ledgered && !unledgered) {
       // The minutes of every harness pass, known only when each has its start and end too: the finish card's summary's
       // and the arms' rule (#569 R5).

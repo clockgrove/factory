@@ -351,27 +351,31 @@ test("#613: only an answer the provider served releases: a clean exit with a res
 test("#613: a hold kept for a per-model window is probed on a model of that family, and released only by an answer from one", async () => {
   await scene(async (h, lines) => {
     let t = Date.now();
-    // This loop's stages run Opus alone: its probe of a Sonnet window is answered by Opus, which says nothing of it.
+    // This loop's stages run Opus and Fable alone (its sub-agents too, whose default is a Sonnet): no probe of its own could lift a Sonnet window, so it makes none, takes no
+    // turn and spends nothing, tick after tick, and says so once for the hold.
     const loop = serveOn(h, () => t);
+    loop.wf = { PENDULUM_SUBAGENT_MODEL: "claude-opus-5-5" };
     loop.result = limited(t + 6 * DAY, t, "seven_day_sonnet");
     await work(loop);
     loop.says(answeredBy("claude-opus-5-5"));
-    t += MIN;
-    assert.deepEqual((await tick(loop)).paused, []);
-    assert.equal(loop.calls().length, 1);
-    assert.equal(loop.limitUntil({ key: "alpha", shared: true }), t - MIN + 6 * DAY, "another model's answer releases nothing");
-    assert.equal(releases(h), 0);
-    assert.deepEqual([probeFile(h).outcome, probeFile(h).usd], ["failed", 0.002]);
-    assert.ok(lines.some((l) => /claude account alpha: probed .*: it was answered by claude-opus-5-5, which its seven_day_sonnet window does not limit; the hold stands/.test(l)), lines.join(""));
+    for (const step of [MIN, 30_000, PROBE_EVERY_MS, PROBE_EVERY_MS]) {
+      t += step;
+      assert.deepEqual((await tick(loop)).paused, []);
+    }
+    assert.equal(loop.calls().length, 0, "never probed");
+    assert.equal(loop.holds.probe("alpha", t), null, "no turn taken: a serve that can check it probes at once");
+    assert.equal(loop.limitUntil({ key: "alpha", shared: true }), Date.parse(loop.result.usageLimit.reset), "the hold stands");
+    assert.equal(lines.filter((l) => /claude account alpha: its usage limit is of the seven_day_sonnet window, and this loop runs no sonnet model to check it with, so it is not probed: the hold stands until its reset \(.*\) or `pendulum hold release alpha`/.test(l)).length, 1, lines.join(""));
     // A loop whose sub-agents run Sonnet probes on that model; an answer that names another model still releases nothing.
     const sonnet = serveOn(h, () => t);
     sonnet.wf = { PENDULUM_SUBAGENT_MODEL: "claude-sonnet-5" };
     sonnet.says(answeredBy("claude-opus-5-5"));
-    t += PROBE_EVERY_MS;
     await tick(sonnet);
     const call = sonnet.calls()[0];
     assert.equal(call.args[call.args.indexOf("--model") + 1], "claude-sonnet-5", "probed on the window's family");
     assert.equal(releases(h), 0);
+    assert.deepEqual([probeFile(h).outcome, probeFile(h).usd], ["failed", 0.002]);
+    assert.ok(lines.some((l) => /claude account alpha: probed .*: it was answered by claude-opus-5-5, which its seven_day_sonnet window does not limit; the hold stands/.test(l)), lines.join(""));
     // Answered by a Sonnet model: the window is lifted.
     sonnet.says(answeredBy("claude-sonnet-5"));
     t += PROBE_EVERY_MS;

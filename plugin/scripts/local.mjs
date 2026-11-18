@@ -2404,7 +2404,8 @@ export class Local {
    * PROBE_EVERY_MS (holds.mjs probeDue), it takes the turn in the machine's holds (so another serve here probes nothing
    * meanwhile) and starts one probe (probeHold), without waiting for it: the tick goes on, and a hold the probe releases
    * is read at the next one (heldNoMore, limitHold). One probe per account at a time in this loop. The turn is a record
-   * read and then replaced, with no lock: two serves that read it in the same moment may each probe once. Returns the
+   * read and then replaced, with no lock: two serves that read it in the same moment may each probe once. A hold of a
+   * per-model window this loop runs no model of is not probed (said once per hold). Returns the
    * probes it started, settled together (a test's wait).
    */
   probeHolds() {
@@ -2424,8 +2425,20 @@ export class Local {
       const now = (this.clock ?? Date.now)();
       const store = this.holdStore(found.hold);
       if (!store.probeDue(key, now)) continue;
-      store.probed({ harness, account: key, now });
       const who = limitName(harness, found.account.name);
+      // A per-model window (usage.mjs windowFamily) that none of this loop's models is of: no probe of this loop's
+      // could release it (probeHold), so none is made and nothing is spent. Said once per hold.
+      const window = store.window(key, now);
+      const family = windowFamily(window);
+      if (family && harness === this.harness && modelFamily(this.probeModel(harness, accountEnv(this.baseEnv(), found.account), family)) !== family) {
+        const said = `${key}@${store.until(key, now)}`;
+        if (!(this.probeSkipSaid ??= new Set()).has(said)) {
+          this.probeSkipSaid.add(said);
+          log(`${who}: its usage limit is of the ${window} window, and this loop runs no ${family} model to check it with, so it is not probed: the hold stands until its reset (${logTime(store.until(key, now))}) or \`pendulum hold release ${key}\``);
+        }
+        continue;
+      }
+      store.probed({ harness, account: key, now });
       const p = this.probeHold(harness, found.account, found.hold, now)
         .catch((e) => log(`${who}: the probe of its usage limit failed (${String(e?.message || e).slice(0, 160)}); the hold stands`))
         .finally(() => this.probing.delete(key));

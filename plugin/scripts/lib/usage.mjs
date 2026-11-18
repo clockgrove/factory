@@ -1577,7 +1577,9 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   const requests = Math.max(a.premiumRequests ?? -1, streamRequests ?? -1);
   if (requests >= 0) rec.premiumRequests = requests;
   if (!rec.model) rec.model = a.model;
-  if (byok) rec.byok = true;
+  // A run that names a model without saying, live, that its calls went through no bring-your-own-key provider is
+  // treated as one that did (fail closed): its model id may be the provider's own, so no comment or card publishes it.
+  if (byok || (rec.model && !notByok)) rec.byok = true;
   else if (notByok && (main.size || Object.keys(agents).length)) rec.agentModels = { main: [...main], agents: Object.fromEntries(Object.entries(agents).map(([k, v]) => [k, [...v]])) };
   const p = priceCredits(a, creditUsd);
   const refusal = rec.ok ? null : providerRefusal("copilot", events);

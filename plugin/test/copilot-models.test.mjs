@@ -211,13 +211,19 @@ test("a pass through a bring-your-own-key provider names no model: none in ran, 
 
 test("fails closed: a stream that never says whether its calls went through BYOK records no model, and a replayed checkpoint record counts for none", async () => {
   // Copilot writes model.call_final_result after the message: a run killed between them says nothing of BYOK.
-  const silent = stream("claude-sonnet-5.5").split("\n").filter((l) => JSON.parse(l).type !== "model.call_final_result").join("\n");
+  const arn = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/x";
+  const silent = stream(arn).split("\n").filter((l) => JSON.parse(l).type !== "model.call_final_result").join("\n");
   const rec = parseCopilot(silent, null, 0);
   assert.equal(rec.agentModels, undefined);
-  assert.equal(rec.byok, undefined);
+  assert.equal(rec.byok, true, "a model named with no live isByok: false is treated as BYOK");
   const { stored, body } = await copilotStage({ text: silent });
+  assert.equal(stored.byok, true);
   assert.deepEqual([stored.ran.worker, stored.ran.subagent, stored.ran.reviewer], [null, null, null]);
   assert.deepEqual(harnessLine(body).models, { worker: null, subagent: null, reviewer: null });
+  assert.equal(JSON.parse(/^<!-- pendulum:ledger (\{.*\}) -->$/m.exec(body)[1]).m, undefined, "no model on the ledger line");
+  assert.doesNotMatch(body, /123456789012/, "the account never reaches the comment");
+  // A stream that names no model at all is no BYOK pass: nothing to hide.
+  assert.equal(parseCopilot("", null, 1).byok, undefined);
   // A checkpoint record (the envelope's `checkpoint`) is the session's history: its messages, sub-agents and isByok:false count for none.
   const replayed = [
     event("assistant.message", { messageId: "m-old", model: "gpt-6.1-sol", content: "old", toolRequests: [] }, { checkpoint: true }),

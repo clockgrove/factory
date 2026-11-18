@@ -197,6 +197,17 @@ const round6 = (n) => Math.round(n * 1e6) / 1e6;
 const nonNeg = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, v) : null);
 
 /**
+ * A stage's pass `records` with each one's dollars (`usd`, and a relayed key's share `workerKeyUsd`) to the millionth,
+ * as its ledger entry writes them (logic.mjs ledgerMarker `u`, `k`). A stage's record is built from these (session.mjs
+ * writeUsage), so its `usd`, its `usdByBilling`, its `usdByPass` and its ledger are sums of the same numbers and agree
+ * to the millionth (#617): summed unrounded, a total rounded once could be a millionth off its passes rounded each.
+ */
+export function passMillionths(records) {
+  const m = (v) => (typeof v === "number" && Number.isFinite(v) ? round6(v) : v);
+  return (records || []).map((r) => (r && typeof r === "object" ? { ...r, ...(Object.hasOwn(r, "usd") ? { usd: m(r.usd) } : {}), ...(Object.hasOwn(r, "workerKeyUsd") ? { workerKeyUsd: m(r.workerKeyUsd) } : {}) } : r));
+}
+
+/**
  * The known dollars of a stage's pass `records` by billing (BILLING), on a credential of `billing`: each pass's own
  * dollars at its kind (passBilling), its relayed worker key's share (`workerKeyUsd`) as `api`, and `extraKeyUsd` (the
  * relay's spend outside every pass) as `api`. A kind is present once a pass of it ran, at $0 when the pass reported nothing;

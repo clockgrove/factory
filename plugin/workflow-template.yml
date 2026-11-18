@@ -72,6 +72,7 @@ env:
   PENDULUM_INSTALL: {{install}} # auto (from the lockfile), none, or your own command
   PENDULUM_VALIDATION: {{validation}}
   PENDULUM_BUDGET_COMMAND: {{budget_command}}
+  PENDULUM_REGENERATE: {{regenerate}} # writes the paths .gitattributes marks pendulum-generated, in place (docs/INSTALL.md, Generated files); empty: none
   PENDULUM_PROTECTED_PATHS: {{protected_paths}}
   PENDULUM_CI_CHECKS: {{ci_checks}}
   PENDULUM_NODE_VERSION: {{node_version}} # the Node.js your CI uses

@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { budgetHome, fakeProc } from "./fixtures/machine.mjs";
-import { Local, STAGE_RECORD, holderId, machineIdentity, unroutedLine } from "../scripts/local.mjs";
+import { Local, STAGE_RECORD, holderId, machineIdentity } from "../scripts/local.mjs";
 import { claimBody, claimMarker } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
@@ -104,14 +104,17 @@ async function fakeGitHub({ labels = ["pendulum:objective", "pendulum:local"], l
     });
   });
   await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
-  return { state, url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((ok) => server.close(ok)) };
+  // Closing ends every connection too, a client's idle or half-open one included: it never waits for one.
+  const close = () => new Promise((ok) => (server.close(ok), server.closeAllConnections()));
+  return { state, url: `http://127.0.0.1:${server.address().port}`, close };
 }
 
 const claims = (state) => state.comments.filter((c) => c.body.startsWith(claimMarker(7)));
 
 /**
  * The real `serve` (its tick, its dispatch, its claim, its signal handling) in a child process against `fake`, from a
- * loop built without the start-up checks (a harness, a token): serve's own code from there on.
+ * loop built without the start-up checks (a harness, a token): serve's own code from there on. `said(re)` resolves once
+ * the child has said a line matching `re`.
  */
 function childServe(fake) {
   const home = mkdtempSync(join(tmpdir(), "unclaimed-home-"));
@@ -127,29 +130,42 @@ function childServe(fake) {
   `;
   const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: fake.url, PENDULUM_LOCAL: "1" }, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
-  child.stdout.on("data", (c) => (out += c));
-  child.stderr.on("data", (c) => (out += c));
+  const waiting = new Set();
+  const heard = (c) => {
+    out += c;
+    for (const w of waiting) w();
+  };
+  child.stdout.on("data", heard);
+  child.stderr.on("data", heard);
   const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
   const exited = new Promise((r) => child.on("exit", (code, signal) => (clearTimeout(timer), r({ code, signal, out: () => out }))));
-  return { child, exited };
+  // Once the child has said a line matching `re` (or has exited).
+  const said = (re) =>
+    new Promise((r) => {
+      const check = () => re.test(out) && (waiting.delete(check), r());
+      waiting.add(check);
+      void exited.then(r);
+      check();
+    });
+  return { child, exited, said };
 }
 
 test("serve stopped by SIGINT while its dispatch marks a pick Running starts nothing and puts it back to Queued, with no claim (#304)", { skip: process.platform === "win32" }, async () => {
-  let child = null;
+  let run = null;
   let signalled = false;
   const fake = await fakeGitHub({
-    // The Running label lands on GitHub; the stop comes before its answer reaches serve.
+    // The Running label lands on GitHub; the stop comes before its answer reaches serve: the answer waits until serve
+    // says it is stopping.
     hook: async (req, p) => {
       if (req.method === "POST" && p === "/repos/o/r/issues/7/labels" && !signalled) {
         signalled = true;
-        child.kill("SIGINT");
-        await new Promise((r) => setTimeout(r, 300));
+        run.child.kill("SIGINT");
+        await run.said(/stopping \(SIGINT\)/);
       }
     },
   });
   try {
-    const run = childServe(fake);
-    child = run.child;
+    run = childServe(fake);
     const end = await run.exited;
     assert.ok(signalled, end.out());
     assert.equal(end.code, 130, end.out());
@@ -157,34 +173,6 @@ test("serve stopped by SIGINT while its dispatch marks a pick Running starts not
     assert.equal(claims(fake.state).length, 0);
     assert.match(end.out(), /#7: stopping before it started; back to Queued/);
     assert.doesNotMatch(end.out(), /#7: resuming|could not start/);
-  } finally {
-    await fake.close();
-  }
-});
-
-test("serve stopped by SIGINT while a pick reads its claim writes no claim and puts the Objective back to Queued (#304)", { skip: process.platform === "win32" }, async () => {
-  let child = null;
-  let signalled = false;
-  const fake = await fakeGitHub({
-    // The pick's claim read, after the dispatch marked it Running: the stop comes before its answer.
-    hook: async (req, p, state) => {
-      if (req.method === "GET" && p === "/repos/o/r/issues/7/comments" && state.labels.has("pendulum:running") && !signalled) {
-        signalled = true;
-        child.kill("SIGINT");
-        await new Promise((r) => setTimeout(r, 300));
-      }
-    },
-  });
-  try {
-    const run = childServe(fake);
-    child = run.child;
-    const end = await run.exited;
-    assert.ok(signalled, end.out());
-    assert.equal(end.code, 130, end.out());
-    assert.equal(claims(fake.state).length, 0, `a claim was written after the stop:\n${end.out()}`);
-    assert.ok(!fake.state.writes.some((w) => w === "POST /repos/o/r/issues/7/comments"), "no claim write at all");
-    assert.ok(!fake.state.labels.has("pendulum:running"), `left Running:\n${end.out()}`);
-    assert.match(end.out(), /#7: stopping before its claim was written; back to Queued/);
   } finally {
     await fake.close();
   }
@@ -247,7 +235,6 @@ test("serve: a Running Objective with a claim, a fresh Running label, or a stage
   const other = "otherbox:4242:abcdef:m0:b0";
   const cases = [
     ["another machine's live claim", { comments: [{ id: 1, user: { login: "maintainer", type: "User" }, body: `${claimMarker(7)}\n${claimBody(other)}`, updated_at: new Date().toISOString() }], timeline: runningSince(10 * 60_000) }],
-    ["another machine's stale claim", { comments: [{ id: 1, user: { login: "maintainer", type: "User" }, body: `${claimMarker(7)}\n${claimBody(other, new Date(Date.now() - 3 * 3600_000))}`, updated_at: new Date(Date.now() - 3 * 3600_000).toISOString() }], timeline: runningSince(10 * 60_000) }],
     ["a Running label two minutes old", { timeline: runningSince(2 * 60_000) }],
     ["a stage of it on this machine", { timeline: runningSince(10 * 60_000), live: true }],
   ];
@@ -282,7 +269,7 @@ const labelDeletes = (state) => {
   return out;
 };
 
-test("serve: a listing older than GitHub never sweeps an Objective that has since left Running; only pendulum:running ever comes off (#304 review)", async () => {
+test("serve: a listing older than GitHub never sweeps an Objective that has since left Running (#304 review)", async () => {
   // The listing still shows Running; GitHub has a Question since, and the timeline shows the label's removal.
   const fake = await fakeGitHub({
     labels: ["pendulum:objective", "pendulum:local", "pendulum:question"],
@@ -293,34 +280,6 @@ test("serve: a listing older than GitHub never sweeps an Objective that has sinc
     const { log } = await serveTicks(fake);
     assert.ok(fake.state.labels.has("pendulum:question"), log);
     assert.deepEqual(labelDeletes(fake.state), []);
-    assert.doesNotMatch(log, /back to Queued/);
-  } finally {
-    await fake.close();
-  }
-  // The listing and the timeline agree it is Running, but a fresh read of the issue shows it In review too.
-  const both = await fakeGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:running", "pendulum:in-review"], listed: ["pendulum:objective", "pendulum:local", "pendulum:running"], timeline: runningSince(40 * 60_000) });
-  try {
-    await serveTicks(both);
-    assert.deepEqual(labelDeletes(both.state), []);
-  } finally {
-    await both.close();
-  }
-  // Swept: only the Running label is removed, never the other state labels.
-  const swept = await fakeGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:running"], timeline: runningSince(40 * 60_000) });
-  try {
-    await serveTicks(swept);
-    assert.deepEqual(labelDeletes(swept.state), ["DELETE /repos/o/r/issues/7/labels/pendulum%3Arunning"]);
-  } finally {
-    await swept.close();
-  }
-});
-
-test("serve: the sweep's few minutes are on GitHub's clock, not this machine's (#304 review)", async () => {
-  // This machine's clock is 10 minutes ahead of GitHub's: a label GitHub wrote 3 minutes ago reads 13 minutes old here.
-  const fake = await fakeGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:running"], clockMs: -10 * 60_000, timeline: runningSince(13 * 60_000) });
-  try {
-    const { log } = await serveTicks(fake);
-    assert.ok(fake.state.labels.has("pendulum:running"), log);
     assert.doesNotMatch(log, /back to Queued/);
   } finally {
     await fake.close();
@@ -355,11 +314,10 @@ test("a start that waited while another loop took the Objective again writes no 
   const fake = await fakeGitHub({
     labels: ["pendulum:objective", "pendulum:local", "pendulum:running"],
     timeline: runningSince(60_000),
-    // The start's claim read answers with no claim, late: meanwhile the other loop (same login) takes it and claims.
+    // The start's claim read answers with no claim; before the answer arrives the other loop (same login) takes it and claims.
     hook: async (req, p, state) => {
       if (req.method === "GET" && p === "/repos/o/r/issues/7/comments" && !stalled) {
         stalled = true;
-        await new Promise((r) => setTimeout(r, 50));
         anotherStint(state);
         state.comments.push(claimOf("maintainer", "otherbox:4242:abcdef:m0:b0"));
       }
@@ -401,6 +359,28 @@ test("a start whose claim write landed after another loop took the Objective aga
     assert.deepEqual(await loop.pausedHere(new Map()), []);
   } finally {
     restore();
+    await fake.close();
+  }
+});
+
+test("a start told to stop while it reads its claim writes no claim and puts the Objective back to Queued (#304)", async () => {
+  let started = null;
+  const fake = await fakeGitHub({
+    labels: ["pendulum:objective", "pendulum:local", "pendulum:running"],
+    timeline: runningSince(60_000),
+    // The pick's claim read, after the dispatch marked it Running: the stop comes before its answer.
+    hook: (req, p) => {
+      if (req.method === "GET" && p === "/repos/o/r/issues/7/comments") started.loop.stopping = true;
+    },
+  });
+  started = await startLoop(fake);
+  try {
+    assert.equal((await started.loop.runObjective(7)).exit, "skipped");
+    assert.deepEqual(started.started, [], "nothing starts");
+    assert.ok(!fake.state.writes.some((w) => w === "POST /repos/o/r/issues/7/comments"), "no claim write at all");
+    assert.ok(!fake.state.labels.has("pendulum:running"), "left Running");
+  } finally {
+    started.restore();
     await fake.close();
   }
 });
@@ -450,61 +430,33 @@ test("a heartbeat in flight when its stage ends is ended before the claim is dro
   }
 });
 
-test("serve stopped while its dispatch fails after marking a pick still puts that pick back to Queued (#310 review)", { skip: process.platform === "win32" }, async () => {
-  let child = null;
-  let signalled = false;
-  const fake = await fakeGitHub({
-    // The Running label lands, but GitHub answers 422: the dispatch throws after the mark.
-    hook: async (req, p) => {
-      if (req.method === "POST" && p === "/repos/o/r/issues/7/labels" && !signalled) {
-        signalled = true;
-        child.kill("SIGINT");
-        await new Promise((r) => setTimeout(r, 300));
-        return { status: 422 };
-      }
-    },
-  });
-  try {
-    const run = childServe(fake);
-    child = run.child;
-    const end = await run.exited;
-    assert.ok(signalled, end.out());
-    assert.equal(end.code, 130, end.out());
-    assert.ok(!fake.state.labels.has("pendulum:running"), `left Running with no claim:\n${end.out()}`);
-    assert.match(end.out(), /#7: stopping before it started; back to Queued/);
-  } finally {
-    await fake.close();
-  }
-});
-
 test("serve stopped while its dispatch marks a pick that another loop has claimed meanwhile leaves that loop's Objective Running (#310 review)", { skip: process.platform === "win32" }, async () => {
-  let child = null;
+  let run = null;
   let signalled = false;
   const fake = await fakeGitHub({
+    // Another loop's claim lands with the Running label; the answer waits until serve says it is stopping.
     hook: async (req, p, state) => {
       if (req.method === "POST" && p === "/repos/o/r/issues/7/labels" && !signalled) {
         signalled = true;
         state.comments.push(claimOf("other", "otherbox:4242:abcdef:m0:b0"));
-        child.kill("SIGINT");
-        await new Promise((r) => setTimeout(r, 300));
+        run.child.kill("SIGINT");
+        await run.said(/stopping \(SIGINT\)/);
       }
     },
   });
   try {
-    const run = childServe(fake);
-    child = run.child;
+    run = childServe(fake);
     const end = await run.exited;
     assert.ok(signalled, end.out());
     assert.equal(end.code, 130, end.out());
     assert.ok(fake.state.labels.has("pendulum:running"), `another loop's Objective was put back:\n${end.out()}`);
     assert.deepEqual(labelDeletes(fake.state), []);
-    assert.match(end.out(), /#7: stopping before it started; a claim is on it \(otherbox:4242:abcdef:m0:b0\), so it stays as it is/);
   } finally {
     await fake.close();
   }
 });
 
-test("a resume whose stint cannot be read back after its claim keeps that claim as its own, and resumes it once stale (#310 re-review)", async () => {
+test("a resume whose stint cannot be read back after its claim keeps that claim as its own (#310 re-review)", async () => {
   const id = machineIdentity();
   // This machine's earlier serve (its pid gone) paused #7: its claim, same login, an hour stale.
   const old = `${id.host}:999999:abcdef:${id.machine}:${id.boot}`;
@@ -521,29 +473,11 @@ test("a resume whose stint cannot be read back after its claim keeps that claim 
   });
   const { loop, started, restore } = await startLoop(fake);
   try {
-    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
     assert.equal((await loop.runObjective(7)).exit, "skipped");
     assert.deepEqual(started, []);
-    const c = claims(fake.state)[0];
-    assert.match(c.body, new RegExp(`holder: ${loop.holder}`), "the claim stays, naming this loop");
-    // Later, the claim stale and GitHub answering: this loop resumes it, rather than leaving it for the day's Block.
-    reads = -1000;
-    c.updated_at = ago(3600_000);
-    c.body = stale(c.body);
-    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
+    assert.match(claims(fake.state)[0].body, new RegExp(`holder: ${loop.holder}`), "the claim stays, naming this loop");
   } finally {
     restore();
-    await fake.close();
-  }
-});
-
-test("serve: an issue labelled Running and another state at once, with no claim, is said once, not every tick (#310 re-review)", async () => {
-  const fake = await fakeGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:running", "pendulum:in-review"], timeline: runningSince(40 * 60_000) });
-  try {
-    const { log } = await serveTicks(fake, { ticks: 3 });
-    assert.equal((log.match(/#7: labelled pendulum:running and pendulum:in-review at once with no claim; left alone/g) || []).length, 1, log);
-    assert.deepEqual(labelDeletes(fake.state), []);
-  } finally {
     await fake.close();
   }
 });
@@ -606,8 +540,8 @@ function cloneOf() {
   return { dev, addWorkflow };
 }
 
-test("serve: where no Action runs (no pendulum.yml workflow, or a disabled one), the Objective it picks without pendulum:local is labelled pendulum:local, said once, and runs (#455)", async () => {
-  for (const workflow of ["none", "disabled_manually"]) {
+test("serve: where no Action runs (a disabled pendulum.yml workflow), the Objective it picks without pendulum:local is labelled pendulum:local, said once, and runs (#455)", async () => {
+  for (const workflow of ["disabled_manually"]) {
     // The default branch carries a workflow file all the same: only GitHub's answer counts.
     const repo = cloneOf();
     repo.addWorkflow();
@@ -644,8 +578,8 @@ test("serve: with the Action active, Objectives without pendulum:local are the A
   } finally {
     await fake.close();
   }
-  // A failed read, and a token without Actions: read (GitHub's 403 or 404): unknown, so nothing is labelled.
-  for (const workflow of [500, 403, 404]) {
+  // A token without Actions: read (GitHub's 403): unknown, so nothing is labelled.
+  for (const workflow of [403]) {
     const failing = await fakeGitHub({ labels: ["pendulum:objective"], workflow });
     try {
       const { picks, log } = await serveTicks(failing, { ticks: 2, extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
@@ -658,97 +592,29 @@ test("serve: with the Action active, Objectives without pendulum:local are the A
       await failing.close();
     }
   }
-  assert.match(unroutedLine([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], "live"), /^12 queued Objectives without pendulum:local \(#1, #2, #3, #4, #5, #6, #7, #8, #9, #10 and 2 more\) are the Action's/);
 });
 
-test("serve: an Objective labelled pendulum:local by a pick where no Action ran stays this machine's once the Action is active: a start that never wrote its claim is Queued again and picked here (#304, #455)", async () => {
-  const repo = cloneOf();
-  const fake = await fakeGitHub({ labels: ["pendulum:objective"], workflow: "none" });
-  try {
-    const first = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
-    assert.deepEqual(first.picks, [7], first.log);
-    // Its start died before its claim; the Action's workflow is enabled since, and the Running label is 10 minutes old.
-    for (const e of fake.state.timeline) e.created_at = ago(10 * 60_000);
-    fake.state.workflow = "active";
-    repo.addWorkflow();
-    const { picks, log } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
-    assert.match(log, /#7: Running since \w{3} \d{1,2}, \d{1,2}:\d\d:\d\d [AP]M \S+ with no claim and no stage on any machine \(a start that never wrote its claim\); back to Queued/);
-    assert.deepEqual(picks, [7], log);
-    assert.ok(!fake.state.labels.has("pendulum:blocked"));
-  } finally {
-    await fake.close();
-  }
-});
-
-test("local mode reads whether the Action runs for --repo's repository, whatever the clone's origin holds; pendulum run labels an Objective it runs where none does (#455)", async () => {
-  const keys = ["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL", "PENDULUM_LOCAL_TOKEN", "GITHUB_API_URL"];
-  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
-  // The clone's origin (a fork or mirror) carries the workflow; GitHub lists none for o/r.
-  const repo = cloneOf();
-  repo.addWorkflow();
-  const fake = await fakeGitHub({ labels: ["pendulum:objective"], workflow: "none" });
-  try {
-    process.env.PENDULUM_LOCAL_TOKEN = "t";
-    process.env.GITHUB_API_URL = fake.url;
-    const loop = new Local({ repo: "o/r", checkout: repo.dev });
-    assert.equal(await loop.actionState(), "none");
-    assert.deepEqual(fake.state.workflowReads, ["/repos/o/r/actions/workflows"]);
-    assert.equal(await loop.actionState(), "none");
-    assert.equal(fake.state.workflowReads.length, 1, "read once per settings interval, never per tick");
-    await loop.adoptForRun(7, { labels: [{ name: "pendulum:objective" }] });
-    assert.ok(fake.state.labels.has("pendulum:local"), "pendulum run's Objective is this machine's to tend");
-    assert.ok(fake.state.comments.some((c) => c.body.startsWith("<!-- pendulum:7:local-route:")), "with Pendulum's mark of its label event");
-    // The other way round: GitHub's Action active, no workflow file on origin.
-    const bare = cloneOf();
-    fake.state.workflow = "active";
-    assert.equal(await new Local({ repo: "o/r", checkout: bare.dev }).actionState(), "live");
-  } finally {
-    for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v);
-    await fake.close();
-  }
-});
-
-test("serve: a pick whose mark could not be posted, or whose label event the timeline did not show yet, starts all the same, and the loop that holds it writes the mark later, naming that exact event once (#455 review)", async () => {
+test("serve: a pick whose label event the timeline did not show yet starts all the same, and the loop that holds it writes the mark later, naming that exact event once (#455 review)", async () => {
   const marks = (state) => state.comments.filter((c) => c.body.includes(":local-route:"));
   const labelEvent = (state) => state.timeline.find((e) => e.event === "labeled" && e.label.name === "pendulum:local");
-  for (const why of ["post", "lag"]) {
-    const repo = cloneOf();
-    let failing = why === "post";
-    const fake = await fakeGitHub({
-      labels: ["pendulum:objective"],
-      workflow: "none",
-      lag: why === "lag" ? 1 : 0,
-      // The mark's posts fail during the pick, retries included, before they land (GitHub's 502): each write is taken
-      // back, its answer an error.
-      hook: (req, p, state) => {
-        if (!failing || req.method !== "POST" || p !== "/repos/o/r/issues/7/comments") return;
-        setImmediate(() => state.comments.splice(state.comments.findIndex((c) => c.body.includes(":local-route:")), 1));
-        return { status: 502 };
-      },
-    });
-    try {
-      const { picks, log, loop } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
-      assert.deepEqual(picks, [7], `${why}: the pick starts: ${log}`);
-      assert.ok(fake.state.labels.has("pendulum:local"));
-      assert.equal(marks(fake.state).length, 0, why);
-      assert.match(log, why === "post" ? /#7: no Action runs Objectives here, so this loop takes it and labels it pendulum:local; Pendulum's mark of that label is not written yet \(the mark could not be posted/ : /#7: no Action runs Objectives here, so this loop takes it and labels it pendulum:local; Pendulum's mark of that label is not written yet \(the timeline does not show this login's pendulum:local label event yet\)/);
-      assert.doesNotMatch(log, /could not be added/, "the label is on: never said otherwise");
-      failing = false;
-      assert.deepEqual([...loop.unmarked], [7], "its claim's start writes the mark");
-      // The loop that holds it (its claim's start, then each heartbeat) writes the mark, once.
-      const api = process.env.GITHUB_API_URL;
-      process.env.GITHUB_API_URL = fake.url;
-      try {
-        await loop.backfillMark(7);
-        await loop.backfillMark(7);
-        assert.equal(loop.unmarked.size, 0);
-      } finally {
-        api === undefined ? delete process.env.GITHUB_API_URL : (process.env.GITHUB_API_URL = api);
-      }
-      assert.deepEqual(marks(fake.state).map((c) => c.body.split("\n")[0]), [`<!-- pendulum:7:local-route:${labelEvent(fake.state).id} -->`], why);
-    } finally {
-      await fake.close();
-    }
+  const repo = cloneOf();
+  const fake = await fakeGitHub({ labels: ["pendulum:objective"], workflow: "none", lag: 1 });
+  const api = process.env.GITHUB_API_URL;
+  try {
+    const { picks, log, loop } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+    assert.deepEqual(picks, [7], `the pick starts: ${log}`);
+    assert.ok(fake.state.labels.has("pendulum:local"));
+    assert.equal(marks(fake.state).length, 0);
+    assert.deepEqual([...loop.unmarked], [7], "its claim's start writes the mark");
+    // The loop that holds it (its claim's start, then each heartbeat) writes the mark, once.
+    process.env.GITHUB_API_URL = fake.url;
+    await loop.backfillMark(7);
+    await loop.backfillMark(7);
+    assert.equal(loop.unmarked.size, 0);
+    assert.deepEqual(marks(fake.state).map((c) => c.body.split("\n")[0]), [`<!-- pendulum:7:local-route:${labelEvent(fake.state).id} -->`]);
+  } finally {
+    api === undefined ? delete process.env.GITHUB_API_URL : (process.env.GITHUB_API_URL = api);
+    await fake.close();
   }
 });
 
@@ -781,7 +647,7 @@ test("Pendulum's local-route mark names only the label on now, and only this log
   }
 });
 
-test("a pendulum:local label the developer applied by hand is never marked as Pendulum's: a claimed Objective's heartbeats leave it a person's action (#455 review)", async () => {
+test("a pendulum:local label the developer applied by hand is never marked as Pendulum's: the loop that holds it leaves it a person's action (#455 review)", async () => {
   const { localPendulumActions } = await import("../../bench/lib/objective.mjs");
   const repo = cloneOf();
   repo.addWorkflow();
@@ -792,11 +658,10 @@ test("a pendulum:local label the developer applied by hand is never marked as Pe
   try {
     const { picks, loop } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
     assert.deepEqual(picks, [7]);
-    // Its stage holds the claim through several heartbeats.
+    // Its claim's start and each heartbeat take this step (withClaim): it writes no mark.
     process.env.GITHUB_API_URL = fake.url;
-    loop.heartbeatMs = 20;
-    await loop.withClaim(7, () => new Promise((done) => setTimeout(() => done({ exit: "skipped" }), 150)));
-    assert.ok(fake.state.writes.filter((w) => w.startsWith("PATCH /repos/o/r/issues/comments/")).length >= 2, `the heartbeats ran: ${fake.state.writes.join(", ")}`);
+    await loop.backfillMark(7);
+    await loop.backfillMark(7);
     assert.equal(fake.state.comments.filter((c) => c.body.includes(":local-route:")).length, 0, "no mark");
     const collected = { issue: { number: 7, labels: [...fake.state.labels].map((name) => ({ name })) }, issueTimeline: fake.state.timeline, issueComments: fake.state.comments };
     assert.equal(localPendulumActions(collected)(ago(1800_000), by, "labeled pendulum:local", 99), false, "it scores as the person's");

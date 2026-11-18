@@ -18,7 +18,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
+import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, openRegeneration, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, listReviews, markReady, postReview, prBodyHistory, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -1582,6 +1582,9 @@ async function main() {
   // answering a Question, a maintainer's push, an answer pass that applied maintainers' decisions) get a pass on the
   // changes since that head, the default branch's left out; one that cannot be told apart from the rest gets the whole PR.
   // A PR reviewed before its Objective was labelled a foundation one gets the foundation pass alone, as its own review.
+  // The regeneration check (checkout.mjs openRegeneration): on every head this stage validates whose change touches a
+  // declared generated path, as in the work stage.
+  const regeneration = inputs.regenerate ? openRegeneration({ command: inputs.regenerate, generated: (paths) => outbox.generated(paths), touched: () => outbox.touched() }) : null;
   const startHead = outbox.expected() || pr.head.sha;
   const scope = await reviewScope(outbox.git, { reviews, comments: marks.comments, issue, base: outbox.base, head: startHead, maxBytes: REVIEW_DIFF_BYTES });
   const alreadyReviewed = scope.covered;
@@ -1590,7 +1593,7 @@ async function main() {
   else if (scope.since) log(`PR #${pr.number}: commits since the head Pendulum's review covers (${scope.since.slice(0, 7)}) go to the reviewer${scope.diff === null ? `, the whole PR (${scope.why})` : ", the changes since that head"}`);
   if (!marks.validated) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker${marks.handedOff ? " (handed off with its required checks running)" : ""}; running Pendulum's validation ${inputs.ciChecks.length && !alreadyReviewed ? "beside" : "before"} the review`);
-    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: passCap(), spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress), stage: decisionStage }), drift, progressCheck: stageProgress, checksOnlyFirst: marks.handedOff };
+    const preArgs = { regeneration, onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: passCap(), spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress), stage: decisionStage }), drift, progressCheck: stageProgress, checksOnlyFirst: marks.handedOff };
     let pre;
     if (preArgs.checks && !alreadyReviewed) {
       overlap = reviewOverlap({ run: (more) => validationLoop({ ...preArgs, ...more }), progress, head: () => outbox.expected() || pr.head.sha, conflicted: async () => (await getPr(repo, pr.number, token)).mergeable_state === "dirty" });
@@ -2066,7 +2069,7 @@ async function main() {
   }
   // No fix pass after a failed push, a held Question or the provider's refusal; a run of unknown cost stops nothing.
   const validation = answering && !outbox.failed && !heldQuestion && !answerRun?.refusal
-    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: passCap(), spentUsd: sumSpend(records).usd, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: stageProgress })
+    ? await validationLoop({ regeneration, onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: passCap(), spentUsd: sumSpend(records).usd, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: stageProgress })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;

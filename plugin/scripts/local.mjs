@@ -56,7 +56,7 @@ import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { git as gitIn } from "./lib/proc.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
 import { childBilling, runDecision, scrubbedEnv } from "./lib/harness.mjs";
-import { passBilling, refusalCause, refusalFields, unknownOf } from "./lib/usage.mjs";
+import { modelFamily, passBilling, refusalCause, refusalFields, unknownOf, windowFamily } from "./lib/usage.mjs";
 import { choiceOf } from "./lib/choice.mjs";
 import { bwrapShim, claudeEnvText, localTools, stageCommands } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
@@ -166,6 +166,12 @@ const PIN_FIX = "Apply one `pendulum:account:<name>` naming an account of this O
 /** Whether a stage's result.json shows a pass its provider served (output or credits), with no usage limit ending it. */
 /** A usage limit or quota that Blocked it with no reset reported (`limitRefused`) is a refusal too, never a served pass. */
 const servedPass = (r) => !r.usageLimit && !r.limitRefused && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
+/**
+ * Whether a probe's record (harness.mjs runDecision) shows an answer its provider served: the harness exited clean
+ * with a result of its own (Claude Code's `result` event, read as `subtype`: a stream with none takes its last line
+ * for one), not ended by Pendulum, and with output or credits (servedPass: a synthetic result reports none).
+ */
+const probeServed = (rec) => !!rec && rec.ok === true && !rec.noRun && !rec.timedOut && !rec.stopped && rec.exitCode === 0 && (rec.harness !== "claude" || rec.subtype === "success") && servedPass(rec);
 /** A pinned release serve could not fetch or start is tried again after this long (followPin). */
 export const PIN_RETRY_MS = 10 * 60_000;
 /** The least time between two switches to a new pinned release (followPin), so a pin that keeps moving cannot hold the loop. */
@@ -2397,8 +2403,9 @@ export class Local {
    * of its is held to one), whose reset is more than PROBE_NEAR_MS ahead and that no serve on this machine probed within
    * PROBE_EVERY_MS (holds.mjs probeDue), it takes the turn in the machine's holds (so another serve here probes nothing
    * meanwhile) and starts one probe (probeHold), without waiting for it: the tick goes on, and a hold the probe releases
-   * is read at the next one (heldNoMore, limitHold). One probe per account at a time in this loop. Returns the probes it
-   * started, settled together (a test's wait).
+   * is read at the next one (heldNoMore, limitHold). One probe per account at a time in this loop. The turn is a record
+   * read and then replaced, with no lock: two serves that read it in the same moment may each probe once. Returns the
+   * probes it started, settled together (a test's wait).
    */
   probeHolds() {
     const wants = this.holdWants ?? new Map();
@@ -2429,12 +2436,26 @@ export class Local {
   }
 
   /**
+   * The model a probe of `harness` runs on, for a hold whose window limits `family` (usage.mjs windowFamily; null: a
+   * window of every model): of the models this loop's stages run when the harness is the loop's (worker, reviewer,
+   * sub-agent), the first of that family, else the worker's; the harness's default for another harness's account.
+   */
+  probeModel(harness, env, family) {
+    if (harness !== this.harness) return null;
+    const inputs = resolveInputs({ args: { repo: this.repoFull }, env });
+    const models = [inputs.model, inputs.reviewerModel, inputs.subagentModel].filter(Boolean);
+    return (family ? models.find((m) => modelFamily(m) === family) : null) ?? models[0] ?? null;
+  }
+
+  /**
    * One probe of a held account (probeHolds): a single decision-free call through the account's own harness and login
    * (harness.mjs runDecision: a fixed prompt, no tool, no file write, no session kept, one turn, under its dollar and
-   * time cap), on the model this loop's stages run when the harness is the loop's, else the harness's default. It is no
-   * stage's and no Objective's: nothing of it is a stage's work, spend or record.
-   * - Answered: the hold is released as `pendulum hold release` does (holds.mjs release: one release record, for every
-   *   serve here), so the Objectives paused on it resume at the next tick and new stages start on it.
+   * time cap). It is no stage's and no Objective's: nothing of it is a stage's work, spend or record.
+   * - Its model is one the hold's window limits (probeModel): a hold kept for a per-model window (`seven_day_opus`) is
+   *   probed on a model of that family, since another model's answer says nothing of that window.
+   * - Answered (probeServed: a real result the provider served, with output; and, for a per-model window, by a model of
+   *   its family): the hold is released as `pendulum hold release` does (holds.mjs release: one release record, for
+   *   every serve here), so the Objectives paused on it resume at the next tick and new stages start on it.
    * - Refused for the usage limit or quota: the hold stands, and the next probe is PROBE_EVERY_MS on.
    * - Anything else (no answer, another refusal, a harness that did not start, the time cap): the hold stands, the same.
    * Its cost is kept with the account's last probe in the machine's holds (holds.mjs probed: with `released`, when it
@@ -2448,9 +2469,17 @@ export class Local {
     // The probe runs on its own harness's login folder alone, as a stage does (stageEnv).
     const env = { ...accountEnv(this.baseEnv(), account) };
     for (const [h, k] of [["claude", "CLAUDE_CONFIG_DIR"], ["codex", "CODEX_HOME"]]) if (h !== harness) delete env[k];
-    const model = harness === this.harness ? resolveInputs({ args: { repo: this.repoFull }, env }).model || null : null;
+    const window = store.window(hold.key, tookAt);
+    const family = windowFamily(window);
+    const model = this.probeModel(harness, env, family);
+    // runDecision is a stage's call, run here in serve's own process: it meters into harness.mjs's STAGE_SPEND, which
+    // serve never reads or writes anywhere (a stage's spend is its worker process's), and it ends on stageStopSignal,
+    // which nothing in serve raises; serve's own stop ends it through `probeStop`.
     const rec = await runDecision({ harness, model, prompt: "Reply with the single word ok.", env, label: "limit probe", signal: (this.probeStop ??= new AbortController()).signal });
-    const outcome = rec.refusal ? (refusalCause(rec.refusal) === "provider-quota" ? "limited" : "failed") : rec.ok && !rec.noRun && !rec.timedOut && !rec.stopped ? "answered" : "failed";
+    // The models that answered, as the harness reported them; a per-model window is lifted only by one of its family.
+    const answeredBy = rec.models && Object.keys(rec.models).length ? Object.keys(rec.models) : [rec.model ?? model];
+    const onWindow = !family || answeredBy.some((m) => modelFamily(m) === family);
+    const outcome = rec.refusal ? (refusalCause(rec.refusal) === "provider-quota" ? "limited" : "failed") : probeServed(rec) && onWindow ? "answered" : "failed";
     const now = (this.clock ?? Date.now)();
     const cost = { usd: typeof rec.usd === "number" && Number.isFinite(rec.usd) ? rec.usd : null, ...unknownOf([rec]) };
     const record = { harness, account: hold.key, now: tookAt, outcome, ...cost, billing: passBilling(childBilling(harness, env), rec), model: rec.model ?? model };
@@ -2458,7 +2487,7 @@ export class Local {
     const until = store.until(hold.key, now);
     if (outcome !== "answered") {
       store.probed(record);
-      const why = outcome === "limited" ? "its usage limit still refuses it" : rec.refusal ? `the provider refused it (${refusalFields(rec.refusal) || "no status"})` : `it got no answer (${String(rec.error || "no result").slice(0, 120)})`;
+      const why = outcome === "limited" ? "its usage limit still refuses it" : rec.refusal ? `the provider refused it (${refusalFields(rec.refusal) || "no status"})` : probeServed(rec) ? `it was answered by ${answeredBy.filter(Boolean).join(", ") || "a model it did not name"}, which its ${window} window does not limit` : `it got no answer (${String(rec.error || "no result the provider served").slice(0, 120)})`;
       log(`${who}: probed before its usage limit's reset${until !== null ? ` (${logTime(until)})` : ""}: ${why}; the hold stands, and it is probed again in ${minutesText(PROBE_EVERY_MS)} at the soonest (the probe: ${spent})`);
       return outcome;
     }
@@ -2468,9 +2497,13 @@ export class Local {
       log(`${who}: answered a probe (${spent}); ${until === null ? "its hold had ended already" : "a stage met its usage limit again meanwhile, so the hold stands"}`);
       return outcome;
     }
+    // Checked, then written, with no lock: a limit another serve's stage meets between the two is ended by this release
+    // too. That stage's Objective then resumes, meets the limit again and holds the account again: one start, no more.
     store.release({ account: hold.key, now });
     store.probed({ ...record, released: now });
-    log(`${who}: answered a probe before its usage limit's reset (${logTime(until)}): the limit was lifted early, so its hold is released, as \`pendulum hold release ${hold.key}\` does; stages start on it again at the next tick (the probe: ${spent})`);
+    // Answered on paid extra usage (usage.mjs `overage`): the plan's own limit may still stand, and stages would run on it.
+    const overage = rec.overage === true ? "; the answer ran on paid extra usage past the plan's limit, so stages on it may too" : "";
+    log(`${who}: answered a probe before its usage limit's reset (${logTime(until)}): the limit was lifted early, so its hold is released, as \`pendulum hold release ${hold.key}\` does; stages start on it again at the next tick${overage} (the probe: ${spent})`);
     return outcome;
   }
 

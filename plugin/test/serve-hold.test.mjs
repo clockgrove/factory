@@ -1946,7 +1946,7 @@ test("withClaim: a stage that paused on GitHub's spent rate limit is resumed aft
   }
 });
 
-test("serve: a held account days from its reset is probed beside the tick; once the probe is answered the hold is released and the Objective it held starts at a later tick (#613)", async () => {
+test("serve: a held account days from its reset is probed beside the tick; once the probe is answered the hold is released and the Objective it held starts at a later tick (#613)", { timeout: 60_000 }, async (ctx) => {
   const { readFileSync, writeFileSync } = await import("node:fs");
   // The harness on the loop's PATH: a fake `claude` that answers the probe, logging each call.
   const bin = mkdtempSync(join(tmpdir(), "probe-bin-"));
@@ -1960,12 +1960,18 @@ test("serve: a held account days from its reset is probed beside the tick; once 
   const run = await serveAgainst({
     view: (read, labels) => labels,
     firstStage: () => Promise.resolve({ exit: "delivered" }),
-    stopAfter: 2000,
+    // The loop ends on the event itself, the Objective's start (runObjective), however many ticks that takes: no count
+    // of listings bounds it. A run that never gets there ends with the test's own time cap.
+    stopAfter: Infinity,
     stubs: {
       harness: "claude",
       holds,
       accountFor: (harness) => ({ name: harness, harness, declared: false }),
       holdOf: (account) => ({ key: account.name, shared: true }),
+      pausedHere() {
+        if (ctx.signal.aborted) this.stopping = true;
+        return Promise.resolve([]);
+      },
       baseEnv: () => ({ PATH: `${bin}:${process.env.PATH}`, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1", PENDULUM_INPUT_MAX_CONCURRENT: "2" }),
       runObjective(n) {
         started.push(n);

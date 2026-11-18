@@ -16,7 +16,8 @@
 // record made on the account before it, for every serve, and resets its back-off count; no file need be removed.
 // A serve re-checks a hold whose reset is far off (#613: probeDue), since a provider may lift a limit before the reset it
 // named: each account has one `<key>.probe.json`, its last probe (when, how it ended, what it cost), replaced whole as
-// the probe starts and again as it ends, so every serve here takes turns from the same record.
+// the probe starts and again as it ends, so every serve here takes turns from the same record (read, then replaced,
+// with no lock: two serves that read it in the same moment may each probe once).
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -56,7 +57,10 @@ export const START_FORGET_MS = HOLD_MAX_MS;
  * itself comes soon enough, and the call is saved.
  */
 export const PROBE_NEAR_MS = 60 * 60_000;
-/** The least time between two probes of one account, by any serve on the machine, however the last one ended. */
+/**
+ * The least time between two probes of one account, by any serve on the machine, however the last one ended (but for
+ * two serves that take the turn in the same moment: the turn is no lock).
+ */
 export const PROBE_EVERY_MS = 30 * 60_000;
 /** How a probe ended: the provider answered it, refused it for the usage limit, or anything else (no answer). */
 export const PROBE_OUTCOMES = Object.freeze(["answered", "limited", "failed"]);

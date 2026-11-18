@@ -433,14 +433,16 @@ The count starts again when a pass on that account completes (the provider serve
 A hold lasts at most eight days.
 
 **Re-checking a hold.** A provider can lift a limit before the reset it named (a reset on the account, a plan change), so `serve` probes a held account now and then instead of trusting a reset days away.
-- **When:** only while the hold's reset is more than an hour ahead, only for a hold some work of that `serve` waits on at that tick (an Objective paused on it, a review or new work held by it), and at most once in 30 minutes per account for every `serve` on the machine together, however the last probe ended.
+- **When:** only while the hold's reset is more than an hour ahead, only for a hold some work of that `serve` waits on at that tick (an Objective paused on it, a review or new work held by it), and once in 30 minutes per account for every `serve` on the machine together, however the last probe ended (the turn is a record, not a lock: two `serve`s that take it in the same moment each probe once).
   Nearer than an hour, the reset itself comes soon enough and nothing is probed.
 - **What:** one call through the held account's own harness and login, the same call a decision made through the harness is (PLAN.md): a fixed one-line prompt, no tool, no file write, no session kept, one turn, under that call's dollar and time cap, on the model the loop's stages run (the harness's default for an account of another harness).
+  A hold kept for a per-model window (`seven_day_opus`, `seven_day_sonnet`) is probed on a model of that family among the loop's worker, reviewer and sub-agent models.
   It runs beside the tick, which never waits for it, and it is no stage: it starts none, takes no slot and writes nothing to GitHub.
-- **Answered:** the hold is released exactly as `pendulum hold release` does it (below), for every `serve` on the machine, and the log says so.
+- **Answered:** the hold is released exactly as `pendulum hold release` does it (below), for every `serve` on the machine, and the log says so (and says when the answer ran on paid extra usage past the plan's limit).
+  Only a served answer counts: a result of the harness's own, a clean exit and output tokens; and for a per-model window, an answer by a model of that family.
   At the next tick the Objectives paused on the account resume and new stages start on it.
 - **Refused for the usage limit or quota:** the hold stands, and the account is probed again 30 minutes on at the soonest.
-- **Anything else** (no answer, another refusal, a harness that did not start, the time cap): the hold stands, the same.
+- **Anything else** (no answer, a result with no output, an answer by a model the window does not limit, another refusal, a harness that did not start, the time cap, `serve` stopping): the hold stands, the same.
 - **Its cost** is the probe's own, in no stage's or Objective's spend: the log line of each probe and the account's probe record in the holds folder give the dollars its harness reported, or say the call is of unknown cost with the reason's code (`unreported`, `no-price`, …), never an estimate.
   `daily_usd` and `pendulum report` read GitHub's records, so they do not count it.
 - Only a limit with a reset is probed: an account passed over on a no-reset guess (Accounts, below) is tried again when the guess ends, and Copilot reports no reset.

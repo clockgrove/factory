@@ -27,6 +27,19 @@ const H = 60 * MIN;
 const DAY = 24 * H;
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
 const LIMIT_RUN = readFileSync(join(import.meta.dirname, "fixtures", "claude-2.1.323-usage-limit.jsonl"), "utf8");
+const AUTH_RUN = readFileSync(join(import.meta.dirname, "fixtures", "claude-2.1.321-401.jsonl"), "utf8");
+const INIT = { type: "system", subtype: "init", session_id: "11111111-1111-1111-1111-111111111111" };
+const jsonl = (events) => events.map((l) => JSON.stringify(l)).join("\n") + "\n";
+/** An answered call as Claude Code reports each model's use (`modelUsage`): `model` answered, with output. */
+const answeredBy = (model) => jsonl([INIT, { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "ok", session_id: INIT.session_id, total_cost_usd: 0.002, modelUsage: { [model]: { inputTokens: 900, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.002 } } }]);
+/** Wait until `ok()` holds (polled every 10 ms, up to 10 s). */
+const until = async (ok) => {
+  const end = Date.now() + 10_000;
+  while (!ok()) {
+    if (Date.now() > end) throw new Error("timed out waiting");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
 /** Claude Code's stream for an answered call that cost `usd`. */
 const answered = (usd = 0.012) => [{ type: "system", subtype: "init", session_id: "11111111-1111-1111-1111-111111111111" }, { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "ok", session_id: "11111111-1111-1111-1111-111111111111", total_cost_usd: usd, usage: { input_tokens: 900, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }].map((l) => JSON.stringify(l)).join("\n") + "\n";
 
@@ -107,8 +120,10 @@ function serveOn(h, clock) {
   const calls = join(dev, "calls.jsonl");
   const fake = join(dev, "fake.json");
   writeFileSync(calls, "");
-  writeFileSync(join(bin, "claude"), `#!${process.execPath}\nconst fs = require("node:fs");\nconst cfg = JSON.parse(fs.readFileSync(${JSON.stringify(fake)}, "utf8"));\nconst prompt = fs.readFileSync(0, "utf8");\nfs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args: process.argv.slice(2), prompt, login: process.env.CLAUDE_CONFIG_DIR ?? null, cwd: process.cwd() }) + "\\n");\nprocess.stdout.write(cfg.out);\nprocess.exit(cfg.code);\n`, { mode: 0o755 });
-  loop.says = (out, code = 0) => writeFileSync(fake, JSON.stringify({ out, code }));
+  writeFileSync(join(bin, "claude"), `#!${process.execPath}\nconst fs = require("node:fs");\nconst cfg = JSON.parse(fs.readFileSync(${JSON.stringify(fake)}, "utf8"));\nconst prompt = fs.readFileSync(0, "utf8");\nfs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args: process.argv.slice(2), prompt, login: process.env.CLAUDE_CONFIG_DIR ?? null, cwd: process.cwd() }) + "\\n");\nconst end = () => {\n  process.stdout.write(cfg.out);\n  process.exit(cfg.code);\n};\n// With \`gate\`, it answers once that file exists: a probe still running, for as long as a test wants.\nconst wait = () => (!cfg.gate || fs.existsSync(cfg.gate) ? end() : setTimeout(wait, 10));\nwait();\n`, { mode: 0o755 });
+  const gate = join(dev, "go");
+  loop.says = (out, code = 0, { gated = false } = {}) => writeFileSync(fake, JSON.stringify({ out, code, gate: gated ? gate : null }));
+  loop.go = () => writeFileSync(gate, "");
   loop.says(answered());
   loop.calls = () => readFileSync(calls, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
   // What every child of the loop starts from, the real baseEnv's, with the fake first on its PATH.
@@ -305,4 +320,191 @@ test("#613: the probe bounds are the store's: a hold more than an hour from its 
   assert.equal(mem.probeDue("claude@env", t + MIN), false);
   // The record goes once no probe was made for as long as a hold can last.
   assert.ok(HOLD_MAX_MS > PROBE_EVERY_MS);
+});
+
+const probeFile = (h, key = "alpha") => JSON.parse(readFileSync(join(holdsDir(h), `${key}.probe.json`), "utf8"));
+const releases = (h) => readdirSync(holdsDir(h)).filter((f) => /^[a-z@0-9-]+\.[0-9a-f]{16}\.json$/.test(f) && JSON.parse(readFileSync(join(holdsDir(h), f), "utf8")).released === true).length;
+
+test("#613: only an answer the provider served releases: a clean exit with a result of no output (a synthetic one), or with no result line at all, keeps the hold", async () => {
+  // Claude Code's own stand-in message (model `<synthetic>`, no tokens) under a result that says success.
+  const synthetic = jsonl([INIT, { type: "assistant", message: { model: "<synthetic>", role: "assistant", type: "message", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }, session_id: INIT.session_id }, { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "ok", session_id: INIT.session_id, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: {} }]);
+  // A stream that ends with no result event: its last line is no result, whatever it carries.
+  const noResult = jsonl([INIT, { type: "assistant", message: { model: "claude-opus-5-5", role: "assistant", type: "message", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 900, output_tokens: 2 } }, session_id: INIT.session_id }]);
+  for (const [out, name] of [[synthetic, "synthetic"], [noResult, "no result"]]) {
+    await scene(async (h, lines) => {
+      let t = Date.now();
+      const loop = serveOn(h, () => t);
+      loop.result = limited(t + 6 * DAY, t);
+      await work(loop);
+      loop.says(out, 0);
+      t += MIN;
+      assert.deepEqual((await tick(loop)).paused, [], name);
+      assert.equal(loop.calls().length, 1, name);
+      assert.equal(loop.limitUntil({ key: "alpha", shared: true }), t - MIN + 6 * DAY, `${name}: the hold stands`);
+      assert.equal(releases(h), 0, name);
+      assert.equal(probeFile(h).outcome, "failed", name);
+      assert.ok(lines.some((l) => /claude account alpha: probed .*: it got no answer \(.*\); the hold stands/.test(l)), lines.join(""));
+    });
+  }
+});
+
+test("#613: a hold kept for a per-model window is probed on a model of that family, and released only by an answer from one", async () => {
+  await scene(async (h, lines) => {
+    let t = Date.now();
+    // This loop's stages run Opus alone: its probe of a Sonnet window is answered by Opus, which says nothing of it.
+    const loop = serveOn(h, () => t);
+    loop.result = limited(t + 6 * DAY, t, "seven_day_sonnet");
+    await work(loop);
+    loop.says(answeredBy("claude-opus-5-5"));
+    t += MIN;
+    assert.deepEqual((await tick(loop)).paused, []);
+    assert.equal(loop.calls().length, 1);
+    assert.equal(loop.limitUntil({ key: "alpha", shared: true }), t - MIN + 6 * DAY, "another model's answer releases nothing");
+    assert.equal(releases(h), 0);
+    assert.deepEqual([probeFile(h).outcome, probeFile(h).usd], ["failed", 0.002]);
+    assert.ok(lines.some((l) => /claude account alpha: probed .*: it was answered by claude-opus-5-5, which its seven_day_sonnet window does not limit; the hold stands/.test(l)), lines.join(""));
+    // A loop whose sub-agents run Sonnet probes on that model; an answer that names another model still releases nothing.
+    const sonnet = serveOn(h, () => t);
+    sonnet.wf = { PENDULUM_SUBAGENT_MODEL: "claude-sonnet-5" };
+    sonnet.says(answeredBy("claude-opus-5-5"));
+    t += PROBE_EVERY_MS;
+    await tick(sonnet);
+    const call = sonnet.calls()[0];
+    assert.equal(call.args[call.args.indexOf("--model") + 1], "claude-sonnet-5", "probed on the window's family");
+    assert.equal(releases(h), 0);
+    // Answered by a Sonnet model: the window is lifted.
+    sonnet.says(answeredBy("claude-sonnet-5"));
+    t += PROBE_EVERY_MS;
+    await tick(sonnet);
+    assert.equal(sonnet.calls().length, 2);
+    assert.equal(releases(h), 1);
+    assert.equal(loop.limitUntil({ key: "alpha", shared: true }), null);
+    assert.deepEqual([probeFile(h).outcome, probeFile(h).model, probeFile(h).released], ["answered", "claude-sonnet-5", t]);
+  });
+  // A window of every model is probed on the worker's model, and its answer releases.
+  await scene(async (h) => {
+    let t = Date.now();
+    const loop = serveOn(h, () => t);
+    loop.wf = { PENDULUM_SUBAGENT_MODEL: "claude-sonnet-5" };
+    loop.result = limited(t + 6 * DAY, t, "seven_day");
+    await work(loop);
+    loop.says(answeredBy("claude-opus-5-5"));
+    t += MIN;
+    await tick(loop);
+    assert.equal(loop.calls()[0].args[loop.calls()[0].args.indexOf("--model") + 1], "claude-opus-5-5");
+    assert.equal(releases(h), 1);
+  });
+});
+
+test("#613: an answered probe releases only the hold it was started for: a limit met while it ran stands, and a hold already ended gets no second release", async () => {
+  await scene(async (h, lines) => {
+    let t = Date.now();
+    const loop = serveOn(h, () => t);
+    loop.result = limited(t + 6 * DAY, t);
+    await work(loop);
+    loop.says(answered(), 0, { gated: true });
+    t += MIN;
+    await loop.pausedHere(new Map());
+    const probing = loop.probeHolds();
+    await until(() => loop.calls().length === 1);
+    // Another serve's stage meets the account's limit again while the probe runs.
+    t += MIN;
+    accountHolds({ dir: holdsDir(h) }).limit({ harness: "claude", account: "alpha", reset: t + 5 * DAY, now: t });
+    t += 1000;
+    loop.go();
+    await probing;
+    assert.equal(releases(h), 0);
+    assert.equal(loop.limitUntil({ key: "alpha", shared: true }), t - MIN - 1000 - MIN + 6 * DAY, "the hold stands");
+    assert.deepEqual([probeFile(h).outcome, probeFile(h).released], ["answered", undefined]);
+    assert.ok(lines.some((l) => /claude account alpha: answered a probe \(\$0\.0120\); a stage met its usage limit again meanwhile, so the hold stands/.test(l)), lines.join(""));
+  });
+  await scene(async (h, lines) => {
+    let t = Date.now();
+    const loop = serveOn(h, () => t);
+    loop.result = limited(t + 6 * DAY, t);
+    await work(loop);
+    loop.says(answered(), 0, { gated: true });
+    t += MIN;
+    await loop.pausedHere(new Map());
+    const probing = loop.probeHolds();
+    await until(() => loop.calls().length === 1);
+    // A person releases the account while the probe runs.
+    t += MIN;
+    accountHolds({ dir: holdsDir(h) }).release({ account: "alpha", now: t });
+    t += 1000;
+    loop.go();
+    await probing;
+    assert.equal(releases(h), 1, "the person's release alone");
+    assert.equal(probeFile(h).released, undefined);
+    assert.ok(lines.some((l) => /claude account alpha: answered a probe \(\$0\.0120\); its hold had ended already/.test(l)), lines.join(""));
+    // The resume says whose release it was: the person's.
+    assert.deepEqual(await loop.pausedHere(new Map()), [8]);
+    assert.ok(lines.some((l) => /#8: claude account alpha was released \(pendulum hold release\) at /.test(l)), lines.join(""));
+  });
+});
+
+test("#613: a refusal that is no usage limit keeps the hold; a probe under way is the account's only one, in its serve and in another; a stopping serve ends it; a Copilot hold is never probed", async () => {
+  // A refused credential: no answer, and no word on the limit.
+  await scene(async (h, lines) => {
+    let t = Date.now();
+    const loop = serveOn(h, () => t);
+    loop.result = limited(t + 6 * DAY, t);
+    await work(loop);
+    loop.says(AUTH_RUN, 1);
+    t += MIN;
+    await tick(loop);
+    assert.equal(loop.calls().length, 1);
+    assert.equal(releases(h), 0);
+    assert.equal(loop.limitUntil({ key: "alpha", shared: true }), t - MIN + 6 * DAY);
+    assert.equal(probeFile(h).outcome, "failed");
+    assert.ok(lines.some((l) => /claude account alpha: probed .*: the provider refused it \(HTTP 401[^)]*\); the hold stands/.test(l)), lines.join(""));
+  });
+  await scene(async (h, lines) => {
+    let t = Date.now();
+    const loop = serveOn(h, () => t);
+    const other = serveOn(h, () => t);
+    loop.result = limited(t + 6 * DAY, t);
+    await work(loop);
+    loop.says(answered(), 0, { gated: true });
+    t += MIN;
+    const tookAt = t;
+    await loop.pausedHere(new Map());
+    const probing = loop.probeHolds();
+    // The turn is written as the probe starts, before any answer: another serve reads it and stays quiet.
+    assert.deepEqual(probeFile(h), { harness: "claude", account: "alpha", at: tookAt, outcome: null, usd: null, billing: null, model: null });
+    await until(() => loop.calls().length === 1);
+    t += MIN;
+    await tick(other);
+    assert.equal(other.calls().length, 0, "another serve, inside the interval");
+    // Past the interval with the probe still running: this loop starts no second one of its own.
+    t += PROBE_EVERY_MS;
+    await loop.pausedHere(new Map());
+    assert.deepEqual(await loop.probeHolds(), [], "one probe per account at a time in a loop");
+    assert.equal(loop.calls().length, 1);
+    // serve stops (its signal handler aborts probeStop): the probe ends, releasing nothing.
+    loop.probeStop.abort();
+    assert.deepEqual(await probing, ["failed"]);
+    assert.equal(releases(h), 0);
+    assert.equal(loop.limitUntil({ key: "alpha", shared: true }), tookAt - MIN + 6 * DAY);
+    assert.equal(probeFile(h).outcome, "failed");
+    assert.ok(lines.some((l) => /claude account alpha: probed .*: it got no answer \(stopped by Pendulum\); the hold stands/.test(l)), lines.join(""));
+    // And a stopping loop starts none.
+    t += PROBE_EVERY_MS;
+    loop.stopping = true;
+    await loop.pausedHere(new Map());
+    assert.deepEqual(await loop.probeHolds(), []);
+    assert.equal(loop.calls().length, 1);
+  });
+  // Copilot reports no reset; a record that holds its login to one all the same is never probed.
+  await scene(async (h) => {
+    let t = Date.now();
+    const loop = serveOn(h, () => t);
+    const key = loop.holdOf({ name: "copilot", harness: "copilot", declared: false }).key;
+    loop.holds.limit({ harness: "copilot", account: key, reset: t + 6 * DAY, now: t });
+    t += MIN;
+    assert.match(loop.limitHold(["pendulum:objective", "pendulum:harness:copilot"], 9, null), /copilot's usage limit is spent until /);
+    assert.deepEqual(await loop.probeHolds(), []);
+    assert.equal(loop.holds.probe(key, t), null, "no turn taken");
+    assert.equal(loop.calls().length, 0);
+  });
 });

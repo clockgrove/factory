@@ -256,3 +256,12 @@ export const backend = (env = process.env) => (isLocal(env) || env.PENDULUM_LOCA
  * objectiveRecords).
  */
 export const spendInProgress = () => true;
+
+/** The routes a stage records it ran on (stageRoute). */
+export const ROUTES = Object.freeze(["actions", "local", "sandbox"]);
+/**
+ * The route this stage runs on, as its usage record and spend line record it (#570): `local` (local mode's backend),
+ * `sandbox` (a cloud sandbox stage: stage.mjs sets PENDULUM_STAGE_SANDBOX) or `actions` (a GitHub Actions job); null
+ * when its environment names none.
+ */
+export const stageRoute = (env = process.env) => (backend(env).name === "local" ? "local" : env.PENDULUM_STAGE_SANDBOX === "1" ? "sandbox" : env.GITHUB_ACTIONS === "true" ? "actions" : null);

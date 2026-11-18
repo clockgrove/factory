@@ -501,7 +501,7 @@ test("the rebase line, the rebase tally, the vendor comment and an account's sha
   assert.ok(!/\$0\.00/.test(spendText({ usd: tally.usd, unknown: 0, byBilling: tally.byBilling })), spendText({ usd: tally.usd, unknown: 0, byBilling: tally.byBilling }));
   // A sandbox stage with no progress comment: the vendor comment carries the model's billing; the vendor's dollars none.
   const body = vendorBody({ line: "- 00:00Z sandbox", vendorUsd: 0.1, modelUsd: 0.8, modelBilling: usage });
-  assert.deepEqual(spendParts(body), { usd: 0.9, modelUsd: 0.8, vendorUsd: 0.1, usdByBilling: { subscription: 0.8 }, billing: "subscription" });
+  assert.deepEqual(spendParts(body), { usd: 0.9, modelUsd: 0.8, vendorUsd: 0.1, usdByBilling: { subscription: 0.8 }, billing: "subscription", route: "sandbox" });
   assert.equal(spendText(spendOf(body)), `$0.90: $0.80 ${SUB} + $0.10`, "the vendor's dollars a bare part");
   // An account's share in the Harness cell, summed from 1/100-cent figures: no stray part either.
   const use = accountUse([{ account: "alpha", usd: 0.3333, usdByBilling: { subscription: 0.333333 } }, { account: "alpha", usd: 0.3333, usdByBilling: { subscription: 0.333333 } }]);

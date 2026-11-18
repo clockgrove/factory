@@ -753,6 +753,8 @@ test("report (S8): a pass's relayed key spend is `api` in its ledger entry and i
   const w = world();
   const rec = w.artifacts["pendulum-usage-3"][0].record;
   rec.ledger = [{ ...rec.ledger[0], billing: "subscription", usd: 0.2, usdByBilling: { subscription: 0.15, api: 0.05 }, workerKeyUsd: 0.05 }, ...rec.ledger.slice(1)];
+  // The stage's own figure split the same way, so its passes fit in it.
+  rec.usdByBilling = { api: 0.20637, subscription: 0.15 };
   const { json: r } = await report(w, { issue: 3 });
   assert.deepEqual(usd(r.breakdowns.pass.find((x) => x.key === "work")), { api: 0.05, subscription: 0.15, credits: 0, unknown: 0, sandbox: 0 });
   // Cost per model minute: each kind over the same priced minutes, never summed.
@@ -780,7 +782,7 @@ test("report (nits): a booking two records carry counts once, on the last, as th
 /** #3 as GitHub Actions stages write it since spend lines are on every route: each progress comment carries its spend line. */
 function linedWorld() {
   const w = world();
-  const lines = { "44002648279": { usd: 0.35637, parts: { usdByBilling: { api: 0.35637 }, billing: "api" } }, "44002920873": { usd: 0.163442, parts: { usdByBilling: { api: 0.163442 }, billing: "api" } } };
+  const lines = { "44002648279": { usd: 0.35637, parts: { usdByBilling: { api: 0.35637 }, billing: "api", route: "actions" } }, "44002920873": { usd: 0.163442, parts: { usdByBilling: { api: 0.163442 }, billing: "api", route: "actions" } } };
   w.comments = w.comments.map((c) => {
     const key = /^<!-- pendulum:3:progress:(?:work|review):(\d+) -->/.exec(c.body || "")?.[1];
     return key && lines[key] && c.user === BOT ? { ...c, body: `${c.body}\n${spendMarker(lines[key].usd, lines[key].parts)}` } : c;
@@ -1646,7 +1648,7 @@ function churnedWorld({ workExit = "blocked", reviewExit = "delivered" } = {}) {
     if (c.user !== BOT) return c;
     const [usdOf, parts, exit] = c.body.startsWith("<!-- pendulum:3:progress:work:44002648279 -->") ? [0.35637, work, workExit] : c.body.startsWith("<!-- pendulum:3:progress:review:44002920873 -->") ? [0.163442, review, reviewExit] : [null];
     if (usdOf === null) return c;
-    const line = spendMarker(usdOf, { usdByBilling: { api: usdOf }, billing: "api", ...parts, ...(exit ? { exit } : {}) });
+    const line = spendMarker(usdOf, { usdByBilling: { api: usdOf }, billing: "api", ...parts, ...(exit ? { exit } : {}), route: "actions" });
     return { ...c, body: c.body.replace(/^<!-- pendulum:spend [^\n]*$/m, line) };
   });
   return w;
@@ -1706,17 +1708,55 @@ test("report (#570 V2): a stage with no ledger puts its spend line's dollars by 
   assert.ok(rest.cost.usd.api >= 0.02, "the decision calls outside a stage name no pass");
 });
 
+test("report (#570 V2): a stage whose passes name more than its own figure is booked whole under no pass, its passes still counted, the reason said; the row of no pass is never negative", async () => {
+  // #3's build: its ledger line's passes cost 0.35637, its spend line says 0.3.
+  const disagree = () => {
+    const w = ledgeredWorld();
+    w.comments = w.comments.map((c) => (c.user === BOT && c.body.startsWith("<!-- pendulum:3:progress:work:44002648279 -->") ? { ...c, body: c.body.replace(/^<!-- pendulum:spend [^\n]*$/m, spendMarker(0.3, { usdByBilling: { api: 0.3 }, billing: "api", route: "actions" })) } : c));
+    return w;
+  };
+  const { json: r } = await report(disagree(), { issue: 3 });
+  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.cost.usd.api]), [["work", 1, 0], ["validation-fix", 1, 0], ["answer", 1, 0], ["review", 1, 0.163442], [null, null, 0.3]]);
+  assert.deepEqual(byIssue(r, 3).passes, { total: 4, answer: 1, fix: 1 }, "its passes still counted");
+  for (const x of r.breakdowns.pass) for (const k of COST_KINDS) assert.ok(x.cost.usd[k] >= 0, `${x.key} ${k}`);
+  assert.equal(r.breakdowns.pass.reduce((t, x) => t + x.cost.usd.api, 0), r.totals.cost.usd.api);
+  const said = r.source.missing.find((m) => m.code === "ledger-overruns");
+  assert.deepEqual([said.issues, said.stages], [[3], [{ issue: 3, stage: "work", key: "44002648279" }]]);
+  // The same from its finish card.
+  const w = disagree();
+  w.comments.push(await finishCard3(w));
+  const card = await report(w, { issue: 3 });
+  assert.equal(card.json.source.read.summaries, 1);
+  assert.deepEqual(card.json.breakdowns.pass, r.breakdowns.pass);
+  assert.deepEqual(card.json.source.missing.find((m) => m.code === "ledger-overruns"), said);
+});
+
 test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Blocks, clock and Running, and the dollars by UTC day", async () => {
-  const w = world();
-  // #5's Blocked notice, Pendulum's own; #9 Running now.
-  w.comments.push(comment(5, `<!-- pendulum:5:blocked:work:local-a1 -->\nBlocked (work): x.\n<!-- pendulum:block {"cause":"pendulum"} -->`, { user: ME, at: "2026-11-17T03:30:00Z" }));
-  w.issues.find((i) => i.number === 9).labels.push({ name: "pendulum:running" });
-  // A stage the next day, on Actions.
-  w.comments.push(progress(7, "review", "52001", { at: "2026-11-18T01:00:00Z", spend: { usd: 0.05, parts: { usdByBilling: { api: 0.05 }, billing: "api" } } }));
+  const { vendorBody } = await import("../scripts/lib/logic.mjs");
+  // The world with each local stage's spend line recording its route, as the writer does now: its Actions stages with
+  // no spend line, and #7's build, record none.
+  const routed = () => {
+    const w = world();
+    w.comments = w.comments.map((c) => (c.user === ME && /^<!-- pendulum:\d+:progress:/.test(c.body) ? { ...c, body: c.body.replace(/^<!-- pendulum:spend \{(.*)\} -->$/m, '<!-- pendulum:spend {$1,"route":"local"} -->') } : c));
+    // #5's Blocked notice, Pendulum's own; #9 Running now.
+    w.comments.push(comment(5, `<!-- pendulum:5:blocked:work:local-a1 -->\nBlocked (work): x.\n<!-- pendulum:block {"cause":"pendulum"} -->`, { user: ME, at: "2026-11-17T03:30:00Z" }));
+    w.issues.find((i) => i.number === 9).labels.push({ name: "pendulum:running" });
+    // #7's review again the next day, on GitHub Actions, after its merge.
+    w.comments.push(progress(7, "review", "52001", { at: "2026-11-18T01:00:00Z", spend: { usd: 0.05, parts: { usdByBilling: { api: 0.05 }, billing: "api", route: "actions" } } }));
+    // #12: a cloud sandbox stage that left only its vendor comment, which records the route.
+    w.issues.push(objectiveIssue(12, { state: "open", labels: ["pendulum:blocked"] }));
+    w.comments.push(comment(12, `<!-- pendulum:12:vendor:work:9001-abcdef012345 -->\n${vendorBody({ line: "- sandbox stopped", vendorUsd: 0.04, modelUsd: 0.1, modelBilling: { usdByBilling: { api: 0.1 }, billing: "api" } })}`, { at: "2026-11-17T06:00:00Z" }));
+    // #13: merged in the period, with no record of it read.
+    w.issues.push(objectiveIssue(13));
+    w.pulls.push(ownPull(13, { created: "2026-11-17T06:00:00Z", merged: "2026-11-17T07:00:00Z" }));
+    return w;
+  };
+  const w = routed();
   const { json: r } = await report(w, { since: "2026-11-17" });
-  // The route each stage ran on: the App's comments are GitHub Actions', the login's local mode's.
-  assert.deepEqual([3, 5, 7, 8].map((n) => byIssue(r, n).route), ["actions", "local", "mixed", "mixed"]);
-  assert.deepEqual(Object.fromEntries(r.breakdowns.route.map((x) => [x.key, x.stages])), { actions: 5, local: 5, decisions: 1, null: 1 });
+  // The route each stage's spend line records; a stage whose line records none is under none, and said.
+  assert.deepEqual([3, 5, 7, 8, 12].map((n) => byIssue(r, n).route), [null, "local", "mixed", null, "sandbox"]);
+  assert.deepEqual(Object.fromEntries(r.breakdowns.route.map((x) => [x.key, x.stages])), { null: 5, local: 5, decisions: 1, actions: 1, sandbox: 1 });
+  assert.deepEqual(r.source.missing.find((m) => m.code === "route-unrecorded")?.issues, [3, 7, 8]);
   assert.deepEqual([byIssue(r, 5).blocks, byIssue(r, 3).blocks], [1, 0]);
   assert.deepEqual([byIssue(r, 5).running, byIssue(r, 3).running], [false, false]);
   const { json: nine } = await report(w, { issue: 9 });
@@ -1727,16 +1767,21 @@ test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Bl
   // By day: each stage on the UTC date it started, oldest first, covering the totals.
   assert.deepEqual(r.breakdowns.day.map((x) => [x.key, x.stages]), [["2026-11-17", r.totals.stages - 1], ["2026-11-18", 1]]);
   assert.equal(r.breakdowns.day[1].cost.usd.api, 0.05);
-  // Per merged Objective: #3 and #7; #7 has a teammate's stage, a run of unknown cost and no fix passes it can count.
+  // Per merged Objective: #3, #7 and #13, merged in the period; #7 has a teammate's stage (a run of unknown cost, and no
+  // fix passes it can count), and no record of #13 was read.
   const p = r.totals.perMerged;
-  assert.equal(p.n, 2);
-  assert.deepEqual([p.usd.api.median, p.usd.api.n, p.usd.api.leftOut], [usd(byIssue(r, 3)).api, 1, 1]);
-  assert.deepEqual([p.reviewRounds.n, p.fixPasses.n, p.fixPasses.median, p.wallMinutes.n, p.wallMinutes.leftOut], [2, 1, 1, 0, 2]);
-  assert.deepEqual(p.leftOut, [{ issue: 3, why: ["no-clock"] }, { issue: 7, why: ["unknown-runs", "no-passes", "no-clock"] }]);
-  // A period that starts after #7's issue was opened cuts its figures: it is left out of them.
-  const { json: late } = await report(w, { since: "2026-11-17T02:00:00Z" });
-  assert.deepEqual(late.totals.perMerged.leftOut.find((x) => x.issue === 7).why, ["outside-period", "no-clock"]);
-  assert.equal(late.totals.perMerged.reviewRounds.n, 1);
+  assert.equal(p.n, 3);
+  assert.deepEqual([p.usd.api.median, p.usd.api.n, p.usd.api.leftOut], [usd(byIssue(r, 3)).api, 1, 2]);
+  assert.deepEqual([p.reviewRounds.n, p.reviewRounds.leftOut, p.fixPasses.n, p.fixPasses.median, p.wallMinutes.n, p.wallMinutes.leftOut], [2, 1, 1, 1, 0, 3]);
+  assert.deepEqual(p.leftOut, [{ issue: 3, why: ["no-clock"] }, { issue: 7, why: ["unknown-runs", "no-passes", "no-clock"] }, { issue: 13, why: ["records-unread"] }]);
+  // Merged in the period, with every stage's figures: a period that starts after #7's rebase and first review counts
+  // only its later review in its row, and both of its reviews per merged Objective; #3 merged before it, out.
+  const { json: late } = await report(w, { since: "2026-11-17T04:45:00Z" });
+  assert.equal(byIssue(late, 7).stages.review, 1);
+  assert.deepEqual([late.totals.perMerged.n, late.totals.perMerged.reviewRounds.median], [2, 2]);
+  // --until bounds the merge: #7, merged at 05:00, is not merged in a period that ends before it.
+  const { json: early } = await report(w, { since: "2026-11-17", until: "2026-11-17T04:59:00Z" });
+  assert.deepEqual(early.totals.perMerged.leftOut.map((x) => x.issue), [3]);
   // With its finish card, a merged Objective's clock is the card's: its first label to its merge.
   const carded = churnedWorld();
   carded.comments.push(await finishCard3(carded));
@@ -1748,15 +1793,38 @@ test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Bl
   assert.deepEqual(fromStages.totals.perMerged, fromCard.totals.perMerged);
   assert.deepEqual([fromStages.totals.perMerged.fixPasses.n, fromStages.totals.perMerged.fixPasses.median], [1, 1]);
   const three = byIssue(fromStages, 3);
-  assert.deepEqual([three.started, three.merged, three.clockWhy], ["2026-11-17T02:23:42Z", real.pr.merged_at, null]);
+  assert.deepEqual([three.started, three.merged, three.clockWhy, three.route], ["2026-11-17T02:23:42Z", real.pr.merged_at, null, "actions"]);
   assert.equal(three.wallMinutes, Math.round(((Date.parse(real.pr.merged_at) - Date.parse("2026-11-17T02:23:42Z")) / 60_000) * 100) / 100);
   // The Markdown carries the same figures.
   const md = renderReport(r);
   assert.match(md, /^## By route$/m);
   assert.match(md, /^\| 2026-11-18 \| 1 \| \$0\.05 \|/m);
   assert.match(md, /^## Per merged Objective$/m);
-  assert.match(md, /^- Left out: #3 \(no-clock\); #7 \(unknown-runs, no-passes, no-clock\)\.$/m);
+  assert.match(md, /^- Left out: #3 \(no-clock\); #7 \(unknown-runs, no-passes, no-clock\); #13 \(records-unread\)\.$/m);
   assert.match(md, /^\| #7 \| merged \| mixed \| 0 \| — \|/m);
+});
+
+test("report (#570): the route a stage ran on is recorded in its usage record and its spend line, never inferred", async () => {
+  const { spendParts, vendorBody } = await import("../scripts/lib/logic.mjs");
+  const { stageRoute } = await import("../scripts/lib/backend.mjs");
+  assert.deepEqual([stageRoute({ GITHUB_ACTIONS: "true" }), stageRoute({ GITHUB_ACTIONS: "true", PENDULUM_STAGE_SANDBOX: "1" }), stageRoute({ PENDULUM_LOCAL: "1" }), stageRoute({})], ["actions", "sandbox", "local", null]);
+  const dir = mkdtempSync(join(tmpdir(), "usage-route-"));
+  const saved = process.env.PENDULUM_LOCAL;
+  process.env.PENDULUM_LOCAL = "1";
+  try {
+    const rec = writeUsage(dir, { harness: "claude", model: "claude-opus-5-5", records: [], passes: 0, exit: "delivered", reason: "", credentialBasis: "test" });
+    assert.equal(rec.route ?? JSON.parse(readFileSync(join(dir, "result.json"), "utf8")).route, "local");
+  } finally {
+    if (saved === undefined) delete process.env.PENDULUM_LOCAL;
+    else process.env.PENDULUM_LOCAL = saved;
+  }
+  const line = stageSpendLine({ usd: 0.1, route: "local" });
+  assert.equal(spendParts(spendMarker(line.usd, line.parts)).route, "local");
+  assert.ok(!Object.hasOwn(stageSpendLine({ usd: 0.1, route: "the moon" }).parts, "route"));
+  assert.equal(spendParts(vendorBody({ line: "x", vendorUsd: 0.01 })).route, "sandbox");
+  // Who posted a stage's comment names no route: the App's comment with no route on its line is under none.
+  const { json: r } = await report(world(), { issue: 3 });
+  assert.deepEqual([byIssue(r, 3).route, r.breakdowns.route.map((x) => x.key)], [null, [null]]);
 });
 
 test("report (#570 V8): the stages whose spend line records they ended Blocked, with their cost; a stage whose records do not say is named", async () => {

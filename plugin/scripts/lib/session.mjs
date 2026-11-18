@@ -7,7 +7,7 @@ import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { backend, spendInProgress } from "./backend.mjs";
+import { backend, spendInProgress, stageRoute } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
 import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, reservedSpend, openPasses, passesRunning, runHarness, seedSessionTotal, setStageBilling, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
 import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
@@ -2288,6 +2288,8 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once;
     // null when the stage had none (a stage the network ended before its comment, a local key only its reporter knows).
     progressRun: typeof progressRun === "string" && progressRun ? progressRun : null,
+    // The route the stage ran on (backend.mjs stageRoute), which its spend line records for the report (#570).
+    ...(stageRoute() ? { route: stageRoute() } : {}),
     // A record Pendulum wrote for a stage whose own process wrote none (killed before it could): the stage's progress
     // comment, when there is one, is the better record of it, and a scorer given both keeps the comment's (withLines).
     ...(standIn ? { standIn: true } : {}),

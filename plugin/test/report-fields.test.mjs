@@ -144,6 +144,12 @@ test("report (#569 R5): an Objective's model minutes are every harness pass's, i
   assert.equal(o.unpricedPasses, 1);
   // $0.90 over the 8 minutes of the three passes whose dollars were all reported.
   assert.deepEqual(o.usdPerModelMinute, { api: { usd: 0.9, pricedMinutes: 8, pricedPasses: 3, usdPerModelMinute: 0.1125 } });
+  // Decision-spend lines by a member who is not Pendulum are decision calls of unknown cost, no stage: the minutes stand
+  // (the synthetic seed decisions, #3).
+  const w = decisionsWorld();
+  w.comments.push({ ...comment(20, `<!-- pendulum:20:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 1, usd: 0.02 })}`, { user: { login: "teammate", type: "User" }, when: at(41) }), author_association: "MEMBER" });
+  const { json: member } = await report(w, ["--issue", "20"]);
+  assert.deepEqual([byIssue(member, 20).cost.unknownWhy.includes("unattributed"), byIssue(member, 20).modelMinutes], [true, 9]);
 });
 
 test("report (#569 R5): a harness pass with no times leaves the Objective's model minutes unknown (pendulum-scratch #19), and the ratio is the dollars over the minutes shown", async () => {

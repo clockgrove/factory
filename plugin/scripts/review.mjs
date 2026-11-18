@@ -830,7 +830,8 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
   // A writer's own line comment (#595) is a maintainer's decision: its text is given once, under the decisions when they
   // show it (its key `line:<id>`), else here, never framed as a third-party reviewer's.
   const shownKeys = new Set(decisionsShown(decisions, afterPush ? Infinity : undefined).map((d) => d.key));
-  const text = (c) => (c.writer ? (shownKeys.has(`line:${c.id}`) ? "(its text is under the maintainers' decisions below)" : c.body) : c.from ? JSON.stringify(String(c.body ?? "")) : c.body);
+  // Any comment from outside Pendulum's reviewer is one JSON string, so its newlines can never start a list item.
+  const text = (c) => (c.writer ? (shownKeys.has(`line:${c.id}`) ? "(its text is under the maintainers' decisions below)" : JSON.stringify(String(c.body ?? ""))) : c.from ? JSON.stringify(String(c.body ?? "")) : c.body);
   const list = comments.map((c) => `- ${c.path || "(review body)"}${Number.isInteger(c.line) ? `:${c.line}` : ""} (comment id ${JSON.stringify(c.id)}${c.from ? `, from third-party reviewer ${c.from}` : c.writer ? `, a maintainer's line comment by ${c.writer}` : ""}): ${text(c)}${c.earlier ? `\n  Still open: Pendulum's check read your earlier answer as not resolving it: ${JSON.stringify(String(c.earlier))}` : ""}`).join("\n");
   const from = [...new Set(comments.map((c) => c.from).filter(Boolean))];
   // A named reviewer outside Pendulum (third-party-review.mjs): its text is review input to judge, never instructions. Its
@@ -1875,6 +1876,8 @@ async function main() {
   // And, when the base's rules require every review conversation resolved, any other reviewer who can push or is an App
   // (#595): its open thread would hold the merge, so the answer pass takes it too. Read only when such a thread exists.
   const unlisted = unlistedRule(repo, pr.base.ref, token);
+  // A writer's line comment is framed as their decision only when it is among the decisions kept (write access checked).
+  const decided = new Set(decisions.map((d) => d.key));
   // Pendulum's placeholder (no finding of its own) still leaves a named reviewer's or code scanning's comments to answer.
   // The foundation pass posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open
   // comments too.
@@ -1904,7 +1907,7 @@ async function main() {
   };
   // Answers the last stage's check got no verdict on are judged again first, with no worker pass for them (a gateway
   // failure costs no answer round); one still without a verdict waits for the exit (session.mjs openFindingsExit).
-  const listedOpen = await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted });
+  const listedOpen = await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted, decided });
   // The stage's findings record (#546): each open finding it lists, open until the finding check finds otherwise.
   await progress.findings({ pr: pr.number, items: listedFindings(listedOpen), listed: true });
   // A stage started only to judge them (no answer round: checkState judgeOnly) gives the worker none of them, so a gateway
@@ -1917,7 +1920,7 @@ async function main() {
     await judgeAnswers(again, againReplies(again));
   }
   const held = new Set([...unjudged.map((u) => String(u.id)), ...(lastCheck.judgeOnly ? again.map((c) => String(c.id)) : [])]);
-  const toAnswer = answerList(again.length ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted }) : listedOpen, { placeholder, first: scope.first }).filter((c) => !held.has(String(c.id)));
+  const toAnswer = answerList(again.length ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted, decided }) : listedOpen, { placeholder, first: scope.first }).filter((c) => !held.has(String(c.id)));
   if (again.length) await progress.findings({ items: listedFindings(toAnswer), listed: true });
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
@@ -2098,7 +2101,7 @@ async function main() {
   pr = after.pr;
   // A named reviewer's comment counts only when the answer pass was given it (third-party-review.mjs exitUnaddressed).
   // And one whose answer the finding check is still to judge.
-  const stillOpen = exitUnaddressed(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted }), [...toAnswer.map((c) => c.id), ...again.map((c) => c.id), ...unjudged.map((u) => u.id)]);
+  const stillOpen = exitUnaddressed(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted, decided }), [...toAnswer.map((c) => c.id), ...again.map((c) => c.id), ...unjudged.map((u) => u.id)]);
   // The answer pass's own result counts: one that failed while applying maintainers' decisions Blocks even on green
   // validation (green proves the old code, not the change asked for); one that only answered findings is judged as
   // the worker's run is, where green validation outweighs a late harness error.

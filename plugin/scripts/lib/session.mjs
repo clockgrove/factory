@@ -761,8 +761,9 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * answer pass with `from` set (thirdPartyComment). A root comment of a thread reviewThreads classifies "unlisted" (a
  * reviewer nobody named who can push, or an App but github-actions[bot]) is listed once `unlisted` (async, read at most
  * once and only when there is such a comment) says the base's rules require every review conversation resolved (#595):
- * an App's as a named reviewer's, `from` its author; a writer's with `writer` its author and no `from` (writerComment),
- * since it is a maintainer's decision too, and answered only when its thread is resolved, never by a reply. One is
+ * an App's as a named reviewer's, `from` its author; a writer's, answered only when its thread is resolved, never by a
+ * reply, with `writer` its author and no `from` (writerComment) when it is among the kept decisions (`decided`, their
+ * keys, whose authors' write access was checked), else as an App's, `from` its author. One is
  * answered when a person answered it (a reply by someone who can push but one of Pendulum's marked comments, its answer or
  * the finding check's evidence, on the reviewer's comment: logic.mjs personAnswer, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
  * reviewer's, never on code scanning's), or when its thread is resolved: the finding check's yes on Pendulum's own
@@ -776,7 +777,7 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * the PR body, for a check again), and each carries `raisedOn`, the commit it was
  * raised on, and `raisedAt`, when, as far as GitHub gives them.
  */
-export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [], unlisted = async () => false }) {
+export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [], unlisted = async () => false, decided = new Set() }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const byId = new Map(comments.map((c) => [c.id, c]));
   // A named reviewer's comment is never Pendulum's own, even where the author filter stands in for the review ids.
@@ -806,8 +807,10 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   // `raisedAt`: when it was raised, which the finding check sets beside the decisions' times.
   // `earlierPrBody`: that answer said its fix is in the PR body (its marker's `:pr_body`, handoff.mjs postReplies, #584).
   const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)), ...(PR_BODY_REPLY.test(answer.get(c.id)) ? { earlierPrBody: true } : {}) } : {}) });
-  // A writer's line comment is a maintainer's decision too: never framed as a third-party reviewer's (`writer`, no `from`).
-  const shaped = (c) => (writerIds.has(c.id) ? writerComment(c, fromOf(c)) : thirdPartyComment(c, fromOf(c)));
+  // A writer's line comment among the kept decisions (`decided`, their keys: write access checked per author) is a
+  // maintainer's decision (`writer`, no `from`); any other, an author association that can be read-only included, is
+  // untrusted review input like an App's.
+  const shaped = (c) => (writerIds.has(c.id) && decided.has(`line:${c.id}`) ? writerComment(c, fromOf(c)) : thirdPartyComment(c, fromOf(c)));
   const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...shaped(c), ...earlier(c) }));
   // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
@@ -4092,7 +4095,8 @@ async function conversationsGate(repo, ctx, report, opts) {
   const back = open.filter((t) => !t.answered && (scanning(t) || (rule && (t.by === "named" || t.by === "unlisted"))));
   // Under the rule, a thread no answer pass takes (a stranger's) holds the merge whatever the answer pass does: it Blocks
   // now, naming every open thread, and no answer round is spent first.
-  const stays = rule ? open.filter((t) => !back.includes(t)) : [];
+  // Pendulum's own open thread is no stranger's: it never stops another thread's answer round.
+  const stays = rule ? open.filter((t) => !back.includes(t) && t.by !== "ours") : [];
   if (back.length && !stays.length) {
     let round;
     try {

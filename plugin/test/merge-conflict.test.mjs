@@ -886,6 +886,12 @@ test("#595: a writer's open thread goes to the answer pass, and one a writer ans
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report: both }, { token: "t" }), "threads");
     assert.match(mergeBlockReason("threads", both), /and 2 are open: chatgpt-codex-connector\[bot\] on src\/store\.ts:12; dana on src\/store\.ts:41\./);
     assert.deepEqual(gh.state.labelled, ["12:pendulum:review"], "no answer round for the App's thread");
+    // Pendulum's own open thread is no stranger's: code scanning's comment beside it still gets its answer round.
+    const pendulum = { __typename: "Bot", login: "pendulum-app" };
+    const ours = { id: "PRRT_ours_open", isResolved: false, path: "src/store.ts", line: 41, originalLine: 41, comments: { nodes: [{ body: "acceptance 1: a second store", authorAssociation: "NONE", author: pendulum, pullRequestReview: { body: `${marker(2, "review")}\nPendulum's review`, authorAssociation: "NONE", author: pendulum } }] } };
+    gh.state.threads = [ours, structuredClone(codeql.thread)];
+    assert.equal(await merge(2, 12), "answer-threads");
+    assert.deepEqual(gh.state.labelled, ["12:pendulum:review", "12:pendulum:review"]);
     // No rule: nothing is answered, resolved or Blocked for any of them.
     gh.state.rules = [];
     gh.state.threads = [writer, codexThread("PRRT_answered2", 9, [reply("Keep it.", kirk, "OWNER")]), structuredClone(personThread)];

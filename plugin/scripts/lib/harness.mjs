@@ -1357,12 +1357,24 @@ async function runResumable(opts) {
 async function runOnce(opts) {
   RUNNING += 1;
   let rec;
+  // The caller's `onPass` (session.mjs liveActivity) hears each pass start, and its end once its record is booked and
+  // whole: a rerun under the same caller (a usage limit's or busy provider's wait, a refused resume, a background
+  // command) is a pass of its own.
+  const told = (phase, r) => {
+    try {
+      opts.onPass?.(phase, r);
+    } catch (e) {
+      log(`${opts.label || "run"}: ${String(e?.message || e).slice(0, 120)}`);
+    }
+  };
+  told("start");
   try {
     rec = await runPass(opts);
     // A pass that ran is among them since its end (runPass); one refused before its start joins them now.
     if (!PASSES.includes(rec)) PASSES.push(rec);
   } finally {
     RUNNING -= 1;
+    told("end", rec ?? null);
   }
   // A pass the stage's stop ended (or refused): its caller never goes on, since what it would do next (push, publish,
   // run the validation commands again) is the stopped run's. The stop writes the stage's end (session.mjs stopStage).
@@ -1583,24 +1595,6 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     if (kept) rec.sessionTotal = kept;
     else delete rec.sessionTotal;
   }
-  // The pass's own dollars, or its unknown cost, join the stage's spend so far; its key spend is the relay's total there.
-  // Its record joins the stage's passes (stagePasses) at the same moment, with its label and times, so no progress write
-  // counts its dollars in the spend line without its row, or the other way round.
-  Object.assign(rec, { label, started, ended });
-  metered.end(rec);
-  PASSES.push(rec);
-  // The pass's spend through the relayed key joins its record (gateway-relay.mjs addKeySpend): max_usd, daily_usd, `usd`.
-  if (relay) {
-    const pass = await relay.endPass();
-    addKeySpend(rec, pass);
-    metered.more(rec);
-    if (pass.calls || pass.usd || pass.gatewayRefused || pass.unknown) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.unknown ? `; ${pass.unknown} call${pass.unknown === 1 ? "" : "s"} of unknown cost, not counted` : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
-    // Commands ran but none reached the relay's forwarder: the harness's sandbox no longer starts them through the shim.
-    if (!pass.pings && commandsRan(harness, r.stdout)) {
-      rec.workerKeyUnreached = true;
-      log(`${label}: the harness ran commands, but none came up with the gateway relay's forwarder (its sandbox did not start them through Pendulum's bwrap shim); the relay was out of their reach`);
-    }
-  }
   // How much of its account's usage limits the provider reported used (automatic account choice prefers the most left).
   const quota = quotaReading(harness, r.stdout, { rollout, since: started });
   if (quota) rec.quota = quota;
@@ -1640,6 +1634,23 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   if (jobs.length) rec.backgroundJobs = jobs;
   rec.stdoutTail = String(r.stdout).slice(-4000);
   rec.stderrTail = String(r.stderr).slice(-4000);
+  // The pass's own dollars, or its unknown cost, join the stage's spend so far; its key spend is the relay's total there.
+  // Its record, whole but for the relay's part below, joins the stage's passes (stagePasses) at the same moment, so no
+  // progress write counts its dollars in the spend line without its row, or the other way round.
+  metered.end(rec);
+  PASSES.push(rec);
+  // The pass's spend through the relayed key joins its record (gateway-relay.mjs addKeySpend): max_usd, daily_usd, `usd`.
+  if (relay) {
+    const pass = await relay.endPass();
+    addKeySpend(rec, pass);
+    metered.more(rec);
+    if (pass.calls || pass.usd || pass.gatewayRefused || pass.unknown) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.unknown ? `; ${pass.unknown} call${pass.unknown === 1 ? "" : "s"} of unknown cost, not counted` : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
+    // Commands ran but none reached the relay's forwarder: the harness's sandbox no longer starts them through the shim.
+    if (!pass.pings && commandsRan(harness, r.stdout)) {
+      rec.workerKeyUnreached = true;
+      log(`${label}: the harness ran commands, but none came up with the gateway relay's forwarder (its sandbox did not start them through Pendulum's bwrap shim); the relay was out of their reach`);
+    }
+  }
   if (eventsFile) appendOwn(eventsFile, `${JSON.stringify({ type: "pendulum.run.end", label, ended, ok: rec.ok, exitCode: r.code, timedOut: r.timedOut, usd: rec.usd })}\n`);
   return rec;
 }

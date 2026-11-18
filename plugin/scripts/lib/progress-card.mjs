@@ -76,7 +76,9 @@ const firstClause = (s) => String(s ?? "").split(/[;:(]/)[0].trim();
 export function stepOf(step, t, line = "") {
   const s = step && typeof step === "object" && Object.hasOwn(ROW_OF, step.step) ? step : { step: "note" };
   const kind = s.step === "ci" && s.crossOs === true ? "crossOs" : s.step === "work" && s.rebase === true ? "rebased" : ROW_OF[s.step];
-  const e = { kind, t, start: time(s.start) ?? t, end: time(s.end), sha: sha7(s.sha), pass: s.pass !== false };
+  // `aside`: a line the stage wrote beside a step that runs (a drift advisory mid-pass, a CI result while the reviewer
+  // runs), never the Now row itself.
+  const e = { kind, t, start: time(s.start) ?? t, end: time(s.end), sha: sha7(s.sha), pass: s.pass !== false, aside: s.aside === true };
   switch (s.step) {
     case "setup":
       Object.assign(e, { first: s.first === true, installFailed: s.installFailed === true, session: text(s.session, 400), resumed: s.resumed === true, unpriced: text(s.unpriced, 600), account: text(s.account, 600) });
@@ -176,14 +178,18 @@ export function progressData({ stage, subject = null, issue, started, now, lines
   const end = events.find((e) => e.step?.step === "exit");
   const steps = events.filter((e) => e.step?.step !== "exit");
   // Running: the Now row is the last step still open (a span with no end yet; an AI step no ended run of its kind has
-  // closed), else the last step written when it is still in progress: not closed itself, and not written beside a span
-  // that has closed since (a CI result while the reviewer ran, a drift advisory mid-build). A closed step is never the
-  // Now row; with none in progress there is none.
+  // closed, or whose run is running again), else the last step written when it is still in progress: not closed itself,
+  // and no line written beside a step (`aside`). A closed step is never the Now row; with none in progress there is none.
   const stageRebase = rebase || steps.some((e) => e.kind === "rebased");
   const ended = (passes || []).filter((p) => p && !p.noRun && Number.isFinite(Date.parse(p.ended)));
+  // The AI step whose run the live snapshot shows running (session.mjs liveActivity: its pass started, not yet ended),
+  // open whatever earlier pass of it ended: a rerun after a usage limit, a busy provider, a refused resume, a background
+  // command.
+  const rerun = snap?.snap && snap.snap.ended === false ? steps.findLast((e) => AI.has(e.kind) && e.pass !== false) : null;
   // When a step closed: an AI step at its run's recorded end, a wait or a span at its own; null while it is open, or
   // for a step that is no span at all.
   const closedAt = (e) => {
+    if (e === rerun) return null;
     if (AI.has(e.kind)) {
       const p = e.pass !== false ? ended.find((x) => passRow(x, { rebase: stageRebase }) === e.kind && Date.parse(x.started) >= e.t - 1000) : null;
       return p ? Date.parse(p.ended) : null;
@@ -191,7 +197,7 @@ export function progressData({ stage, subject = null, issue, started, now, lines
     return (e.step?.wait === true || e.step?.span === true) && Number.isFinite(e.end) ? e.end : null;
   };
   const open = (e) => (AI.has(e.kind) ? e.pass !== false && closedAt(e) === null : (e.step?.wait === true || e.step?.span === true) && !Number.isFinite(e.end));
-  const inProgress = (c) => !!c && closedAt(c) === null && !steps.some((e) => e !== c && (closedAt(e) ?? -Infinity) > c.t);
+  const inProgress = (c) => !!c && !c.aside && closedAt(c) === null;
   const current = live && !exit && steps.length ? (steps.findLast(open) ?? (inProgress(steps.at(-1)) ? steps.at(-1) : null)) : null;
   // One row per kind of step, ordered by its first time (a step's line, else its first AI run's start), the AI judge's
   // row and the wrap-up's included; the Now row follows them all.
@@ -414,16 +420,16 @@ function nowCell(d, at) {
   const [, doing] = ROWS[c.kind];
   const model = d.snapNow?.model ? modelName(d.snapNow.model) : c.model ? modelName(c.model) : null;
   const s = d.snapNow?.snap;
-  // What the step's agent last reported (its run's activity snapshot), else the stage's own live line when no snapshot
-  // came with it, else how long the step has run. An ended run's snapshot is never the Now row's: its step is closed.
-  const activity = s ? `${s.elapsedMin} min, ${many(s.turns, "turn")}, ${many(s.toolCalls, "tool call")}, ${s.idleMin === 0 || s.idleMin === null ? "active now" : `last activity ${s.idleMin} min ago`}` : (!d.snap && d.status) || `${minutesText(Math.max(0, d.now - c.t))}`;
+  // What the step's agent last reported (its run's activity snapshot), else how long the step has run. An ended run's
+  // snapshot is never the Now row's: its step is closed.
+  const activity = s ? `${s.elapsedMin} min, ${many(s.turns, "turn")}, ${many(s.toolCalls, "tool call")}, ${s.idleMin === 0 || s.idleMin === null ? "active now" : `last activity ${s.idleMin} min ago`}` : minutesText(Math.max(0, d.now - c.t));
   const where = (c.kind === "ci" || c.kind === "crossOs") && c.sha ? ` on \`${c.sha}\`` : "";
   return `**Now:** ${tableCell(`${doing}${where}${model ? ` · ${model}` : ""} · ${activity}`)}`;
 }
 
 /**
- * The card's markdown (pure), from progressData's arguments and: `status` (the live line: the Now row's words when no
- * activity snapshot came with it), `ran` (choice.mjs ranWith), `harness`, `runId`, `runUrl`, `where` (`actions`,
+ * The card's markdown (pure), from progressData's arguments and: `status` (the live line: the Now row's words before
+ * the stage's first step), `ran` (choice.mjs ranWith), `harness`, `runId`, `runUrl`, `where` (`actions`,
  * `sandbox`, `local`), `detailMax` (the Step cells' clause: DETAIL_MAX, SHORT_DETAIL near the limit), `chart` (false: no
  * timeline chart), `explain` (false: Run details without its explanatory sentences), `table` (false: no table, near
  * GitHub's limit), `notes` (Run details' lines the
@@ -431,7 +437,7 @@ function nowCell(d, at) {
  * own lines (the Full log goes after them, progressBody); the timeline chart's block ("" for none).
  */
 export function progressCard({ status = "", ran = null, harness = null, runId = null, runUrl = null, where = "local", detailMax = DETAIL_MAX, chart = true, explain = true, table: showTable = true, notes = [], ...args }) {
-  const d = { ...progressData(args), status: clean(status, 400) };
+  const d = progressData(args);
   const at = (t) => clockText(t, { zone: d.zone, abbr: false, date: d.crosses });
   const atZ = (t) => clockText(t, { zone: d.zone, date: d.crosses });
   const running = d.live && !d.exit;

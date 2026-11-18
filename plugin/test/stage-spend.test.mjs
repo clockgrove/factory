@@ -162,7 +162,7 @@ test("a pass's record joins the stage's passes as its dollars join the stage's s
     import { setActiveRelay } from ${JSON.stringify(LIB("gateway-relay.mjs"))};
     let seen = null;
     const relay = { token: "pendulum-relay-test", url: "http://127.0.0.1:9", beginPass() {}, totals: () => ({ usd: 0 }), endPass: async () => {
-      seen = { usd: stageSpendNow().usd, running: stageSpendNow().running, passes: stagePasses().map((p) => [p.label, p.usd, !!p.started, !!p.ended]) };
+      seen = { usd: stageSpendNow().usd, running: stageSpendNow().running, passes: stagePasses().map((p) => [p.label, p.usd, !!p.started, !!p.ended, p.exitCode, p.timedOut, p.ok]) };
       return { usd: 0, calls: 0, unknown: 0, pings: 1 };
     } };
     setActiveRelay(relay);
@@ -173,7 +173,7 @@ test("a pass's record joins the stage's passes as its dollars join the stage's s
   await s.exited;
   const out = JSON.parse(s.out().trim().split("\n").at(-1) || "null");
   assert.ok(out?.seen && out.usd > 0, `the relayed pass did not run:\n${s.out()}\n${s.err()}`);
-  assert.deepEqual(out.seen, { usd: out.usd, running: 0, passes: [["work-1", out.usd, true, true]] });
+  assert.deepEqual(out.seen, { usd: out.usd, running: 0, passes: [["work-1", out.usd, true, true, 0, false, true]] }, "the record whole but for the relay's part");
   assert.equal(out.after, 1, "the record is among the stage's passes once");
 });
 
@@ -230,8 +230,8 @@ async function stages(plan) {
       const until = Date.now() + 10_000;
       while (!there(join(root, "half")) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
       if (how.startsWith("term")) {
-        // The status line the stop's write carries (no write now: the last was moments ago), or where it goes.
-        if (how === "term-5xx") progress.live("FAIL-THIS", { everyMs: 3_600_000 });
+        // A header link the stop's write carries (a link writes nothing itself), or where that write goes.
+        if (how === "term-5xx") progress.link("FAIL-THIS", "https://example.test/fail");
         if (how === "term-unsent") process.env.GITHUB_API_URL = process.env.FAKE_DEAD;
         process.stdout.write("spent\\n");
         await run;

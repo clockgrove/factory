@@ -200,9 +200,9 @@
       }
     },
     "pendulum-status": {
-      "sha256": "2e31a04a95db1aa2db9b27524eae51064a0af270b3e03f2526696db12b6442df",
+      "sha256": "8e3ebb1612da3f034b6948b6799771371ad7c6590781bf51ccda21118beefd1b",
       "lines": 40,
-      "words": 675,
+      "words": 692,
       "files": {
         "reference.md": {
           "sha256": "03d8ddd00f6a2ffe7ba4b7beef905c8546f32676031adb506c7f831610673d70",

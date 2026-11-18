@@ -245,7 +245,7 @@ export function openDrift({ inputs, env = process.env, home, progress = null, st
       flagged = true;
       const line = driftLine({ stage, model, verdict: a.verdict, confidence: a.confidence, entries: n });
       log(line);
-      if (progress) await progress(line, { step: "drift", model, verdict: a.verdict });
+      if (progress) await progress(line, { step: "drift", model, verdict: a.verdict, aside: true });
     };
     const feed = (line) => {
       acts.feed(line);

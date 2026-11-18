@@ -933,7 +933,7 @@ export async function holdScope({ outbox, session, harness, model, effort = null
     const resume = session?.canResume ? session.id : null;
     const live = liveActivity(progress, { harness, model, tick: io?.tick });
     const exitBefore = io?.files?.()?.["exit.json"];
-    const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : `${taskCard}\n\n---\n\n${ask}`, freshPrompt: `${taskCard}\n\n---\n\n${ask}`, maxUsd: left, resume, cwd, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label, onLine: live.onLine, onResume: live.onResume });
+    const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : `${taskCard}\n\n---\n\n${ask}`, freshPrompt: `${taskCard}\n\n---\n\n${ask}`, maxUsd: left, resume, cwd, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label, onLine: live.onLine, onPass: live.onPass, onResume: live.onResume });
     await live.finish();
     if (io) await io.collect();
     usage.push(rec);
@@ -1090,7 +1090,12 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   // The harness and models the stage runs on once the Objective's labels are read (progress.ran), with its own model.
   let ran = null;
   let lastWrite = 0;
-  let writing = null;
+  // Every write, in the order asked (queued): one at a time, so a later body never lands under an earlier one. `pending`
+  // counts the writes queued or in flight; `liveQueued`, a live write waiting its turn (it reads the newest state when it
+  // runs, so one is enough).
+  let chain = Promise.resolve();
+  let pending = 0;
+  let liveQueued = false;
   // The comment as the last write that landed left it: its id and the spend its line shows.
   let commentId = null;
   let shown = { usd: 0, unknown: 0 };
@@ -1208,12 +1213,23 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     if (step?.step === "exit" && typeof step.exit === "string") ended = step.exit;
     lines.push([Date.now(), text, step && typeof step === "object" ? step : null]);
   };
+  /** A write after every write asked before it (the final spend line never lands under a status write). */
+  const queued = (before = null) => {
+    pending += 1;
+    const p = chain.then(() => {
+      before?.();
+      return write();
+    });
+    chain = p.then(
+      () => (pending -= 1),
+      () => (pending -= 1),
+    );
+    return p;
+  };
   const progress = async (phase, step = null) => {
     addLine(phase, step);
     status = "";
-    // A status write still in flight lands first, so it never overwrites this one (the final spend line with it).
-    await writing;
-    await write();
+    await queued();
   };
   /**
    * The harness and models the stage runs on (choice.mjs ranWith), as the Objective's labels chose them: the harness line
@@ -1246,30 +1262,18 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     if (ran && recorded) progress.ran({ ...ran, ...ranModels(recorded) });
   };
   /**
-   * The live status line (what the harness is doing now); written at most every `everyMs`, never twice at once. A forced
-   * one that comes while a write is in flight is written after it, in the same `writing`, never dropped: a run's end
-   * (liveActivity finish) is what puts its ended record on the card.
+   * The live status line (what the harness is doing now); written at most every `everyMs`, and not while another write
+   * is queued or in flight. A forced one (a pass's end, liveActivity) is queued after them instead, never dropped: it is
+   * what puts an ended run's record on the card.
    */
-  let liveAgain = false;
-  const liveWrite = () => {
-    writing = (async () => {
-      do {
-        liveAgain = false;
-        await write();
-      } while (liveAgain);
-    })().finally(() => {
-      writing = null;
-    });
-  };
   progress.live = (text, { everyMs = 120_000, force = false, snap = null, model: liveModel = null } = {}) => {
     status = sanitize(text, { max: 2000 });
-    liveNow = snap ? { snap, model: liveModel } : null;
-    if (!force && Date.now() - lastWrite < everyMs) return;
-    if (writing) {
-      if (force) liveAgain = true;
-      return;
-    }
-    liveWrite();
+    // An ended run's snapshot (its result line, or a pass killed with none: liveActivity onPass) is no live state.
+    liveNow = snap && !snap.ended ? { snap, model: liveModel } : null;
+    if (!force && (Date.now() - lastWrite < everyMs || pending > 0)) return;
+    if (liveQueued) return;
+    liveQueued = true;
+    queued(() => (liveQueued = false)).catch((e) => log(`progress: ${String(e?.message || e).slice(0, 120)}`));
   };
   /** A run with no usage artifact (local mode) records its final dollars here, where any dispatcher can sum them. */
   /**
@@ -1317,8 +1321,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
       addLine(phase, step);
       status = "";
     }
-    await writing;
-    return write();
+    return queued();
   };
   /**
    * The decision calls' spend this comment carries from its next write (decision-spend.mjs decisionSpendText): the merge
@@ -1340,7 +1343,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   progress.planAsked = async (repos) => {
     const now = new Date().toISOString();
     asked = mergeRead(asked, Object.fromEntries((repos || []).map((r) => [String(r).toLowerCase(), now])));
-    await write();
+    await queued();
   };
   /** The heads and failure signatures this run's triage reran (triage.mjs), for later jobs; written with the next line. */
   progress.triage = (rec) => {
@@ -1353,8 +1356,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   progress.findings = async (update, { write: now = false } = {}) => {
     findings = mergeFindings(findings, update);
     if (!now) return true;
-    await writing;
-    return write();
+    return queued();
   };
   /** A link shown in the header (the PR, once it exists). */
   progress.link = (label, url) => {
@@ -1366,31 +1368,52 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
 
 /**
  * The onLine hook for a harness run: feeds the activity tracker and keeps the progress
- * comment's status line current. Returns {onLine, onResume, tracker, finish(label)}: runHarness calls onResume with a
- * resumed session's prior running total, so the line shows the pass's own share.
+ * comment's status line current. Returns {onLine, onPass, onResume, tracker, finish()}: runHarness calls onResume with a
+ * resumed session's prior running total, so the line shows the pass's own share, and onPass at each pass's start and end.
  */
 export function liveActivity(progress, { harness, model, tick = null, drift = null }) {
   const tracker = harnessActivity();
+  const say = (force) => {
+    const snap = tracker.snapshot();
+    progress?.live(activityLine(snap, { harness, model, billing: progress?.billingOf?.() ?? null }), { force, snap, model });
+  };
+  // Whether the last pass's end is written (onPass): `finish` then writes nothing more.
+  let endSaid = false;
   const onLine = (line) => {
     tracker.feed(line);
     // The drift advisory's watcher (drift.mjs), when on: its own checkpoint clock, never in the run's way.
     drift?.feed(line);
-    // The run's own end line writes nothing: its record is not booked until the harness exits, so the comment would show
-    // it finished with its cost not counted. `finish`, once the record is booked, writes the run's end.
-    const snap = tracker.snapshot();
-    if (!snap.ended) progress?.live(activityLine(snap, { harness, model, billing: progress?.billingOf?.() ?? null }), { snap, model });
+    // A pass's own end line writes nothing: its record is not booked until the harness exits, so the comment would show
+    // it finished with its cost not counted. Its end (onPass), once the record is booked, writes it.
+    if (!tracker.snapshot().ended) say(false);
     // The hand-off's own throttle (at most every two minutes): the plan comment follows plan.md while the harness works.
     tick?.();
   };
-  progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { force: true, snap: tracker.snapshot(), model });
+  say(true);
   return {
     onLine,
     onResume: tracker.since,
+    // runHarness's hook (runOnce): each pass's start runs the step again (a rerun after a usage limit, a busy provider,
+    // a refused resume, a background command); each pass's end, its record booked, is written once, at once, whether or
+    // not its stream had its result line.
+    onPass: (phase) => {
+      if (phase === "start") {
+        tracker.passStart();
+        endSaid = false;
+        return;
+      }
+      tracker.passEnd();
+      endSaid = true;
+      say(true);
+    },
     tracker,
-    // The drift check in flight lands first, so its decision record is in the stage's usage before it is written.
+    // The drift check in flight lands first, its decision record in the stage's usage (shown from the next write). A run
+    // whose pass ends were not heard (no runHarness hook) is ended and written here.
     finish: async () => {
       await drift?.stop();
-      progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { force: true, snap: tracker.snapshot(), model });
+      if (endSaid) return;
+      tracker.passEnd();
+      say(true);
     },
   };
 }
@@ -1821,7 +1844,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const full = `${taskCard}\n\n---\n\n${ask}`;
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage).usd - (passDecisions() - decisionsAtStart)) : 0;
     const live = liveActivity(progress, { harness, model, tick: io?.tick, drift: drift?.watch({ stage, goal: GOALS.fix, root: checkout, plan: () => io?.plan?.() ?? null }) });
-    const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : full, freshPrompt: full, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: stage, onLine: live.onLine, onResume: live.onResume });
+    const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : full, freshPrompt: full, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: stage, onLine: live.onLine, onPass: live.onPass, onResume: live.onResume });
     await live.finish();
     if (io) await io.collect();
     usage.push(rec);
@@ -2785,7 +2808,13 @@ export async function stopStage({ cause, label, repo, issue, pr = undefined, rec
   try {
     const until = Date.now() + settleMs;
     while (passesRunning() > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
-    if (passesRunning() > 0) log(`a harness pass still runs ${Math.round(settleMs / 1000)} s after the stop; it counts as a run of unknown cost`);
+    // A pass not returned yet may have ended already, its record booked (harness.mjs runPass: the relay's last lookups):
+    // only one still open (openPasses) counts as a run of unknown cost.
+    if (passesRunning() > 0) {
+      const open = openPasses().filter((p) => !p.decision).length;
+      const secs = Math.round(settleMs / 1000);
+      log(open ? `${open === 1 ? "a harness pass still runs" : `${open} harness passes still run`} ${secs} s after the stop; ${open === 1 ? "it counts" : "they count"} as ${open === 1 ? "a run" : "runs"} of unknown cost` : `a harness pass that ended is still finishing ${secs} s after the stop; its record and cost are kept`);
+    }
     await backend().sandbox.reap().catch((e) => log(`reap: ${String(e?.message || e).slice(0, 120)}`));
     records.splice(0, records.length, ...recordsNow());
     await stoppedEnd({ cause, label, repo, issue, pr, finish, opts, tidyMs, onEnded: () => (ended = true) });

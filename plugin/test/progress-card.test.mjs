@@ -36,10 +36,11 @@ async function withEnv(vars, fn) {
 
 /**
  * The stage's real reporter on a fake GitHub with a fake clock: `drive(p, clock)` writes its lines. Returns every body
- * written, its key line removed. `delayMs`: how long the fake GitHub takes to answer a write; `posted`: given the list of
- * bodies as it fills; `opts`: the reporter's own options (its spend so far, its passes).
+ * written, in the order they landed. `delayMs`: how long the fake GitHub takes to answer a write (a number, or a function
+ * asked for each write); `posted`: given the list of bodies as it fills; `stats`: filled with the writes in flight now
+ * (`now`) and at most at once (`max`); `opts`: the reporter's own options (its spend so far, its passes).
  */
-async function reporter(stage, drive, { start = "2026-11-18T04:41:10Z", runId = "1794976879130", env = {}, delayMs = 0, posted: seen = null, opts = {} } = {}) {
+async function reporter(stage, drive, { start = "2026-11-18T04:41:10Z", runId = "1794976879130", env = {}, delayMs = 0, posted: seen = null, stats = {}, opts = {} } = {}) {
   const real = globalThis.fetch;
   const realNow = Date.now;
   const posted = [];
@@ -47,8 +48,12 @@ async function reporter(stage, drive, { start = "2026-11-18T04:41:10Z", runId = 
   globalThis.fetch = async (url, init = {}) => {
     const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
     if ((init.method || "GET") === "GET") return json([]);
-    if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+    stats.now = (stats.now ?? 0) + 1;
+    stats.max = Math.max(stats.max ?? 0, stats.now);
+    const ms = typeof delayMs === "function" ? delayMs() : delayMs;
+    if (ms) await new Promise((r) => setTimeout(r, ms));
     posted.push(JSON.parse(init.body).body);
+    stats.now -= 1;
     return json({ id: 9, user: { login: "me", type: "User" }, body: posted.at(-1) });
   };
   let t = at(start);
@@ -586,7 +591,11 @@ test("a step whose run has ended is never the Now row; an earlier run's activity
   assert.doesNotMatch(c.card, /\*\*Now:\*\*|finished/);
   assert.match(c.card, /^\| 8:41 PM \| Built the change · Opus 5\.5 \| 28 min 29 s \| \$2\.51 \|$/m);
   // A drift advisory written beside the build is no Now row once the build ended; nor is a wait that ended.
-  assert.equal(data([work, [t0 + 600_000, "drift advisory", { step: "drift", verdict: "scope_creep" }]], ended).current, null);
+  assert.equal(data([work, [t0 + 600_000, "drift advisory", { step: "drift", verdict: "scope_creep", aside: true }]], ended).current, null);
+  // A line written beside the reviewer (its CI result) is no Now row once the reviewer ended; one with no mark is.
+  const reviewed = [{ label: "review", usd: 1, started: iso(t0 + 1000), ended: iso(t0 + 900_000) }];
+  const beside = (mark) => data([[t0, "reviewer", { step: "review" }], [t0 + 600_000, "green while the reviewer runs", { step: "ci", sha: "abc1234", outcome: "passed", ...(mark ? { aside: true } : {}) }]], reviewed).current?.kind ?? null;
+  assert.deepEqual([beside(true), beside(false)], [null, "ci"]);
   assert.equal(data([[t0, "wait", { step: "ci", sha: "abc1234", wait: true, end: t0 + 60_000, outcome: "passed" }]]).current, null);
   // A run killed with no end line leaves a snapshot that never ended: the CI wait after it is the Now row, in its own words.
   const killed = { model: "claude-opus-5-5", snap: { ...over.snap, ended: false } };
@@ -600,7 +609,7 @@ test("rows are in order of their first time, the AI judge's included; the Now ro
   const lines = [
     [t0, "install", { step: "setup", span: true, end: t0 + 20_000 }],
     [t0 + 30_000, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }],
-    [t0 + 130_000, "drift advisory", { step: "drift", verdict: "scope_creep" }],
+    [t0 + 130_000, "drift advisory", { step: "drift", verdict: "scope_creep", aside: true }],
     [t0 + 1_800_000, "validation pass 1 (required checks)", { step: "ci", begin: true }],
     [t0 + 1_800_000, "waiting", { step: "ci", sha: "abc1234", wait: true }],
   ];
@@ -614,4 +623,92 @@ test("rows are in order of their first time, the AI judge's included; the Now ro
     rows.map((l) => l.split(" | ").slice(0, 2).join(" | ")),
     ["| 12:53 PM | Set up", "| 12:53 PM | Built the change · Opus 5.5", "| 12:55 PM | AI judge calls ×2", "| 12:55 PM | Drift advisory · AI judge flagged possible scope creep; advice only", "| 1:23 PM | Waited for CI", "| 1:23 PM | **Now:** waiting for CI on `abc1234` · 2 min"],
   );
+});
+
+test("a run's second pass keeps its step the Now row, its first pass's cost on the step's row", () => {
+  const t0 = at("2026-11-18T04:41:00Z");
+  const work = [t0 + 30_000, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }];
+  const first = [{ label: "work-1", model: "claude-opus-5-5", usd: 0.25, started: iso(t0 + 31_000), ended: iso(t0 + 600_000) }];
+  const running = { model: "claude-opus-5-5", snap: { elapsedMin: 12, turns: 3, toolCalls: 2, idleMin: 0, ended: false, tokens: { input: 1, output: 1 }, subagentsActive: [] } };
+  const c = render({ stage: "work", issue: 1, started: t0, now: t0 + 720_000, lines: [work], passes: first, snap: running, spend: 0.25, parts: { usdByBilling: { subscription: 0.25 }, usdUnknown: 1, usdUnknownWhy: ["unreported"], running: true, usdRunning: 1 } });
+  assert.match(c.card, /^\| 8:41 PM \| Built the change · Opus 5\.5 \| 9 min 29 s \| \$0\.25 \|\n\| 8:41 PM \| \*\*Now:\*\* building the change · Opus 5\.5 · 12 min, 3 turns, 2 tool calls, active now \| running \| when it ends \|$/m);
+  assert.match(c.card, /1 AI run has not reported a cost yet/);
+  // Its pass ended (the snapshot ended): no Now row.
+  assert.doesNotMatch(render({ stage: "work", issue: 1, started: t0, now: t0 + 720_000, lines: [work], passes: first, snap: { ...running, snap: { ...running.snap, ended: true } }, spend: 0.25, parts: { running: true } }).card, /\*\*Now:\*\*/);
+});
+
+test("every write goes through one queue: a slow line write and a forced write after it land in order, never at once", async () => {
+  const stats = {};
+  let first = true;
+  let posted = [];
+  const snap = { elapsedMin: 1, turns: 1, toolCalls: 1, idleMin: 0, ended: false, tokens: { input: 1, output: 1 }, subagentsActive: [] };
+  await reporter(
+    "work",
+    async (p) => {
+      const line = p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
+      await new Promise((r) => setTimeout(r, 5));
+      p.live("claude working", { force: true, snap, model: "claude-opus-5-5" });
+      await line;
+      for (const until = performance.now() + 5_000; (stats.now || posted.length < 2) && performance.now() < until; ) await new Promise((r) => setTimeout(r, 5));
+    },
+    {
+      stats,
+      posted: (list) => (posted = list),
+      delayMs: () => {
+        const ms = first ? 120 : 1;
+        first = false;
+        return ms;
+      },
+    },
+  );
+  assert.equal(stats.max, 1, "one write at a time");
+  assert.equal(posted.length, 2);
+  assert.doesNotMatch(cardOf(posted[0]), /active now/);
+  assert.match(cardOf(posted[1]), /\*\*Now:\*\* building the change · Opus 5\.5 · 1 min, 1 turn, 1 tool call, active now/);
+});
+
+test("the exit write lands last, after the forced writes queued before it, whatever GitHub's latency", async () => {
+  const snap = { elapsedMin: 1, turns: 1, toolCalls: 1, idleMin: 0, ended: false, tokens: { input: 1, output: 1 }, subagentsActive: [] };
+  for (let round = 0; round < 25; round += 1) {
+    const stats = {};
+    const posted = await reporter(
+      "work",
+      async (p) => {
+        const line = p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
+        p.live("claude working", { force: true, snap, model: "claude-opus-5-5" });
+        p.live("claude working", { force: true, snap: { ...snap, turns: 2 }, model: "claude-opus-5-5" });
+        p.spend(1.25, null);
+        await p("exit: delivered", endStep({ issue: 433, exit: "delivered" }));
+        await line;
+        for (const until = performance.now() + 5_000; stats.now && performance.now() < until; ) await new Promise((r) => setTimeout(r, 2));
+      },
+      { stats, delayMs: () => Math.floor(Math.random() * 15) },
+    );
+    assert.equal(stats.max, 1, `round ${round}: one write at a time`);
+    assert.match(posted.at(-1), /- [^\n]* exit: delivered\n/, `round ${round}: the exit write is the last to land`);
+    assert.deepEqual(spendOf(posted.at(-1)), { usd: 1.25, unknown: 0 });
+  }
+});
+
+test("a pass killed before its result line ends on the card all the same: its snapshot closes at the pass's end", async () => {
+  let rec = null;
+  let posted = [];
+  await reporter(
+    "work",
+    async (p, clock) => {
+      await p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
+      const live = liveActivity(p, { harness: "claude", model: "claude-opus-5-5" });
+      live.onPass("start");
+      clock("2026-11-18T04:50:00Z");
+      live.onLine(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "npm test" } }] } }));
+      // Killed (hung, a stop): no result line; runHarness books its record of unknown cost, then the pass's end.
+      rec = { label: "work-1", model: "claude-opus-5-5", usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], started: "2026-11-18T04:41:11Z", ended: "2026-11-18T04:50:00Z" };
+      live.onPass("end", rec);
+      await p.planAsked([]);
+    },
+    { posted: (list) => (posted = list), opts: { soFar: async () => ({ usd: 0, unknown: 1, running: 0 }), passesOf: () => (rec ? [rec] : []) } },
+  );
+  const last = cardOf(posted.at(-1));
+  assert.doesNotMatch(last, /\*\*Now:\*\*|active now/);
+  assert.match(last, /^\| 8:41 PM \| Built the change · Opus 5\.5 \| 8 min 49 s \| unknown \|$/m);
 });

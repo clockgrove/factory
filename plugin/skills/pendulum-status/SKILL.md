@@ -12,7 +12,7 @@ Read GitHub and report; change nothing. A way on is one of Pendulum's labels or 
 1. `gh issue list --repo OWNER/NAME --state open --label pendulum:objective --json number,title,labels,createdAt --limit 100`, and the same with `--label pendulum:draft`, merged by number (a draft may carry both). Given an issue number, `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels` alone.
 2. Each one's state from its labels ([reference.md](reference.md), States). A closed issue is done. `pendulum:draft` wins over every other label: a draft, never run. An open issue without `pendulum:objective` is stopped. `pendulum:restart` on it: a restart is under way.
 3. Its route: `pendulum:local`, the local loop's; any other, the Action's (the local loop's where no Action is active).
-4. For a Running one, the last row of the steps table in Pendulum's progress comment on the issue: what the stage is doing now, and for how long.
+4. For a Running one, the steps table in Pendulum's progress comment on the issue: its last row, marked **Now**, is the step in progress and for how long; with no **Now** row the stage is between steps, and the rows above say what has run.
 
 Show one line per Objective, oldest first: number, title, state, route, and for Blocked and Question the one-line reason (below). `pendulum wait` (the pendulum-serve skill) waits for the next change instead of asking again.
 

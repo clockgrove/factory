@@ -294,6 +294,20 @@ test("#243: a PR the merge queue took out for a conflict waits while a PR in the
   });
 });
 
+test("#2647: a conflict GitHub had not worked out when the PR was read is read again after its refusal: conflict, not a thrown error", async () => {
+  await withGitHub(async (g, gh) => {
+    const base = g.main();
+    const one = g.commit("pendulum/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
+    const two = g.commit("pendulum/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    g.git("update-ref", "refs/heads/main", one);
+    const pr = gh.open(12, 2, two);
+    pr.unknownOnce = true;
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    assert.equal(await merge(2, 12), "conflict");
+    assert.equal(gh.enqueued.length, 0);
+  });
+});
+
 test("#2669: the dispatcher's merge pass queues or merges the PR just before the review stage's own call: success, not a refusal", async () => {
   await withGitHub(async (g, gh) => {
     const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");

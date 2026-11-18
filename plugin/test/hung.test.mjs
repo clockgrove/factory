@@ -50,6 +50,9 @@ test("runReading and hangVerdict: what cannot be read decides nothing", async ()
   const r = reading([harness, command]);
   assert.deepEqual([hangVerdict(null, r, { open: 1 }), hangVerdict(r, null, { open: 1 }), hangVerdict(r, r, { heard: true, open: 1 })], [null, null, false]);
   assert.equal(hangVerdict(r, r, { open: 1 }), true, "an open command with no progress is hung");
+  // Progress by the open command, CPU or I/O, keeps the run (#388).
+  assert.equal(hangVerdict(r, reading([harness, { ...command, cpu: 6 }]), { open: 1 }), false);
+  assert.equal(hangVerdict(r, reading([harness, { ...command, io: { rchar: 11, wchar: 0 } }]), { open: 1 }), false);
   assert.deepEqual([hangVerdict(null, null, { streams: true }), hangVerdict(r, r)], [true, null], "no command open: a streaming harness's silence decides, readings or not; another's cannot");
   const unreadCommand = reading([harness, { ...command, io: null }]);
   assert.equal(hangVerdict(unreadCommand, unreadCommand, { open: 1 }), null, "a command whose I/O cannot be read");

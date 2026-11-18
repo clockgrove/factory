@@ -10,7 +10,8 @@ import { harnessBudgetUsd, sessionCeilingUsd, stageVendorCost, storedUsd } from 
 import { VERCEL_RATES } from "../scripts/lib/adapters/sandbox-vercel.mjs";
 import { spendOf, spendParts, vendorBody, vendorLine } from "../scripts/lib/logic.mjs";
 import { startedFields } from "../scripts/stage.mjs";
-import { bookVendor, startInSandbox } from "../scripts/launch.mjs";
+import { bookVendor, stageProgressComment, startInSandbox } from "../scripts/launch.mjs";
+import { setSelf } from "../scripts/lib/logic.mjs";
 
 const R = VERCEL_RATES;
 const H = 3_600_000;
@@ -84,6 +85,22 @@ test("vendor comment: the vendor line carries state, seconds, size and dated rat
   // Nothing but codes and numbers reaches the comment.
   assert.match(vendorLine({ id: "pendulum-x", state: "stopped", cost, rates: R, error: "vercel: <b>secret text</b>" }), /\(\?\)|stopped/);
   assert.ok(!vendorLine({ id: "pendulum-x", state: "stopped", cost: { ...cost, usd: null }, rates: R, error: "vercel: secret text" }).includes("secret"), "a vendor message never reaches the comment");
+});
+
+test("progress key: the end finds the stage's progress comment by its claim, and only Pendulum's own", () => {
+  // The end finds the comment by the stage's claim alone (the record's other fields can be lost to a race).
+  setSelf("pendulum-app[bot]");
+  const bot = { login: "pendulum-app[bot]", type: "Bot" };
+  const claim = "2f176ca16e06";
+  const comments = [
+    { id: 1, user: bot, body: `<!-- pendulum:240:progress:work:42564473403-${claim} -->\nPendulum work` },
+    { id: 2, user: { login: "someone", type: "User" }, body: `<!-- pendulum:240:progress:review:${claim} -->\nforged` },
+    { id: 3, user: bot, body: `<!-- pendulum:240:progress:review:${claim} -->\nPendulum review` },
+  ];
+  assert.equal(stageProgressComment(comments, 240, "work", claim)?.id, 1);
+  assert.equal(stageProgressComment(comments, 240, "review", claim)?.id, 3, "only Pendulum's own");
+  assert.equal(stageProgressComment(comments, 240, "work", "000000000000"), null);
+  assert.equal(stageProgressComment(comments, 24, "work", claim), null, "another Objective's number does not match");
 });
 
 const fakeAdapter = (over = {}) => {

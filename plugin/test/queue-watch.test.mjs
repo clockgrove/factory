@@ -432,6 +432,8 @@ async function reviewReads(fake, verdict = null, { head = HEAD, pass = COMMITTED
 const own = { verdict: "change_caused", confidence: 0.95 };
 /** How a queue fix pass ended (session.mjs queueTryEnd): committed and pushed; ran and committed nothing; never ran. */
 const COMMITTED = { before: "a".repeat(40), after: "b".repeat(40), pushed: true, rec: { ok: true } };
+const IDLE = { before: "a".repeat(40), after: "a".repeat(40), pushed: true, rec: { ok: true } };
+const NEVER_RAN = { before: "a".repeat(40), after: "a".repeat(40), pushed: true, rec: null };
 
 test("queue red: a red run on the queue's commit goes to the review stage once per drop, before any re-enqueue or Block; other drops do not (#312)", async () => {
   const fake = fakeGitHub();
@@ -631,6 +633,27 @@ test("queue red: the queue's fix passes go on while each makes progress, past tw
     fake.s.removals.push(queueDrop(ago(3 * MIN)));
     assert.equal(await merge({}), "queue-red");
     assert.equal((await reviewReads(fake, own)).state, "fixing");
+  });
+});
+
+test("queue red: each try's end is recorded; tries whose pass never ran never count, one that ran and committed nothing Blocks (#399)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    queueRed(fake, { id: 650, at: ago(20 * MIN) });
+    fake.s.removals = [queueDrop(ago(18 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    // A stage ends before its pass runs (a crash, a stop, a pause): nothing recorded, and the next takes it up again.
+    for (let i = 1; i <= 1; i++) {
+      assert.equal((await reviewReads(fake, own, { pass: NEVER_RAN })).state, "fixing", `early end ${i}`);
+      assert.deepEqual(records(fake).map((r) => [r.state, r.tries, r.ends]), [["handed", i, []]]);
+      assert.equal(await merge({}), "queue-red", "handed again");
+    }
+    assert.equal(fake.s.enqueued.length, 0);
+    // The next runs to its end and commits nothing: recorded, and the next read Blocks as no progress.
+    assert.equal((await reviewReads(fake, own, { pass: IDLE })).state, "fixing");
+    assert.deepEqual(records(fake).map((r) => [r.state, r.tries, r.ends]), [["handed", 2, ["idle"]]]);
+    const blocked = await reviewReads(fake, own);
+    assert.equal(blocked.state, "blocked");
   });
 });
 

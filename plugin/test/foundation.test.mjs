@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { FOUNDATION_LABEL, foundationLabel } from "../scripts/lib/choice.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, foundationTrusted } from "../scripts/lib/objective-trust.mjs";
-import { reviewPost } from "../scripts/lib/handoff.mjs";
+import { reviewPost, reviewsCover } from "../scripts/lib/handoff.mjs";
+import { parseReview } from "../scripts/lib/logic.mjs";
 import { foundationCall, foundationReview } from "../scripts/review.mjs";
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
@@ -106,4 +107,16 @@ test("a session's review: post-review takes the foundation pass under `foundatio
   assert.ok(at("const found = await foundationTrusted(repo, issue, trusted.labels, opts);") > at("const trusted = await trustedIssue("), "read with the text it vouches for");
   assert.ok(at("if (!found.ok) throw new Error(`nothing posted: ${found.reason}. ${found.fix}`);") < at("await postReview("), "refused before anything is posted");
   assert.ok(at("foundation: found.foundation })") < at("await postReview("));
+});
+
+test("reviewsCover: a review and its foundation pass count only from Pendulum or someone who can push, and only for their own issue", () => {
+  const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
+  const bot = (body) => ({ body, author_association: "OWNER", user: { login: "kirk" } });
+  // The first review stage ran before the label: one pass, no foundation marker, so the foundation pass is due.
+  const plain = reviewPost({ issue: 7, review: { comments: [], acceptance: [{ entry: "A", met: true, evidence: "ok" }] }, diff, entries: [{ id: "A", text: "a" }] });
+  assert.deepEqual(reviewsCover([bot(plain.body)], 7), { reviewed: true, foundation: false });
+  const alone = reviewPost({ issue: 7, review: null, diff, foundation: parseReview('{"comments": [{"path": "src/new.ts", "line": 2, "entry": "foundation", "body": "foundation review: z"}]}') });
+  assert.deepEqual(reviewsCover([bot(plain.body), bot(alone.body)], 7), { reviewed: true, foundation: true });
+  assert.deepEqual(reviewsCover([{ ...bot(alone.body), author_association: "NONE", user: { login: "stranger" } }], 7), { reviewed: false, foundation: false });
+  assert.deepEqual(reviewsCover([bot(alone.body)], 8), { reviewed: false, foundation: false });
 });

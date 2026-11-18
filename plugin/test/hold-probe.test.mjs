@@ -26,6 +26,7 @@ const MIN = 60_000;
 const H = 60 * MIN;
 const DAY = 24 * H;
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
+const LIMIT_RUN = readFileSync(join(import.meta.dirname, "fixtures", "claude-2.1.323-usage-limit.jsonl"), "utf8");
 const jsonl = (events) => events.map((l) => JSON.stringify(l)).join("\n") + "\n";
 /** Wait until `ok()` holds (polled every 10 ms, up to 10 s). */
 const until = async (ok) => {
@@ -198,6 +199,34 @@ test("#613: a usage limit lifted before the reset it named is released at the ne
     assert.equal(next.held, null);
     assert.ok(lines.some((l) => /#8: claude account alpha answered a serve's probe and was released at .*; resuming it now, before the reset it paused for/.test(l)), lines.join(""));
     assert.equal(loop.calls().length, 1, "nothing held: nothing probed");
+  });
+});
+
+test("#613: a probe still refused for the usage limit keeps the hold, as does a probe that got no result", async () => {
+  await scene(async (h) => {
+    let t = Date.now();
+    const loop = serveOn(h, () => t);
+    loop.says(LIMIT_RUN, 1);
+    loop.result = limited(t + 6 * DAY, t);
+    await work(loop);
+    const reset = loop.limitUntil({ key: "alpha", shared: true });
+    const files = readdirSync(holdsDir(h)).filter((f) => f !== "alpha.probe.json");
+    t += MIN;
+    const probedAt = t;
+    assert.deepEqual((await tick(loop)).paused, []);
+    assert.equal(loop.calls().length, 1);
+    assert.equal(loop.limitUntil({ key: "alpha", shared: true }), reset, "the hold stands");
+    assert.deepEqual(readdirSync(holdsDir(h)).filter((f) => f !== "alpha.probe.json"), files, "no release record");
+    assert.deepEqual(JSON.parse(readFileSync(join(holdsDir(h), "alpha.probe.json"), "utf8")), { harness: "claude", account: "alpha", at: probedAt, outcome: "limited", usd: 0, billing: "subscription", model: "claude-opus-5-5" });
+    // Any other failure (the harness exits with no result): the hold stands, its cost unknown and said so, never a figure.
+    loop.says("", 1);
+    t += PROBE_EVERY_MS;
+    assert.deepEqual((await tick(loop)).paused, []);
+    assert.equal(loop.calls().length, 2);
+    assert.equal(loop.limitUntil({ key: "alpha", shared: true }), reset);
+    const failed = JSON.parse(readFileSync(join(holdsDir(h), "alpha.probe.json"), "utf8"));
+    assert.deepEqual([failed.outcome, failed.usd, failed.usdUnknown, failed.usdUnknownWhy], ["failed", null, 1, ["unreported"]]);
+    assert.equal(loop.ran(), 1, "no stage started through any of it");
   });
 });
 

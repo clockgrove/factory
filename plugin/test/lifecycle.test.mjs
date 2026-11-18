@@ -83,6 +83,12 @@ function harness(tag) {
   child.unref();
   return child;
 }
+/** A process group whose leader has exited while a member lives (a daemonised process); the member's pid. */
+function leaderless(tag = null) {
+  const r = spawnSync("setsid", ["sh", "-c", "sleep 60 </dev/null >/dev/null 2>&1 & echo $!; echo $$"], { encoding: "utf8", env: tag ? { ...process.env, PENDULUM_RUN_TAG: tag } : process.env });
+  const [member, leader] = r.stdout.trim().split("\n").map(Number);
+  return { member, leader };
+}
 const deadPid = () => spawnSync("true").pid;
 // Fresh tags for each run of this file: a reap kills every process of this user that carries its tag, so a fixed tag
 // would let a copy of this file running at the same time (another checkout's suite) reap, or be reaped by, this one.
@@ -129,6 +135,30 @@ test("a start reaps the harness a dead stage of the Objective recorded, and only
     assert.ok(alive(reused.pid));
   } finally {
     for (const pid of groups) killGroup(pid);
+  }
+});
+
+test("a group whose leader is gone is reaped only when a member carries the run's tag", { skip: process.platform !== "linux" }, async () => {
+  const ws = mkdtempSync(join(tmpdir(), "ws-"));
+  const usage = join(ws, "usage-work-1");
+  mkdirSync(usage);
+  // An unrelated daemon that took the recorded pid's group id: no tag anywhere.
+  const other = leaderless();
+  // The run's own group, its leader gone: its member inherited the tag.
+  const ours = leaderless(tags.a);
+  try {
+    assert.ok(await until(() => alive(other.member) && alive(ours.member) && !alive(other.leader) && !alive(ours.leader)));
+    const dead = { owner: deadPid(), ownerStart: "1", boot: bootId(), start: "1" };
+    writeFileSync(join(usage, groupRecordName(other.leader)), JSON.stringify({ pid: other.leader, tag: tags.b, ...dead }));
+    assert.equal(reapLeftRuns(ws), 0);
+    assert.ok(alive(other.member), "an untagged group is left alone");
+    writeFileSync(join(usage, groupRecordName(ours.leader)), JSON.stringify({ pid: ours.leader, tag: tags.a, ...dead }));
+    assert.equal(reapLeftRuns(ws), 1);
+    assert.ok(await until(() => !alive(ours.member)), "the run's group is gone");
+    assert.ok(alive(other.member));
+  } finally {
+    killGroup(other.leader);
+    killGroup(ours.leader);
   }
 });
 

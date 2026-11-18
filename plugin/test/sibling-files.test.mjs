@@ -454,8 +454,25 @@ test("#366: a conflicting PR that merges cleanly with every sibling ahead of it 
   assert.deepEqual([o.sentBack, o.rebaseHeld], [[21, 22, 23, 24], []]);
 });
 
+/** Objective n In review with PR 10 + n, clean, under review (its label on), at `head`. */
+const reviewingPr = (n, head) => ({ pr: { ...dirtyPr(n, head).pr, mergeable: true, mergeable_state: "clean", labels: [{ name: "pendulum:review" }] }, files: [] });
 /** The comments of PR `prNumber` that start with Objective n's record marker of `kind`. */
 const records = (w, n, prNumber, kind) => (w.state.comments[prNumber] || []).filter((c) => c.body.startsWith(marker(n, kind).replace(/ -->$/, ":")));
+/** A record of `kind` on n's PR waiting for `on` since `sinceMs` (overlap.mjs writeRecord's form). */
+const waitRecord = (n, kind, on, sinceMs, id = 960 + n) => ({ id, user: { login: SELF, type: "Bot" }, body: `${marker(n, kind).replace(/ -->$/, "")}:${on}-${Math.floor(sinceMs / 1000)} -->\nPendulum: waits.`, created_at: new Date(sinceMs).toISOString(), updated_at: new Date(sinceMs).toISOString() });
+
+test("#366: a send-back waits 6 h at most for the sibling ahead: waiting since 7 h ago it goes back, and its record is released", async () => {
+  forgetFiles();
+  const h21 = G.head("reg 21", { "src/registry.ts": [29] });
+  const h22 = G.head("reg 22", { "src/registry.ts": [29] });
+  const setup = (comments = {}) => world([issue(21, ["pendulum:in-review"], 1), issue(22, ["pendulum:in-review"], 1)], { comments: { 31: [validated(21, h21)], 32: [validated(22, h22)], ...comments }, prs: { 21: reviewingPr(21, h21), 22: dirtyPr(22, h22) } });
+  // Waiting since 7 h ago: it goes back now, and its record is released.
+  const late = setup({ 32: [validated(22, h22), waitRecord(22, "sendback-wait", 21, Date.now() - 7 * 3600_000)], 22: [] });
+  const l = await tick(late, { maxConcurrent: 6 });
+  assert.deepEqual([l.sentBack, l.rebaseHeld], [[22], []]);
+  assert.match(records(late, 22, 32, "sendback-wait")[0].body, /-released -->/);
+
+});
 
 test("#340: a hand-off waits 6 h at most from its first wait, then its review goes on beside the sibling and the note says why; two that wait on each other go in the release order, never both held", async () => {
   forgetFiles();

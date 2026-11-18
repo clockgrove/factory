@@ -369,3 +369,17 @@ test("every write goes through one queue: the exit write lands last, after the f
   assert.match(posted.at(-1), /- [^\n]* exit: delivered\n/, "the exit write is the last to land");
   assert.deepEqual(spendOf(posted.at(-1)), { usd: 1.25, unknown: 0 });
 });
+
+test("near GitHub's limit: a log of 80 lines of 2,000 characters stays under the comment limit, its first and last lines, exit line and spend line kept", async () => {
+  const huge = (
+    await reporter("work", async (p) => {
+      for (let i = 0; i < 80; i++) await p(`${"y".repeat(1990)} ${i}`, { step: "note" });
+      p.spend(1, { usdByBilling: { api: 1 } }, LEDGER);
+      await p("exit: delivered", endStep({ issue: 433, exit: "delivered" }));
+    })
+  ).at(-1);
+  assert.ok(huge.length < GITHUB_COMMENT_MAX, `${huge.length}`);
+  assert.match(huge, /y+ 0\n/, "the first lines kept");
+  assert.match(huge, /exit: delivered\n\n<\/details>/, "the last lines kept");
+  assert.deepEqual(spendOf(huge), { usd: 1, unknown: 0, byBilling: { api: 1 } });
+});

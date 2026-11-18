@@ -1,12 +1,17 @@
 import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 import { WORKFLOW_ONLY_SETTINGS, VARIABLE_SETTINGS, WORKFLOW_SETTINGS, layerLines, resolveInputs, valueProblem, machineSettings, settingLayers, variableSettings } from "../scripts/lib/inputs.mjs";
 import { HOT_SETTINGS, Local } from "../scripts/local.mjs";
 import { SPENT_GUESS_MS } from "../scripts/lib/holds.mjs";
 
 // A repository's settings in layers: Pendulum's defaults, the workflow's env block, repository variables, this machine (#284).
+
+const LAUNCH = fileURLToPath(new URL("../scripts/launch.mjs", import.meta.url));
+const INPUTS = fileURLToPath(new URL("../scripts/lib/inputs.mjs", import.meta.url));
 
 test("settingLayers: each layer over the one below; a variable never sets a setting only the workflow file sets; another harness drops the models below it", () => {
   for (const n of ["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB", "THIRD_PARTY_REVIEWERS", "CI_CHECKS", "PG_BIN", "NODE_VERSION"]) {
@@ -52,6 +57,11 @@ test("settingLayers: each layer over the one below; a variable never sets a sett
   assert.equal(lines[5], "repository variable PENDULUM_SETUP ignored: only the reviewed workflow file sets it");
 });
 
+/** Runs `code` in a fresh Node process with `env` (its PENDULUM_* settings as the workflow's env block on Actions), as action.yml's run step starts a script. */
+function onActions(code, env) {
+  return execFileSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, GITHUB_ACTIONS: "true", ...env } });
+}
+
 test("#402: rebase_limit is a cap a repository variable may set (a whole number above 0); third_party_wait_minutes gates a merge, so only the workflow file sets it", () => {
   assert.ok(VARIABLE_SETTINGS.has("PENDULUM_REBASE_LIMIT"));
   assert.deepEqual(variableSettings({ PENDULUM_REBASE_LIMIT: "3" }).kept, { PENDULUM_REBASE_LIMIT: "3" });
@@ -76,6 +86,23 @@ test("#402: rebase_limit is a cap a repository variable may set (a whole number 
   assert.deepEqual(resolveInputs({ env: { PENDULUM_GUESS_HOURS: "-1" } }).guessMs, SPENT_GUESS_MS);
   // serve takes a change of either at its next tick, as it does the other scheduling settings.
   for (const k of ["PENDULUM_REBASE_LIMIT", "PENDULUM_GUESS_HOURS"]) assert.ok(HOT_SETTINGS.includes(k), k);
+});
+
+test("on Actions the workflow's `vars` input lays the repository's variables over the env block before any script reads a setting, and the launcher hands them to the cloud sandbox's stage (#284)", () => {
+  const block = { PENDULUM_HARNESS: "claude", PENDULUM_MODEL: "claude-opus-5-5", PENDULUM_MAX_CONCURRENT: "3", PENDULUM_MAX_USD: "25", PENDULUM_TIMEOUT_MINUTES: "240", PENDULUM_AUTO_MERGE: "true" };
+  const vars = { PENDULUM_MAX_CONCURRENT: "6", PENDULUM_MAX_USD: "10", PENDULUM_AUTO_MERGE: "false", PENDULUM_TIMEOUT_MINUTES: "300", ANTHROPIC_OIDC_EXCHANGE_URL: "https://x" };
+  const code = `const { stageEnvironment } = await import(${JSON.stringify(LAUNCH)});
+const { resolveInputs } = await import(${JSON.stringify(INPUTS)});
+const inputs = resolveInputs({ args: { repo: "o/r" } });
+const stage = stageEnvironment({ inputs, stage: "work", issue: 7, claim: "c", tokens: { write: "w" } });
+console.log(JSON.stringify({ left: process.env.PENDULUM_INPUT_VARS ?? null, inputs: { maxConcurrent: inputs.maxConcurrent, maxUsd: inputs.maxUsd, autoMerge: inputs.autoMerge, timeoutMinutes: inputs.timeoutMinutes, model: inputs.model }, stage: { max: stage.PENDULUM_MAX_CONCURRENT, usd: stage.PENDULUM_MAX_USD, merge: stage.PENDULUM_AUTO_MERGE, vars: Object.keys(stage).filter((k) => k.endsWith("_VARS")) } }));`;
+  const out = onActions(code, { ...block, PENDULUM_INPUT_VARS: JSON.stringify(vars) });
+  const result = JSON.parse(out.trim().split("\n").at(-1));
+  assert.deepEqual(result, {
+    left: null,
+    inputs: { maxConcurrent: 6, maxUsd: 10, autoMerge: true, timeoutMinutes: 240, model: "claude-opus-5-5" },
+    stage: { max: "6", usd: "10", merge: "true", vars: [] },
+  });
 });
 
 /**

@@ -7,7 +7,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after as afterAll, test } from "node:test";
-import { CALL_LOG, UNIX_SOCKET_PATH_MAX, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal } from "../scripts/lib/gateway-relay.mjs";
+import { MAX_WAITING, CALL_LOG, UNIX_SOCKET_PATH_MAX, EDITS_MAX_BYTES, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
 import { RELAY_SOCKET_DIR_ENV, RELAY_SOCKET_ROOT, SOCKET_DIR_RECORD, checkSocketRoot, closeWorkerRelay, dropSocketDir, handSocketDir, localRelayDir, makeSocketDir, openWorkerRelay, readSocketDirRecord, relaySocketDir, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { STAGE_RECORD, reapSocketDirs, relaysGatewayKey } from "../scripts/local.mjs";
@@ -608,6 +608,44 @@ test("the gateway's real answer shapes (fixture): string costs, the generation i
   }
 });
 
+test("with a cap, calls waiting their turn when the pass ends are refused, never sent; the one in flight is booked into that pass", async () => {
+  let hold = null;
+  let entered = null;
+  const inFlight = new Promise((r) => (entered = r));
+  const gw = await fakeGateway({
+    "/v4/ai/image-model": async (body) => {
+      if (JSON.parse(body || "{}").wait) {
+        entered();
+        await new Promise((r) => (hold = r));
+      }
+      return priced(1);
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-minors-"));
+  const g = await openRelay({ key: KEY, dir: join(dir, "g"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1] });
+  try {
+    g.beginPass(100);
+    const first = call(g.socketPath, { token: g.token, body: '{"wait":true}' });
+    await inFlight;
+    // One more than may wait: the first answer is the 429 of the one that found the queue full, so the others wait.
+    const queued = Array.from({ length: MAX_WAITING + 1 }, () => call(g.socketPath, { token: g.token }));
+    const full = await Promise.race(queued);
+    assert.equal(full.status, 429);
+    const ended = g.endPass();
+    hold();
+    const statuses = (await Promise.all(queued)).map((x) => x.status).sort();
+    assert.deepEqual(statuses, [...Array(MAX_WAITING).fill(403), 429]);
+    assert.equal((await first).status, 200);
+    const pass = await ended;
+    assert.deepEqual([pass.usd, pass.calls], [1, 1]);
+    assert.equal(g.totals().calls, 1, "none of the queue was sent");
+  } finally {
+    await g.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the AI SDK's real requests (ai@7.0.165, fixture) pass through the relay with every header the gateway needs; the model header is never dropped (#126)", async () => {
   const F = JSON.parse(readFileSync(new URL("./fixtures/ai-sdk-7.0.165-requests.json", import.meta.url), "utf8"));
   const got = [];
@@ -773,6 +811,26 @@ test("image edits (#129): the recorded multipart and JSON requests pass byte for
   assert.equal(routeOf("POST", "/v1/images/edits")?.family, "image");
   assert.equal(routeOf("POST", "/v1/images/edits?x=1"), null);
   assert.equal(routeOf("GET", "/v1/credits"), null, "/v1/credits stays refused");
+});
+
+test("image edits (#132): a real turnaround's size, 38.5 MiB, is under the cap and passes whole", async () => {
+  const EDITS = "/v1/images/edits";
+  const boundary = "pendulum-test-boundary";
+  const body = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nopenai/gpt-image-2\r\n--${boundary}\r\nContent-Disposition: form-data; name="image[]"; filename="a.png"\r\nContent-Type: image/png\r\n\r\n`), PNG, Buffer.alloc(Math.ceil(38.5 * 1024 * 1024)), Buffer.from(`\r\n--${boundary}--\r\n`)]);
+  assert.ok(body.length < EDITS_MAX_BYTES);
+  const gw = await fakeGateway({ [EDITS]: { body: { created: 1, data: [{ b64_json: "aGk=" }], providerMetadata: { gateway: { cost: "0.01", generationId: "gen_EDITSLOW00001" } } } }, "/v1/generation": { body: { data: { total_cost: 0.01 } } } });
+  const dir = mkdtempSync(join(tmpdir(), "re-big-"));
+  const r = await openRelay({ key: KEY, dir: join(dir, "real"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5] });
+  try {
+    r.beginPass(100);
+    assert.equal((await send(r.socketPath, { path: EDITS, headers: { authorization: `Bearer ${r.token}`, "content-type": `multipart/form-data; boundary=${boundary}` }, body })).status, 200);
+    assert.ok(gw.seen.find((x) => x.url === EDITS).raw.equals(body), "the body arrived whole");
+    assert.equal((await r.endPass()).calls, 1);
+  } finally {
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the AI Gateway's own budget refusal (402 quota_for_entity_exceeded) costs $0, is named, and refuses later calls apart from Pendulum's own cap 402 (#134)", async () => {

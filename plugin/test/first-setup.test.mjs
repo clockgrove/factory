@@ -5,13 +5,13 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { doctorFooter, workflowTokenChecks } from "../scripts/doctor.mjs";
-import { asksWrite, defaultTokenJobs, defaultTokenState } from "../scripts/setup.mjs";
+import { asksWrite, defaultTokenJobs, defaultTokenState, workflowSettings } from "../scripts/setup.mjs";
 
 const SETUP = join(import.meta.dirname, "..", "scripts", "setup.mjs");
 const REPO = { owner: "acme", name: "widgets", full: "acme/widgets" };
@@ -116,6 +116,45 @@ async function withApi(gh, fn) {
 
 /** doctor's default-token row against the fake GitHub. */
 const doctorRow = (gh) => withApi(gh, async () => (await workflowTokenChecks({ repo: REPO, token: "dummy" })).find((r) => r.name === "default workflow token"));
+
+test("--preset first-run renders max_usd 5, max_concurrent 1 and auto-merge off; a flag beside it wins", async () => {
+  const gh = await fakeGitHub({ perms: { default_workflow_permissions: "read" } });
+  try {
+    const clone = mkdtempSync(join(tmpdir(), "first-setup-clone-"));
+    const out = join(clone, "pendulum.yml");
+    const r = await setup(gh, ["--apply", "workflow", "--preset", "first-run", "--out", out, "--yes"], clone);
+    assert.equal(r.status, 0, r.out);
+    const env = workflowSettings(readFileSync(out, "utf8")).env;
+    assert.deepEqual([env.PENDULUM_MAX_USD, env.PENDULUM_MAX_CONCURRENT, env.PENDULUM_AUTO_MERGE], ["5", "1", "false"]);
+    const own = await setup(gh, ["--apply", "workflow", "--preset", "first-run", "--max-usd", "8", "--out", join(clone, "own.yml"), "--yes"], clone);
+    assert.equal(own.status, 0, own.out);
+    assert.equal(workflowSettings(readFileSync(join(clone, "own.yml"), "utf8")).env.PENDULUM_MAX_USD, "8");
+  } finally {
+    await gh.close();
+  }
+});
+
+test("required checks: a candidate from a passed pull request is never applied on its own, and nothing inferred reaches the workflow file", async () => {
+  // The latest pull request's head ran CI and passed a job: a candidate, named by nobody.
+  const runs = [{ id: 11, name: "CI", path: ".github/workflows/ci.yml", head_sha: "abc1234def", pull_requests: [{ number: 7 }] }];
+  const jobs = { 11: [{ name: "test (22)", conclusion: "success" }] };
+  const gh = await fakeGitHub({ runs, jobs, ownerType: "Organization" });
+  try {
+    const r = await setup(gh, ["--apply", "protection", "--yes"]);
+    assert.equal(r.status, 0, r.out);
+    assert.ok(gh.state.requests.some((q) => q.includes("/actions/runs")), "the candidates were read");
+    assert.equal(gh.state.posted.length, 1);
+    assert.equal(gh.state.posted[0].rules.find((x) => x.type === "required_status_checks"), undefined);
+    // A first render never writes inferred names: PENDULUM_CI_CHECKS stays empty, so the runtime reads the live ruleset.
+    const clone = mkdtempSync(join(tmpdir(), "first-setup-clone-"));
+    const first = join(clone, "first.yml");
+    const w = await setup(gh, ["--apply", "workflow", "--out", first, "--yes"], clone);
+    assert.equal(w.status, 0, w.out);
+    assert.equal(workflowSettings(readFileSync(first, "utf8")).env.PENDULUM_CI_CHECKS, "");
+  } finally {
+    await gh.close();
+  }
+});
 
 test("#556: doctor's ci token row FAILs a pull_request or merge_group workflow, on any page of the list, that grants any scope write, or write-all, at the top or on a job, naming each grant; read, none, read-all and {} pass", async () => {
   const scopes = ["id-token", "packages", "checks", "statuses", "deployments", "security-events", "pages", "attestations", "discussions", "repository-projects", "a-scope-github-adds-later"];

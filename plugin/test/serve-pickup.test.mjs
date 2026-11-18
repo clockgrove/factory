@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { budgetHome, fakeProc } from "./fixtures/machine.mjs";
 import { Local, deadHereHolder, holderId, machineIdentity } from "../scripts/local.mjs";
 import { committedWorkflowNow } from "../scripts/lib/local.mjs";
-import { DOWNGRADE_LINE, checkoutProblem, pendulumBuild, pinDecision, releaseCheckout, releasesDir, runningPendulum, startProblem } from "../scripts/lib/release.mjs";
+import { DOWNGRADE_LINE, checkoutProblem, markInUse, pendulumBuild, pinDecision, pruneReleases, releaseCheckout, releasesDir, runningPendulum, startProblem } from "../scripts/lib/release.mjs";
 import { claudeLocalSettings, codexLocalConfig, copilotLocalSettings, harnessOuterSettings, srtSettings, versionSettings } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
@@ -187,6 +187,36 @@ test("checkoutProblem: every file is hashed against the manifest taken at the fe
   writeFileSync(join(c.dir, "plugin", "scripts", "extra.mjs"), "planted\n");
   assert.match(checkoutProblem(c), /extra\.mjs was added|\.git\/info\/exclude changed/);
 });
+
+test("pruneReleases: the newest three checkouts stay, and the one serve runs or any live serve runs whatever its age; a fetch under way stays", () => {
+  pruneCase();
+});
+
+function pruneCase() {
+  const home = mkdtempSync(join(tmpdir(), "home-"));
+  const root = releasesDir(home);
+  const names = ["v1.0.0-a", "v1.0.1-b", "v1.0.2-c", "v1.0.3-d", "v1.0.4-e", "v1.0.5-f", "v1.0.6-g", "v1.0.7-h.part"];
+  names.forEach((n, i) => {
+    mkdirSync(join(root, n), { recursive: true });
+    const at = new Date(Date.now() - (names.length - i) * 60_000);
+    utimesSync(join(root, n), at, at);
+  });
+  mkdirSync(join(root, ".home"));
+  // Another live serve on this machine runs from the oldest but one; a dead one's name keeps nothing.
+  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+  try {
+    markInUse(join(root, "v1.0.1-b"), { home, pid: other.pid });
+    markInUse(join(root, "v1.0.2-c"), { home, pid: 2 ** 22 + 7 });
+    // A live process's name another serve removed while this one reads it (here: one that does not read).
+    mkdirSync(join(root, ".in-use", String(process.pid)));
+    pruneReleases(home, [join(root, "v1.0.0-a")]);
+    rmSync(join(root, ".in-use", String(process.pid)), { recursive: true });
+  } finally {
+    other.kill();
+  }
+  assert.deepEqual(readdirSync(root).sort(), [".home", ".in-use", "v1.0.0-a", "v1.0.1-b", "v1.0.4-e", "v1.0.5-f", "v1.0.6-g", "v1.0.7-h.part"]);
+  assert.deepEqual(readdirSync(join(root, ".in-use")), [String(other.pid)], "a dead process's name goes");
+}
 
 test("startProblem: the new release's loop is tried with nothing of this shell's env", async () => {
   const fx = pendulumRepo();
@@ -417,6 +447,45 @@ async function serveOver(ad, { wf, pendulum, atTick, paused = () => [], stubs = 
   }
   return { lines, loop };
 }
+
+test("serve: a new pinned release holds new stages while one runs, and serve starts again on it once none runs (#276)", async () => {
+  const ad = adopter({ PENDULUM_LOCAL_MAX_CONCURRENT: "3" });
+  const fx = pendulumRepo();
+  fx.release("9.9.9");
+  const home = mkdtempSync(join(tmpdir(), "home-"));
+  let stageEnd = null;
+  const offered = [];
+  const execs = [];
+  const { loop } = await serveOver(ad, {
+    wf: { PENDULUM_LOCAL_MAX_CONCURRENT: "3" },
+    pendulum: { version: "0.9.30", commit: null, root: "/f", release: true },
+    atTick: (n, l) => {
+      // Tick 1 starts #7; the repin lands before tick 2. The stage in flight ends a few ticks after the release is ready.
+      if (n === 1) ad.push({ PENDULUM_LOCAL_MAX_CONCURRENT: "3" }, "v9.9.9");
+      if (l.repin?.state === "ready" && (l.waited = (l.waited || 0) + 1) === 3) stageEnd({ exit: "delivered" });
+      if (n >= 200) l.stopping = true;
+    },
+    paused: (n, l) => {
+      offered.push({ n, waiting: !!l.repin && !execs.length });
+      return [];
+    },
+    stubs: (loop) => ({
+      releaseOpts: { home, url: fx.url },
+      runObjective: () => new Promise((ok) => (stageEnd = ok)),
+      execve: (...args) => {
+        execs.push(args);
+        loop.stopping = true;
+      },
+    }),
+  });
+  assert.ok(loop.waited >= 3, "the switch waited for the stage in flight");
+  assert.deepEqual(offered.filter((o) => o.waiting), [], "no paused work is resumed while the switch waits");
+  assert.equal(execs.length, 1, "started again once");
+  const [file, argv, env] = execs[0];
+  assert.equal(file, process.execPath);
+  assert.match(argv.at(-1 - (process.argv.length - 2)), new RegExp(`^${releasesDir(home)}/v9\\.9\\.9-[0-9a-z]+/plugin/scripts/local\\.mjs$`));
+  assert.equal(env.PENDULUM_PLUGIN_ROOT, undefined);
+});
 
 test("serve: a pin it does not follow is said once and changes nothing: a branch, or a serve run from a checkout that is not a release (#276)", async () => {
   for (const [pin, pendulum, said] of [

@@ -15,13 +15,13 @@ On a first setup (no `.github/workflows/pendulum.yml` yet) ask only these three,
 2. **The spending caps:** `--max-usd` per job and `--daily-usd` per day.
 3. **Auto-merge:** `--auto-merge` on or off.
 
-For a first run, recommend `--preset first-run` as the answer to the caps and auto-merge (it leaves `daily_usd` at $100), one line each:
+For a first run, recommend `--preset first-run` as the answer to the caps and auto-merge, one line each:
 
 - `max_usd` 5: a job stops at about $5, so a wrong turn costs little.
-- `max_concurrent` 1: one Objective at a time, so each one can be followed.
+- `max_concurrent` 1: one Objective at a time, so each can be followed.
 - `auto_merge` false: Pendulum's pull requests wait for the user's merge, so they read each first.
 
-A flag beside the preset wins; everything else takes its default. Show the rendered file; on yes, write it (After lands it). Then list the defaults it took as "You can change these later", with where, from [reference.md](reference.md), Workflow settings (also re-renders and the cloud sandbox).
+A flag beside the preset wins; everything else takes its default. Show the rendered file; on yes, write it (After lands it). Then list the defaults it took as "You can change these later", with where, from [reference.md](reference.md), Workflow settings (also re-renders and the cloud sandbox). Recommend listing the test runner in `--validation`, taking a test file or filter, so answer rounds can settle findings by test.
 
 ## 2. The GitHub App
 
@@ -31,7 +31,7 @@ Never read, print or copy the key. Offer `--apply app`, in the background where 
 
 - **Labels** (`--apply labels`) and **Project board** (`--apply project`): as the App when its credentials are exported ([reference.md](reference.md), Labels and board), else as the user's `gh` login.
 - **Merge queue and branch protection** (`--apply protection`): the `pendulum` ruleset on the default branch (a merge queue where GitHub offers one; required checks: the branch's own, else none), as the user's `gh` login (admin). Show its candidate checks and marks; pass exactly those the user accepts as `--ci-checks`. If the CI workflow lacks `merge_group:` under `on:`, offer to add it.
-- **A read-only default workflow token** (`--apply default-token`, never part of `all`): doctor fails while the default `GITHUB_TOKEN` can write. Show the preview: the workflows that would get a read-only token, any called workflow among them that asks for write (it would then fail), and those left alone. One that writes with `GITHUB_TOKEN` needs `permissions:` first: ask. It changes no file.
+- **A read-only default workflow token** (`--apply default-token`, never part of `all`): doctor fails while the default `GITHUB_TOKEN` can write. Show the preview: the workflows that would get a read-only token, any called workflow among them that asks for write, and those left alone. One that writes with `GITHUB_TOKEN` needs `permissions:` first: ask.
 
 ## 4. Skills in the repository
 
@@ -43,7 +43,7 @@ Instead of or beside the Action, on the user's machine: walk [local.md](local.md
 
 ## Several accounts
 
-Adding or removing accounts ("add a second Claude account"): [reference.md](reference.md).
+Adding or removing accounts: [reference.md](reference.md).
 
 ## After
 

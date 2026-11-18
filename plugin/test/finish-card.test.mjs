@@ -768,3 +768,23 @@ test("finish card (#589 S4): a closed Objective's open PR is stopped while its l
   assert.ok(!retry.writes.some((w) => w.startsWith("DELETE /issues/8/labels/")), "its label waits");
   assert.ok(retry.writes.some((w) => w.startsWith("DELETE /issues/80/labels/")), "its PR stopped: the review label off");
 });
+
+test("#617: a card whose rows' cents are shared out to the total says so once, in the money note; one whose rows are their own figures says nothing", async () => {
+  const { SHARED_NOTE } = await import("../scripts/lib/finish-card.mjs");
+  // pendulum-scratch #37's figures: $0.302286 and $0.152868 are $0.30 and $0.15 on their own, and $0.46 together.
+  const shared = withSelf(() => data({ comments: withSpend({ work: { usd: 0.302286, usdByBilling: { api: 0.302286 } }, review: { usd: 0.152868, usdByBilling: { api: 0.152868 } } }) }));
+  const card = renderFinishCard(shared);
+  assert.match(card, /\| Review · [^|]+ \| [^|]+ \| \$0\.16 \|\n(?:\|[^\n]*\n)*\| \| \*\*Total\*\* \| [^|]+ \| \*\*\$0\.46\*\* \|/, "the review's row carries the cent that makes the rows add up");
+  assert.match(card, /review stage's last line: \$0\.15$/m, "the run log shows the stage's own figure");
+  assert.equal(card.split(SHARED_NOTE).length, 2, "said once");
+  assert.ok(card.includes(`\n\n${SHARED_NOTE} CI minutes are not included.\n\n<details><summary>Run details</summary>`), "in the money note");
+  // The recorded run: $0.35637 and $0.163442 are $0.36 and $0.16, which add up to $0.52 as they are.
+  const own = renderFinishCard(withSelf(() => data()));
+  assert.ok(!own.includes(SHARED_NOTE) && own.includes("\n\nCI minutes are not included.\n\n<details>"));
+  // With the breakdown drawn, the note stays one line: the bars' sentence, then this one.
+  const part = (usd) => ({ usd, usdByBilling: { api: usd }, usdByPass: { work: { usd: 0.202286, usdByBilling: { api: 0.202286 } }, fix: { usd: 0.1, usdByBilling: { api: 0.1 } } } });
+  const drawn = renderFinishCard(withSelf(() => data({ comments: withSpend({ work: part(0.302286), review: { usd: 0.152868, usdByBilling: { api: 0.152868 } } }) })));
+  assert.ok(drawn.includes("**Where the money went**"));
+  assert.ok(drawn.includes(`\nBars show recorded dollars only. ${SHARED_NOTE} CI minutes are not included.\n`));
+  assert.equal(drawn.split(SHARED_NOTE).length, 2);
+});

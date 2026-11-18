@@ -212,15 +212,16 @@ test("report (#569 V10): review rounds give the reviewer's passes; cost per mode
   const { json: r } = await report(decisionsWorld(), ["--issue", "20"]);
   assert.deepEqual(r.hotSpots.reviewLoops.items, [{ issue: 20, reviews: 1, reviewerPasses: 1 }]);
   const model = (k) => r.breakdowns.model.find((x) => x.key === k);
-  // Each row over the priced harness passes of the stages it counts: the work stage's on the worker's model, the review
-  // stage's (its review and fix passes) on the reviewer's.
-  assert.deepEqual(model(OPUS).usdPerModelMinute, { api: { usd: 0.5, pricedMinutes: 5, pricedPasses: 1, usdPerModelMinute: 0.1 } });
-  assert.deepEqual(model(FABLE).usdPerModelMinute, { api: { usd: 0.4, pricedMinutes: 3, pricedPasses: 2, usdPerModelMinute: 0.133333 } });
+  // Each row over the priced harness passes that ran on its model, as its dollars are booked by pass (#568): the work
+  // pass and the review stage's fix pass on the worker's model, the review pass on the reviewer's; never the answer pass,
+  // whose dollars were not reported.
+  assert.deepEqual(model(OPUS).usdPerModelMinute, { api: { usd: 0.6, pricedMinutes: 6, pricedPasses: 2, usdPerModelMinute: 0.1 } });
+  assert.deepEqual(model(FABLE).usdPerModelMinute, { api: { usd: 0.3, pricedMinutes: 2, pricedPasses: 1, usdPerModelMinute: 0.15 } });
   assert.deepEqual(model("decisions").usdPerModelMinute, {});
-  assert.deepEqual(r.hotSpots.costPerModelMinute.items.map((x) => [x.model, x.billing, x.usdPerModelMinute]), [[FABLE, "api", 0.133333], [OPUS, "api", 0.1]]);
+  assert.deepEqual(r.hotSpots.costPerModelMinute.items.map((x) => [x.model, x.billing, x.usdPerModelMinute]), [[FABLE, "api", 0.15], [OPUS, "api", 0.1]]);
   const md = renderReport(r);
   assert.match(md, /^\*\*Review rounds\*\*: #20 1 \(1 reviewer pass\(es\)\)$/m);
-  assert.match(md, new RegExp(`^\\*\\*Cost per model minute, by model\\*\\*: ${FABLE} \\$0\\.13/min api \\(\\$0\\.40 over 3 min of 2 priced pass\\(es\\)\\); ${OPUS} \\$0\\.10/min api`, "m"));
+  assert.match(md, new RegExp(`^\\*\\*Cost per model minute, by model\\*\\*: ${FABLE} \\$0\\.15/min api \\(\\$0\\.30 over 2 min of 1 priced pass\\(es\\)\\); ${OPUS} \\$0\\.10/min api`, "m"));
 });
 
 /**

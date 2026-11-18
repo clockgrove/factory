@@ -9,13 +9,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { collectObjective, snapshotApi, usageDirFor, usageFromDir } from "../lib/collect.mjs";
 import { cacheOf, costOf, loadPrices, parseUsageText, priceTokens, sessionsOf } from "../lib/cost.mjs";
-import { pendulumRequests, handoverSteps, humanActions, localPendulumActions, markdownTable, scoreObjective, splitInterventions, summaryLine } from "../lib/objective.mjs";
+import { RENAMED_NOTE, RENAMED_WHY, pendulumRequests, handoverSteps, humanActions, localPendulumActions, markdownTable, scoreObjective, splitInterventions, summaryLine } from "../lib/objective.mjs";
 import { bySelf, dispatchLatency, pendulumLogin, failedStartsOf, lastWrite, launchesOf, phaseMinutes, setupSeconds } from "../lib/phases.mjs";
 import { noWait, waitedRecorded, waitedUnrecorded } from "./fixtures/sandbox-drill.mjs";
 import { blocked, cleanMerge, humanPush, localMerge, OPERATOR, questionAnswered, REPO, snapshotOf, withHandover } from "./fixtures/github.mjs";
 import { CODEX_NO_TOKENS, mergeUsage, parseUsage } from "../../plugin/scripts/lib/usage.mjs";
 import { harnessMarker, usdText } from "../../plugin/scripts/lib/logic.mjs";
 import { handoverLine } from "../../plugin/scripts/lib/handover.mjs";
+import { PREVIOUS_NAME } from "../../plugin/scripts/lib/local.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
 const USAGE = join(import.meta.dirname, "fixtures", "usage");
@@ -1459,4 +1460,115 @@ test("#566 S6: a vendor comment standing alone with no model dollars and no mode
   // With the model's dollars, they are known; with its run of unknown cost, that one run, not a second.
   assert.deepEqual(alone({ usd: 0.34, modelUsd: 0.3, vendorUsd: 0.04 }), [[0.3, 0, [], { usd: 0.04 }]]);
   assert.deepEqual(alone({ usd: 0.04, vendorUsd: 0.04, usdUnknown: 1, usdUnknownWhy: ["unreported"] }), [[null, 1, ["unreported"], { usd: 0.04 }]]);
+});
+
+/** `c` labelled before the rename to Pendulum: its first label under the old name, a day before the fixture's (#567). */
+const renamed = (c, name = `${PREVIOUS_NAME}:objective`) => ({ ...c, issueTimeline: [{ event: "labeled", label: { name }, actor: OPERATOR, created_at: "2031-03-01T01:00:00Z" }, ...c.issueTimeline] });
+
+test("an Objective labelled before the rename to Pendulum (#567): a clean merge's walk-away, operator minutes, waiting and wall clock are unknown and in no walk-away count; nothing else changes", async () => {
+  const { streaks, pooledStreak, verdict } = await import("../lib/streak.mjs");
+  const { baselineOf } = await import("../lib/baseline.mjs");
+  const plain = scoreObjective(cleanMerge(42, usage("claude")), { prices, now: NOW });
+  assert.deepEqual([plain.wallMinutes, plain.walkAway.value, plain.operator.minutes], [150, true, 0]);
+  for (const name of [`${PREVIOUS_NAME}:objective`, `${PREVIOUS_NAME}:running`]) {
+    const row = scoreObjective(renamed(cleanMerge(42, usage("claude")), name), { prices, now: NOW });
+    assert.deepEqual([row.wallMinutes, row.workingMinutes, row.wallBasis], [null, null, "unknown: labelled before the rename to Pendulum"], name);
+    assert.deepEqual([row.walkAway.value, row.walkAway.bucket, row.walkAway.reason, row.walkAway.askedOnly.value, row.walkAway.clockRenamed], [null, "unknown", RENAMED_WHY, null, true]);
+    assert.equal(row.operator.minutes, "unknown");
+    assert.equal(row.waitingMinutes, null);
+    assert.ok(row.missing.includes("clock start (labelled before the rename to Pendulum)"));
+    // A stopwatch reading is a measure of its own: it stands.
+    assert.equal(scoreObjective(renamed(cleanMerge(42, usage("claude")), name), { prices, now: NOW, minutes: 12 }).operator.minutes, 12);
+    // What the later window read stands as read; the exit, the cost and the rest of the row are as without the event.
+    const rest = ({ walkAway: { value, bucket, reason, askedOnly, clockRenamed, ...w }, operator, wallMinutes, wallBasis, workingMinutes, waitingMinutes, waitingBasis, missing, ...r }) => ({ w, r });
+    assert.deepEqual(rest(row), rest(plain));
+    // The table says unknown; the summary leaves it out of every count and names it.
+    const other = scoreObjective(cleanMerge(43, usage("claude")), { prices, now: NOW });
+    const table = markdownTable([row, other]);
+    assert.match(table, new RegExp(`^\\| #42 \\| merged \\| unknown: not known: labelled before the rename to Pendulum[^|]* \\| unknown \\| 0 / 0 \\|`, "m"));
+    assert.match(table, new RegExp(`\\| ${plain.runnerMinutes} \\| unknown \\|`));
+    assert.match(table, /^Walk-away: 1 of 1 Objective\(s\) \(1 merged\) with no human input; 1 of 1 counting only input Pendulum asked for\. [^\n]* Not known \(labelled before the rename to Pendulum\), in no count: #42\.$/m);
+    // The streak skips it: it neither extends nor breaks, and is not finished; the baseline's walk-away rate leaves it out.
+    assert.deepEqual(verdict(row), { ok: null, unknown: true, why: `walk-away unknown: ${RENAMED_WHY}` });
+    const h = Object.values(streaks([row, other], { from: "2031-02-01T00:00:00Z" }).harnesses)[0];
+    assert.deepEqual([h.finished, h.walkAway, h.current, h.sequence.map((x) => [x.issue, x.ok])], [1, 1, 1, [[42, null], [43, true]]]);
+    const pooled = pooledStreak([{ ...row, repository: REPO }, { ...other, repository: REPO }], { from: "2031-02-01T00:00:00Z" });
+    assert.deepEqual([pooled.finished, pooled.walkAway, pooled.current], [1, 1, 1]);
+    assert.equal(baselineOf([row, other]).walkAway, 100);
+  }
+});
+
+test("an Objective labelled before the rename to Pendulum (#567): what its later window saw is a fact: a Blocked, a human push, an answered Question and a P1 escape each stay a break", async () => {
+  const { streaks, pooledStreak, endedAt } = await import("../lib/streak.mjs");
+  const from = "2031-02-01T00:00:00Z";
+  const escaped = (r) => ({ ...r, quality: { ...r.quality, escapes: [{ issue: 90, priority: "P1" }] } });
+  const probes = [
+    ["blocked", scoreObjective(renamed(blocked(44)), { prices, now: NOW })],
+    ["human push", scoreObjective(renamed(humanPush(43)), { prices, now: NOW })],
+    ["question", scoreObjective(renamed(questionAnswered(45)), { prices, now: NOW })],
+    ["P1 escape", escaped(scoreObjective(renamed(cleanMerge(42)), { prices, now: NOW }))],
+  ];
+  for (const [what, row] of probes) {
+    const plain = { "blocked": blocked(44), "human push": humanPush(43), "question": questionAnswered(45), "P1 escape": cleanMerge(42) }[what];
+    const known = scoreObjective(plain, { prices, now: NOW });
+    if (what !== "P1 escape") {
+      // A miss as read, noted: the same bucket, Blocks, Question, human actions and interventions as without the event.
+      assert.equal(row.walkAway.bucket, "miss", what);
+      assert.equal(row.walkAway.value, false, what);
+      assert.deepEqual([row.walkAway.blocked, row.walkAway.question, row.walkAway.blocks, row.walkAway.humanActions, row.walkAway.interventions], [known.walkAway.blocked, known.walkAway.question, known.walkAway.blocks, known.walkAway.humanActions, known.walkAway.interventions], what);
+      assert.equal(row.walkAway.reason, `${known.walkAway.reason} (${RENAMED_NOTE})`, what);
+      assert.equal(row.walkAway.askedOnly.value, known.walkAway.askedOnly.value ? null : false, what);
+    } else assert.equal(row.walkAway.bucket, "unknown");
+    // Each one breaks the streak, per harness and pooled, and ends when it ended.
+    assert.equal(endedAt(row), endedAt(known), what);
+    const seq = Object.values(streaks([row], { from }).harnesses).flatMap((h) => h.sequence);
+    assert.deepEqual(seq.map((x) => [x.issue, x.ok]), [[row.issue, false]], what);
+    const pooled = pooledStreak([{ ...row, repository: REPO }], { from });
+    assert.deepEqual([pooled.finished, pooled.walkAway, pooled.sequence.map((x) => x.ok)], [1, 0, [false]], what);
+  }
+});
+
+test("an Objective labelled before the rename to Pendulum (#567): an External result seen after its later label stays External, skipped like any other", async () => {
+  const { streaks, pooledStreak, verdict } = await import("../lib/streak.mjs");
+  const { blockMarker } = await import("../../plugin/scripts/lib/logic.mjs");
+  const stopped = () => {
+    const c = blocked(80);
+    c.bodyEdits = [];
+    c.workflowRuns = [];
+    c.issueComments[1].body += `\n${blockMarker("max-usd")}`;
+    return c;
+  };
+  const known = scoreObjective(stopped(), { prices, now: NOW });
+  const row = scoreObjective(renamed(stopped()), { prices, now: NOW });
+  assert.equal(known.walkAway.bucket, "external");
+  assert.deepEqual([row.walkAway.bucket, row.walkAway.value, row.walkAway.clockRenamed, row.walkAway.blocks, row.walkAway.blocked], ["external", false, true, known.walkAway.blocks, known.walkAway.blocked]);
+  assert.equal(row.walkAway.reason, `${known.walkAway.reason} (${RENAMED_NOTE})`);
+  assert.deepEqual(verdict(row), verdict(known));
+  const h = Object.values(streaks([row], { from: "2031-02-01T00:00:00Z" }).harnesses)[0];
+  assert.deepEqual([h.finished, h.external, h.sequence.map((x) => [x.ok, x.external])], [0, 1, [[null, true]]]);
+  const pooled = pooledStreak([{ ...row, repository: REPO }], { from: "2031-02-01T00:00:00Z" });
+  assert.deepEqual([pooled.finished, pooled.external], [0, 1]);
+});
+
+test("an Objective labelled before the rename to Pendulum (#567): a walk-away with an input source unread stays as read and breaks the streak, never unknown", async () => {
+  const { streaks, pooledStreak, verdict } = await import("../lib/streak.mjs");
+  const unread = () => ({ ...cleanMerge(42), bodyEdits: null });
+  const known = scoreObjective(unread(), { prices, now: NOW });
+  const row = scoreObjective(renamed(unread()), { prices, now: NOW });
+  assert.deepEqual(known.walkAway.unseen, ["body edits"]);
+  assert.deepEqual([row.walkAway.value, row.walkAway.bucket, row.walkAway.unseen, row.walkAway.clockRenamed], [true, "walk-away", ["body edits"], true]);
+  assert.equal(row.walkAway.reason, `${known.walkAway.reason} (${RENAMED_NOTE})`);
+  assert.deepEqual(verdict(row), verdict(known));
+  assert.equal(verdict(row).ok, false);
+  const seq = Object.values(streaks([row], { from: "2031-02-01T00:00:00Z" }).harnesses).flatMap((h) => h.sequence);
+  assert.deepEqual(seq.map((x) => [x.issue, x.ok]), [[42, false]]);
+  const pooled = pooledStreak([{ ...row, repository: REPO }], { from: "2031-02-01T00:00:00Z" });
+  assert.deepEqual([pooled.finished, pooled.walkAway, pooled.sequence.map((x) => x.ok)], [1, 0, [false]]);
+  // verdict itself: an unknown row with an input source unread, or none recorded, is a break before any skip.
+  const clean = scoreObjective(renamed(cleanMerge(42)), { prices, now: NOW });
+  assert.equal(clean.walkAway.bucket, "unknown");
+  for (const unseen of [["workflow runs"], undefined]) {
+    const v = verdict({ ...clean, walkAway: { ...clean.walkAway, unseen } });
+    assert.deepEqual([v.ok, v.why], [false, `input not readable (${(unseen ?? ["input sources not recorded"]).join(", ")}): walk-away unproven`]);
+  }
 });

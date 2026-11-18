@@ -40,7 +40,7 @@ export const isFix = (kind) => /-(?:fix|fresh)$/.test(kind);
 export const isAnswer = (kind) => kind === "answer" || kind.startsWith("answer-");
 
 /** One ledger entry as the report reads it: its kind, cost by billing, tokens and minutes; null for a broken one. */
-function ledgerPass(e) {
+export function ledgerPass(e) {
   if (!e || typeof e !== "object") return null;
   const c = zeroCost();
   const usd = num(e.usd);

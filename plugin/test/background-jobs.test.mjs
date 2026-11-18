@@ -201,6 +201,9 @@ test("runHarness's passes under one liveActivity: the first pass's cost reaches 
     return { usd: Math.round((n.usd - base.usd) * 1e6) / 1e6, unknown: n.unknown - base.unknown, running: n.running };
   };
   const go = join(mkdtempSync(join(tmpdir(), "pendulum-go-")), "go");
+  // The writes landed when the rerun started, and the index of the write this test asks for at the rerun's first line.
+  let atStart = null;
+  let asked = null;
   try {
     const progress = progressReporter(repoOf("acme/app"), 7, { token: () => "t" }, { stage: "work", runId: "1", harness: "claude", model: "claude-opus-5-5", soFar, passesOf: () => stagePasses().slice(before), env: { PENDULUM_TIME_ZONE: "UTC" } });
     await progress("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
@@ -209,12 +212,16 @@ test("runHarness's passes under one liveActivity: the first pass's cost reaches 
     let during = null;
     const onPass = (phase, r) => {
       if (phase === "start") started += 1;
+      if (phase === "start" && started === 2) atStart = bodies.length;
       live.onPass(phase, r);
     };
     // While the rerun runs (its stream begun, its result held back): a write, then the rerun may end.
     const onLine = (l) => {
       live.onLine(l);
-      if (started === 2 && !during) during = progress.planAsked([]).then(() => writeFileSync(go, ""));
+      if (started === 2 && !during) during = progress.planAsked([]).then(() => {
+        asked = bodies.length - 1;
+        writeFileSync(go, "");
+      });
     };
     // The session is killed with its background job still running, then resumed once (runHarness: JOBS).
     const { calls } = await pass(["bg-kill", "held"], { onLine, onPass, onResume: live.onResume }, { go });
@@ -229,6 +236,8 @@ test("runHarness's passes under one liveActivity: the first pass's cost reaches 
   const cards = bodies.map((b) => b.split("\n\n<details>")[0]);
   const row = (c) => /^\| [^|]+ \| Built the change · Opus 5\.5 \| [^|]+ \| ([^|]+) \|$/m.exec(c)?.[1] ?? null;
   const now = (c) => /\*\*Now:\*\* building the change/.test(c);
+  // At the rerun's start, before its first line's write: the step is the Now row again, by a write of its own.
+  assert.ok(atStart !== null && asked !== null && cards.slice(atStart, asked).some(now), `no Now row written at the rerun's start (writes ${atStart} to ${asked}):\n${cards.join("\n=====\n")}`);
   // At the first pass's end: its cost on the headline and the step's row, no Now row.
   const firstEnd = cards.findIndex((c) => row(c) === "$0.25" && !now(c));
   assert.ok(firstEnd > 0, cards.join("\n=====\n"));

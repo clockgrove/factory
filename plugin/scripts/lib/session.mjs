@@ -1379,6 +1379,8 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
   };
   // Whether the last pass's end is written (onPass): `finish` then writes nothing more.
   let endSaid = false;
+  // The passes started so far (onPass).
+  let passes = 0;
   const onLine = (line) => {
     tracker.feed(line);
     // The drift advisory's watcher (drift.mjs), when on: its own checkpoint clock, never in the run's way.
@@ -1395,11 +1397,14 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
     onResume: tracker.since,
     // runHarness's hook (runOnce): each pass's start runs the step again (a rerun after a usage limit, a busy provider,
     // a refused resume, a background command); each pass's end, its record booked, is written once, at once, whether or
-    // not its stream had its result line.
+    // not its stream had its result line. A later pass's start is written at once too: the write for the pass before
+    // it was moments ago, so its own first lines would wait out the throttle with no Now row on the card.
     onPass: (phase) => {
       if (phase === "start") {
         tracker.passStart();
         endSaid = false;
+        passes += 1;
+        if (passes > 1) say(true);
         return;
       }
       tracker.passEnd();

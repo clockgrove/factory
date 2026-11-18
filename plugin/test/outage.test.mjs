@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -827,4 +828,135 @@ test("#353, worker.mjs run for real: GitHub answering 500 past the retries ends 
   assert.equal(result.outage.code, "HTTP 500");
   assert.match(result.reason, /answered HTTP 500 to every try/);
   assert.ok(!/crashed/.test(out), out);
+});
+
+// --- #594: behind an HTTPS proxy (local mode's stages run with NODE_USE_ENV_PROXY=1), Node's fetch is undici's. ---
+
+/**
+ * A real HTTP proxy on a loopback port that answers each CONNECT as `answer(host)` says: a status, refusing the tunnel;
+ * or a port, a tunnel to that loopback port (a working proxy, whatever host was asked). Every CONNECT is in `seen`.
+ */
+async function proxyOf(answer) {
+  const seen = [];
+  const proxy = createServer((req, res) => (seen.push(`${req.method} ${req.url}`), res.writeHead(500).end()));
+  proxy.on("connect", (req, sock, head) => {
+    seen.push(`CONNECT ${req.url}`);
+    sock.on("error", () => {});
+    const a = answer(req.url.replace(/:\d+$/, ""));
+    if (a.status) return void sock.end(`HTTP/1.1 ${a.status} Proxy Says No\r\nContent-Length: 0\r\n\r\n`);
+    const up = connect(a.port, "127.0.0.1", () => {
+      sock.write("HTTP/1.1 200 Connection established\r\n\r\n");
+      up.write(head);
+      up.pipe(sock);
+      sock.pipe(up);
+    });
+    up.on("error", () => sock.destroy());
+  });
+  await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
+  return { seen, url: `http://127.0.0.1:${proxy.address().port}`, close: () => new Promise((r) => (proxy.closeAllConnections(), proxy.close(r))) };
+}
+
+/** Run node with `args` as its own process behind `proxy`, as local mode runs a stage; resolves {code, out}. */
+const behind = (proxy, args, extraEnv = {}) =>
+  new Promise((done, fail) => {
+    const child = spawn(process.execPath, args, { env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, NODE_USE_ENV_PROXY: "1", HTTPS_PROXY: proxy.url, HTTP_PROXY: proxy.url, ...extraEnv } });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+    child.on("error", fail);
+    child.on("close", (code) => (clearTimeout(timer), done({ code, out })));
+  });
+
+test("#594: Node's fetch through a real proxy: its 5xx to CONNECT is the host unreached, its 4xx is not, and a host's own 502 through it is an answer", async () => {
+  const upstream = createServer((req, res) => res.writeHead(502, { "content-type": "application/json" }).end('{"message":"Server Error"}'));
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+  const statuses = { "api.github.test": 502, "s503.github.test": 503, "s504.github.test": 504, "auth.github.test": 407, "deny.github.test": 403 };
+  const proxy = await proxyOf((host) => (statuses[host] ? { status: statuses[host] } : { port: upstream.address().port }));
+  const net = pathToFileURL(join(import.meta.dirname, "..", "scripts", "lib", "network.mjs")).href;
+  const origins = [...Object.keys(statuses).map((h) => `https://${h}`), "http://working.github.test"];
+  const code = `import { causeCode, probe, unreachable } from ${JSON.stringify(net)};
+const out = {};
+for (const o of ${JSON.stringify(origins)}) {
+  try { const r = await fetch(o, { signal: AbortSignal.timeout(20000) }); out[o] = { status: r.status }; }
+  catch (e) { out[o] = { code: causeCode(e), unreachable: unreachable(e) }; }
+}
+out.probe = await probe("https://api.github.test");
+console.log(JSON.stringify(out));`;
+  try {
+    const r = await behind(proxy, ["--input-type=module", "-e", code]);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(JSON.parse(r.out), {
+      "https://api.github.test": { code: "PROXY_TUNNEL_502", unreachable: true },
+      "https://s503.github.test": { code: "PROXY_TUNNEL_503", unreachable: true },
+      "https://s504.github.test": { code: "PROXY_TUNNEL_504", unreachable: true },
+      "https://auth.github.test": { code: "PROXY_TUNNEL_407", unreachable: false },
+      "https://deny.github.test": { code: "PROXY_TUNNEL_403", unreachable: false },
+      "http://working.github.test": { status: 502 },
+      probe: "PROXY_TUNNEL_502",
+    });
+    assert.ok(proxy.seen.every((l) => l.startsWith("CONNECT ")), "every request went through the proxy's tunnel");
+  } finally {
+    await proxy.close();
+    await new Promise((r) => upstream.close(r));
+  }
+});
+
+test("#594: undici's code alone, or its tunnel message with anything around it, is no proxy refusal", () => {
+  const fetchFailed = (cause) => new TypeError("fetch failed", { cause: Object.assign(new Error("Request was cancelled."), { cause }) });
+  const aborted = (message) => Object.assign(new Error(message), { name: "AbortError", code: "UND_ERR_ABORTED" });
+  assert.equal(unreachable(fetchFailed(aborted("Request aborted"))), false);
+  assert.equal(unreachable(fetchFailed(aborted("Proxy response (502) !== 200 when HTTP Tunneling, again"))), false);
+  assert.equal(unreachable(fetchFailed(Object.assign(new Error("Proxy response (502) !== 200 when HTTP Tunneling"), { code: "ECONNRESET" }))), false);
+  assert.equal(unreachable(fetchFailed(aborted("Proxy response (502) !== 200 when HTTP Tunneling"))), true);
+});
+
+/**
+ * Run worker.mjs as its own process, local mode, behind `proxy` (NODE_USE_ENV_PROXY, as local mode's stages run), with
+ * GitHub's API at `origin`, the stage's wait cut to 1.5 s and the client's backoff to milliseconds (a preload sets
+ * OUTAGE and RETRY). Returns {code, out, result}.
+ */
+async function stageBehind(proxy, origin) {
+  const root = mkdtempSync(join(tmpdir(), "outage-proxy-"));
+  mkdirSync(join(root, "co"));
+  const pre = join(root, "pre.mjs");
+  const lib = (f) => JSON.stringify(pathToFileURL(join(import.meta.dirname, "..", "scripts", "lib", f)).href);
+  writeFileSync(pre, `import { OUTAGE } from ${lib("network.mjs")};\nimport { RETRY } from ${lib("github.mjs")};\nOUTAGE.stageWaitMs = 1500;\nOUTAGE.probeMs = [100];\nRETRY.baseMs = 5;\n`);
+  const args = ["--import", pathToFileURL(pre).href, join(import.meta.dirname, "..", "scripts", "worker.mjs"), "--repo", "o/r", "--issue", "7", "--checkout", join(root, "co"), "--usage-dir", join(root, "u")];
+  const r = await behind(proxy, args, { HOME: root, TZ: process.env.TZ, PENDULUM_LOCAL: "1", PENDULUM_APP_TOKEN: "t", GITHUB_API_URL: origin, GITHUB_GRAPHQL_URL: `${origin}/graphql` });
+  const file = join(root, "u", "result.json");
+  return { ...r, result: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null };
+}
+
+test("#594, worker.mjs run for real: a proxy that cannot open a tunnel to GitHub (its 502 to CONNECT) pauses the stage on this machine's network", async () => {
+  const proxy = await proxyOf(() => ({ status: 502 }));
+  try {
+    const { code, out, result } = await stageBehind(proxy, "https://api.github.test");
+    assert.equal(code, 0, out);
+    assert.equal(result?.exit, "paused", out);
+    assert.match(out, /network: api\.github\.test is unreachable from this machine \(PROXY_TUNNEL_502\)/);
+    assert.deepEqual({ origin: result.outage.origin, code: result.outage.code }, { origin: "https://api.github.test", code: "PROXY_TUNNEL_502" });
+    assert.match(result.reason, /this machine could not reach api\.github\.test \(PROXY_TUNNEL_502\)/);
+    assert.ok(!/crashed/.test(out), out);
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("#594, worker.mjs run for real: GitHub's own 502 through a working proxy stays GitHub answering: the client's retries, then GitHub's outage, never this machine's", async () => {
+  const upstream = createServer((req, res) => res.writeHead(502, { "content-type": "application/json" }).end('{"message":"Server Error"}'));
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+  const proxy = await proxyOf(() => ({ port: upstream.address().port }));
+  try {
+    const { code, out, result } = await stageBehind(proxy, "http://api.github.test");
+    assert.equal(code, 0, out);
+    assert.equal(result?.exit, "paused", out);
+    assert.ok(proxy.seen.length > 1 && proxy.seen.every((l) => l === "CONNECT api.github.test:80"), "through the proxy's tunnel");
+    assert.ok(!/unreachable from this machine/.test(out), out);
+    assert.equal(result.outage.code, "HTTP 502");
+    assert.match(result.reason, /answered HTTP 502 to every try/);
+  } finally {
+    await proxy.close();
+    await new Promise((r) => upstream.close(r));
+  }
 });

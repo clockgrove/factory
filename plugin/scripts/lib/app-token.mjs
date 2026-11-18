@@ -3,7 +3,7 @@
 // needed; the same code serves the Action and `/pendulum doctor` on a laptop.
 // Only setup's app step creates an App (lib/app-manifest.mjs); everything here verifies and uses the one it is given.
 import { createSign } from "node:crypto";
-import { NetworkDown, OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, downFor, networkBack, quotaNow, spentCandidate, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
+import { NetworkDown, OUTAGE, RATE_LIMIT_SPENT, causeCode, downFor, networkBack, quotaNow, spentCandidate, spentResetOf, stoppedWaiting, unreachableCode, waitingOutages } from "./network.mjs";
 
 const b64url = (buf) => Buffer.from(buf).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
 
@@ -91,12 +91,12 @@ async function fetchOrNoAnswer(url, init) {
     } catch (e) {
       const code = causeCode(e);
       const origin = new URL(url).origin;
-      if (UNREACHABLE.has(code) && waitingOutages()) {
+      if (unreachableCode(code) && waitingOutages()) {
         await networkBack(origin, code);
         continue;
       }
-      if (UNREACHABLE.has(code) && stoppedWaiting()) throw downFor(origin) ?? new NetworkDown({ origin, code, since: OUTAGE.now() });
-      throw Object.assign(new Error(`${init.method} ${url}: ${e.message}`, { cause: e }), { status: 0, transport: true, code, unsent: UNREACHABLE.has(code) });
+      if (unreachableCode(code) && stoppedWaiting()) throw downFor(origin) ?? new NetworkDown({ origin, code, since: OUTAGE.now() });
+      throw Object.assign(new Error(`${init.method} ${url}: ${e.message}`, { cause: e }), { status: 0, transport: true, code, unsent: unreachableCode(code) });
     }
   }
 }

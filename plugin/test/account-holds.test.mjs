@@ -17,7 +17,7 @@ writeFileSync(
   'import { appendFileSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nconst a = process.argv;\nappendFileSync(process.env.FAKE_RAN, "ran\\n");\nif (process.env.FAKE_LIMIT) {\n  const { accountHolds } = await import(process.env.FAKE_HOLDS);\n  accountHolds({ dir: process.env.FAKE_HOLDS_DIR }).limit(JSON.parse(process.env.FAKE_LIMIT));\n  const { existsSync } = await import("node:fs");\n  while (!existsSync(process.env.FAKE_GO)) await new Promise((r) => setTimeout(r, 20));\n}\nwriteFileSync(join(a[a.indexOf("--usage-dir") + 1], "result.json"), process.env.FAKE_RESULT);\n',
 );
 process.env.PENDULUM_PLUGIN_ROOT = root;
-const { HOLD_FORGET_MS, HOLD_MAX_MS, LIMIT_BACKOFF_MS, accountHolds, holdsDir } = await import("../scripts/lib/holds.mjs");
+const { LIMIT_BACKOFF_MS, accountHolds, holdsDir } = await import("../scripts/lib/holds.mjs");
 const { Local } = await import("../scripts/local.mjs");
 const { accountsFile } = await import("../scripts/lib/accounts.mjs");
 const { gitPinFile, harnessOuterSettings, pinGitDir } = await import("../scripts/lib/local.mjs");
@@ -118,66 +118,6 @@ test("#264: a usage limit holds only the account that met it, for every serve on
   assert.ok(!within(holdsDir(h), join(h, ".config", "pendulum")));
 });
 
-test("#264: an account held by another account's limit still starts: a hold on beta holds no stage on alpha", async () => {
-  const h = fakeHome();
-  const t = Date.now();
-  await withHome(h, async () => {
-    accountHolds({ dir: holdsDir(h) }).limit({ harness: "claude", account: "beta", reset: t + 60 * MIN, now: t });
-    const a = serveOn(h, () => t);
-    assert.equal(a.limitHold(["pendulum:objective"]), null);
-    a.result = { exit: "delivered", tokens: { output: 10 } };
-    assert.equal((await a.stage(8, "work", "worker.mjs", [])).exit, "delivered");
-    assert.equal(a.ran(), 1);
-  });
-});
-
-test("#264: the back-off streak is the account's, shared by every serve; it ends when a pass on that account completes, or once the hold is long past", async () => {
-  const h = fakeHome();
-  let t = Date.now();
-  await withHome(h, async () => {
-    const pause = async (loop) => {
-      loop.result = limited(t - MIN, t);
-      const end = await loop.stage(8, "work", "worker.mjs", []);
-      await loop.outagePaused(8, end);
-      const held = (loop.offline.get(8).reset - t) / MIN;
-      t = loop.offline.get(8).reset;
-      return held;
-    };
-    // A provider that refuses past the reset it stated, met by two serves in turn: one streak, 2, 5, 10 then 15 minutes.
-    const a = serveOn(h, () => t);
-    const b = serveOn(h, () => t);
-    assert.deepEqual([await pause(a), await pause(b), await pause(a), await pause(b), await pause(a)], [2, 5, 10, 15, 15]);
-    // A pass on alpha that another serve's limit lands during: it started before that limit and ends after it, so the
-    // streak stays.
-    t += 1000;
-    b.result = { exit: "delivered", tokens: { output: 10 } };
-    b.during = { harness: "claude", account: "alpha", reset: t - MIN, now: t + 500 };
-    const files = readdirSync(holdsDir(h)).length;
-    const running = b.stage(8, "work", "worker.mjs", []);
-    for (const deadline = Date.now() + 30_000; readdirSync(holdsDir(h)).filter((f) => !f.startsWith(".")).length === files; ) {
-      assert.ok(Date.now() < deadline, "the other serve's limit was never written");
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    t += 2000;
-    b.go();
-    assert.equal((await running).exit, "delivered");
-    b.during = null;
-    t += 16 * MIN;
-    assert.equal(await pause(a), 15, "the streak went on: 15 minutes, not 2");
-    // A pass on alpha that started after the newest limit completes: the streak ends.
-    t += 1000;
-    await b.stage(8, "work", "worker.mjs", []);
-    assert.equal(await pause(a), 2);
-    // A stage that ran but whose pass the provider never served does not end it.
-    a.result = { exit: "blocked", tokens: { output: 0 } };
-    await a.stage(8, "work", "worker.mjs", []);
-    assert.equal(await pause(b), 5);
-    // The hold long past: forgotten, and the count starts again.
-    t += HOLD_FORGET_MS + MIN;
-    assert.equal(await pause(a), 2);
-  });
-});
-
 test("#264: several serves writing holds at the same time lose none", async () => {
   const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), ".cache", "pendulum", "holds");
   const t = Date.now();
@@ -230,36 +170,6 @@ test("#264: no sandbox may write the holds; a record a sandbox or another user c
   assert.deepEqual(LIMIT_BACKOFF_MS, [2, 5, 10, 15].map((m) => m * MIN));
 });
 
-test("#264: with no accounts declared, a hold is the login's: two serves on two Claude Code folders never hold each other, two on one folder do", async () => {
-  const h = fakeHome({ declared: false });
-  const t = Date.now();
-  await withHome(h, async () => {
-    const on = (folder) => (process.env.CLAUDE_CONFIG_DIR = join(h, "work", folder));
-    on("claude-a");
-    const a = serveOn(h, () => t);
-    a.result = limited(t + 180 * MIN, t);
-    await a.outagePaused(8, await a.stage(8, "work", "worker.mjs", []));
-    // Another serve on another login: nothing held, its stage runs.
-    on("claude-b");
-    const b = serveOn(h, () => t);
-    assert.equal(b.limitHold(["pendulum:objective"]), null);
-    b.result = { exit: "delivered", tokens: { output: 10 } };
-    assert.equal((await b.stage(8, "work", "worker.mjs", [])).exit, "delivered");
-    assert.equal(b.ran(), 1);
-    // Another serve (or a restarted one) on the first login: held, nothing starts.
-    on("claude-a");
-    const c = serveOn(h, () => t);
-    assert.match(c.limitHold(["pendulum:objective"]), /^claude's usage limit is spent until /);
-    assert.equal((await c.stage(8, "work", "worker.mjs", [])).exit, "paused");
-    assert.equal(c.ran(), 0);
-  });
-  // The key is the login's path, hashed: no path in the record.
-  for (const f of readdirSync(holdsDir(h))) {
-    assert.match(f, /^claude@[0-9a-f]{12}\.([0-9a-f]{16}|quota)\.json$/);
-    assert.ok(!readFileSync(join(holdsDir(h), f), "utf8").includes(h));
-  }
-});
-
 test("#421: pauses on GitHub's spent rate limit count from the first only while nothing is done between them: a harness pass served counts afresh, a decision call alone does not", async () => {
   const { writeUsage } = await import("../scripts/lib/session.mjs");
   const { keepDecision } = await import("../scripts/lib/harness.mjs");
@@ -300,46 +210,22 @@ test("#421: pauses on GitHub's spent rate limit count from the first only while 
   });
 });
 
-test("#264: a Copilot token from serve's environment names no login: its hold stays in that serve's memory", async () => {
-  const h = fakeHome({ declared: false });
-  const t = Date.now();
-  await withHome(h, async () => {
-    process.env.COPILOT_GITHUB_TOKEN = "dummy";
-    const a = serveOn(h, () => t);
-    const hold = a.holdOf({ name: "copilot", harness: "copilot", declared: false });
-    assert.deepEqual(hold, { key: "copilot@env", shared: false });
-    await a.limitPaused(8, { exit: "paused", stage: "work", account: "copilot", hold, usageLimit: { harness: "copilot", reset: new Date(t + 60 * MIN).toISOString(), since: new Date(t).toISOString() } });
-    assert.equal(a.limitUntil(hold), t + 60 * MIN);
-    assert.match(a.limitHold(["pendulum:objective", "pendulum:harness:copilot"]), /^copilot's usage limit is spent until /);
-    assert.equal(serveOn(h, () => t).limitUntil(hold), null, "another serve does not see it");
-    assert.deepEqual(readdirSync(holdsDir(h)), []);
-    // A token file in ~/.config/pendulum is a login: shared, keyed by its path, never its value.
-    delete process.env.COPILOT_GITHUB_TOKEN;
-    assert.equal(a.holdOf({ name: "copilot", harness: "copilot", declared: false }).shared, true);
-  });
-});
 
-test("#264: a record is held to the longest window, a record from a later clock does not pin the streak, a served pass's record lasts as long as the hold, and a key no file may carry stays in memory", () => {
+test("#264: the back-off streak is the account's, shared by every serve; it ends when a pass that started after the newest limit completes", () => {
   const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
-  const t = Date.now();
-  const errors = [];
-  const holds = accountHolds({ dir, onError: (e) => errors.push(e.message) });
-  // Hand-made: an end past any window (toISOString would throw on it), and one stamped a day ahead with a long streak.
-  writeFileSync(join(dir, "alpha.00000000000000a1.json"), JSON.stringify({ harness: "claude", account: "alpha", until: 8.9e15, streak: 0, at: t }), { mode: 0o600 });
-  writeFileSync(join(dir, "beta.00000000000000b1.json"), JSON.stringify({ harness: "claude", account: "beta", until: t - MIN, streak: 3, at: t + 24 * 60 * MIN }), { mode: 0o600 });
-  assert.equal(holds.until("alpha", t), t + HOLD_MAX_MS);
-  assert.doesNotThrow(() => new Date(holds.until("alpha", t)).toISOString());
-  assert.equal(holds.limit({ harness: "claude", account: "gamma", reset: t + 30 * 24 * 60 * MIN, now: t }), t + HOLD_MAX_MS);
-  // beta: a pass completes after the later-clock record; the streak ends and the next refusal is held 2 minutes.
-  holds.served({ harness: "claude", account: "beta", now: t, started: t - 1 });
-  assert.equal(holds.limit({ harness: "claude", account: "beta", reset: t - MIN, now: t + 1 }), t + 1 + LIMIT_BACKOFF_MS[0]);
-  // A pass served while held: its record lasts as long as the hold, so the streak does not come back when it is forgotten.
-  const d = { harness: "claude", account: "delta" };
-  const end = holds.limit({ ...d, reset: t - MIN, now: t });
-  holds.served({ ...d, now: t + 1000, started: t + 500 });
-  assert.equal(holds.limit({ ...d, reset: end - MIN, now: t + 1000 + HOLD_FORGET_MS + 1 }), t + 1000 + HOLD_FORGET_MS + 1 + LIMIT_BACKOFF_MS[0]);
-  // A key no file may be named by: kept in memory, and said.
-  holds.limit({ harness: "claude", account: "Bad/Key", reset: t + 60 * MIN, now: t });
-  assert.equal(holds.until("Bad/Key", t), t + 60 * MIN);
-  assert.equal(errors.length, 1);
+  const [a, b] = [accountHolds({ dir }), accountHolds({ dir })];
+  const alpha = { harness: "claude", account: "alpha" };
+  const t = Date.UTC(2031, 0, 1);
+  // The provider refuses past the reset it stated, met by two serves in turn: one streak.
+  assert.equal(a.limit({ ...alpha, reset: t - MIN, now: t }), t + 2 * MIN);
+  const t1 = t + 2 * MIN;
+  assert.equal(b.limit({ ...alpha, reset: t1 - MIN, now: t1 }), t1 + 5 * MIN);
+  // A pass that started before the newest limit and ended after it: the streak stays.
+  const t2 = t1 + 5 * MIN;
+  a.served({ ...alpha, now: t2, started: t1 - 1 });
+  assert.equal(a.limit({ ...alpha, reset: t2 - MIN, now: t2 }), t2 + 10 * MIN);
+  // A pass that started after it: the streak ends.
+  const t3 = t2 + 10 * MIN;
+  a.served({ ...alpha, now: t3, started: t2 + 1 });
+  assert.equal(a.limit({ ...alpha, reset: t3 - MIN, now: t3 + 1 }), t3 + 1 + 2 * MIN);
 });

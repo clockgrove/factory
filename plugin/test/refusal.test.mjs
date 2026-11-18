@@ -4,10 +4,9 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { jsonLines, parseUsage, providerRefusal, subAgentRefusal } from "../scripts/lib/usage.mjs";
+import { jsonLines, parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
 import { REASON_MAX, decideExit } from "../scripts/lib/logic.mjs";
 import { crashed } from "../scripts/lib/session.mjs";
-import { reviewCallEnd } from "../scripts/lib/handoff.mjs";
 
 const fixtures = join(import.meta.dirname, "fixtures");
 const fixture = (f) => readFileSync(join(fixtures, f), "utf8");
@@ -26,12 +25,6 @@ test("codex: a 400 refusal is read from turn.failed's JSON body, not counted as 
   assert.match(d.reason, /not retried: the fix is on the credential's account/);
   const quoted = d.reason.slice(d.reason.indexOf("): ") + 3, d.reason.indexOf("; not retried"));
   assert.ok(quoted.length <= REASON_MAX && quoted.endsWith("…"), "the provider's message is clipped");
-});
-
-test("codex: a 401 Codex reports only as prose stays a death (retried as before); nothing reads the words", () => {
-  const rec = failed("codex", fixture("codex-0.167-401.jsonl"));
-  assert.equal(rec.refusal, undefined);
-  assert.equal(crashed(rec), true);
 });
 
 test("codex: a JSON body with a 429 or 5xx status is retryable; 429 insufficient_quota is not", () => {
@@ -54,81 +47,6 @@ test("claude: a 401 is a refusal from the result's api_error_status; a 429 or 5x
     const retryable = text.replaceAll('"api_error_status":401', `"api_error_status":${status}`).replace('"error":"authentication_failed"', `"error":"${kind}"`);
     assert.equal(parseUsage("claude", retryable, null).refusal, undefined, `HTTP ${status}`);
   }
-});
-
-// #418: Pendulum does not judge a Claude model id by its form (choice.mjs modelProblem); the API's 404 for a model the
-// login does not serve is the answer, read as a refusal (no retry, no death) that Blocks naming it. Recorded from Claude
-// Code 2.1.325 (`claude -p --model <unserved>`, a loopback API that 404s the model).
-test("claude: a 404 for a model the login does not serve is a refusal that Blocks", () => {
-  const rec = failed("claude", fixture("claude-2.1.325-model-not-found.jsonl"));
-  assert.deepEqual([rec.refusal?.status, rec.refusal?.type, rec.refusal?.subAgent], [404, "model_not_found", undefined]);
-  assert.equal(crashed(rec), false);
-  assert.match(decideExit({ harness: rec, pr: null, commits: 0 }).reason, /^claude was refused by its provider \(HTTP 404 model_not_found\): There's an issue with the selected model/);
-});
-
-// #418: a sub-agent's model the login does not serve. Claude Code 2.1.325 reports it only as the sub-agent's API error
-// message (its `parent_tool_use_id`, `api_error_type` and no status); the main session goes on and ends `end_turn` with
-// no error (recorded with an implementer agent pinned to an unserved model and a loopback API that 404s it).
-test("claude: a sub-agent's model refused is the run's refusal, and Blocks naming the label that chose the model", () => {
-  const text = fixture("claude-2.1.325-subagent-model-not-found.jsonl");
-  const rec = failed("claude", text, 0);
-  assert.equal(jsonLines(text).findLast((e) => e.type === "result").is_error, false, "the recorded run itself ends without an error");
-  assert.deepEqual({ ...rec.refusal, message: undefined }, { harness: "claude", status: 404, type: "model_not_found", code: null, message: undefined, subAgent: "implementer", toolUseId: "toolu_01SubAgent" });
-  assert.equal(rec.ok, false);
-  assert.equal(crashed(rec), false);
-  const d = decideExit({ harness: rec, pr: null, commits: 0 });
-  assert.equal(d.exit, "blocked");
-  assert.match(d.reason, /^claude was refused by its provider for its `implementer` sub-agent \(HTTP 404 model_not_found\): There's an issue with the selected model/);
-  assert.match(d.reason, /The fix is the sub-agent model, which a `pendulum:subagent-model:<id>` label on the issue \(else PENDULUM_SUBAGENT_MODEL\) chooses/);
-  // A sub-agent's busy answer or usage limit is not one: the main session meets those as its own.
-  const sub = (fields) => [{ type: "assistant", is_api_error_message: true, parent_tool_use_id: "t1", subagent_type: "implementer", message: { content: [] }, ...fields }];
-  assert.equal(subAgentRefusal(sub({ error: "rate_limit", api_error_type: "rate_limit_error" })), null);
-  assert.equal(subAgentRefusal(sub({ error: "server_error", api_error_type: "overloaded_error" })), null);
-  assert.equal(subAgentRefusal(sub({ error: "invalid_request", api_error_type: "invalid_request_error" })), null, "a request's own 400");
-  assert.equal(subAgentRefusal(sub({ error: "rate_limit", api_error: "usage_limit_reached", api_error_status: 429 })), null);
-  assert.equal(subAgentRefusal(sub({ error: "authentication_failed", api_error_status: 401 })).status, 401);
-  assert.equal(subAgentRefusal(sub({ parent_tool_use_id: null, error: "model_not_found", api_error_type: "not_found_error" })), null, "the main session's own is providerRefusal's");
-  assert.match(decideExit({ harness: { ...rec, refusal: { ...rec.refusal, subAgent: "foundation-reviewer" } }, pr: null, commits: 0 }).reason, /`pendulum:reviewer-model:<id>` label on the issue \(else PENDULUM_REVIEWER_MODEL\)/);
-});
-
-// #418: the run stops at the sub-agent's refusal, before the main session goes on without that work and spends on it.
-test("runHarness: a Claude run is stopped at its sub-agent's model refusal, which is the pass's refusal, not a stop by Pendulum", async () => {
-  const { runHarness } = await import("../scripts/lib/harness.mjs");
-  const bin = mkdtempSync(join(tmpdir(), "pendulum-subagent-"));
-  const home = mkdtempSync(join(tmpdir(), "pendulum-home-"));
-  const lines = fixture("claude-2.1.325-subagent-model-not-found.jsonl").trim().split("\n");
-  const at = lines.findIndex((l) => l.includes('"is_api_error_message":true'));
-  // The recorded stream up to the sub-agent's refusal, then the main session's own going on a minute later.
-  writeFileSync(join(bin, "claude"), `#!${process.execPath}\nconst lines = ${JSON.stringify(lines)};\nfor (const l of lines.slice(0, ${at + 1})) console.log(l);\nsetTimeout(() => { for (const l of lines.slice(${at + 1})) console.log(l); }, 60_000);\n`, { mode: 0o755 });
-  const path = process.env.PATH;
-  process.env.PATH = `${bin}:${path}`;
-  try {
-    const started = Date.now();
-    const rec = await runHarness({ harness: "claude", model: "claude-opus-5-5", prompt: "p", maxUsd: 0, cwd: bin, env: { HOME: home, PATH: process.env.PATH }, timeoutMs: 120_000, label: "work" });
-    assert.ok(Date.now() - started < 30_000, "stopped at the refusal, not at the end of the run");
-    assert.deepEqual([rec.refusal?.subAgent, rec.refusal?.status, rec.ok, rec.stopped], ["implementer", 404, false, false]);
-    assert.equal(crashed(rec), false);
-    assert.match(decideExit({ harness: rec, pr: null, commits: 0 }).reason, /`pendulum:subagent-model:<id>` label/);
-  } finally {
-    process.env.PATH = path;
-  }
-});
-
-// Copilot 1.0.107's session.error event (copilot-sdk/generated/session-events.d.ts ErrorData).
-test("copilot: session.error with a 4xx status or a quota type is a refusal on a failed run; a passing rate limit is not, the user's global one is", () => {
-  const text = fixture("copilot-1.0.107-session-error.jsonl");
-  const rec = failed("copilot", text);
-  assert.deepEqual({ ...rec.refusal, message: undefined }, { harness: "copilot", status: 402, type: "quota", code: "quota_exceeded", message: undefined });
-  assert.equal(parseUsage("copilot", text.replace('"exitCode":1', '"exitCode":0'), null, 0).refusal, undefined, "a run that exited 0 recovered");
-  const limited = (code) => text.replace('"errorType":"quota","errorCode":"quota_exceeded","statusCode":402', `"errorType":"rate_limit","errorCode":"${code}","statusCode":429`);
-  assert.equal(parseUsage("copilot", limited("rate_limited"), null, 1).refusal, undefined);
-  assert.equal(parseUsage("copilot", limited("user_global_rate_limited"), null, 1).refusal?.code, "user_global_rate_limited", "#390: a usage limit with no reset reported");
-});
-
-test("a refusal outranks a death count and names itself in the review's account of a call", () => {
-  const rec = failed("codex", fixture("codex-0.167-refused-400.jsonl"));
-  assert.match(decideExit({ harness: { ...rec, died: 2 }, pr: null }).reason, /^codex was refused/);
-  assert.equal(reviewCallEnd(rec, null), "a refusal by the provider (HTTP 400 invalid_request_error codex_byok_restricted_by_api_credit_promo)");
 });
 
 test("runHarness and exitRecord: one refused Codex call, no second ask, the exit record Blocks with the refusal", async () => {

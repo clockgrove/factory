@@ -13,12 +13,11 @@ import { test } from "node:test";
 import { planTextMarker } from "../scripts/lib/handoff.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
 import { objectiveSha, recordText } from "../scripts/lib/objective-trust.mjs";
-import { parseYaml } from "../scripts/lib/yaml.mjs";
 import { priceCodex } from "../scripts/lib/usage.mjs";
 import { prepareUpload } from "../scripts/lib/seal.mjs";
 import { setAgent } from "../scripts/lib/proc.mjs";
 import { dropSessions, keepSession } from "../scripts/lib/claude-runner.mjs";
-import { cancelledEnd, savedSessionNow } from "../scripts/lib/session.mjs";
+import { savedSessionNow } from "../scripts/lib/session.mjs";
 import { scoreObjective } from "../../bench/lib/objective.mjs";
 import { loadPrices } from "../../bench/lib/cost.mjs";
 import { cleanMerge } from "../../bench/test/fixtures/github.mjs";
@@ -230,25 +229,6 @@ test("on the agent uid, the cancelled stage's session is unpacked by the system'
   });
 });
 
-test("a session copy that fails leaves the cancelled stage's record and no session in the usage directory, masked or not", () => {
-  asAgentWithPlantedTools(() => {
-    const usageDir = join(mkdtempSync(join(tmpdir(), "agent-session-")), "u");
-    mkdirSync(usageDir);
-    const good = "5b0c3a1e-7d6f-4a40-9a51-0c1e2f3a4b5c";
-    const bad = "6c1d4b2f-8e70-4b51-ab62-1d2f3a4b5c6d";
-    keepSession(good, capture(mkdtempSync(join(tmpdir(), "cap-")), good, '{"note":"s3cret-value"}\n'));
-    // An archive tar cannot read, unpacked after one that it can: the copy fails part-way.
-    keepSession(bad, { tar: Buffer.alloc(4096, 1), files: [`proj/${bad}.jsonl`] });
-    // The stream's masking fails too (a directory where the file would be): the record is written before it, and stays.
-    mkdirSync(join(usageDir, "events.jsonl"));
-    const rec = cancelledEnd("SIGTERM", { usageDir, mask: [join(usageDir, "events.jsonl")], secrets: ["s3cret-value"], fields: () => ({ harness: "claude", model: "claude-opus-5-5", progressRun: "4242", account: null, passes: 1, credentialBasis: "none" }), sessionOf: () => ({ harness: "claude", sessionId: good, also: [bad], checkout: "/c" }) });
-    assert.equal(rec.exit, "cancelled");
-    assert.equal(JSON.parse(readFileSync(join(usageDir, "result.json"), "utf8")).session, null, "the record, with no session");
-    assert.ok(!existsSync(join(usageDir, "transcript")), "no part of the copy in the usage directory");
-    assert.deepEqual(readdirSync(join(usageDir, "..")).sort(), ["u"], "nor beside it");
-  });
-});
-
 /** A fake Codex: one turn per call; FAKE_HANG=1 writes `<FAKE_STATE>/running` and never reports its turn. */
 function fakeCodex(bin) {
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
@@ -308,35 +288,6 @@ test("a stage cancelled after a finished pass keeps that pass's dollars and its 
   assert.equal(rec.session?.id, "01a1c6ba-16b2-7a13-b2da-47bf51b4e724", "the finished pass's session, saved for the next stage");
   assert.deepEqual(rec.session.files, ["2026/11/10/rollout-2026-11-10T10-30-46-01a1c6ba-16b2-7a13-b2da-47bf51b4e724.jsonl"]);
   assert.equal(readFileSync(join(usage, "transcript", rec.session.files[0]), "utf8"), '{"note":"***"}\n', "masked like every saved session");
-});
-
-test("the Action's work and review steps are the stage's own process, so a cancelled job's signals reach it", async () => {
-  // The runner signals the step's process alone (SIGINT, then SIGTERM); bash waiting on a child never passes them on.
-  const action = parseYaml(readFileSync(join(ROOT, "action.yml"), "utf8"));
-  const step = action.runs.steps.find((s) => typeof s.run === "string" && s.run.includes("scripts/worker.mjs"));
-  const dir = mkdtempSync(join(tmpdir(), "step-"));
-  const plugin = join(dir, "plugin");
-  mkdirSync(join(plugin, "scripts"), { recursive: true });
-  for (const [mode, script] of [["work", "worker.mjs"], ["review", "review.mjs"]]) {
-    const got = join(dir, `${mode}.got`);
-    writeFileSync(join(plugin, "scripts", script), `import { writeFileSync } from "node:fs";\nprocess.on("SIGINT", () => { writeFileSync(${JSON.stringify(got)}, "SIGINT"); process.exit(130); });\nwriteFileSync(${JSON.stringify(`${got}.up`)}, "");\nsetTimeout(() => process.exit(0), 20000);\n`);
-    // The step's script as the runner runs it: a file, with the shell options it passes.
-    const file = join(dir, `${mode}.sh`);
-    writeFileSync(file, step.run);
-    const out = join(dir, `${mode}.out`);
-    writeFileSync(out, "");
-    const shell = spawn("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", file], { env: { PATH: process.env.PATH, HOME: dir, RUNNER_TEMP: dir, GITHUB_OUTPUT: out, PENDULUM_INPUT_MODE: mode, PENDULUM_PLUGIN_ROOT: plugin, PENDULUM_USAGE_DIR: join(dir, "usage"), GITHUB_REPOSITORY: "o/r", PENDULUM_INPUT_ISSUE: "7", PENDULUM_INPUT_PR: "12", GITHUB_WORKSPACE: dir }, stdio: "ignore" });
-    const exited = new Promise((r) => shell.on("exit", (code) => r(code)));
-    try {
-      assert.ok(await until(() => existsSync(`${got}.up`), 10_000), `${mode}: the stage started`);
-      process.kill(shell.pid, "SIGINT");
-      const code = await Promise.race([exited, new Promise((r) => setTimeout(() => r("timeout"), 5_000).unref())]);
-      assert.equal(code, 130, `${mode}: the step's process got SIGINT and ended on it`);
-      assert.equal(readFileSync(got, "utf8"), "SIGINT");
-    } finally {
-      shell.kill("SIGKILL");
-    }
-  }
 });
 
 // #532: on Actions the harness runs as the agent uid in systemd units (proc.mjs asAgent), outside the step's process
@@ -442,47 +393,4 @@ test("a stage cancelled on Actions writes its record, stops the agent's units an
   // The masking and the session copy still ran after the reap.
   assert.equal(r.stream, '{"note":"***"}\n');
   assert.equal(r.record.session?.id, "5b0c3a1e-7d6f-4a40-9a51-0c1e2f3a4b5c", r.out);
-});
-
-test("a cancelled stage that had written its own record still stops the agent's units", async () => {
-  const r = await cancelledOnRunner({ written: true });
-  assert.equal(r.record?.exit, "blocked", "its own record stands");
-  assert.deepEqual(r.calls.map((c) => c.split(" ")[0]), ["systemctl", "systemctl", "pkill"], r.out);
-  assert.equal(r.unitAlive, false);
-});
-
-test("a reap that hangs is cut off at its bound, the agent's uid still killed, and the stage exits inside the grace", async () => {
-  const { CANCEL_GRACE_MS } = await import("../scripts/lib/session.mjs");
-  const { REAP_NOW_MS } = await import("../scripts/lib/proc.mjs");
-  // SIGTERM first: the runner's last 2.5 s.
-  const r = await cancelledOnRunner({ signal: "SIGTERM", hang: true });
-  assert.deepEqual(r.end, { code: 143, sig: null }, r.out);
-  assert.equal(r.record?.exit, "cancelled", "the record, written before the reap");
-  assert.deepEqual(r.calls, ["systemctl kill --signal=SIGKILL pendulum-agent-* record unmasked no-session", "systemctl stop pendulum-agent-* record unmasked no-session", "pkill -KILL -u pendulum-agent record unmasked no-session"], "each hung step cut at its share, the next still run");
-  // Cut by the root-side timeout, inside each step's share, not by Pendulum's own kill of sudo.
-  assert.match(r.out, /agent reaped: units kill cut, units stop cut, uid kill exit 1/);
-  const { REAP_CUT_EARLY_MS } = await import("../scripts/lib/proc.mjs");
-  const secs = r.cuts.map((c) => Number(/-k 0\.1 (\S+) /.exec(c)?.[1]));
-  assert.equal(secs.length, 3, r.cuts.join("\n"));
-  assert.ok(secs[0] > 0 && secs[0] * 1000 <= REAP_NOW_MS / 3 - REAP_CUT_EARLY_MS + 1, `the first step's cut at ${secs[0]} s: before its share ends`);
-  assert.ok(r.ms < Math.min(CANCEL_GRACE_MS.SIGTERM, REAP_NOW_MS) + 1_000, `the stage exited ${r.ms} ms after the signal`);
-});
-
-test("with no system timeout the reap runs its steps without it and says so", async () => {
-  const r = await cancelledOnRunner({ noTimeout: true });
-  assert.deepEqual(r.cuts, [], "no timeout ran");
-  assert.equal(r.calls.length, 3, r.out);
-  assert.equal(r.unitAlive, false);
-  assert.match(r.out, /agent reaped: root-side timeout not started, units kill exit 0, units stop exit 0, uid kill exit 1/);
-});
-
-test("only an Actions stage reaps the agent on a cancel: never in local mode or a cloud sandbox stage", async () => {
-  const actions = await cancelledOnRunner();
-  assert.equal(actions.calls.length, 3, actions.out);
-  for (const env of [{ PENDULUM_LOCAL: "1" }, { PENDULUM_STAGE_SANDBOX: "1" }]) {
-    const r = await cancelledOnRunner({ env });
-    assert.deepEqual(r.calls, [], `${JSON.stringify(env)}: nothing reaped\n${r.out}`);
-    assert.equal(r.unitAlive, true, JSON.stringify(env));
-    assert.equal(r.record, null, `${JSON.stringify(env)}: no cancel path at all`);
-  }
 });

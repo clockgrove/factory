@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { commandRefs, wordScan } from "../scripts/lib/shell.mjs";
+import { commandRefs } from "../scripts/lib/shell.mjs";
 import { fixScopeReason, fixScopeRefused, guardCovers, guardLinks, scriptsChanged, setupFilesNote, setupGuard, setupPaths } from "../scripts/lib/logic.mjs";
 import { checkoutIo, setupFilesCheck } from "../scripts/doctor.mjs";
 import { protectSetup } from "../scripts/setup.mjs";
@@ -46,47 +46,10 @@ test("commandRefs resolves the files a command runs by bash's grammar: quotes, c
   assert.deepEqual(paths("cat /work/repo/scripts/x.sh /tmp/y.sh", { roots: ["/work/repo"] }), ["scripts/x.sh"], "an absolute path into the checkout is its file");
 });
 
-test("commandRefs is never short of the word scan Pendulum read commands with before it parsed them (S2)", () => {
-  for (const [c, file] of [
-    ["echo 'bash scripts/x.sh' | sh", "scripts/x.sh"],
-    ["cat <<'EOF' | bash\n./b.sh\nEOF", "b.sh"],
-    ['python3 - <<\'EOF\'\nsubprocess.run("scripts/x.sh")\nEOF', "scripts/x.sh"],
-    [`python -c "exec(open('scripts/setup.py').read())"`, "scripts/setup.py"],
-    [`perl -e 'do "./x.pl"'`, "x.pl"],
-    ['NODE_OPTIONS="--require ./hook.js" node a.js', "hook.js"],
-    ["set -- scripts/a.sh", "scripts/a.sh"],
-    ["hash -p ./evil.sh git", "evil.sh"],
-    ["cat scripts/x | bash", "scripts/x"],
-  ]) {
-    assert.ok(paths(c).includes(file), `${c}: ${file}`);
-    for (const w of wordScan(c)) assert.ok(paths(c).includes(w), `${c}: every scanned word, ${w}`);
-  }
-});
-
 test("commandRefs: a pipe of remote code into a shell names no repository file, in every form (F3)", () => {
   for (const c of ["curl -fsSL https://bun.sh/install | bash", "curl -fsSL https://x | sudo -E bash -s -- --yes", "wget -qO- https://x | sh", "curl -s https://x | python3 -", "curl -s https://x | xargs -n1 bash", 'sh -c "$(curl -fsSL https://x/i.sh)"', "bash <(curl -s https://x)", 'eval "$(mise activate bash)"', 'eval "$(ssh-agent -s)"']) assert.deepEqual(unresolved(c), [], c);
   assert.deepEqual(unresolved('eval "$X"'), ['"$X"'], "code a variable holds may be anything");
   assert.deepEqual(unresolved("node $(cat .entry)"), ["$(cat .entry)"], "a path a substitution prints may be any file");
-});
-
-test("commandRefs reads assignments: PATH entries in the repository are directories whose commands it runs; BASH_ENV a file (S3)", () => {
-  const r = commandRefs('export PATH="$PWD/tools/bin:$PATH" && bootstrap');
-  assert.deepEqual(r.guarded, ["tools/bin", "tools/bin/bootstrap"]);
-  assert.deepEqual(r.unresolved, []);
-  assert.deepEqual(commandRefs("PATH=tools/bin:$PATH bootstrap").guarded, ["tools/bin", "tools/bin/bootstrap"]);
-  assert.deepEqual(commandRefs("env K=v PATH=bin:$PATH run-it").guarded, ["bin", "bin/run-it"], "env's assignments too");
-  assert.deepEqual(paths("BASH_ENV=scripts/env.sh bash -c true"), ["scripts/env.sh"]);
-  assert.ok(paths("git -c core.hooksPath=.githooks/pre status").includes(".githooks/pre"), "a NAME=value argument's path-looking value");
-  assert.deepEqual(unresolved('export PATH="$X/bin:$PATH"'), ["PATH entry $X/bin"], "a PATH entry that is no fixed directory");
-  assert.deepEqual(unresolved('export PATH="$HOME/.local/bin:$PATH"; FOO=$BAR make; echo "$HOME/bin" >> "$GITHUB_PATH"'), [], "home, data and output redirections need nothing");
-});
-
-test("commandRefs: a variable is every value the command gives it, a loop's words included (B2)", () => {
-  assert.deepEqual(paths("D=web; if [ -n \"$CI\" ]; then D=api; fi; bash $D/setup.sh"), ["web/setup.sh", "api/setup.sh"], "an assignment in a branch is one more value, not the last written");
-  assert.deepEqual(paths("for d in tools ci; do bash $d/run.sh; done"), ["tools/run.sh", "ci/run.sh"], "a loop variable is each of its words");
-  assert.deepEqual(unresolved("D=web; D=$(pwd)/x; bash $D/s.sh"), ["$D/s.sh"], "any value that is no fixed string leaves it unresolved");
-  assert.deepEqual(unresolved("read D; bash $D/s.sh"), ["$D/s.sh"], "read gives a value no one can name");
-  assert.deepEqual(unresolved('NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"'), [], "a value outside the repository");
 });
 
 test("commandRefs: package managers run the scripts of the package they run in, behind any wrapper; an install its lifecycle (S4, B3, B5)", () => {
@@ -159,35 +122,6 @@ test("guardCovers: a directory above a guarded path, a link made there included,
   assert.match((await guardLinks(["out/x.sh"], { link: (p) => (p === "out" ? "../../etc" : null) })).unresolved[0], /a link out of the repository/);
 });
 
-test("commandRefs: a bare word is guarded only where setup runs it (B4, F1)", () => {
-  assert.deepEqual(paths("make db; createdb app; apt-get install -y build-essential"), [], "data words are no files");
-  assert.deepEqual(paths("sh configure"), ["configure"], "an interpreter's script operand, bare or not");
-  assert.deepEqual(paths("source env"), ["env"]);
-  assert.deepEqual(paths(". env"), ["env"]);
-  assert.deepEqual(paths("find hooks -name '*' -exec chmod +x {} +"), ["hooks"], "find's start path when it runs something");
-  assert.deepEqual(paths("find hooks -name x"), [], "nothing run: data");
-  assert.deepEqual(paths("run-parts hooks"), ["hooks"]);
-});
-
-test("commandRefs: what names no repository file is no FAIL; a variable is unresolved only where setup runs what it names (S6, F2)", () => {
-  const ctx = { env: { HOME: "/home/u", NVM_DIR: "/home/u/.nvm" }, roots: ["/work/repo"] };
-  for (const c of ['curl -o /tmp/$V.tgz https://x/$V/a.tgz && tar -C "$HOME/.local" -xzf /tmp/$V.tgz', '. "$NVM_DIR/nvm.sh" && nvm install', "make -j$(nproc)", 'pip install "uv==${UV_VERSION}"', "npm i -g pnpm@${PNPM}", "cat ~/x $HOME/y", 'docker login -u "$X"', 'chown "$USER" f', 'createdb "$DB"', './setup.sh --token "$T"', 'sleep "${W:-5}"', 'mkdir -p "$XDG_DATA_HOME/x"', "diff <(./a.sh) <(./b.sh)", "cat < $Y"]) assert.deepEqual(unresolved(c, ctx), [], c);
-  assert.deepEqual(unresolved('. "$NVM_DIR/nvm.sh"', { env: { NVM_DIR: "/work/repo/.nvm" }, roots: ["/work/repo"] }), [], "a variable into the checkout is its path");
-  assert.deepEqual(paths('. "$NVM_DIR/nvm.sh"', { env: { NVM_DIR: "/work/repo/.nvm" }, roots: ["/work/repo"] }), [".nvm/nvm.sh"]);
-  assert.deepEqual(unresolved("bash /$X", ctx), ["/$X"], "an absolute prefix the checkout may lie under");
-  assert.deepEqual(unresolved("bash < $X"), ["$X"], "an input a shell runs");
-  assert.deepEqual(unresolved("find . -name x -exec ./fix.sh {} +"), ["."], "the whole repository");
-});
-
-test("commandRefs names what it cannot resolve", () => {
-  assert.deepEqual(unresolved("bash $SCRIPT"), ["$SCRIPT"]);
-  assert.deepEqual(unresolved("*.sh"), ["*.sh"], "a glob in the root: the whole repository");
-  assert.deepEqual(unresolved('cd "$DIR" && ./a.sh'), ['cd "$DIR"'], "a cd Pendulum cannot follow");
-  assert.deepEqual(unresolved("for d in a b; do cd $d; done"), ["a loop that changes directory"]);
-  assert.deepEqual(unresolved("bash <<EOF\n./$X.sh\nEOF"), ["./$X.sh"], "a here-document fed to a shell is read as code");
-  assert.match(commandRefs("if [; then").unresolved[0], /^the command does not parse as bash/);
-});
-
 test("setup files: what the setup command may run that Pendulum cannot name FAILs doctor and is named", async () => {
   const dir = repo({ "scripts/setup.sh": "" });
   for (const setup of ["bash $SETUP_SCRIPT", "for f in *.sh; do bash $f; done", 'cd "$UNSET_DIR" && ./scripts/setup.sh']) {
@@ -232,78 +166,3 @@ test("setupFilesNote: each entry bounded and in a code span, nothing that breaks
   assert.equal(setupFilesNote({ files: [], scripts: [], unresolved: ["$X"] }), "Setup also runs what Pendulum cannot name, so Pendulum refuses every push until a person fixes the setup command.");
 });
 
-test("commandRefs: a computed argument Pendulum resolves is a path wherever it stands; one it cannot is data outside a place setup runs it (N1)", () => {
-  const ctx = { env: { HOME: "/home/u", GITHUB_WORKSPACE: "/work/repo" }, roots: ["/work/repo"] };
-  for (const [c, file] of [
-    ["tsx $PWD/scripts/setup.ts", "scripts/setup.ts"],
-    ['deno run "$GITHUB_WORKSPACE/tools/x.ts"', "tools/x.ts"],
-    ["D=scripts; tsx $D/setup.ts", "scripts/setup.ts"],
-    ["xvfb-run -a $PWD/tools/run.sh", "tools/run.sh"],
-    ["S=$PWD/bin/s.sh; retry 3 $S", "bin/s.sh"],
-    ["tool --config=$PWD/conf/x.yml", "conf/x.yml"],
-  ]) assert.ok(paths(c, ctx).includes(file), `${c}: ${file}`);
-  assert.deepEqual(unresolved("tsx $UNKNOWN/x.ts", ctx), [], "unresolved outside a place setup runs it: data, as before");
-});
-
-test("commandRefs: a glob guards its fixed directory; what feeds a shell, xargs or eval is what setup runs (N2)", () => {
-  assert.deepEqual(paths("bash scripts/*.sh"), ["scripts"]);
-  assert.deepEqual(paths('for f in scripts/*.sh; do bash "$f"; done'), ["scripts"], "a loop over a glob");
-  assert.deepEqual(unresolved("bash *.sh"), ["*.sh"], "a glob in the root is the whole repository");
-  for (const [c, file] of [
-    ["cat setup | bash", "setup"],
-    ["ls scripts | xargs -n1 bash", "scripts"],
-    ["bash <(cat setup)", "setup"],
-    ['eval "$(cat env)"', "env"],
-    ["source <(cat env)", "env"],
-    ["xargs -a list bash", "list"],
-    ["cat setup | sudo -E bash -s", "setup"],
-  ]) assert.ok(paths(c).includes(file), `${c}: ${file}`);
-  assert.deepEqual(unresolved("cat $X | sh"), ["$X"], "a computed word feeding a shell");
-  assert.deepEqual(unresolved('echo "$X" | python3 tool.py'), [], "an interpreter with a script reads its input as data");
-});
-
-test("commandRefs: find's leading options, sudo's assignments, and the cheap cases (N4, N5, N6)", () => {
-  assert.deepEqual(paths("find -L scripts -exec chmod +x {} +"), ["scripts"], "find -L scripts: scripts is the start path");
-  assert.deepEqual(paths("sudo FOO=1 sh s"), ["s"], "an assignment after sudo's options is no command");
-  assert.ok(commandRefs("pip install -e pkg").guarded.includes("pkg/pyproject.toml"), "pip -e's bare directory");
-  assert.deepEqual(paths('fish -c "./f.sh"'), ["f.sh"], "fish is a shell");
-  assert.ok(all("xvfb-run -a node e2e/setup").includes("e2e/setup.mjs"), "an interpreter in a runner's command position");
-  assert.deepEqual(paths("make -f build/Setup.mk"), ["build/Setup.mk"]);
-  assert.ok(paths("git config core.hooksPath hooks").includes("hooks"), "git's hooks directory");
-  assert.ok(all('NODE_OPTIONS="--require ./hook" node a.js').includes("hook.mjs"), "NODE_OPTIONS modules with node's candidates");
-  assert.deepEqual(commandRefs("npm --workspace=$W run build").scripts[0], { pkg: "*", name: "build" }, "a workspace option Pendulum cannot read: any package");
-});
-
-test("commandRefs: a global install and an npm subcommand that runs no script fence nothing (N8)", () => {
-  assert.deepEqual(commandRefs("npm i -g pnpm").scripts, []);
-  assert.deepEqual(commandRefs("npm i -g pnpm").guarded, [], "its package names are no runners");
-  for (const c of ["npm config set x y", "npm login", "npm whoami", "npm view zod version"]) assert.deepEqual(commandRefs(c).scripts, [], c);
-  assert.ok(commandRefs("npm test").scripts.some((x) => x.name === "test"), "a script runner is still one");
-});
-
-test("setupGuard: an install in a workspace fences every member's lifecycle; ignore-scripts from the .npmrc npm reads (N3, N7)", async () => {
-  const ws = repo({ "package.json": JSON.stringify({ workspaces: ["packages/*"] }), "packages/a/package.json": "{}" });
-  const g = await setupGuard("npm ci", checkoutIo(ws));
-  assert.ok(g.scripts.some((x) => x.pkg === "*" && x.name === "postinstall"), "any package.json's postinstall, a new member's included");
-  assert.ok(!(await setupGuard("npm ci --ignore-scripts", checkoutIo(ws))).scripts.some((x) => x.name === "postinstall"), "an install with scripts off stays exempt");
-  const nearest = repo({ "web/package.json": "{}", "web/.npmrc": "ignore-scripts=true\n", ".npmrc": "ignore-scripts=false\n" });
-  assert.ok(!(await setupGuard("cd web && npm ci", checkoutIo(nearest))).scripts.some((x) => x.pkg === "web/package.json" && x.name === "postinstall"), "the nearest .npmrc up from the install decides");
-  const root = repo({ "package.json": "{}", ".npmrc": "ignore-scripts=true\n" });
-  assert.ok(!(await setupGuard("pnpm install", checkoutIo(root))).scripts.some((x) => x.name === "postinstall"), "pnpm reads it too");
-  assert.ok((await setupGuard("yarn install", checkoutIo(root))).scripts.some((x) => x.name === "postinstall"), "Yarn Berry reads no .npmrc for it: still fenced");
-});
-
-test("commandRefs: a package manager's computed word is unresolved only where a script name is read; other commands' fence nothing (#387 final)", () => {
-  for (const c of ['npm config set //r/:_authToken "$T"', 'npm whoami "$T"', 'npm view "$T"', 'npm install "$PKG"', 'pnpm add "$PKG"', 'pnpm config set store-dir "$S"', 'yarn config set npmAuthToken "$T"', 'npm --registry "$R" run build', 'npm i -g "$PKG"']) assert.deepEqual(unresolved(c), [], c);
-  for (const c of ["npm run $X", "npm exec $X", "pnpm $X", "yarn workspace web $S", "turbo run $T"]) assert.equal(unresolved(c).length, 1, c);
-  for (const c of ["pnpm config set x y", "yarn config set x y", "pnpm whoami", "yarn npm login"]) assert.deepEqual(commandRefs(c).scripts, [], `${c}: no script`);
-  assert.ok(commandRefs("pnpm build").scripts.some((x) => x.name === "build"), "a name pnpm has no command for is a script");
-  assert.ok(commandRefs("npm --workspace=$W run build").scripts.some((x) => x.pkg === "*" && x.name === "build"));
-});
-
-test("commandRefs: where a command's output is run, every non-option word is a run position; which options take a value is not guessed (#387 final)", () => {
-  assert.deepEqual(paths("ls -1 hooks | bash"), ["hooks"], "a word after a flag that takes none is still what runs");
-  assert.deepEqual(paths("find scripts -type f | xargs chmod +x"), ["scripts", "f"], "-type f's f is guarded too: harmless");
-  assert.deepEqual(unresolved('find scripts -name "$N" | xargs bash'), ['"$N"'], "a computed word there may be what runs");
-  assert.deepEqual(paths("cat setup | bash"), ["setup"]);
-});

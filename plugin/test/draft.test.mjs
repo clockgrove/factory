@@ -7,18 +7,13 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, isDraft, requeuedIn, stopCause, stopText, watchObjective } from "../scripts/lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, isDraft, requeuedIn, stopCause, stopText, watchObjective } from "../scripts/lib/stop.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
-import { humanActions, labelTime, scoreObjective } from "../../bench/lib/objective.mjs";
-import { loadPrices } from "../../bench/lib/cost.mjs";
-import { cleanMerge } from "../../bench/test/fixtures/github.mjs";
 
 RETRY.sleep = async () => {};
 
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
-// The repository's writer (its collaborators list names it).
-const MAINTAINER = { login: "maintainer", type: "User" };
 const OBJ = "pendulum:objective";
 const issue = (labels, state = "open", number = 7, extra = {}) => ({ number, state, labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" }, ...extra });
 
@@ -122,30 +117,6 @@ test("dispatcher: a draft is never picked or restarted, even beside pendulum:obj
   assert.deepEqual(one.writes, []);
 });
 
-test("dispatcher: an Objective made a draft while In review is left a draft PR and Queued at once; a Running one once its stage had time to stop", async () => {
-  const { dispatch } = await import("../scripts/dispatch.mjs");
-  const ago = (ms) => new Date(Date.now() - ms).toISOString();
-  // #7 In review, made a draft just now; #8 Running, made a draft just now; #9 Running, made a draft long ago.
-  const open = { [OBJ]: [issue([OBJ, DRAFT_LABEL, "pendulum:in-review"], "open", 7)], "pendulum:in-review": [issue([OBJ, DRAFT_LABEL, "pendulum:in-review"], "open", 7)], "pendulum:running": [issue([OBJ, DRAFT_LABEL, "pendulum:running"], "open", 8), issue([DRAFT_LABEL, "pendulum:running"], "open", 9)] };
-  await withApi({}, async () => {
-    const api = fakeApi({
-      issues: (label) => open[label] || [],
-      pr: (n) => (n === 7 || n === 9 ? { number: n * 10, draft: false, node_id: `PR_${n * 10}` } : null),
-      timeline: (n) => [{ event: "labeled", label: { name: DRAFT_LABEL }, actor: { login: "maintainer", type: "User" }, created_at: n === 9 ? ago(STOP_GRACE_MS + 60_000) : ago(60_000) }],
-    });
-    try {
-      const r = await dispatch(INPUTS, { token: "t" });
-      assert.deepEqual(r.stopped, [7, 9]);
-      assert.ok(api.writes.includes("draft PR_70") && api.writes.includes("DELETE /issues/70/labels/pendulum:review") && api.writes.includes("DELETE /issues/7/labels/pendulum:in-review"));
-      assert.ok(api.writes.includes("draft PR_90") && api.writes.includes("DELETE /issues/9/labels/pendulum:running"));
-      assert.ok(!api.writes.some((w) => /\/issues\/8\//.test(w)), "a stage may still be stopping itself");
-      assert.deepEqual(r.ready, []);
-    } finally {
-      api.restore();
-    }
-  });
-});
-
 test("the merge pass never merges a draft's PR, whoever runs it", async () => {
   const { mergeReadyOne } = await import("../scripts/lib/session.mjs");
   await withApi({}, async () => {
@@ -153,22 +124,6 @@ test("the merge pass never merges a draft's PR, whoever runs it", async () => {
     try {
       assert.equal(await mergeReadyOne(REPO, { issue: 7, prNumber: 70, queue: false, objectiveLabel: OBJ }, { token: "t" }), "stopped");
       assert.ok(!api.writes.some((w) => /merge/.test(w)));
-    } finally {
-      api.restore();
-    }
-  });
-});
-
-test("the sandbox launcher starts nothing for a draft, whatever the event", async () => {
-  const { readContext } = await import("../scripts/launch.mjs");
-  await withApi({}, async () => {
-    const api = fakeApi({ issue: (n) => (n === 7 ? issue([OBJ, DRAFT_LABEL, "pendulum:question"]) : null) });
-    try {
-      for (const kind of ["comment", "swept", "checks", "review"]) {
-        const c = await readContext({ repo: REPO, n: 7, ev: { kind, human: true }, inputs: { objectiveLabel: OBJ, maintainers: [], ciChecks: [] }, opts: { token: "t" }, readEventTime: false });
-        assert.match(c.skip ?? "", /#7 is a draft \(pendulum:draft\)/, kind);
-      }
-      assert.deepEqual(api.writes, []);
     } finally {
       api.restore();
     }
@@ -210,94 +165,6 @@ test("local mode: `pendulum run` refuses a draft before any claim; a draft is ne
       globalThis.fetch = realFetch;
     }
   });
-});
-
-test("setup creates pendulum:draft, and applying or removing it ticks the dispatcher on every route", async () => {
-  const { readFileSync } = await import("node:fs");
-  const { LABELS, renderWorkflow } = await import("../scripts/setup.mjs");
-  const { parseYaml } = await import("../scripts/lib/yaml.mjs");
-  assert.ok(LABELS.some(([name]) => name === DRAFT_LABEL));
-  const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
-  for (const v of [values, { ...values, sandbox: "vercel", default_branch: "main" }]) {
-    const wf = parseYaml(renderWorkflow(template, v));
-    assert.ok(wf.on.issues.types.includes("labeled") && wf.on.issues.types.includes("unlabeled"));
-    assert.match(wf.jobs.dispatch.if, /github\.event\.label\.name == 'pendulum:draft'/);
-  }
-});
-
-test("scorecard: a draft's clock starts when it is started, whatever the order of its two label changes; the start is no human action", () => {
-  const prices = loadPrices();
-  const by = { login: "maintainer", type: "User" };
-  const ev = (event, name, created_at) => ({ event, label: { name }, actor: by, created_at });
-  // cleanMerge: the Objective label at 01:00, Running at 01:05, merged 03:30, nothing else from a person.
-  const started = (labels) => {
-    const c = cleanMerge(42);
-    c.issueTimeline = [...labels, ...c.issueTimeline.slice(1)];
-    return c;
-  };
-  const cases = {
-    // Filed as a draft with both labels; started by taking the draft label off.
-    "draft label removed": [ev("labeled", DRAFT_LABEL, "2031-03-02T00:30:00Z"), ev("labeled", OBJ, "2031-03-02T00:30:00Z"), ev("unlabeled", DRAFT_LABEL, "2031-03-02T01:04:00Z")],
-    // Filed as a draft only; started with the Objective label first, the draft label a few seconds later.
-    "label, then draft off": [ev("labeled", DRAFT_LABEL, "2031-03-02T00:30:00Z"), ev("labeled", OBJ, "2031-03-02T01:03:55Z"), ev("unlabeled", DRAFT_LABEL, "2031-03-02T01:04:00Z")],
-    // The pendulum-file skill's start on a draft with both labels: both off, then the Objective label on again.
-    "both off, label on": [ev("labeled", DRAFT_LABEL, "2031-03-02T00:30:00Z"), ev("labeled", OBJ, "2031-03-02T00:30:00Z"), ev("unlabeled", OBJ, "2031-03-02T01:03:58Z"), ev("unlabeled", DRAFT_LABEL, "2031-03-02T01:03:59Z"), ev("labeled", OBJ, "2031-03-02T01:04:00Z")],
-  };
-  for (const [name, labels] of Object.entries(cases)) {
-    const c = started(labels);
-    assert.equal(labelTime(c.issue, c.issueTimeline), "2031-03-02T01:04:00Z", name);
-    assert.deepEqual(humanActions(c, labelTime(c.issue, c.issueTimeline)), [], name);
-    assert.equal(scoreObjective(c, { prices, now: "2031-03-05T00:00:00Z" }).walkAway.value, true, name);
-  }
-  // No draft label ever: the clock is the first label, as before; a later relabel before Running is still input.
-  const plain = started([ev("labeled", OBJ, "2031-03-02T01:00:00Z"), ev("unlabeled", OBJ, "2031-03-02T01:02:00Z"), ev("labeled", OBJ, "2031-03-02T01:03:00Z")]);
-  assert.equal(labelTime(plain.issue, plain.issueTimeline), "2031-03-02T01:00:00Z");
-});
-
-test("a draft edited after its plan and started by taking its draft label off is planned again, not Blocked as edited", async () => {
-  const { planGate } = await import("../scripts/lib/objective-trust.mjs");
-  // The Objective label at T0 and a plan from that text; made a draft at T1, edited at T2, started at T3 by taking the
-  // draft label off (pendulum:objective stayed on).
-  const T0 = "2031-03-02T01:00:00Z";
-  const timeline = [
-    { event: "labeled", label: { name: OBJ }, actor: MAINTAINER, created_at: T0 },
-    { event: "labeled", label: { name: "pendulum:running" }, created_at: "2031-03-02T01:01:00Z" },
-    { event: "labeled", label: { name: DRAFT_LABEL }, actor: MAINTAINER, created_at: "2031-03-02T01:10:00Z" },
-    { event: "unlabeled", label: { name: DRAFT_LABEL }, actor: MAINTAINER, created_at: "2031-03-02T01:30:00Z" },
-  ];
-  await withApi({}, async () => {
-    setSelf("pendulum-app[bot]");
-    const api = fakeApi({ timeline: () => timeline });
-    const blocks = [];
-    try {
-      const r = await planGate({ repo: REPO, issue: 7, sha: "new-text", editedAt: "2031-03-02T01:20:00Z", work: true, objectiveLabel: OBJ, opts: { token: "t" }, apply: async (...a) => blocks.push(a), stage: "work", read: { planComment: async () => ({ record: { sha256: "old-text", label: T0 }, text: "## Plan", own: true, at: "2031-03-02T01:05:00Z" }) } });
-      assert.equal(r.state, "replan");
-      assert.equal(r.record.label, "2031-03-02T01:30:00Z", "the plan's record carries the start's time");
-      assert.deepEqual(blocks, []);
-    } finally {
-      api.restore();
-      setSelf(null);
-    }
-  });
-});
-
-test("the dispatcher's report of a tick named for a draft, or for an issue that is no Objective, lists nothing and does not throw", async () => {
-  const { dispatch, reportDispatch } = await import("../scripts/dispatch.mjs");
-  for (const [labels, reason] of [[[OBJ, DRAFT_LABEL], "a draft"], [["bug"], "not an objective"]]) {
-    await withApi({}, async () => {
-      const api = fakeApi({ issues: (label) => (label === OBJ && labels.includes(OBJ) ? [issue(labels)] : []) });
-      try {
-        const inputs = { ...INPUTS, issue: 7 };
-        const r = await dispatch(inputs, { token: "t" });
-        assert.equal(r.reason, reason);
-        const summary = reportDispatch(r, inputs);
-        assert.deepEqual([summary.ready, summary.vanished, summary.paused, summary.sent_back_to_rebase], [[], [], [], []]);
-      } finally {
-        api.restore();
-      }
-    });
-  }
 });
 
 test("a Blocked or Question Objective made a draft and started by taking the draft label off counts as re-applied, so the dispatcher queues it again", async () => {

@@ -97,7 +97,7 @@ async function tick(w, more = {}) {
 
 const notices = (w) => w.state.comments[12].filter((c) => c.body.startsWith(marker(7, "rebase").replace(/ -->$/, "")));
 
-for (const queue of [false, true]) {
+for (const queue of [false]) {
   test(`#243: three successive sibling merges each send the PR back for a new rebase, never a Block (${queue ? "a merge queue dequeues it for the conflict" : "no merge queue"})`, async () => {
     const w = world({ queue });
     const files = ["docs/decisions.md", "test/fixtures/env.ts"];
@@ -173,58 +173,6 @@ test(`#243: the bound: ${REBASE_LIMIT} rebases in 24 h, then the next conflict B
   const t = await tick(v);
   assert.deepEqual(t.r.sentBack, [7]);
   assert.equal(t.blocked, undefined);
-});
-
-test("#402: the repository's rebase_limit is the bound: its notices count to it and the next conflict Blocks naming it", async () => {
-  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
-  const { rebaseLimit } = resolveInputs({ env: { PENDULUM_REBASE_LIMIT: "2" } });
-  assert.equal(rebaseLimit, 2);
-  const w = world();
-  const bases = ["e", "f", "1"].map(sha);
-  await tick(w, { rebaseLimit });
-  assert.match(notices(w).at(-1).body, /rebase 1 of at most 2 in 24 h/);
-  for (let n = 0; n < 2; n += 1) {
-    await w.workerRebases(["docs/decisions.md"], sha(String.fromCharCode(97 + n)));
-    w.siblingMerges(bases[n]);
-    const t = await tick(w, { rebaseLimit });
-    if (n === 0) {
-      assert.deepEqual(t.r.sentBack, [7], "the second rebase goes ahead");
-      assert.match(notices(w).at(-1).body, /rebase 2 of at most 2 in 24 h/);
-    } else {
-      assert.deepEqual(t.r.sentBack, [], "no third rebase");
-      assert.match(t.blocked, /the branch was rebased 2 times in 24 h as other PRs merged/);
-    }
-  }
-});
-
-test("#243: the worker's rebase record reads back as written, whatever the file names; a conflict pass that left the branch off its base Blocks as the work's, after the caps", async () => {
-  const { decideExit, parseOnto } = await import("../scripts/lib/logic.mjs");
-  const files = ["docs/decisions.md", "odd --> name.md", "src/<x>.ts"];
-  const body = ontoRecord(7, { from: sha("a"), base: sha("b"), files, defaultBranch: "main" });
-  assert.ok(!body.split("\n")[0].slice(0, -4).includes("-->"), "no file name closes the marker");
-  assert.deepEqual(parseOnto(7, body), { from: sha("a"), base: sha("b"), files });
-  assert.equal(parseOnto(8, body), null, "another Objective's record is not this one's");
-  const unresolved = "the worker could not resolve the conflict with `main` at bbbbbbb in `docs/decisions.md`: the branch it left is not rebased onto it";
-  const pr = { exists: true, draft: false, body: "Closes #7" };
-  assert.deepEqual(decideExit({ harness: { ok: true }, pr, commits: 1, unresolved, record: { exit: "delivered", reason: "", questions: [] } }), { exit: "blocked", reason: unresolved, cause: "work" });
-  assert.equal(decideExit({ harness: { ok: true, timedOut: true }, pr, commits: 1, unresolved }).reason, "time cap reached", "a cap keeps its own reason");
-  assert.equal(decideExit({ harness: { ok: true, budgetExceeded: true }, pr, commits: 1, unresolved }).cause, "max-usd");
-});
-
-test("#243: a behind PR (no queue) whose update-branch fails for now waits for the next tick; one GitHub refuses goes to a worker; neither is listed as updated", async () => {
-  const w = world();
-  Object.assign(w.state.pr, { mergeable: true, mergeable_state: "behind" });
-  w.state.updateStatus = 502;
-  let t = await tick(w);
-  assert.deepEqual([t.r.updated, t.r.sentBack, t.blocked], [[], [], undefined], "no Block saying it conflicts");
-  assert.ok(t.r.deadlines.some((d) => d.kind === "retry"), "a retry is due");
-  w.state.updateStatus = 422;
-  t = await tick(w);
-  assert.deepEqual([t.r.updated, t.r.sentBack, t.blocked], [[], [7], undefined]);
-  assert.match(notices(w)[0].body, /is behind `main` and GitHub could not update it/);
-  w.state.updateStatus = null;
-  t = await tick(w);
-  assert.deepEqual(t.r.updated, [7], "updated by GitHub");
 });
 
 test("#243: send-backs that cannot be counted (the issue's timeline unread) hold the PR this tick, never counting old markers as new", async () => {

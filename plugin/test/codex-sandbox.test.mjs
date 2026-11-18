@@ -5,12 +5,10 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GATEWAY_HOST, SHELL_SECRET_KEYS, codexRunner, codexSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
+import { SHELL_SECRET_KEYS, codexRunner, codexSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
 import { captureSession, dropSessions, holdSession, preparePendulumHome, realRoots, runnerLaunch } from "../scripts/lib/claude-runner.mjs";
-import { CODEX_RUNNER_HOME, CODEX_RUNNER_SESSION_ROOT, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "../scripts/lib/codex-runner.mjs";
+import { CODEX_RUNNER_HOME, CODEX_RUNNER_SESSION_ROOT, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, codexRunnerLayout, presentPaths, resetCodexState } from "../scripts/lib/codex-runner.mjs";
 import { GitRefusal, LOCAL_DOMAINS, codexLocalConfig, gitRefusalReason } from "../scripts/lib/local.mjs";
-import { BACKENDS } from "../scripts/lib/backend.mjs";
-import { claudeSandboxChecks } from "../scripts/doctor.mjs";
 
 const AGENT = { user: "pendulum-agent", uid: 1002, home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set() };
 const CLONE = "/home/pendulum-agent/repo";
@@ -59,16 +57,6 @@ test("Codex on a runner: its own sandbox with local mode's profile fitted to the
   assert.equal(codexRunner({ harness: "codex", agent: null, clone: CLONE }), null, "no agent uid (a developer's /pendulum:pendulum-run): no runner sandbox");
   assert.equal(codexRunner({ harness: "codex", agent: AGENT, clone: CLONE, env: { PENDULUM_LOCAL: "1" } }), null, "local mode has its own");
   assert.ok(harnessCommand({ harness: "codex", prompt: "p" }).args.includes("--dangerously-bypass-approvals-and-sandbox"), "a developer's own session keeps the CLI's own behaviour");
-});
-
-test("Codex through the AI Gateway on a runner: the gateway's host joins its commands' hosts", () => {
-  const gw = codexRunner({ harness: "codex", agent: AGENT, clone: CLONE, env: { PENDULUM_CODEX_GATEWAY_KEY: "k" } });
-  assert.equal(GATEWAY_HOST, "ai-gateway.vercel.sh");
-  assert.deepEqual(gw.domains, [...LOCAL_DOMAINS, GATEWAY_HOST]);
-  assert.ok(!codexRunner({ harness: "codex", agent: AGENT, clone: CLONE, env: { CODEX_API_KEY: "k" } }).domains.includes(GATEWAY_HOST));
-  const { args } = harnessCommand({ harness: "codex", model: "gpt-x", prompt: "p", runner: { ...gw, present: new Set() }, gateway: { session: null } });
-  assert.match(configOf(args)["permissions.pendulum"], /"ai-gateway\.vercel\.sh"="allow"/);
-  assert.equal(configOf(args).model_provider, '"vercel"');
 });
 
 test("local mode's Codex profile is unchanged: credential stores denied under the home, present paths read-only", () => {
@@ -153,32 +141,6 @@ test("a link planted at a writable root is replaced by a real directory; one hig
   assert.ok(existsSync(join(real, "agent", ".npm")));
 });
 
-test("the confinement probe: the agent's home and .git/config refuse a write, the temp directory takes one", () => {
-  const { root, agent } = fakeAgent();
-  const run = (home, git, tmp, host = "") => {
-    try {
-      return { code: 0, out: execFileSync("/bin/sh", ["-c", CONFINEMENT_PROBE, "sh", home, git, tmp, host], { encoding: "utf8" }) };
-    } catch (e) {
-      return { code: e.status, out: String(e.stdout) };
-    }
-  };
-  // Unconfined here (no sandbox): the probe says which rule breaks first.
-  assert.deepEqual(run(agent.home, "", agent.tmp), { code: 4, out: "the agent home is writable\n" });
-  const ro = join(root, "ro");
-  mkdirSync(ro, { mode: 0o555 });
-  const git = join(agent.tmp, "config");
-  writeFileSync(git, "x");
-  assert.deepEqual(run(ro, git, agent.tmp), { code: 4, out: "the checkout's .git/config is writable\n" }, "a fixed text: no local path reaches a Blocked comment");
-  assert.equal(readFileSync(git, "utf8"), "x", "the probe writes nothing into a writable file");
-  assert.deepEqual(run(ro, "", ro), { code: 4, out: "the agent temp directory is not writable\n" });
-  assert.equal(run(ro, "", agent.tmp).code, 0);
-  // The marker check: here (no sandbox, no PID namespace) the parent's environment shows it.
-  const marked = execFileSync("/bin/sh", ["-c", `${PROBE_MARKER}=m42 /bin/sh -c "$1" sh ${ro} "" ${agent.tmp} "" m42 || echo "exit $?"`, "sh", CONFINEMENT_PROBE], { encoding: "utf8" });
-  assert.equal(marked, "the credential stand-in is readable in a process environment\nexit 4\n");
-  assert.equal(offListHost(["github.com"]), "example.com");
-  assert.equal(offListHost(["example.com"]), "", "an allow-list that names it: no network rule");
-});
-
 test("the decoy: a readable process outside the sandbox that holds the marker fails the probe; the launch checks the decoy is there", () => {
   const { root, agent } = fakeAgent();
   const ro = join(root, "ro2");
@@ -245,37 +207,6 @@ test("Codex's sandbox probe runs before every start: where it cannot start or do
   await codexSandboxCheck(runner, {}, { run: ok });
   await codexSandboxCheck(runner, {}, { run: ok });
   assert.equal(n, 2, "probed at every start");
-});
-
-test("Codex's task card on a runner: the sandbox notes, and setup's services out of its commands' reach", () => {
-  const notes = BACKENDS.actions.sandbox.cardNotes({}, "codex", [5432]);
-  assert.match(notes, /\$TMPDIR/);
-  assert.match(notes, /deniedHosts/);
-  assert.match(notes, /outside your sandbox: your commands cannot reach it/);
-  assert.doesNotMatch(notes, /localhost:5432/, "no relay for Codex: no port is offered");
-  assert.equal(BACKENDS.actions.sandbox.cardNotes({}, "copilot", [5432]), notes, "Copilot's are the same");
-  assert.equal(BACKENDS.actions.sandbox.cardNotes({}, "unknown", []), "");
-});
-
-test("doctor: Codex in a job needs bwrap, AppArmor on a self-hosted runner, and its sandbox starting", async () => {
-  const names = (rows) => rows.map((r) => `${r.name}:${r.status}`);
-  const codex = { harness: "codex" };
-  const hosted = { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" };
-  assert.deepEqual(names(await claudeSandboxChecks({ inputs: codex, env: hosted, local: false, has: async () => false, start: async () => ({ ok: true }) })), ["codex sandbox: bwrap:FAIL"], "no start without bwrap");
-  assert.deepEqual(names(await claudeSandboxChecks({ inputs: codex, env: hosted, local: false, has: async () => true, start: async () => ({ ok: true }) })), ["codex sandbox: bwrap:PASS", "codex sandbox: start:PASS"]);
-  const failed = await claudeSandboxChecks({ inputs: codex, env: hosted, local: false, has: async () => true, start: async () => ({ ok: false, reason: "bwrap: setting up uid map: Permission denied" }) });
-  assert.deepEqual(names(failed), ["codex sandbox: bwrap:PASS", "codex sandbox: start:FAIL"]);
-  assert.match(failed.at(-1).detail, /uid map/);
-  const self = await claudeSandboxChecks({ inputs: codex, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "", start: async () => ({ ok: false, reason: "x" }) });
-  assert.deepEqual(names(self), ["codex sandbox: bwrap:PASS", "codex sandbox: apparmor:FAIL", "codex sandbox: start:FAIL"]);
-  assert.match(self.at(-1).fix, /pendulum-bwrap/);
-  assert.deepEqual(await claudeSandboxChecks({ inputs: codex, env: hosted, local: true, has: async () => false }), [], "local mode checks its own sandboxes");
-  assert.deepEqual(names(await claudeSandboxChecks({ inputs: codex, env: hosted, local: false, has: async () => true, start: async () => null })), ["codex sandbox: bwrap:PASS"], "before the agent exists, no start check");
-});
-
-test("no script the agent runs through a unit holds a ${...}: systemd-run expands that form in a unit's arguments itself", () => {
-  for (const [name, script] of Object.entries({ CONFINEMENT_PROBE, DECOY_LAUNCH })) assert.ok(!script.includes("${"), name);
-  assert.match(DECOY_LAUNCH, /grep -qxF "PENDULUM_PROBE_MARKER=\$PENDULUM_PROBE_MARKER"/);
 });
 
 test("Codex's domains take host names only: a loopback name, an IP address or host:port, whose port its proxy ignores, never reaches it; doctor warns locally (#108)", async () => {

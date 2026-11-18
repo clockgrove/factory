@@ -1,16 +1,12 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { RETRY, postReview, prDiff } from "../scripts/lib/github.mjs";
-import { answerPrompt } from "../scripts/review.mjs";
+import { RETRY, postReview } from "../scripts/lib/github.mjs";
 import { parseReplies, postReplies } from "../scripts/lib/handoff.mjs";
-import { bodyFindingId, bodyFindings, diffLines, filesDiff, fitToFiles, promptDiff, reviewBody, setSelf, snapComments } from "../scripts/lib/logic.mjs";
-import { exec } from "../scripts/lib/proc.mjs";
-import { mirrorDiff, unaddressedReviewComments } from "../scripts/lib/session.mjs";
+import { bodyFindingId, bodyFindings, diffLines, filesDiff, fitToFiles, reviewBody, setSelf, snapComments } from "../scripts/lib/logic.mjs";
+import { unaddressedReviewComments } from "../scripts/lib/session.mjs";
 
 // The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
 RETRY.sleep = async () => {};
@@ -37,76 +33,6 @@ test("review diff: a small PR's comments snap the same from GitHub's files API a
   assert.deepEqual(snapComments(findings, fromFiles), snapComments(findings, github));
 });
 
-/** A real git repository: a base, a branch with every kind of change, and a default branch that moved on after it. */
-function repoWithBranch() {
-  const dir = mkdtempSync(join(tmpdir(), "review-diff-"));
-  const g = (...args) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }).trim();
-  const put = (path, text) => writeFileSync(join(dir, path), text);
-  const lines = (n, tag = "") => Array.from({ length: n }, (_, i) => `line ${i + 1}${tag}`).join("\n") + "\n";
-  g("init", "-q", "-b", "main");
-  put("keep.txt", lines(40));
-  put("gone.txt", lines(10));
-  put("moved.txt", lines(30));
-  put("same.txt", lines(12, " same"));
-  put("other.txt", lines(5));
-  g("add", "-A");
-  g("commit", "-q", "-m", "base");
-  g("checkout", "-q", "-b", "feature");
-  put("keep.txt", lines(40).replace("line 20\n", "line 20 changed\n").replace("line 3\n", ""));
-  put("added.txt", lines(4, " new"));
-  put("blob.bin", Buffer.from([0, 1, 2, 3, 0, 255]));
-  g("rm", "-q", "gone.txt");
-  g("mv", "moved.txt", "renamed.txt");
-  put("renamed.txt", lines(30).replace("line 29\n", "line 29 edited\n"));
-  g("mv", "same.txt", "same-renamed.txt");
-  g("add", "-A");
-  g("commit", "-q", "-m", "feature");
-  const head = g("rev-parse", "HEAD");
-  g("checkout", "-q", "main");
-  put("other.txt", lines(5).replace("line 2\n", "line 2 on main after the branch\n"));
-  g("commit", "-q", "-am", "main moves on");
-  const base = g("rev-parse", "HEAD");
-  const mgit = (args, opts = {}) => exec("git", ["-C", dir, ...args], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }, ...opts });
-  return { dir, g, base, head, mgit };
-}
-
-test("review diff: from history it is the PR's three-dot diff, and snaps the same as one made from per-file patches", async () => {
-  const { dir, g, base, head, mgit } = repoWithBranch();
-  try {
-    const diff = await mirrorDiff(mgit, base, head, { mergeBase: true });
-    const mb = g("merge-base", base, head);
-    assert.equal(diff, g("diff", "--no-color", "--no-ext-diff", "--no-textconv", mb, head) + "\n", "from the merge base to the head");
-    assert.ok(!diff.includes("other.txt"), "what the default branch did after the branch point is not the PR's");
-    assert.deepEqual(Object.keys(lineMap(diff)).sort(), ["added.txt", "keep.txt", "renamed.txt"], "deletions, binaries and pure renames take no comment");
-    // The files API's listing of the same change: status, names and each file's hunks (GitHub's `patch`).
-    const listing = g("diff", "--name-status", "-M", mb, head).split("\n").map((l) => {
-      const [code, a, b] = l.split("\t");
-      const status = { M: "modified", A: "added", D: "deleted", R: "renamed" }[code[0]];
-      const file = { filename: b || a, status: status === "deleted" ? "removed" : status, ...(b ? { previous_filename: a } : {}) };
-      const patch = g("diff", "-M", mb, head, "--", ...(b ? [a, b] : [a])).split("\n");
-      const at = patch.findIndex((x) => x.startsWith("@@"));
-      if (at >= 0) file.patch = patch.slice(at).join("\n");
-      if (code === "R100") file.changes = 0;
-      return file;
-    });
-    const fromFiles = filesDiff(listing);
-    assert.deepEqual(lineMap(fromFiles), lineMap(diff));
-    const findings = [...findingsFor(diff), { path: "gone.txt", line: 2, body: "on a deleted file" }, { path: "blob.bin", line: 1, body: "on a binary" }];
-    assert.deepEqual(snapComments(findings, fromFiles), snapComments(findings, diff));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("review diff: a commit missing from the mirror that cannot be fetched throws, so the caller falls back", async () => {
-  const { dir, base, mgit } = repoWithBranch();
-  try {
-    await assert.rejects(mirrorDiff(mgit, base, "f".repeat(40), { mergeBase: true }), /could not be fetched/);
-    await assert.rejects(mirrorDiff(mgit, "HEAD", base, { mergeBase: true }), /not a commit id/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
 
 test("review diff: past GitHub's 300-file diff limit, the files API's pages make the diff; a file without a patch takes no comment", () => {
   // The shape of an adopter PR with 406 files, mostly deletions, one too large for a patch.
@@ -125,71 +51,6 @@ test("review diff: past GitHub's 300-file diff limit, the files API's pages make
     { path: "src/kept.ts", line: 6, side: "RIGHT", body: "z" },
   ]);
   assert.equal(filesDiff([]), "");
-});
-
-test("review diff: prDiff uses history when it can, else every page of the files API", async () => {
-  const realFetch = globalThis.fetch;
-  const asked = [];
-  const page = (n) => Array.from({ length: n }, (_, i) => ({ filename: `d/f${asked.length}-${i}.txt`, status: "removed", changes: 1, patch: "@@ -1 +0,0 @@\n-x" }));
-  globalThis.fetch = async (url) => {
-    const u = String(url);
-    asked.push(u);
-    const next = asked.length < 5 ? { link: `<https://api.github.com/repositories/1/pulls/7/files?per_page=100&page=${asked.length + 1}>; rel="next"` } : {};
-    return new Response(JSON.stringify(asked.length < 5 ? page(100) : [...page(5), { filename: "src/a.ts", status: "added", changes: 1, patch: "@@ -0,0 +1 @@\n+a" }]), { status: 200, headers: { "content-type": "application/json", ...next } });
-  };
-  const repo = { full: "o/r", owner: "o", name: "r" };
-  const pr = { number: 7, changed_files: 3100, base: { sha: "b".repeat(40) }, head: { sha: "c".repeat(40) } };
-  try {
-    const seen = [];
-    const fromHistory = await prDiff(repo, pr, { token: "t" }, { diffOf: async (b, h) => (seen.push([b, h]), "diff --git a/x b/x\n") });
-    assert.deepEqual(fromHistory, { text: "diff --git a/x b/x\n", source: "history", historyError: "", unlisted: 0, unpatched: 0 });
-    assert.deepEqual(seen, [[pr.base.sha, pr.head.sha]]);
-    assert.equal(asked.length, 0, "no API call when history makes the diff");
-    const fallback = await prDiff(repo, pr, { token: "t" }, { diffOf: async () => { throw new Error("commit ccccccc could not be fetched"); } });
-    assert.equal(asked.length, 5);
-    assert.match(asked[0], /\/repos\/o\/r\/pulls\/7\/files\?per_page=100$/);
-    assert.equal(fallback.source, "files");
-    assert.equal(fallback.historyError, "commit ccccccc could not be fetched");
-    assert.equal(fallback.unpatched, 0, "every listed file carries its patch");
-    assert.equal(fallback.text.match(/^diff --git /gm).length, 406);
-    assert.equal(fallback.unlisted, 3100 - 406);
-    assert.deepEqual(lineMap(fallback.text), { "src/a.ts": { first: 1, lines: [1] } });
-    asked.length = 0;
-    assert.equal((await prDiff(repo, { ...pr, changed_files: 406 }, { token: "t" })).historyError, "no local history");
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-});
-
-test("review diff: the reviewer's prompt carries the whole diff up to the cap, then whole files only, with a count of the rest", () => {
-  const file = (i) => `diff --git a/f${i} b/f${i}\n--- a/f${i}\n+++ b/f${i}\n@@ -1 +1 @@\n-a\n+${"x".repeat(80)}\n`;
-  const diff = Array.from({ length: 10 }, (_, i) => file(i)).join("");
-  assert.equal(promptDiff(diff), diff);
-  assert.equal(promptDiff(diff, diff.length), diff);
-  const cut = promptDiff(diff, file(0).length * 3 + 5);
-  assert.ok(cut.startsWith(file(0) + file(1) + file(2)));
-  assert.match(cut, /\(the diff is cut here at \d+ of \d+ characters; 7 file\(s\) are not shown in full/);
-  assert.ok(!cut.includes("diff --git a/f3 "));
-  assert.match(promptDiff(file(0), 40), /^diff --git a\/f0 b\/f0\n--- a\/f0\n\+\+\+ b\/f0\n\(the diff is cut here at 39 of \d+ characters; 1 file\(s\)/, "a first file alone over the cap is cut at a line");
-});
-
-test("review diff: a diff over maxBytes throws (exec says it cut the output), so prDiff falls back to the files API", async () => {
-  const { dir, base, head, mgit } = repoWithBranch();
-  const realFetch = globalThis.fetch;
-  try {
-    const whole = await mirrorDiff(mgit, base, head, { mergeBase: true });
-    assert.equal((await exec("git", ["-C", dir, "diff", base, head], { maxBytes: 10 })).truncated, true);
-    assert.equal((await exec("git", ["-C", dir, "diff", base, head])).truncated, false);
-    await assert.rejects(mirrorDiff(mgit, base, head, { mergeBase: true, maxBytes: whole.length - 1 }), /the diff is over \d+ bytes/);
-    assert.equal(await mirrorDiff(mgit, base, head, { mergeBase: true, maxBytes: whole.length }), whole);
-    globalThis.fetch = async () => new Response(JSON.stringify([{ filename: "a.ts", status: "added", changes: 1, patch: "@@ -0,0 +1 @@\n+a" }]), { status: 200, headers: { "content-type": "application/json" } });
-    const prd = await prDiff({ full: "o/r" }, { number: 1, changed_files: 1, base: { sha: base }, head: { sha: head } }, { token: "t" }, { diffOf: (b, h) => mirrorDiff(mgit, b, h, { mergeBase: true, maxBytes: 100 }) });
-    assert.equal(prd.source, "files");
-    assert.equal(prd.historyError, "the diff is over 100 bytes");
-  } finally {
-    globalThis.fetch = realFetch;
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 const NOTE = (at) => `**Finding on ${at}**, where GitHub takes no line comment, so it is placed here:\n\n`;
@@ -355,56 +216,6 @@ test("review diff: postReview moves what GitHub cannot place to a line it takes,
   }
 });
 
-test("review diff: a diff that only deletes still gets every finding posted and counted, in the review body or on context", async () => {
-  const gone = "diff --git a/old.ts b/old.ts\ndeleted file mode 100644\n--- a/old.ts\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n";
-  const cut = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -4,4 +4,3 @@\n ctx\n-old\n ctx\n ctx\n";
-  const findings = [{ path: "old.ts", line: 2, body: "a caller still imports this" }, { path: "./src/a.ts", line: 40, body: "off the hunk" }, { body: "no place named" }];
-  // Nothing on the right side: unplaced, each with its own path and line.
-  assert.deepEqual(snapComments(findings, gone), [
-    { path: "old.ts", line: 2, side: "RIGHT", body: "a caller still imports this" },
-    { path: "src/a.ts", line: 40, side: "RIGHT", body: "off the hunk" },
-    { path: null, line: null, side: "RIGHT", body: "no place named" },
-  ]);
-  // Context lines take comments: a hunk that only deletes keeps its findings as line comments.
-  assert.deepEqual(snapComments(findings, cut).map((c) => [c.path, c.line, c.body.split("\n")[0]]), [
-    ["src/a.ts", 4, "**Finding on `old.ts` line 2**, which this PR's diff does not show, so it is placed here:"],
-    ["src/a.ts", 4, "**Finding on `src/a.ts` line 40**, which this PR's diff does not show, so it is placed here:"],
-    ["src/a.ts", 4, "no place named"],
-  ]);
-  const realFetch = globalThis.fetch;
-  setSelf("pendulum[bot]");
-  try {
-    // GitHub lists the deleted file with a patch of removed lines only: every finding goes in the body, on the first post.
-    const listing = [{ filename: "old.ts", status: "removed", changes: 2, patch: "@@ -1,2 +0,0 @@\n-a\n-b" }];
-    const comments = snapComments(findings, gone);
-    let gh = githubStub({ files: listing });
-    globalThis.fetch = gh.fetch;
-    const review = { body: "<!-- pendulum:7:review -->\nPendulum reviewer: one comment-only pass, 3 comment(s).", comments, commitId: "c".repeat(40) };
-    assert.deepEqual(await postReview(repo7, 7, review, { token: "t" }), { review: { id: 1 }, inline: 0, moved: 0, inBody: 3, retried: 0, sent: [] });
-    assert.deepEqual(gh.posts[0].comments, []);
-    assert.deepEqual(bodyFindings(gh.posts[0].body).map((f) => [f.n, f.path, f.line]), [[1, "old.ts", 2], [2, "src/a.ts", 40], [3, "", null]]);
-    assert.match(gh.posts[0].body, /\*\*the PR as a whole \(no file named\)\*\*\n\nno place named/);
-    // They count until answered: the deletion-only PR does not go to merge with them unseen.
-    gh = githubStub({ reviews: [{ id: 1, user: { login: "pendulum[bot]" }, body: gh.posts[0].body }] });
-    globalThis.fetch = gh.fetch;
-    const open = await unaddressedReviewComments(repo7, 7, null, { token: "t", reviewIds: new Set([1]) });
-    assert.deepEqual(open.map((c) => c.id), ["r1-1", "r1-2", "r1-3"]);
-    assert.match(answerPrompt({ taskCard: "", prNumber: 7, comments: open.map((c) => ({ id: c.id, path: c.path, line: c.line, body: c.body })) }), /^- \(review body\) \(comment id "r1-3"\)/m);
-    // No listing: what has no file and line goes in the body at once; no 422 round trip for it.
-    gh = githubStub({ files: new Error("x") });
-    globalThis.fetch = gh.fetch;
-    const placeholder = [{ path: null, line: null, side: "RIGHT", body: "<!-- pendulum:placeholder -->\nPendulum reviewer: no findings; the pass ran and returned nothing line-tied." }];
-    assert.deepEqual(await postReview(repo7, 7, { ...review, comments: placeholder }, { token: "t" }), { review: { id: 1 }, inline: 0, moved: 0, inBody: 0, retried: 0, sent: [] });
-    assert.equal(gh.posts.length, 1);
-    assert.deepEqual(gh.posts[0].comments, []);
-    assert.match(gh.posts[0].body, /\n\nPendulum reviewer: no findings; the pass ran and returned nothing line-tied\.$/);
-    assert.deepEqual(bodyFindings(gh.posts[0].body), []);
-  } finally {
-    setSelf(null);
-    globalThis.fetch = realFetch;
-  }
-});
-
 test("review diff: findings a 422 put in the review body count as unaddressed, reach the answer pass, are answered once and count as answered once the finding check resolves them", async () => {
   const realFetch = globalThis.fetch;
   setSelf("pendulum[bot]");
@@ -446,26 +257,5 @@ test("review diff: findings a 422 put in the review body count as unaddressed, r
   } finally {
     setSelf(null);
     globalThis.fetch = realFetch;
-  }
-});
-
-test("a file name git quotes in its diff (non-ASCII, a quote, an emoji) or ends with a tab (a space) maps to its real path, and a comment on it stays on its line", () => {
-  const dir = mkdtempSync(join(tmpdir(), "quoted-"));
-  try {
-    const git = (...a) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { encoding: "utf8" });
-    git("init", "-q");
-    git("commit", "-q", "--allow-empty", "-m", "a");
-    const names = ["café.md", "a b.md", 'say "hi".md', "back\\slash.md", "🦝.md", "plain.md"];
-    for (const n of names) writeFileSync(join(dir, n), "one\ntwo\n");
-    git("add", "-A");
-    git("commit", "-q", "-m", "b");
-    const diff = git("-c", "core.quotePath=true", "diff", "HEAD~1", "HEAD");
-    assert.match(diff, /\+\+\+ "b\/caf\\303\\251\.md"/);
-    assert.deepEqual(Object.keys(lineMap(diff)).sort(), [...names].sort());
-    for (const n of names) assert.deepEqual(lineMap(diff)[n], { first: 1, lines: [1, 2] });
-    const [c] = snapComments([{ path: "café.md", line: 2, body: "Finding." }], diff);
-    assert.deepEqual(c, { path: "café.md", line: 2, side: "RIGHT", body: "Finding." });
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 });

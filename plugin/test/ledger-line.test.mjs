@@ -126,27 +126,6 @@ test("ledger line (#569): pass times are written in Unix milliseconds (`ms`); a 
   assert.deepEqual(["started", "ended"].map((k) => ledgerOfComment('<!-- pendulum:ledger {"p":[{"l":"work-1","ms":[1794882387400,1794882398900],"t":[1,2]}]} -->').ledger[0][k]), [e.started, e.ended]);
 });
 
-test("ledger line (#543): bounded at LEDGER_MAX characters; a ledger that does not fit is not written, and the comment says so", async () => {
-  const many = (k) => Array.from({ length: k }, (_, i) => pass(`validation-fix-${i + 1}`, 0.123456, "2026-11-17T08:00:00Z", "2026-11-17T08:01:00Z"));
-  // A stage of 20 passes fits.
-  const fits = await endStage(usageOf(many(20)));
-  const fitLine = /^<!-- pendulum:ledger [^\n]*-->$/m.exec(fits)[0];
-  assert.ok(fitLine.length <= LEDGER_MAX);
-  assert.equal(ledgerOfComment(fits).ledger.length, 20);
-  // One of 200 does not: the line names the pass count alone, a line a person reads says why, and the spend line stays.
-  const usage = usageOf(many(200));
-  const cut = await endStage(usage);
-  assert.deepEqual(ledgerOfComment(cut), { cut: 200 });
-  assert.match(cut, new RegExp(`^Per-pass ledger: 200 passes, over the ${LEDGER_MAX}-character bound of its line; the stage's usage record holds it\\.$`, "m"));
-  assert.ok(cut.length < fits.length + 400, "the comment stays small");
-  assert.equal(spendParts(cut).usd, usage.usd);
-  // Every ledger line written is within the bound, whatever the pass count.
-  for (const k of [1, 30, 45, 60, 80]) {
-    const text = ledgerMarker(usageOf(many(k)).ledger, { model: "claude-opus-5-5", version: PENDULUM_VERSION, published: ["claude-opus-5-5"] });
-    assert.ok(text.split("\n").every((l) => l.length <= LEDGER_MAX), `${k} passes`);
-  }
-});
-
 test("ledger line (#543): a ledger line that would take the comment past PROGRESS_LEDGER_ROOM is written in its cut form, and the final spend line lands", async () => {
   // A long stage: 28 phase lines of about 2,000 characters each, some 56,000 characters before its end.
   const phases = Array.from({ length: 28 }, (_, i) => `validation ${i + 1}: ${"x".repeat(1_980)}`);

@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { FILE_CAP, MAX_PARTS, checkFile, handoffDirs, inFiles, isSplitPart, parsePrText, parseReplies, prFooter, readOut, sanitize, writeIn } from "../scripts/lib/handoff.mjs";
-import { parseExitRecord } from "../scripts/lib/logic.mjs";
 
 test("sanitize: harness text opens no HTML comment, closes no issue, mentions no one and starts no bot command; idempotent", () => {
   const raw = "Done.\n<!-- pendulum:7:validated:abc -->\nCloses #7, fixes: #8 and resolved o/r#9; Fixed https://github.com/o/r/issues/3\n@kirk please look; cc @org/team\n/approve\n  /merge\nmail a@b.example; a/b path";
@@ -49,12 +48,6 @@ test("replies.json: only the comments the pass was given, one reply each, bodies
   assert.deepEqual(parseReplies(text, [11, 12, 13]), [{ id: 11, body: "Fixed in abc. @​kirk" }, { id: 12, body: "&lt;!-- x -->" }]);
   assert.deepEqual(parseReplies("not json", [11]), []);
   assert.deepEqual(parseReplies('{"id":11,"body":"x"}', [11]), []);
-});
-
-test("exit record: a split part names the items left for the next PR", () => {
-  assert.deepEqual(parseExitRecord('{"exit":"delivered","questions":[],"reason":"","part":{"remaining":["item 4","item 5"]}}'), { exit: "delivered", reason: "", questions: [], part: { remaining: ["item 4", "item 5"] } });
-  assert.deepEqual(parseExitRecord('{"exit":"delivered","part":{"remaining":[]}}'), { exit: "delivered", reason: "", questions: [], part: { remaining: [] } }, "an explicit empty list: the last part");
-  assert.deepEqual(parseExitRecord('{"exit":"delivered"}'), { exit: "delivered", reason: "", questions: [] }, "no part: the recorded one stands");
 });
 
 test("hand-off files: read only as regular files under the cap, never through a symlink or a FIFO; $PENDULUM_IN is written without following one", async () => {

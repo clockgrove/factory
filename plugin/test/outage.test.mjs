@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
 import { RETRY, rest } from "../scripts/lib/github.mjs";
-import { NetworkDown, OUTAGE, resetNetwork, unreachable, waitOutages } from "../scripts/lib/network.mjs";
+import { NetworkDown, OUTAGE, resetNetwork, stopWaiting, unreachable, waitOutages } from "../scripts/lib/network.mjs";
 import { outageExit, crashed } from "../scripts/lib/session.mjs";
 import { parseUsage } from "../scripts/lib/usage.mjs";
 import { LOST_PASS_PROMPT, runHarness } from "../scripts/lib/harness.mjs";
@@ -84,6 +84,27 @@ test("rest: calls that cannot leave this machine wait for one probe loop, then g
       assert.match(net[0], /network: api\.github\.test is unreachable from this machine \(EAI_AGAIN\); waiting for it to answer again, for up to 15 min/);
       assert.match(net[1], /network: api\.github\.test answers again after 1 min \(unreachable since Nov 14, 8:47:00 AM UTC\)/);
       assert.deepEqual(retryLines(lines), [], "no retry lines for a network that is down");
+    },
+  );
+});
+
+test("rest: a call whose own request is the first to find the host unreachable ends with its caller's stopSignal, though the network stays down (#626)", async () => {
+  await offline(
+    () => {
+      throw dns();
+    },
+    async () => {
+      waitOutages();
+      // The network stays down: a probe's wait ends only when the process stops waiting.
+      let lost;
+      const waiting = new Promise((r) => (lost = r));
+      OUTAGE.sleep = (ms, s) => (lost(), new Promise((r) => s?.addEventListener("abort", r, { once: true })));
+      const stop = new AbortController();
+      const call = rest("repos/o/r/issues/7/comments", { token: "t", stopSignal: stop.signal });
+      await waiting;
+      stop.abort();
+      stopWaiting();
+      await assert.rejects(call, { name: "AbortError" });
     },
   );
 });

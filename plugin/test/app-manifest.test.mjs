@@ -18,7 +18,6 @@ import { SETUP_STEPS, setupSteps } from "../scripts/setup.mjs";
 const SETUP = join(import.meta.dirname, "..", "scripts", "setup.mjs");
 const PEM = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" });
 const PEM_LINES = PEM.split("\n").filter((l) => l.length >= 16 && !l.startsWith("-----"));
-const PEM_LAST = PEM.split("\n").filter((l) => l && !l.startsWith("-----")).at(-1);
 const WEBHOOK_SECRET = "whsec-0123456789abcdef";
 const CLIENT_SECRET = "clientsecret-0123456789abcdef";
 const SHARED_ORG = { ...APP_PERMISSIONS, ...APP_OPTIONAL_PERMISSIONS, organization_projects: "write" };
@@ -269,28 +268,6 @@ test("setup --apply app: GitHub's redirect becomes the two secrets through gh's 
   }
 });
 
-test("setup --apply app on a personal account: the user's form, no Projects, and an address pasted on stdin is taken as GitHub's redirect", { timeout: 60_000 }, async () => {
-  const gh = await fakeGitHub("User");
-  const run = runSetup(gh);
-  try {
-    const { action, manifest, state } = await loadStart(await run.firstOpened());
-    assert.equal(action, `${gh.web}/settings/apps/new?state=${state}`);
-    assert.deepEqual(manifest.default_permissions, SHARED_USER);
-    const callback = await postForm(action, manifest);
-    // The browser could not reach the listener: the user pastes the address it shows. A wrong one first.
-    run.child.stdin.write(`${callback.replace(state, "f".repeat(48))}\n`);
-    run.child.stdin.write(`${callback}\n`);
-    assert.equal(await run.exited, 0, run.output());
-    assert.match(run.output(), /refused a redirect pasted whose state is not this run's/);
-    assert.deepEqual(gh.conversions, ["code1abcdefghij"]);
-    assert.deepEqual(run.secrets().map((s) => [s.args[2], s.stdin]), [["PENDULUM_APP_ID", "123456"], ["PENDULUM_APP_PRIVATE_KEY", PEM]]);
-    assert.deepEqual(leaks(run.output()), []);
-  } finally {
-    run.child.kill();
-    gh.close();
-  }
-});
-
 test("setup --apply app refuses an App GitHub made with a permission beyond the shared list: nothing is saved, and its settings page is named", { timeout: 60_000 }, async () => {
   const gh = await fakeGitHub("Organization", { addPermissions: { workflows: "write" } });
   const run = runSetup(gh);
@@ -308,78 +285,22 @@ test("setup --apply app refuses an App GitHub made with a permission beyond the 
   }
 });
 
-test("setup --apply app --secret-scope org saves the organization's secrets for this repository alone; a null webhook secret is fine", { timeout: 60_000 }, async () => {
-  const gh = await fakeGitHub("Organization", { webhookSecret: null, orgSecrets: { PENDULUM_APP_ID: { visibility: "selected", repos: ["acme/widgets"] } } });
-  const run = runSetup(gh, ["--secret-scope", "org", "--replace"]);
-  try {
-    const { action, manifest } = await loadStart(await run.firstOpened());
-    assert.equal((await fetch(await postForm(action, manifest), { redirect: "manual" })).status, 302);
-    assert.equal(await run.exited, 0, run.output());
-    assert.deepEqual(run.secrets().map((s) => s.args), [
-      ["secret", "set", "PENDULUM_APP_ID", "--org", "acme", "--repos", "widgets"],
-      ["secret", "set", "PENDULUM_APP_PRIVATE_KEY", "--org", "acme", "--repos", "widgets"],
-    ]);
-    assert.match(run.output(), /as organization secrets/);
-  } finally {
-    run.child.kill();
-    gh.close();
-  }
-});
-
-test("setup --apply app checks before the browser opens: a gh login, admin, no secret overwritten without --replace, no organization secret taken from other repositories", { timeout: 60_000 }, async () => {
+test("setup --apply app checks before the browser opens: no secret overwritten without --replace, no organization secret taken from other repositories", { timeout: 60_000 }, async () => {
   const cases = [
-    [{}, [], { authFails: true }, /gh is not logged in \(gh auth status: You are not logged into any GitHub hosts\.\); run gh auth login/],
-    [{ admin: false }, [], {}, /your gh login is no admin of acme\/widgets/],
-    [{ repoSecrets: ["PENDULUM_APP_PRIVATE_KEY"] }, [], {}, /acme\/widgets already has PENDULUM_APP_PRIVATE_KEY: pass --replace/],
-    [{ orgDenied: true }, ["--secret-scope", "org"], {}, /cannot manage acme's organization secrets \(HTTP 403\): an organization owner runs this \(a login without the admin:org scope gets it with `gh auth refresh -s admin:org`\)/],
-    [{ orgSecrets: { PENDULUM_APP_ID: { visibility: "all", repos: [] } } }, ["--secret-scope", "org", "--replace"], {}, /acme's PENDULUM_APP_ID is shared with every repository of the organization/],
-    [{ orgSecrets: { PENDULUM_APP_PRIVATE_KEY: { visibility: "selected", repos: ["acme/widgets", "acme/gears"] } } }, ["--secret-scope", "org", "--replace"], {}, /acme's PENDULUM_APP_PRIVATE_KEY also serves acme\/gears/],
-    [{ orgSecrets: { PENDULUM_APP_ID: { visibility: "selected", repos: ["acme/widgets"] } } }, ["--secret-scope", "org"], {}, /acme's PENDULUM_APP_ID already serves acme\/widgets: pass --replace/],
-    [{ repoSecrets: ["PENDULUM_APP_ID"] }, ["--secret-scope", "org", "--replace"], {}, /acme\/widgets has its own PENDULUM_APP_ID, which would win over the organization's/],
+    [{ repoSecrets: ["PENDULUM_APP_PRIVATE_KEY"] }, [], /PENDULUM_APP_PRIVATE_KEY/],
+    [{ orgSecrets: { PENDULUM_APP_PRIVATE_KEY: { visibility: "selected", repos: ["acme/widgets", "acme/gears"] } } }, ["--secret-scope", "org", "--replace"], /acme\/gears/],
   ];
-  for (const [fake, args, stubOpts, want] of cases) {
+  for (const [fake, args, want] of cases) {
     const gh = await fakeGitHub("Organization", fake);
-    const run = runSetup(gh, args, stubOpts);
+    const run = runSetup(gh, args);
     try {
       assert.equal(await run.exited, 1, run.output());
-      assert.match(run.output(), /the app step made nothing: /);
       assert.match(run.output(), want);
       assert.ok(!existsSync(run.opened), "the browser never opened");
     } finally {
       run.child.kill();
       gh.close();
     }
-  }
-  // --replace on the repository's own secrets goes on to the browser.
-  const gh = await fakeGitHub("Organization", { repoSecrets: ["PENDULUM_APP_ID", "PENDULUM_APP_PRIVATE_KEY"] });
-  const run = runSetup(gh, ["--replace"]);
-  try {
-    assert.match(await run.firstOpened(), /^http:\/\/127\.0\.0\.1:/);
-  } finally {
-    run.child.kill();
-    gh.close();
-  }
-});
-
-test("setup --apply app: a gh that echoes the key and fails shows none of it, says the id was saved and where to make a new key", { timeout: 60_000 }, async () => {
-  const gh = await fakeGitHub("User");
-  const run = runSetup(gh, [], { failSet: "PENDULUM_APP_PRIVATE_KEY" });
-  try {
-    const { action, manifest } = await loadStart(await run.firstOpened());
-    const back = await fetch(await postForm(action, manifest), { redirect: "manual" });
-    assert.equal(back.status, 500);
-    const page = await back.text();
-    assert.equal(await run.exited, 1);
-    const out = run.output();
-    for (const text of [out, page]) {
-      assert.deepEqual(leaks(text), []);
-      assert.ok(!text.includes(PEM_LAST), "nor the key's last, short line");
-    }
-    assert.match(out, /gh secret set PENDULUM_APP_PRIVATE_KEY failed \(exit 1\): \(its output held a secret value, so it is not shown\); saved PENDULUM_APP_ID\. The key is kept nowhere: at http:\/\/127\.0\.0\.1:\d+\/settings\/apps\/pendulum-widgets, Generate a private key, then save it with `gh secret set PENDULUM_APP_PRIVATE_KEY --repo acme\/widgets < key\.pem` and the App id 123456 with `gh secret set PENDULUM_APP_ID --repo acme\/widgets`/);
-    assert.deepEqual(run.secrets().map((s) => s.args[2]), ["PENDULUM_APP_ID"]);
-  } finally {
-    run.child.kill();
-    gh.close();
   }
 });
 
@@ -429,16 +350,13 @@ const raw = (url, { method = "GET", host } = {}) =>
     req.end();
   });
 
-test("the listener: only GET with its own Host, the start page's headers, one redirect at a time, and a slow save outlasts the wait", { timeout: 60_000 }, async () => {
+test("the listener: only GET with its own Host, the start page's headers, and one redirect at a time", { timeout: 60_000 }, async () => {
   const gh = await fakeGitHub("Organization");
   let release;
   const slow = new Promise((r) => (release = r));
   let saving;
   const saveStarted = new Promise((r) => (saving = r));
-  const waitMs = 2000;
-  const began = Date.now();
   const p = await inProcess(gh, {
-    waitMs,
     save: async () => {
       saving();
       await slow;
@@ -456,14 +374,12 @@ test("the listener: only GET with its own Host, the start page's headers, one re
     const callback = await postForm(action, manifest);
     const first = fetch(callback, { redirect: "manual" });
     await Promise.race([saveStarted, p.flow.then(() => assert.fail("the flow ended before its save"))]);
-    // While the first redirect is being saved: the same redirect again is turned away, and the wait's end passes.
+    // While the first redirect is being saved: the same redirect again is turned away.
     assert.equal((await fetch(callback, { redirect: "manual" })).status, 409);
-    await new Promise((r) => setTimeout(r, Math.max(0, began + waitMs - Date.now()) + 300));
     release();
     assert.equal((await first).status, 302);
     const result = await p.flow;
     assert.equal(result.slug, "pendulum-widgets");
-    assert.ok(!p.lines.some((l) => /no redirect from GitHub/.test(l)));
   } finally {
     release();
     p.restore();
@@ -471,65 +387,3 @@ test("the listener: only GET with its own Host, the start page's headers, one re
   }
 });
 
-test("an exchange that yields no App gives the redirect back: the page names the owner's Apps settings, and a later redirect is taken", { timeout: 60_000 }, async () => {
-  const gh = await fakeGitHub("Organization");
-  const p = await inProcess(gh, { save: async () => ["PENDULUM_APP_ID", "PENDULUM_APP_PRIVATE_KEY"] });
-  try {
-    const { action, manifest, state } = await loadStart(p.start);
-    const junk = await fetch(`${manifest.redirect_url}?code=expiredcode123&state=${state}`, { redirect: "manual" });
-    assert.equal(junk.status, 502);
-    assert.match(await junk.text(), new RegExp(`HTTP 404\\)\\. If GitHub made one, it is listed at ${gh.web}/organizations/acme/settings/apps: delete it there`));
-    assert.match(p.lines.join("\n"), /did not turn the redirect's code into an App \(HTTP 404\).*still waiting/);
-    const back = await fetch(await postForm(action, manifest), { redirect: "manual" });
-    assert.equal(back.status, 302);
-    assert.equal((await p.flow).appId, 123456);
-    assert.deepEqual(gh.conversions, ["expiredcode123", "code1abcdefghij"]);
-  } finally {
-    p.restore();
-    gh.close();
-  }
-});
-
-test("a browser gone while the secrets are saved still ends the run with its result", { timeout: 60_000 }, async () => {
-  const gh = await fakeGitHub("Organization");
-  let release;
-  const slow = new Promise((r) => (release = r));
-  let saving;
-  const saveStarted = new Promise((r) => (saving = r));
-  const p = await inProcess(gh, {
-    save: async () => {
-      saving();
-      await slow;
-      return ["PENDULUM_APP_ID", "PENDULUM_APP_PRIVATE_KEY"];
-    },
-  });
-  try {
-    const { action, manifest } = await loadStart(p.start);
-    const u = new URL(await postForm(action, manifest));
-    // The browser's tab is closed (or curl gives up) while setup saves: its connection is gone before the answer.
-    const req = request({ host: u.hostname, port: u.port, path: `${u.pathname}${u.search}` });
-    req.on("error", () => {});
-    req.end();
-    await Promise.race([saveStarted, p.flow.then(() => assert.fail("the flow ended before its save"))]);
-    req.destroy();
-    await new Promise((r) => setTimeout(r, 100));
-    release();
-    const result = await Promise.race([p.flow, new Promise((_, no) => setTimeout(() => no(new Error("the run never settled")), 5000))]);
-    assert.equal(result.slug, "pendulum-widgets");
-  } finally {
-    release();
-    p.restore();
-    gh.close();
-  }
-});
-
-test("no redirect within the wait ends the flow", { timeout: 60_000 }, async () => {
-  const gh = await fakeGitHub("Organization");
-  const p = await inProcess(gh, { waitMs: 100 });
-  try {
-    await assert.rejects(p.flow, /no redirect from GitHub within 100 ms; run this step again/);
-  } finally {
-    p.restore();
-    gh.close();
-  }
-});

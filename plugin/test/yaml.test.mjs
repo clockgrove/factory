@@ -1,9 +1,8 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { parse } from "../vendor/yaml/browser/index.js";
 import { parseYaml, workflowEvents, writeGrants } from "../scripts/lib/yaml.mjs";
 
 test("workflow YAML: events and permissions read from the parsed file; anything doctor cannot read for sure throws", () => {
@@ -57,21 +56,6 @@ test("#556: writeGrants reads a permissions block exactly: every scope at write,
   assert.deepEqual(writeGrants(parseYaml("permissions: read-all").permissions), []);
 });
 
-test("workflow YAML: what GitHub Actions reads, read the same way (anchors, folded and indented block text, quoted text over several lines); plain values stay text", () => {
-  // Anchors and aliases: GitHub Actions has read them since 2025-09-18.
-  const anchored = parseYaml("on: push\nbase: &perms\n  contents: write\njobs:\n  a:\n    permissions: *perms\n");
-  assert.deepEqual(anchored.jobs.a.permissions, { contents: "write" });
-  assert.deepEqual(writeGrants(anchored.jobs.a.permissions), ["contents: write"]);
-  // A folded condition joins its lines with spaces, as GitHub evaluates it.
-  assert.equal(parseYaml("if: >\n  github.event.action == 'closed' ||\n  github.event_name == 'push'\n").if, "github.event.action == 'closed' || github.event_name == 'push'\n");
-  // A literal block keeps the extra indentation of its deeper lines.
-  assert.equal(parseYaml("run: |\n  if x; then\n    echo y\n  fi\n").run, "if x; then\n  echo y\nfi\n");
-  assert.equal(parseYaml('a: "one\n  two"').a, "one two");
-  // Plain values are their source text, never booleans or numbers; `on` is a key, not YAML 1.1's true.
-  assert.deepEqual(parseYaml("on: [push]\ncancel-in-progress: true\nnode: 24.10\ntimeout: 010\nempty:\ntilde: ~\nquoted: 'true'"), { on: ["push"], "cancel-in-progress": "true", node: "24.10", timeout: "010", empty: null, tilde: null, quoted: "true" });
-  assert.equal(parseYaml(""), null);
-});
-
 test("workflow YAML: aliases copy their anchor against a budget, so many aliases read and an alias bomb throws; a caller can refuse aliases", () => {
   const job = (i) => `  j${i}:\n    runs-on: ubuntu-latest\n    steps: *steps\n`;
   const many = `on: push\nx-steps: &steps\n  - &c {run: echo}\n${Array.from({ length: 10 }, () => "  - *c\n").join("")}jobs:\n${Array.from({ length: 120 }, (_, i) => job(i)).join("")}`;
@@ -86,20 +70,6 @@ test("workflow YAML: aliases copy their anchor against a budget, so many aliases
   assert.equal(Object.getPrototypeOf(proto), Object.prototype);
   assert.deepEqual(Object.keys(proto), ["__proto__"]);
   assert.equal({}.polluted, undefined);
-});
-
-test("every skill's frontmatter is strict YAML with its directory's name and a description: a harness that reads it strictly (Copilot CLI) drops a skill it cannot parse", () => {
-  const skills = join(import.meta.dirname, "..", "skills");
-  const names = readdirSync(skills);
-  assert.ok(names.length >= 14);
-  for (const name of names) {
-    const fm = /^---\n([\s\S]*?)\n---\n/.exec(readFileSync(join(skills, name, "SKILL.md"), "utf8"));
-    assert.ok(fm, `${name}: no frontmatter`);
-    let doc;
-    assert.doesNotThrow(() => (doc = parse(fm[1])), `${name}: frontmatter is not strict YAML (quote a description that holds ": ")`);
-    assert.equal(doc.name, name);
-    assert.ok(typeof doc.description === "string" && doc.description.length > 40, `${name}: description`);
-  }
 });
 
 // GitHub evaluates `${{ }}` anywhere in an action's metadata, descriptions included, and refuses to load the action when

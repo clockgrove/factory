@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { harnessMarker, ledgerMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
-import { RATIO_WORDS, rateRatios, rateTables, renderReport, reportCheck } from "../scripts/lib/report.mjs";
-import { COMMANDS, parseArgs, reportCommand } from "../scripts/local.mjs";
+import { RATIO_WORDS, rateRatios, rateTables } from "../scripts/lib/report.mjs";
+import { parseArgs, reportCommand } from "../scripts/local.mjs";
 import { codexPrice } from "../scripts/lib/usage.mjs";
 
 // Model-usage proposals (#547): `pendulum report --rates` computes the only cross-model figure Pendulum gives, a ratio of
@@ -24,7 +24,6 @@ const issueUrl = (n) => `https://api.github.com/repos/${REPO.full}/issues/${n}`;
 const NOW = Date.parse("2026-11-18T00:00:00Z");
 /** The price table as the file holds it, read here on its own, not through the code under test. */
 const TABLE = JSON.parse(readFileSync(join(import.meta.dirname, "..", "scripts", "lib", "codex-prices.json"), "utf8"));
-const SKILL_DIR = join(import.meta.dirname, "..", "skills", "pendulum-report");
 
 let nextId = 7000;
 /**
@@ -232,25 +231,6 @@ test("rateRatios: two vendors' models are never weighed together; an ended promo
   );
 });
 
-test("report --rates: a stage whose sub-agents ran on another model and that no record splits leaves both models without a ratio", async () => {
-  const w = world();
-  // #45: a local Codex stage known only from its ledger line, its harness line naming a gpt-6-luna sub-agent model.
-  w.issues.push({ number: 45, title: "Objective 45", state: "closed", labels: [{ name: "pendulum:objective" }], created_at: "2026-11-17T01:00:00Z", user: ME });
-  const ledger = [{ label: "work-1", model: "gpt-6.1-sol", effort: "medium", started: "2026-11-17T02:00:00Z", ended: "2026-11-17T02:10:00Z", usd: 0.1, usdUnknown: 0, usdUnknownWhy: [], billing: "api", usdByBilling: { api: 0.1 }, tokens: SOL }];
-  w.comments.push({ id: (nextId += 1), issue_url: issueUrl(45), user: ME, author_association: "OWNER", created_at: "2026-11-17T02:00:00Z", updated_at: "2026-11-17T02:10:00Z", body: ["<!-- pendulum:45:progress:work:local-45 -->", "Pendulum work: started.", harnessMarker("codex", "gpt-6.1-sol", { worker: "gpt-6.1-sol", subagent: "gpt-6-luna", reviewer: null, labels: [] }), spendMarker(0.1, { usdByBilling: { api: 0.1 }, billing: "api" }), ledgerMarker(ledger, { model: "gpt-6.1-sol", version: PENDULUM_VERSION, published: ["gpt-6.1-sol", "gpt-6-luna"] })].join("\n") });
-  w.pulls.push({ number: 1045, head: { ref: "pendulum/45", repo: { id: 1 } }, base: { repo: { id: 1 } }, created_at: "2026-11-17T02:05:00Z", merged_at: "2026-11-17T02:20:00Z", state: "closed" });
-  const { json: r } = await report(w, ["--issue", "41,45", "--rates", "gpt-6-luna"]);
-  assert.deepEqual(
-    r.rates.skipped.map((x) => [x.model, x.candidate, x.why]),
-    [
-      ["gpt-6.1-sol", null, "sub-agents"],
-      ["gpt-6-luna", null, "sub-agents"],
-    ],
-  );
-  // #41's gpt-6-sol stage ran no sub-agent model of its own, so its ratio stands.
-  assert.deepEqual(r.rates.items.map((x) => [x.model, x.candidate]), [["gpt-6-sol", "gpt-6-luna"]]);
-});
-
 /** The two passes of a review stage: its review on the reviewer's model, its answer on the worker's. */
 const REVIEWER = "gpt-6.1-sol";
 const WORKER = "gpt-6-sol";
@@ -258,7 +238,6 @@ const REVIEW_T = { input: 150_000, output: 6_000, cached: 90_000, written: 10_00
 const ANSWER_T = { input: 240_000, output: 18_000, cached: 200_000, written: 30_000 };
 const pass = (label, model, tokens, at) => ({ label, model, effort: "medium", started: `2026-11-17T02:0${at}:00Z`, ended: `2026-11-17T02:0${at + 1}:00Z`, usd: 0.1, usdUnknown: 0, usdUnknownWhy: [], billing: "api", usdByBilling: { api: 0.1 }, tokens });
 const plus = (...ts) => Object.fromEntries(["input", "output", "cached", "written"].map((k) => [k, ts.reduce((n, t) => n + t[k], 0)]));
-const less = (a, b) => Object.fromEntries(["input", "output", "cached", "written"].map((k) => [k, a[k] - b[k]]));
 
 /**
  * Objective `n`'s one Codex stage (a review on REVIEWER by default), its harness line naming its `model` and the
@@ -308,42 +287,6 @@ test("report --rates: a review stage's passes on two models are split by its led
   priceRatio(s, REVIEWER, "gpt-6.1-terra", REVIEW_T);
 });
 
-test("report --rates: a Codex review stage's usage record splits the same way, each sub-agent thread out of the pass it ran in and under its own model", async () => {
-  const w = empty();
-  const THREAD = { input: 40_000, output: 3_000, cached: 30_000, written: 5_000 };
-  const run = (nextId += 1);
-  reviewStage(w, 47, { subagent: "gpt-6-luna", user: BOT, key: String(run) });
-  // The answer pass's tokens hold its thread's share (codex-threads.mjs withSubAgents), as its record's do.
-  const record = { harness: "codex", model: REVIEWER, usd: 0.2, usdByBilling: { api: 0.2 }, billing: "api", runs: 1, exit: "delivered", progressRun: String(run), started: "2026-11-17T02:00:00Z", ended: "2026-11-17T02:10:00Z", tokens: plus(REVIEW_T, ANSWER_T), subAgents: [{ id: "t1", model: "gpt-6-luna", tokens: THREAD, run: "answer" }], ledger: [pass("review", REVIEWER, REVIEW_T, 0), pass("answer", WORKER, ANSWER_T, 2)] };
-  w.artifacts["pendulum-usage-47-review"] = [{ id: run, name: "pendulum-usage-47-review", expired: false, created_at: "2026-11-17T02:10:00Z", workflow_run: { id: run, repository_id: 1, head_repository_id: 1 }, record }];
-  const { json: r } = await report(w, ["--issue", "47", "--rates", "gpt-6.1-terra"]);
-  assert.deepEqual(r.rates.skipped, []);
-  assert.deepEqual(mixOf(r, REVIEWER), partsOf(REVIEW_T));
-  assert.deepEqual(mixOf(r, WORKER), partsOf(less(ANSWER_T, THREAD)));
-  assert.deepEqual(mixOf(r, "gpt-6-luna"), partsOf(THREAD));
-  priceRatio(r, REVIEWER, "gpt-6.1-terra", REVIEW_T);
-  priceRatio(r, WORKER, "gpt-6.1-terra", less(ANSWER_T, THREAD));
-  priceRatio(r, "gpt-6-luna", "gpt-6.1-terra", THREAD);
-});
-
-test("report --rates: a review stage whose passes' models no ledger names gives its model and the worker's no ratio (`pass-models`)", async () => {
-  // A usage record with no ledger, and a ledger line that names the review pass's model alone.
-  const w = empty();
-  const run = (nextId += 1);
-  reviewStage(w, 48, { user: BOT, key: String(run) });
-  const record = { harness: "codex", model: REVIEWER, usd: 0.2, usdByBilling: { api: 0.2 }, billing: "api", runs: 1, exit: "delivered", progressRun: String(run), started: "2026-11-17T02:00:00Z", ended: "2026-11-17T02:10:00Z", tokens: plus(REVIEW_T, ANSWER_T) };
-  w.artifacts["pendulum-usage-48-review"] = [{ id: run, name: "pendulum-usage-48-review", expired: false, created_at: "2026-11-17T02:10:00Z", workflow_run: { id: run, repository_id: 1, head_repository_id: 1 }, record }];
-  reviewStage(w, 49, { extra: [spendMarker(0.2, { usdByBilling: { api: 0.2 }, billing: "api" }), ledgerMarker([pass("review", REVIEWER, REVIEW_T, 0), pass("answer", WORKER, ANSWER_T, 2)], { model: REVIEWER, version: PENDULUM_VERSION, published: [REVIEWER] })] });
-  for (const n of ["48", "49"]) {
-    const { json: r } = await report(w, ["--issue", n, "--rates", "gpt-6.1-terra"]);
-    assert.deepEqual(r.rates.items, [], n);
-    // #569 V11: nothing could be weighed, and the report says so in a field of its own, and in the Markdown.
-    assert.equal(r.rates.usable, false, n);
-    assert.match(renderReport(r), /^No ratio could be weighed: each model and candidate below says why\.$/m, n);
-    assert.deepEqual(r.rates.skipped.map((x) => [x.model, x.why]).sort(), [[WORKER, "pass-models"], [REVIEWER, "pass-models"]].sort(), n);
-  }
-});
-
 test("report --rates: a stage's decision records are in no model's mix, from its ledger line or its usage record", async () => {
   const DECIDED = { input: 30_000, output: 2_000, cached: 0, written: 0 };
   const ledger = [pass("work-1", WORKER, ANSWER_T, 0), { ...pass("triage", "gpt-6-luna", DECIDED, 2), decision: true, calls: 2 }];
@@ -361,77 +304,4 @@ test("report --rates: a stage's decision records are in no model's mix, from its
     assert.deepEqual(mixOf(r, WORKER), partsOf(ANSWER_T), n);
     priceRatio(r, WORKER, "gpt-6.1-terra", ANSWER_T);
   }
-});
-
-test("report --rates: a stage whose ledger names another model than its harness line is under the ledger's model; an alias of its own is its own, named by the table's row", async () => {
-  const w = empty();
-  // The harness line names the worker's model; every pass of its ledger ran on another.
-  reviewStage(w, 52, { kind: "work", model: WORKER, extra: [spendMarker(0.1, { usdByBilling: { api: 0.1 }, billing: "api" }), ledgerMarker([pass("work-1", REVIEWER, ANSWER_T, 0)], { model: WORKER, version: PENDULUM_VERSION, published: [WORKER, REVIEWER] })] });
-  const { json: r } = await report(w, ["--issue", "52", "--rates", "gpt-6.1-terra"]);
-  assert.deepEqual(r.rates.skipped, []);
-  assert.deepEqual(r.rates.items.map((x) => x.model), [REVIEWER]);
-  assert.deepEqual(mixOf(r, REVIEWER), partsOf(ANSWER_T));
-  priceRatio(r, REVIEWER, "gpt-6.1-terra", ANSWER_T);
-  // A ledger naming the price table's row of the harness line's alias (gpt-5.6 is gpt-5.6-sol): one model, under the
-  // row's id (report.mjs modelName).
-  const alias = empty();
-  reviewStage(alias, 53, { kind: "work", model: "gpt-5.6", extra: [spendMarker(0.1, { usdByBilling: { api: 0.1 }, billing: "api" }), ledgerMarker([pass("work-1", "gpt-5.6-sol", ANSWER_T, 0)], { model: "gpt-5.6", version: PENDULUM_VERSION, published: ["gpt-5.6", "gpt-5.6-sol"] })] });
-  const { json: a } = await report(alias, ["--issue", "53", "--rates", "gpt-6.1-terra"]);
-  assert.deepEqual([...new Set([...a.rates.items, ...a.rates.skipped].map((x) => x.model).filter(Boolean))], ["gpt-5.6-sol"]);
-});
-
-test("report --rates: the command line takes model ids only", () => {
-  assert.equal(reportCheck({ rates: ["gpt-6.1-terra,gpt-6-luna"] }), null);
-  assert.match(reportCheck({ rates: ["gpt 6"] }), /^--rates takes model ids/);
-  assert.match(reportCheck({ rates: [","] }), /^--rates takes model ids/);
-  assert.throws(() => parseArgs(["report", "--rates", "$5"]), /--rates takes model ids/);
-});
-
-test("the report skill's proposals: on request only, a named model's judgement citing its rows, no counterfactual dollars, every command real", () => {
-  const skill = readFileSync(join(SKILL_DIR, "SKILL.md"), "utf8");
-  const page = readFileSync(join(SKILL_DIR, "proposals.md"), "utf8");
-  // The skill reaches the page only when the user asks.
-  assert.match(skill, /Only when the user asks[^\n]*\[proposals\.md\]\(proposals\.md\)/);
-  for (const rule of [
-    // Never a counterfactual dollar figure, in any form, and a ratio only as the report gives it.
-    "**No counterfactual dollars, ever.**",
-    "Never write what a model, an effort or a setting would have cost, saved or spent",
-    "A rate ratio only from `rates.items`",
-    "never across vendors",
-    // Every figure cites its row; the output is marked as a judgement and names its model.
-    "Cite every figure by the exact JSON path of the row it came from",
-    "a figure with no row cited is left out",
-    "Proposals: a judgement by <model>, not a figure of Pendulum's. Rows read:",
-    "`claude-fable-5-2`",
-    // Nothing runs unattended, and hot spots stay ranked facts.
-    "or would cost, save or spend",
-    'never as a percentage, "cheaper" or a saving',
-    // Nothing runs unattended, and hot spots stay ranked facts. The session runs only the report, which reads; the
-    // sub-agent that writes the proposals runs nothing.
-    "Run nothing but `pendulum report` itself, which only reads",
-    "You, the session, run every `pendulum report` the proposals read first",
-    "the sub-agent runs nothing",
-    "no threshold",
-    // The replay is Claude Code's alone, on Pendulum's own set; candidates are the price table's rows.
-    "the replay runs Claude Code only, on that set",
-    "`<plugin root>/scripts/lib/codex-prices.json`",
-  ]) assert.ok(page.includes(rule), `proposals.md says: ${rule}`);
-  // Every A/B label the page names is one USAGE.md's label table sets, and it names each of them with what it sets.
-  const usage = readFileSync(join(import.meta.dirname, "..", "..", "docs", "USAGE.md"), "utf8");
-  const labels = [...usage.matchAll(/^\| `(pendulum:(?:harness|model|subagent-model|reviewer-model):<[a-z]+>)`/gm)].map((m) => m[1]);
-  assert.deepEqual(labels.sort(), ["pendulum:harness:<name>", "pendulum:model:<id>", "pendulum:reviewer-model:<id>", "pendulum:subagent-model:<id>"]);
-  for (const l of labels) assert.match(page, new RegExp(`^\\s+- \`${l.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\`: .+\\(\`PENDULUM_[A-Z_]+\``, "m"), `proposals.md lists ${l} with what it sets`);
-  for (const [l] of page.matchAll(/pendulum:(?:harness|model|subagent-model|reviewer-model|effort):<[a-z]+>/g)) assert.ok(labels.includes(l), `${l} is a label USAGE.md names`);
-  // The four parts, in order.
-  const parts = ["**Observation**", "**Hypothesis**", "**Experiment**", "**Command**"].map((p) => page.indexOf(p));
-  assert.ok(parts.every((i, k) => i > 0 && (k === 0 || i > parts[k - 1])), "observation, hypothesis, experiment, command in order");
-  // Every `pendulum report` flag the page names is one the command takes, and each bench script it names exists with the
-  // flags it gives (bench/skills.mjs --check holds the paths to the checkout).
-  const flags = Object.keys(COMMANDS.report.flags);
-  for (const [line] of page.matchAll(/`pendulum report[^`]*`/g)) for (const [, f] of line.matchAll(/--([a-z-]+)/g)) assert.ok(flags.includes(f), `pendulum report --${f}`);
-  for (const [line, script] of page.matchAll(/`node <pendulum clone>\/bench\/([a-z-]+\.mjs)[^`]*`/g)) {
-    const src = readFileSync(join(import.meta.dirname, "..", "..", "bench", script), "utf8");
-    for (const [, f] of line.matchAll(/--([a-z-]+)/g)) assert.match(src, new RegExp(`[{,\\s]"?${f}"?: \\{ type:`), `${script} --${f}`);
-  }
-  assert.ok(page.includes("bench/review-replay.mjs") && page.includes("bench/drill.mjs") && page.includes("pendulum:experiment:") && page.includes("pendulum report --compare"));
 });

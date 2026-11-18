@@ -684,16 +684,18 @@ test("finish card (#544): the summary marker carries the card's own figures, fro
 });
 
 test("finish card (#567): an issue labelled before the rename to Pendulum has no wall clock: the card says so, never a figure that starts too late", async () => {
-  const { finishSummary } = await import("../scripts/lib/finish-card.mjs");
+  const { finishSummary, readSummary, summaryMarker } = await import("../scripts/lib/finish-card.mjs");
   const plain = withSelf(() => data());
   // GitHub keeps a renamed label's old name on its events: the Objective's first label, a day before the current one.
   for (const name of [`${PREVIOUS_NAME}:objective`, `${PREVIOUS_NAME}:running`]) {
     const timeline = [{ event: "labeled", label: { name }, actor: { login: "kirkmarple-clockgrove" }, created_at: "2026-11-16T02:00:00Z" }, ...real.timeline];
     const d = withSelf(() => data({ timeline }));
     const sum = finishSummary(d);
-    assert.deepEqual([sum.wallMs, sum.labelledWallMs], [null, null], name);
+    assert.deepEqual([sum.wallMs, sum.labelledWallMs, sum.clockWhy, finishSummary(plain).clockWhy], [null, null, "renamed", null], name);
+    // The summary records why (#587), so a reader takes it from the card; the card read back keeps it.
+    assert.equal(readSummary(`${finishMarker(3)}\n${summaryMarker(d)}`, 3)?.clockWhy, "renamed", name);
     // Nothing else is read from that event: the clock's start and every other figure are as without it.
-    const rest = (x) => ({ ...x, pendulum: null, wallMs: null, labelledWallMs: null });
+    const rest = (x) => ({ ...x, pendulum: null, wallMs: null, labelledWallMs: null, clockWhy: null });
     assert.deepEqual(rest(sum), rest(finishSummary(plain)));
     const md = renderFinishCard(d);
     assert.match(md, /<h3 align="center">Merged for [^<]*\. Its wall clock is not known: it was labelled before the rename to Pendulum\.<\/h3>/);

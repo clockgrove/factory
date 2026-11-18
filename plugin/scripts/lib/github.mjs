@@ -907,6 +907,37 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
 /** The most pages of 100 review threads reviewThreads reads. */
 const THREAD_PAGES = 10;
 
+/**
+ * The PR body's history (#584), from GitHub's own record of its edits: `{now, revisions, complete}`. `now` is the body
+ * as it stands; `revisions`, each `{at, body}` newest first (sorted by `at`, whatever order GitHub gives), every version the body has had (its first one at the PR's
+ * opening), with `body` null for a version a person deleted from the history; none when the body was never edited.
+ * `complete`: the revisions reach back to the first one (BODY_EDIT_PAGES pages at most).
+ */
+export async function prBodyHistory(repo, number, opts) {
+  const revisions = [];
+  let now = "";
+  let after = null;
+  for (let page = 0; page < BODY_EDIT_PAGES; page += 1) {
+    const data = await graphql(
+      `query($owner: String!, $name: String!, $n: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { body userContentEdits(first: 20, after: $after) { pageInfo { hasNextPage endCursor } nodes { editedAt deletedAt diff } } } } }`,
+      { owner: repo.owner, name: repo.name, n: Number(number), after },
+      opts,
+    );
+    const pr = data?.repository?.pullRequest;
+    if (!pr) throw new GitHubError(`PR #${number}'s body could not be read`, 404, "");
+    if (page === 0) now = String(pr.body ?? "");
+    const got = pr.userContentEdits;
+    revisions.push(...(got?.nodes || []).map((e) => ({ at: e.editedAt, body: e.deletedAt || typeof e.diff !== "string" ? null : e.diff })));
+    if (!got?.pageInfo?.hasNextPage || !got.pageInfo.endCursor) return { now, revisions: newestFirst(revisions), complete: true };
+    after = got.pageInfo.endCursor;
+  }
+  return { now, revisions: newestFirst(revisions), complete: false };
+}
+/** Versions by their edit time, newest first; one with no time readable last. */
+const newestFirst = (list) => list.map((r) => ({ r, t: Date.parse(r.at) })).sort((a, b) => (Number.isFinite(b.t) ? b.t : -Infinity) - (Number.isFinite(a.t) ? a.t : -Infinity) || 0).map((x) => x.r);
+/** The most pages of 20 body versions prBodyHistory reads. */
+const BODY_EDIT_PAGES = 10;
+
 /** Resolve one review thread (pull requests write, which Pendulum's token has). */
 export async function resolveThread(id, opts) {
   await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id }, opts);

@@ -764,7 +764,8 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * them out in the body of Pendulum's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one
  * is answered once a comment under Pendulum's resolved marker for it (finding-check.mjs) is on the PR. Pendulum's own
  * reviews and markers are those by Pendulum or someone who can push (trustedAuthor). An open finding Pendulum answered
- * before carries `earlier`, that answer's text, for the next answer pass, and each carries `raisedOn`, the commit it was
+ * before carries `earlier`, that answer's text, for the next answer pass (and `earlierPrBody` when it said its fix is in
+ * the PR body, for a check again), and each carries `raisedOn`, the commit it was
  * raised on, and `raisedAt`, when, as far as GitHub gives them.
  */
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
@@ -784,7 +785,8 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const resolved = candidates.length ? new Set((await reviewThreads(repo, prNumber, 0, { token })).filter((t) => t.resolved).map((t) => t.rootId)) : new Set();
   // `raisedOn`: the commit the finding was raised on, from which the finding check reads what changed since.
   // `raisedAt`: when it was raised, which the finding check sets beside the decisions' times.
-  const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)) } : {}) });
+  // `earlierPrBody`: that answer said its fix is in the PR body (its marker's `:pr_body`, handoff.mjs postReplies, #584).
+  const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)), ...(PR_BODY_REPLY.test(answer.get(c.id)) ? { earlierPrBody: true } : {}) } : {}) });
   const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, namedReviewer(c, thirdParty)), ...earlier(c) }));
   // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
@@ -794,7 +796,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const trusted = (await listComments(repo, prNumber, { token })).filter(trustedAuthor);
   const done = new Set(trusted.map((c) => BODY_RESOLVED.exec(c.body || "")?.[1]).filter(Boolean));
   const said = new Map(trusted.map((c) => [BODY_REPLY.exec(c.body || "")?.[1], c.body]).filter(([id]) => id));
-  return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)) } : f))];
+  return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)), ...(PR_BODY_REPLY.test(said.get(f.id)) ? { earlierPrBody: true } : {}) } : f))];
 }
 /** Pendulum's earlier answer as the next answer pass reads it: its marker and heading off, sanitised and cut. */
 const answerText = (body) =>
@@ -806,7 +808,9 @@ const answerText = (body) =>
     { max: 4000 },
   );
 const REVIEW_AT_START = /^<!-- pendulum:\d+:review -->/;
-const BODY_REPLY = /^<!-- pendulum:\d+:reply:(r\d+-\d+) -->/;
+const BODY_REPLY = /^<!-- pendulum:\d+:reply:(r\d+-\d+)(?::pr_body)? -->/;
+/** Pendulum's answer that said its fix is in the PR body (#584). */
+const PR_BODY_REPLY = /^<!-- pendulum:\d+:reply:\S+:pr_body -->/;
 const BODY_RESOLVED = /^<!-- pendulum:\d+:resolved:(r\d+-\d+) -->/;
 
 /**
@@ -2133,6 +2137,60 @@ export async function answerDiff(mgit, { base, from, head, maxBytes = 1024 * 102
   const r = await replayOnto(mgit, { base, covered: from, head });
   const d = await mgit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", r.why ? from : r.tree, head], { maxBytes });
   return d.code === 0 || d.truncated ? String(d.stdout) : null;
+}
+
+/**
+ * The PR body as it stood at `at` (#584), from github.mjs prBodyHistory's `history`: the newest version edited at or
+ * before `at`, the body as it stands when it was never edited; null when that cannot be told (no `at`, a version a person
+ * deleted from the history, a history that does not reach back to `at`). Line ends as `\n`.
+ */
+export function bodyAt(history, at) {
+  const t = Date.parse(at);
+  if (!history || !Number.isFinite(t)) return null;
+  const lf = (s) => String(s).replace(/\r\n?/g, "\n");
+  if (!history.revisions.length) return history.complete ? lf(history.now) : null;
+  // GitHub's times are to the second. A version edited in the very second the finding was raised counts as before it:
+  // the body's change then leaves that edit out, so an edit made in that second never counts as the answer's (fails closed).
+  const v = history.revisions.find((r) => Date.parse(r.at) <= t);
+  return v && typeof v.body === "string" ? lf(v.body) : null;
+}
+
+/**
+ * git's diff of the PR body from `before` to `now` (#584), its hunks only: "" when they are the same, null when git
+ * could not make it. Both texts are written to the mirror as blobs (`mgit`, the outbox's git): data, never run.
+ */
+export async function bodyDiff(mgit, before, now, { maxBytes = 256 * 1024 } = {}) {
+  const lf = (s) => String(s ?? "").replace(/\r\n?/g, "\n");
+  if (lf(before) === lf(now)) return "";
+  const blob = async (text) => {
+    const r = await mgit(["hash-object", "-t", "blob", "-w", "--stdin"], { input: lf(text) });
+    return r.code === 0 ? r.stdout.trim() : null;
+  };
+  const [a, b] = [await blob(before), await blob(now)];
+  if (!a || !b) return null;
+  // One line of context: a body is mostly long table rows, and the finding check's cap is for the change.
+  const d = await mgit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U1", a, b, "--"], { maxBytes });
+  if (d.code !== 0 && !d.truncated) return null;
+  const text = String(d.stdout);
+  const hunk = text.search(/^@@ /m);
+  return hunk < 0 ? null : text.slice(hunk);
+}
+
+/**
+ * The finding check's `bodyDiffOf` (#584): `at` (when a finding was raised) to what the PR body changed since then
+ * (bodyDiff), "" when nothing, null when that cannot be told. The history is read once (`read`, prBodyHistory), on the
+ * first ask; a failed read is null for every finding.
+ */
+export function bodyChanges(mgit, read) {
+  let history = null;
+  return async (at) => {
+    history ??= Promise.resolve()
+      .then(read)
+      .catch((e) => (log(`finding check: the PR body's history could not be read (${e?.status ?? e?.code ?? "error"})`), null));
+    const h = await history;
+    const before = bodyAt(h, at);
+    return before === null ? null : bodyDiff(mgit, before, h.now);
+  };
 }
 
 /**

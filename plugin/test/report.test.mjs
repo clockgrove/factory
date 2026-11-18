@@ -1740,7 +1740,14 @@ test("report (#570 V5, V6, V7): per merged Objective, each Objective's route, Bl
   // With its finish card, a merged Objective's clock is the card's: its first label to its merge.
   const carded = churnedWorld();
   carded.comments.push(await finishCard3(carded));
-  const three = byIssue((await report(carded, { issue: 3, by: "account" })).json, 3);
+  // A member's decision-spend lines are decision calls of unknown cost, no stage: its fix passes stay known on both paths.
+  carded.comments.push(comment(3, `<!-- pendulum:3:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 1, usd: 0.01 })}`, { user: { login: "teammate", type: "User" }, association: "MEMBER", at: "2026-11-17T02:27:30Z" }));
+  const fromCard = (await report(carded, { issue: 3 })).json;
+  assert.equal(fromCard.source.read.summaries, 1);
+  const fromStages = (await report(carded, { issue: 3, by: "account" })).json;
+  assert.deepEqual(fromStages.totals.perMerged, fromCard.totals.perMerged);
+  assert.deepEqual([fromStages.totals.perMerged.fixPasses.n, fromStages.totals.perMerged.fixPasses.median], [1, 1]);
+  const three = byIssue(fromStages, 3);
   assert.deepEqual([three.started, three.merged, three.clockWhy], ["2026-11-17T02:23:42Z", real.pr.merged_at, null]);
   assert.equal(three.wallMinutes, Math.round(((Date.parse(real.pr.merged_at) - Date.parse("2026-11-17T02:23:42Z")) / 60_000) * 100) / 100);
   // The Markdown carries the same figures.

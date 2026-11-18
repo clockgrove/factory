@@ -1329,7 +1329,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       if (c.unknownRuns) unknownItems.push({ issue: n, stage: stageKind, runs: c.unknownRuns, why: c.unknownWhy });
       if (c.unknownRuns && rec.source !== "decisions" && !rec.notStage) unknownStages += 1;
       // The stage's passes, from its per-pass ledger.
-      if (rec.unattributed && !rec.notStage) unattributedStages += 1;
+      // A comment of decision lines Pendulum cannot attribute is no stage: it leaves the Objective's passes known.
+      if (rec.unattributed && !rec.notStage && rec.source !== "decisions") unattributedStages += 1;
       let passCost = null;
       if (!(rec.source === "decisions" || rec.unattributed || rec.stopped || unmatched)) {
         if (!ledger) {

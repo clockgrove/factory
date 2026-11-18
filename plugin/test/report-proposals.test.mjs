@@ -296,8 +296,8 @@ test("report --rates: a review stage's passes on two models are split by its led
   assert.deepEqual(mixOf(r, WORKER), partsOf(ANSWER_T));
   priceRatio(r, REVIEWER, "gpt-6.1-terra", REVIEW_T);
   priceRatio(r, WORKER, "gpt-6.1-terra", ANSWER_T);
-  // The stage stays one stage under the reviewer's model in the model breakdown, all its tokens there.
-  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.tokens]), [[REVIEWER, 1, plus(REVIEW_T, ANSWER_T)]]);
+  // The model breakdown books each pass's dollars and tokens under its own model (#568); the stage counts once, under its own.
+  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api, x.tokens]), [[REVIEWER, 1, 0.1, REVIEW_T], [WORKER, 0, 0.1, ANSWER_T]]);
   // With a sub-agent model and no record to split its threads out, the answer pass's tokens may hold them: the worker's
   // model and the sub-agent model get no ratio; the review pass's model keeps its own.
   const subbed = empty();

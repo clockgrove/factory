@@ -2801,7 +2801,7 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * reviewer models, as choice.mjs ranWith gives them and the usage record's `ran` keeps them); [] when it names none
  * (Copilot at its default), null when the record has no `ran` to say.
  */
-const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
+export const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
 /**
  * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage): `{usd, parts}` for
  * progress.spend. Every stage gets one: `usd` its known dollars (0 when no harness pass ran, or none reported), and its

@@ -14,7 +14,7 @@ The report JSON you already have, and nothing else: no issue, PR, transcript or 
 
 A few at most, each built from the figures as the JSON gives them, in four parts, in this order:
 
-1. **Observation**: what the report shows. Cite every figure by the exact JSON path of the row it came from, with the row's key, for example `breakdowns.model[1]` (`key` `gpt-6-sol`) `cost.usd.api` and `stages`; a figure with no row cited is left out.
+1. **Observation**: what the report shows. Cite every figure by the exact JSON path of the row it came from, with the row's key, for example `breakdowns.model[1]` (`key` `gpt-6-sol`) `cost.usd.api` and `stages`; a figure with no row cited is left out. A model row's dollars are by the model each pass ran on (`basis.pass`) and the rest of its stages' (`basis.stage`): cite the part a figure comes from, and never divide a model row's dollars by its `stages`, which count only the stages whose own model it is.
 2. **Hypothesis**: what a change of model, effort or setting might move, and which measure would show it: dollars per merged Objective, model minutes, wall clock, review rounds, fix passes, or the review findings and their outcomes.
 3. **Experiment**: the one that would measure it.
    - A Claude reviewer's model or effort, for a user who has Pendulum's private replay set (the replay runs Claude Code only, on that set): `node <pendulum clone>/bench/review-replay.mjs --set DIR --repo DIR --model NAME --effort LEVEL --label NAME`, once with the current model as the baseline and once with the candidate (recall and noise per record). Any other reviewer, or without the set: an A/B on real Objectives with `pendulum:reviewer-model:<id>`, below.

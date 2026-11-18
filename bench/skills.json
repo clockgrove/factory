@@ -101,14 +101,14 @@
       "words": 699,
       "files": {
         "proposals.md": {
-          "sha256": "b3ddf3a532ea503e28aeeef5abcf6b926c1aa8eea8034949217f62f45e03353f",
+          "sha256": "6dbdd1a7f8cd51c4fa5450c75f790d40008887d1a9c2d8ff3d1318973717799a",
           "lines": 47,
-          "words": 826
+          "words": 873
         },
         "reference.md": {
-          "sha256": "bf8671e18437926f2b51a3a2b2f7de1167724fa4b8b25d8ed28f0edd46d3c408",
+          "sha256": "560627eec1c0571c15cd11d880424b4a153efc732d17dd8ba9b824727646a187",
           "lines": 23,
-          "words": 621
+          "words": 650
         }
       }
     },

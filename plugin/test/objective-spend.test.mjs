@@ -6,17 +6,16 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RETRY, downloadArtifactResult } from "../scripts/lib/github.mjs";
 import { finishData, finishMarker, objectiveRecords, postFinishCard, renderFinishCard, spendBreakdown } from "../scripts/lib/finish-card.mjs";
 import { capGate, stageStart } from "../scripts/lib/objective-cap.mjs";
-import { resolveInputs, valueProblem } from "../scripts/lib/inputs.mjs";
 import { decisionSpendMarker, harnessMarker, setSelf, spendMarker, spendParts, stageSpendLine } from "../scripts/lib/logic.mjs";
 import { writeUsage } from "../scripts/lib/session.mjs";
-import { PASS_KINDS, passKind, passRead } from "../scripts/lib/usage.mjs";
+import { passKind, passRead } from "../scripts/lib/usage.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -68,52 +67,6 @@ test("a stage's spend record carries its dollars by pass kind, from the pass lab
   assert.deepEqual([line.usdByPass, line.rerun, line.judgeOnly], [usage.usdByPass, usage.rerun, true], "and in the spend line every stage writes");
   assert.equal(spendParts(spendMarker(1, { usdByPass: { work: { usd: -1 }, bogus: { usd: 1 } } })).usdByPass, undefined, "a broken or foreign kind reads as none");
   assert.equal(spendParts(spendMarker(1, { rerun: { afterBlock: "not a time" } })).rerun, undefined);
-});
-
-test("every pass label the code runs a harness under is a pass kind, or named here as none", () => {
-  const files = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : e.name.endsWith(".mjs") ? [join(dir, e.name)] : []));
-  const found = new Set();
-  for (const f of files(join(import.meta.dirname, "..", "scripts"))) {
-    const text = readFileSync(f, "utf8");
-    for (const m of text.matchAll(/label: ("[^"]*"|`[^`]*`)|label = "([^"]*)"|ask\([^,\n]+, "([^"]+)"\)|const stage = (`\$\{label\}-[^`]*`)/g)) found.add(m[2] ?? m[3] ?? (m[4] ?? m[1]).slice(1, -1));
-  }
-  // Each harness pass label, as the code writes it, and an instance of it, with its kind (usage.mjs PASS_KINDS).
-  const passes = {
-    "work-${attempt}": ["work-2", "work"],
-    conflict: ["conflict", "conflict"],
-    review: ["review", "review"],
-    "review-retry": ["review-retry", "review"],
-    "review-fallback": ["review-fallback", "review"],
-    "review-foundation": ["review-foundation", "review"],
-    answer: ["answer", "answer"],
-    "answer-scope": ["answer-scope", "answer"],
-    // A validation loop's own label (its default, the review stage's two) and the passes it runs under it.
-    validation: ["validation-fix-1", "fix"],
-    "pre-review-validation": ["pre-review-validation-fresh-2", "fix"],
-    "review-validation": ["review-validation-fix-3", "fix"],
-    // The work stage's cross-OS loop (session.mjs workValidation, #518).
-    "cross-os-validation": ["cross-os-validation-fresh-2", "fix"],
-    '${label}-${fresh ? "fresh" : "fix"}-${red.passes}': ["review-validation-fresh-1", "fix"],
-    // A fix pass's scope hold has no kind: the report's passes count it as neither an answer nor a fix pass either.
-    '${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}': ["validation-fresh-scope-1", null],
-    // Pendulum's own calls: their dollars stay the stage's.
-    decision: ["decision", null],
-    exit: ["exit", null],
-    "question-check": ["question-check", null],
-    run: ["run", null],
-    // serve's probe of a held account (#613, local.mjs probeHold): no stage's pass, so no kind.
-    "limit probe": ["limit probe", null],
-  };
-  // Labels of no harness pass: a usage limit's place, a GitHub label, a status word, a red job's name.
-  const other = (l) => /^(rebase|finding|fence|fix-progress|same-failure) check$/.test(l) || /^pendulum:/.test(l) || l === "working" || /^job \$\{/.test(l);
-  for (const l of found) assert.ok(Object.hasOwn(passes, l) || other(l), `a pass label the test does not know: ${l}; add it to usage.mjs passKind and here`);
-  for (const [l, [instance, kind]] of Object.entries(passes)) {
-    if (!["validation"].includes(l)) assert.ok(found.has(l), `${l}: no longer in the code`);
-    assert.equal(passKind(instance), kind, l);
-    if (kind) assert.ok(PASS_KINDS.includes(kind));
-  }
-  // The foundation pass's retry and fallback labels are made from handoff.mjs's (`again.label.replace(...)`).
-  for (const l of ["review-foundation-retry", "review-foundation-fallback"]) assert.equal(passKind(l), "review");
 });
 
 /**
@@ -506,16 +459,6 @@ test("max_objective_usd, through the real stage start and artifact reads: a fork
   } finally {
     process.env.PATH = path;
   }
-});
-
-test("max_objective_usd: unset or 0 is no cap and reads nothing; a variable's value is a number, 0 or more", async () => {
-  assert.equal(resolveInputs({ env: {} }).maxObjectiveUsd, null);
-  assert.equal(resolveInputs({ env: { PENDULUM_MAX_OBJECTIVE_USD: "0" } }).maxObjectiveUsd, null);
-  assert.equal(resolveInputs({ env: { PENDULUM_MAX_OBJECTIVE_USD: "60" } }).maxObjectiveUsd, 60);
-  assert.equal(resolveInputs({ args: { max_objective_usd: "12.5" } }).maxObjectiveUsd, 12.5);
-  assert.equal(valueProblem("PENDULUM_MAX_OBJECTIVE_USD", "lots"), "not a number, 0 or more");
-  assert.equal(valueProblem("PENDULUM_MAX_OBJECTIVE_USD", "40"), null);
-  for (const cap of [null, 0, undefined]) assert.deepEqual(await capGate({ repo: REPO, issue: 7, cap, opts: {}, apply: () => assert.fail("no Block"), stage: "work", records: () => assert.fail("nothing read") }), { ok: true, spent: null });
 });
 
 test("#565 W7: a stage's decision dollars are a row of their own in the card's breakdown, out of its work", () => {

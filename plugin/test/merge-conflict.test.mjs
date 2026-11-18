@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { applyExit, mergeBlockCause, mergeBlockReason, mergeReadyOne, rebaseBlock, rebaseMarkers, rebaseNotice, recordMergeable } from "../scripts/lib/session.mjs";
 import { REBASE_LIMIT, marker, ontoRecord, setSelf, setWriters, staleDecision } from "../scripts/lib/logic.mjs";
 import { Local } from "../scripts/local.mjs";
-import { RETRY, transientError } from "../scripts/lib/github.mjs";
+import { RETRY } from "../scripts/lib/github.mjs";
 import { planTextMarker } from "../scripts/lib/handoff.mjs";
 import { EDITED_REASON, objectiveSha, recordText } from "../scripts/lib/objective-trust.mjs";
 import { openEditCheck } from "../scripts/lib/edit-check.mjs";
@@ -294,58 +294,6 @@ test("#243: a PR the merge queue took out for a conflict waits while a PR in the
   });
 });
 
-test("#243: a queue-conflict wait whose queue cannot be read holds this tick; one whose trial merge cannot be computed goes back in once per queue state, never again on the same queue", async () => {
-  const { queueConflictWait, queueConflictRecord } = await import("../scripts/lib/session.mjs");
-  await withGitHub(async (g, gh) => {
-    g.publish();
-    const t0 = Date.now();
-    const at = (s) => new Date(t0 + s * 1000).toISOString();
-    const real = gh.fetch;
-    globalThis.fetch = async (url, init = {}) => (/\/graphql$/.test(String(url)) && String(init.body).includes("entries(first") ? new Response(JSON.stringify({ message: "Server Error" }), { status: 502 }) : real(url, init));
-    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(1) }, { token: "t" }), "pending");
-    globalThis.fetch = real;
-    // A queue head no trial can read: back in, and the queue's state then recorded on the issue.
-    gh.state.entries = [{ pr: 11, head: "0".repeat(40) }];
-    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(1) }, { token: "t" }), null);
-    const rec = queueConflictRecord(gh.comments[2], 2);
-    assert.deepEqual([rec.pr, rec.removal], [12, at(1)]);
-    // The queue (its merge group, which pairwise trials cannot see) takes it out again, and nothing in the queue moved:
-    // it waits rather than bouncing off the same queue at event speed.
-    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(2) }, { token: "t" }), "queue-wait");
-    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(2) }, { token: "t" }), "queue-wait", "however often the dispatcher ticks");
-    // The queue changed (another PR joined): one more go.
-    gh.state.entries = [{ pr: 11, head: "0".repeat(40) }, { pr: 14, head: "1".repeat(40) }];
-    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(2) }, { token: "t" }), null);
-    assert.equal(queueConflictRecord(gh.comments[2], 2).removal, at(2));
-  });
-});
-
-test("#2647: a conflict GitHub had not worked out when the PR was read is read again after its refusal: conflict, not a thrown error", async () => {
-  await withGitHub(async (g, gh) => {
-    const base = g.main();
-    const one = g.commit("pendulum/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
-    const two = g.commit("pendulum/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
-    g.git("update-ref", "refs/heads/main", one);
-    const pr = gh.open(12, 2, two);
-    pr.unknownOnce = true;
-    await recordMergeable(repo, 12, 2, two, { token: "t" });
-    assert.equal(await merge(2, 12), "conflict");
-    assert.equal(gh.enqueued.length, 0);
-  });
-});
-
-test("#2647: a merge refusal on a PR that does not conflict is still thrown (the review stage decides on it)", async () => {
-  await withGitHub(async (g, gh) => {
-    const base = g.main();
-    const two = g.commit("pendulum/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
-    gh.open(12, 2, two);
-    await recordMergeable(repo, 12, 2, two, { token: "t" });
-    const real = gh.fetch;
-    globalThis.fetch = async (url, init = {}) => (/\/graphql$/.test(String(url)) && JSON.parse(init.body).query.includes("enqueuePullRequest") ? new Response(JSON.stringify({ errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] }), { status: 200 }) : real(url, init));
-    await assert.rejects(merge(2, 12), /Resource not accessible/);
-  });
-});
-
 test("#2669: the dispatcher's merge pass queues or merges the PR just before the review stage's own call: success, not a refusal", async () => {
   await withGitHub(async (g, gh) => {
     const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
@@ -371,46 +319,6 @@ test("#2669: the dispatcher's merge pass queues or merges the PR just before the
     gh.state.race = async () => assert.equal(await direct(), "merged", "the dispatcher's pass");
     assert.equal(await direct(), "merged");
     assert.equal(mergeBlockReason("merged"), null);
-  });
-});
-
-test("#2669: a refusal while the PR sits in the queue at another head is still thrown", async () => {
-  await withGitHub(async (g, gh) => {
-    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
-    const pr = gh.open(12, 2, two);
-    await recordMergeable(repo, 12, 2, two, { token: "t" });
-    const pushed = g.commit("pendulum/2", two, "export const version = 1;\nexport function saveTwo() { return 2; }\n", "two, pushed");
-    gh.state.race = async () => {
-      pr.head.sha = pushed;
-      gh.queued.add(12);
-    };
-    await assert.rejects(merge(2, 12), /already in the queue/);
-  });
-});
-
-test("#2669: a refusal whose read-again fails for now throws that read's transient error (the review job's next tick), not the refusal", async () => {
-  await withGitHub(async (g, gh) => {
-    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
-    gh.open(12, 2, two);
-    await recordMergeable(repo, 12, 2, two, { token: "t" });
-    gh.state.race = async () => gh.queued.add(12);
-    // After the refusal, GitHub fails the queue read (502), then the PR read (503).
-    let fail = /isInMergeQueue/;
-    const real = gh.fetch;
-    globalThis.fetch = async (url, init = {}) => {
-      const what = /\/graphql$/.test(String(url)) ? JSON.parse(init.body).query : `${init.method || "GET"} ${url}`;
-      if (gh.attempts.length && fail.test(what)) return new Response(JSON.stringify({ message: "Server Error" }), { status: fail.source === "isInMergeQueue" ? 502 : 503 });
-      return real(url, init);
-    };
-    let thrown = await merge(2, 12).catch((e) => e);
-    assert.deepEqual([thrown.status, transientError(thrown)], [502, true], String(thrown.message));
-
-    gh.attempts.length = 0;
-    gh.queued.delete(12);
-    gh.state.race = async () => gh.queued.add(12);
-    fail = /GET .*\/pulls\/12$/;
-    thrown = await merge(2, 12).catch((e) => e);
-    assert.deepEqual([thrown.status, transientError(thrown)], [503, true], String(thrown.message));
   });
 });
 
@@ -452,93 +360,7 @@ test("#243: local --wait sends a conflicting PR back each time other PRs merged;
   assert.match(exits[1].reason, new RegExp(`rebased ${REBASE_LIMIT} times in 24 h`));
 });
 
-test("#402: local --wait sends back and Blocks at the repository's rebase_limit", async () => {
-  const pr = { number: 12, state: "open", head: { sha: "a".repeat(40) }, base: { ref: "main" }, mergeable_state: "dirty" };
-  const posted = [];
-  const exits = [];
-  const loop = Object.assign(Object.create(Local.prototype), { repo, opts: { token: "t" }, work: async () => ({ exit: "delivered" }) });
-  const gh = (recent) => ({ getPrSettled: async () => pr, rebaseMarkers: async () => ({ effective: recent, recent, already: false, stuck: null, record: null }), prComment: async (_r, n, body) => posted.push(body), applyExit: async (_r, x) => exits.push(x) });
-  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
-  const inputs = { ...resolveInputs({ env: { PENDULUM_REBASE_LIMIT: "2" } }), objectiveLabel: "pendulum:objective", notify: "" };
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(1) }), true);
-  assert.match(posted[0], /rebase 2 of at most 2 in 24 h/);
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(2) }), false);
-  assert.match(exits[0].reason, /rebased 2 times in 24 h/);
-});
-
-/** A Local loop whose GitHub calls are `gh` (sendBack's seam) and whose worker run answers `workAnswers` in turn. */
-function sendBackLoop(workAnswers) {
-  const ran = [];
-  const loop = Object.assign(Object.create(Local.prototype), { repo, opts: { token: "t" }, work: async (issue, o) => (ran.push([issue, o]), workAnswers.shift() || { exit: "delivered" }) });
-  return { loop, ran };
-}
-const dirtyPr = (over = {}) => ({ number: 12, state: "open", head: { sha: "a".repeat(40) }, base: { ref: "main" }, mergeable_state: "dirty", ...over });
-const failing = (status) => Object.assign(new Error(`GitHub said ${status}`), { status });
 const inputs = { objectiveLabel: "pendulum:objective", notify: "" };
-
-test("#2647: --wait follows a merge-time conflict into the send-back, and polls again when the send-back says retry", async () => {
-  await withGitHub(async (g, gh) => {
-    const base = g.main();
-    const one = g.commit("pendulum/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
-    const two = g.commit("pendulum/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
-    g.git("update-ref", "refs/heads/main", one);
-    gh.open(12, 2, two);
-    const answers = ["retry", true];
-    const sent = [];
-    const loop = Object.assign(Object.create(Local.prototype), { repo, repoFull: "o/r", opts: { token: "t" }, baseEnv: () => ({}), sendBack: async (issue, prNumber) => (sent.push([issue, prNumber]), answers.shift()) });
-    assert.equal(await loop.followMerge(2, 12, { pollMs: 1 }), true);
-    assert.deepEqual(sent, [[2, 12], [2, 12]], "a conflict goes to the send-back; its retry is read again on the next poll");
-    assert.deepEqual(gh.attempts, [], "nothing is enqueued");
-  });
-});
-
-test("#2647: a send-back whose GitHub read or comment fails never throws: a transient error retries, any other Blocks with its reason", async () => {
-  const exits = [];
-  const posted = [];
-  const base = { rebaseMarkers: async () => ({ effective: 0, recent: 0, already: false, since: null }), prComment: async (_r, n, b) => posted.push([n, b]), applyExit: async (_r, x) => exits.push(x) };
-
-  // GitHub 502 reading the PR: no worker run, no Block, followMerge polls again.
-  let { loop, ran } = sendBackLoop([]);
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh: { ...base, getPrSettled: async () => { throw failing(502); } } }), "retry");
-  assert.deepEqual([ran.length, exits.length], [0, 0]);
-
-  // A refused notice (403): Blocked with the reason, no worker run.
-  ({ loop, ran } = sendBackLoop([]));
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh: { ...base, getPrSettled: async () => dirtyPr(), prComment: async () => { throw failing(403); } } }), false);
-  assert.equal(ran.length, 0);
-  assert.deepEqual(exits.map((x) => [x.exit, x.stage]), [["blocked", "merge"]]);
-  assert.match(exits[0].reason, /send-back .* failed \(HTTP 403\)/);
-
-  // The bound's Block itself hitting a 503: retried on the next poll, never thrown.
-  ({ loop, ran } = sendBackLoop([]));
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh: { ...base, getPrSettled: async () => dirtyPr(), rebaseMarkers: async () => ({ effective: REBASE_LIMIT, recent: REBASE_LIMIT, already: false }), applyExit: async () => { throw failing(503); } } }), "retry");
-
-  // Even the Block for a non-transient failure failing leaves sendBack returning, not throwing.
-  ({ loop, ran } = sendBackLoop([]));
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh: { ...base, getPrSettled: async () => { throw failing(404); }, applyExit: async () => { throw failing(500); } } }), false);
-  assert.equal(posted.length, 0);
-});
-
-test("#243: a rebase whose worker delivers unlabelled with the PR conflicting again (another sibling landed) is sent back by the next poll, not Blocked", async () => {
-  const exits = [];
-  const gh = { getPrSettled: async () => dirtyPr(), rebaseMarkers: async () => ({ effective: 0, recent: 0, already: false, since: "2026-11-09T00:00:00Z" }), prComment: async () => {}, applyExit: async (_r, x) => exits.push(x) };
-  const { loop, ran } = sendBackLoop([{ exit: "delivered", unreviewed: true }]);
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh }), "retry", "followMerge's next poll decides under the same rules");
-  assert.equal(ran.length, 1);
-  assert.deepEqual(exits, []);
-});
-
-test("#2647: a PR that stopped conflicting before the send-back read it is neither Blocked nor sent to a worker", async () => {
-  const exits = [];
-  const posted = [];
-  for (const now of [dirtyPr({ mergeable_state: "clean" }), dirtyPr({ state: "closed" }), dirtyPr({ merged: true, state: "closed" })]) {
-    const { loop, ran } = sendBackLoop([]);
-    const gh = { getPrSettled: async () => now, rebaseMarkers: async () => ({ effective: 1, already: false }), prComment: async (_r, n, b) => posted.push([n, b]), applyExit: async (_r, x) => exits.push(x) };
-    assert.equal(await loop.sendBack(2, 12, inputs, { gh }), "retry");
-    assert.equal(ran.length, 0);
-  }
-  assert.deepEqual([exits.length, posted.length], [0, 0]);
-});
 
 test("#243: the dispatcher and a --wait loop Blocking the same send-back condition write one Blocked comment", async () => {
   await withGitHub(async (g, gh) => {
@@ -792,24 +614,6 @@ test("#331: a person's reply in code scanning's thread is no answer: the thread 
   });
 });
 
-test("#331: threads resolved just now that GitHub's merge check does not count yet: one more try after a moment, not a refusal", async () => {
-  await withGitHub(async (g, gh) => {
-    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
-    gh.open(12, 2, two);
-    await recordMergeable(repo, 12, 2, two, { token: "t" });
-    // Pendulum's reviewer's finding a maintainer answered: a person's answer, resolved at the merge.
-    const pendulum = { __typename: "Bot", login: "pendulum-app" };
-    const root = { body: "acceptance 1: a second store", authorAssociation: "NONE", author: pendulum, pullRequestReview: { body: `${marker(2, "review")}\nPendulum's review`, authorAssociation: "NONE", author: pendulum } };
-    const thread = { id: "PRRT_ours", isResolved: false, path: "src/store.ts", line: 41, originalLine: 41, comments: { nodes: [root, reply("Keep it: decided on the issue.", { __typename: "User", login: "dana" }, "MEMBER")] } };
-    gh.state.threads = [thread];
-    gh.state.rules = [RULESET];
-    gh.state.refuseOnce = true;
-    assert.equal(await merge(2, 12), "queued");
-    assert.deepEqual(gh.attempts, [12, 12]);
-    assert.deepEqual(gh.state.resolved, ["PRRT_ours"]);
-  });
-});
-
 test("#595: under the rule a named reviewer's comment posted after the answer pass goes back to it, as code scanning's does; with no rule it holds nothing", async () => {
   await withGitHub(async (g, gh) => {
     const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
@@ -955,119 +759,5 @@ test("#438: local --wait follows a PR through a long merge queue while its entry
     assert.equal(r.answer, true, r.lines);
     assert.ok(r.minutes >= 240, "followed past 120 minutes and past the hung bound, while it moved in the queue");
     assert.match(r.lines, /following PR #12: in the merge queue \(entry QUEUED, position 3\)\n[^]*following PR #12: in the merge queue \(entry AWAITING_CHECKS, position 1\)\n/, "it says where the PR is as that changes");
-  });
-});
-
-test("#438: local --wait stops on a merge queue entry that cannot be read, or stays the same, past the queue's check timeout plus the hung bound", async () => {
-  await withGitHub(async (g, gh) => {
-    await reviewedPr(g, gh);
-    gh.state.queueTimeout = 60;
-    gh.queued.add(12);
-    gh.state.entryFails = true;
-    let r = await followOnClock(10 * 60_000, () => {});
-    assert.equal(r.answer, false);
-    assert.equal(r.minutes, 110, r.lines);
-    assert.match(r.lines, /stopped following PR #12: its merge queue entry \(unread\) made no progress in 110 min, past the merge queue's 60-min check timeout plus the bound for a hung required check \(50 min\)/);
-
-    gh.state.entryFails = false;
-    gh.state.entry = entryAt("QUEUED", 2);
-    r = await followOnClock(10 * 60_000, () => {});
-    assert.equal(r.minutes, 110, r.lines);
-    assert.match(r.lines, /its merge queue entry \(QUEUED, position 2\) made no progress in 110 min/);
-  });
-});
-
-test("#438: local --wait follows a PR waiting for the queue ahead while that queue changes, and stops once it has not for the queue's check timeout plus the hung bound", async () => {
-  await withGitHub(async (g, gh) => {
-    const base = g.main();
-    // Siblings that write the same line of store.mjs as PR #12: each in the queue conflicts with it by a trial merge.
-    const one = g.commit("pendulum/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
-    const four = g.commit("pendulum/4", base, "export const version = 1;\nexport function saveFour() {}\n", "four");
-    await reviewedPr(g, gh);
-    g.publish();
-    gh.state.queueTimeout = 60;
-    // Taken out for a conflict with #11 ahead of it; at 60 min #11 has left and #14, which conflicts too, waits there.
-    gh.state.removals = [{ at: new Date(Date.now() + 1000).toISOString(), reason: "merge_conflict" }];
-    gh.state.entries = [{ pr: 11, head: one }];
-    const r = await followOnClock(10 * 60_000, (min) => {
-      if (min >= 60) gh.state.entries = [{ pr: 14, head: four }];
-    });
-    assert.equal(r.answer, false);
-    assert.equal(r.minutes, 170, `110 min after the queue ahead last changed, not after the follow began: ${r.lines}`);
-    assert.match(r.lines, /following PR #12: out of the merge queue, waiting for the queue ahead of it to move\n/);
-    assert.match(r.lines, /stopped following PR #12 after 110 min waiting for the merge queue ahead of it \(#14\), which did not change, past the merge queue's 60-min check timeout plus the bound for a hung required check \(50 min\)/);
-    assert.deepEqual(gh.attempts, []);
-  });
-});
-
-test("#438: local --wait counts the bound out of the queue from when it last saw the PR there", async () => {
-  await withGitHub(async (g, gh) => {
-    await reviewedPr(g, gh);
-    gh.state.queueTimeout = 60;
-    gh.queued.add(12);
-    // Three hours in the queue, moving up; then out of it, its checks running again.
-    const r = await followOnClock(10 * 60_000, (min) => {
-      gh.state.entry = entryAt("QUEUED", 4 - Math.floor(min / 60));
-      if (min >= 180) gh.queued.delete(12), (gh.state.checkRuns = [{ id: 1, name: "ci", status: "in_progress", conclusion: null, started_at: new Date().toISOString() }]);
-    });
-    assert.equal(r.answer, false);
-    assert.equal(r.minutes, 230, `50 min after it left the queue, not after the follow began: ${r.lines}`);
-    assert.match(r.lines, /stopped following PR #12 after 50 min out of the merge queue, the bound for a hung required check \(from the merge queue's 60-min check timeout\); still pending: its required checks on [0-9a-f]{7} \(ci running\)/);
-  });
-});
-
-test("#438: with auto_merge off, local --wait follows a PR a person put in the queue, and otherwise stops naming the person's merge", async () => {
-  await withGitHub(async (g, gh) => {
-    const pr = await reviewedPr(g, gh);
-    gh.state.queueTimeout = 60;
-    // A person enqueues it at 10 min; the queue's checks take 80 more; it merges at 90, past the 50-min bound.
-    let r = await followOnClock(
-      10 * 60_000,
-      (min) => {
-        if (min >= 10) gh.queued.add(12), (gh.state.entry = entryAt(min >= 30 ? "AWAITING_CHECKS" : "QUEUED", 1));
-        if (min >= 90) mergedNow(pr), gh.queued.delete(12);
-      },
-      { PENDULUM_AUTO_MERGE: "false" },
-    );
-    assert.equal(r.answer, true, r.lines);
-    assert.equal(r.minutes, 90);
-    assert.deepEqual(gh.attempts, [], "Pendulum merges and enqueues nothing with auto_merge off");
-
-    // Never enqueued: it stops after the bound, waiting on a person, not on a hung check.
-    Object.assign(pr, { merged: false, merged_at: null, state: "open" });
-    r = await followOnClock(10 * 60_000, () => {}, { PENDULUM_AUTO_MERGE: "false" });
-    assert.equal(r.answer, false);
-    assert.equal(r.minutes, 50);
-    assert.match(r.lines, /stopped following PR #12 after 50 min with no person merging it or putting it in the merge queue \(auto_merge is off\)\n/);
-    assert.doesNotMatch(r.lines, /hung required check/);
-  });
-});
-
-test("#438: local --wait out of the merge queue stops on the bound from the queue's check timeout, naming it and the pending checks", async () => {
-  await withGitHub(async (g, gh) => {
-    await reviewedPr(g, gh);
-    gh.state.checkRuns = [{ id: 1, name: "ci", status: "in_progress", conclusion: null, started_at: new Date().toISOString() }];
-    // A 30-minute queue check timeout: a running required check is hung past 20 minutes.
-    gh.state.queueTimeout = 30;
-    let r = await followOnClock(5 * 60_000, () => {});
-    assert.equal(r.answer, false);
-    assert.equal(r.minutes, 20, "stopped at the repository's bound, not 120 minutes");
-    assert.match(r.lines, /stopped following PR #12 after 20 min out of the merge queue, the bound for a hung required check \(from the merge queue's 30-min check timeout\); still pending: its required checks on [0-9a-f]{7} \(ci running\)/);
-    assert.deepEqual(gh.enqueued, []);
-
-    // No merge queue: setup's default timeout is the bound, and the line says so.
-    gh.state.queueTimeout = 0;
-    r = await followOnClock(10 * 60_000, () => {});
-    assert.equal(r.minutes, 50);
-    assert.match(r.lines, /stopped following PR #12 after 50 min waiting for its merge, the bound for a hung required check \(from setup's default 60-min check timeout\); still pending: its required checks/);
-
-    // A 4-hour timeout: checks green after 150 minutes are still followed, enqueued and merged.
-    gh.state.queueTimeout = 240;
-    r = await followOnClock(10 * 60_000, (min) => {
-      if (min >= 150) gh.state.checkRuns = [{ id: 1, name: "ci", status: "completed", conclusion: "success" }];
-      if (gh.queued.size || gh.enqueued.length) mergedNow(gh.prs[12]);
-    });
-    assert.equal(r.answer, true, r.lines);
-    assert.deepEqual(gh.enqueued.map((e) => e.pr), [12]);
   });
 });

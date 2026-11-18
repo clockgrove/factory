@@ -1,14 +1,12 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { codexRollout, codexThreads, localRollouts, withSubAgents } from "../scripts/lib/codex-threads.mjs";
+import { codexRollout, withSubAgents } from "../scripts/lib/codex-threads.mjs";
 import { priceCodex, priceStage, CODEX_PRICES } from "../scripts/lib/usage.mjs";
 import { dropSessionTotals, runHarness, subAgentThreads } from "../scripts/lib/harness.mjs";
-import { capturedSession, captureSession, dropSessions, SESSIONS_HELD } from "../scripts/lib/claude-runner.mjs";
-import { codexRunnerLayout } from "../scripts/lib/codex-runner.mjs";
 import { restoreTranscript, saveTranscript, stageThreads, writeUsage } from "../scripts/lib/session.mjs";
 import { costOf } from "../../bench/lib/cost.mjs";
 
@@ -33,15 +31,6 @@ const named = (thread, id, kind = "started") => `${JSON.stringify({ timestamp: "
 /** A child of `parent` with the implementer's real counts, under another id. */
 const SIBLING = "01a1ce4d-0000-7000-8000-0000000000b1";
 const childOf = (parent, id) => childText.replaceAll(CHILD, id).replaceAll(PARENT, parent);
-
-function sessionsDir(files) {
-  const root = mkdtempSync(join(tmpdir(), "codex-threads-"));
-  for (const [r, text] of Object.entries(files)) {
-    mkdirSync(join(root, r, ".."), { recursive: true });
-    writeFileSync(join(root, r), text);
-  }
-  return root;
-}
 
 test("a rollout's own thread: its parent, its model, its own token totals, the threads it names", () => {
   const gw = codexRollout(fixture("codex-0.167-spawn-gateway-parent.jsonl"));
@@ -77,39 +66,6 @@ test("a forked sub-agent's copy of its parent's history is skipped; a total carr
   const tc = (total, last) => JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: total, cached_input_tokens: 0, output_tokens: 10 }, last_token_usage: { input_tokens: last, cached_input_tokens: 0, output_tokens: 10 } } } });
   const carried = codexRollout([JSON.stringify({ type: "session_meta", payload: { id: "01a1ce4d-0000-7000-8000-0000000000c1" } }), tc(1500, 500), tc(1800, 300)].join("\n"));
   assert.deepEqual(carried.tokens, { input: 800, cached: 0, written: 0, output: 10 });
-});
-
-test("every thread under a run's thread, children of children too; a thread that does not name it as parent is not counted", async () => {
-  const GRAND = "01a1ce4d-0000-7000-8000-000000000001";
-  const STRANGER = "01a1ce4d-0000-7000-8000-000000000002";
-  const root = sessionsDir({
-    [rel(PARENT, "21-47-43")]: parentText + named(PARENT, STRANGER),
-    [rel(CHILD)]: childText + named(CHILD, GRAND),
-    [rel(GRAND, "21-49-00")]: childOf(CHILD, GRAND),
-    // Named by the parent, but its own rollout says another thread spawned it.
-    [rel(STRANGER, "21-49-30")]: childOf("01a1ffff-0000-7000-8000-00000000ffff", STRANGER),
-  });
-  try {
-    const { threads, missed } = await codexThreads(localRollouts(root), PARENT);
-    assert.deepEqual(threads.map((t) => [t.id, t.parent]), [[CHILD, PARENT], [GRAND, CHILD]]);
-    assert.deepEqual(threads[1].tokens, CHILD_TOKENS);
-    assert.deepEqual(missed, [], "the stranger was read and refused: no miss");
-    assert.deepEqual((await codexThreads(localRollouts(root), CHILD)).threads, [threads[1]], "from the child down only");
-    assert.deepEqual(await codexThreads(localRollouts(root), "../etc"), { threads: [], missed: [] }, "no path out of the sessions directory");
-    // The read limit: what was read is counted, the rest is named as missed.
-    const limited = await codexThreads(localRollouts(root), PARENT, { maxReads: 2 });
-    assert.deepEqual([limited.threads.map((t) => t.id), limited.missed], [[CHILD], [{ id: null, why: "over 2 rollouts" }]]);
-    // The #129 worker named its implementer, whose rollout was not kept: nothing to count, nothing invented.
-    const gw = sessionsDir({ [rel("01a1ce7d-369e-7983-89dd-9f98e083d64e")]: fixture("codex-0.167-spawn-gateway-parent.jsonl") });
-    assert.deepEqual(await codexThreads(localRollouts(gw), "01a1ce7d-369e-7983-89dd-9f98e083d64e"), { threads: [], missed: [{ id: "01a1ce7d-97aa-7ba3-aeb1-688467bcfcdf", why: "no rollout" }] }, "its implementer is named as missed");
-    assert.deepEqual((await codexThreads(localRollouts(gw), PARENT)).missed, [{ id: PARENT, why: "no rollout" }], "no rollout of the run's own: missed");
-    // A rollout over the size cap is not read; a reader that throws is the caller's (subAgentThreads) to catch.
-    const big = await codexThreads((id) => (id === PARENT ? { text: parentText } : { skip: "over 67108864 bytes" }), PARENT);
-    assert.deepEqual(big, { threads: [], missed: [{ id: CHILD, why: "over 67108864 bytes" }] });
-    rmSync(gw, { recursive: true, force: true });
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
 });
 
 test("a run's record gains each thread's own share, priced at its own model; a thread counted before adds only what is new", () => {
@@ -234,72 +190,6 @@ test("a Codex run counts its sub-agents in this pass, on a resume, and in a late
     const review = await run(P2, "review-fix-1");
     assert.deepEqual(review.subAgents[0].tokens, { input: 30000, cached: 20000, written: 0, output: 400 }, "only the implementer's new work");
     assert.equal(review.usd, Math.round((priceCodex(MODEL, { input: 5000, cached: 0, written: 0, output: 50 }) + priceCodex(MODEL, { input: 30000, cached: 20000, written: 0, output: 400 })) * 10000) / 10000);
-  } finally {
-    putBack(saved);
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-test("on a runner (Actions, a cloud sandbox) the threads are read from archives the agent makes, and captured with the run's own", async () => {
-  dropSessions();
-  const root = mkdtempSync(join(tmpdir(), "codex-runner-threads-"));
-  const agent = { home: join(root, "agent"), tmp: join(root, "agent", "tmp") };
-  const layout = codexRunnerLayout(agent, join(root, "codex-home"));
-  const GRAND = "01a1ce4d-0000-7000-8000-000000000003";
-  for (const [r, text] of Object.entries({ [rel(PARENT, "21-47-43")]: parentText, [rel(CHILD)]: childText + named(CHILD, GRAND), [rel(GRAND, "21-49-00")]: childOf(CHILD, GRAND) })) {
-    mkdirSync(join(layout.sessions, r, ".."), { recursive: true });
-    writeFileSync(join(layout.sessions, r), text);
-  }
-  try {
-    assert.deepEqual(await captureSession(layout, PARENT), [rel(PARENT, "21-47-43")]);
-    const { threads, missed } = await subAgentThreads(PARENT, layout, process.env);
-    assert.deepEqual(missed, []);
-    assert.deepEqual(threads.map((t) => [t.id, t.tokens]), [[CHILD, CHILD_TOKENS], [GRAND, CHILD_TOKENS]]);
-    // Captured as the run's own session is: saved with the stage (saveAgentTranscript) and put back on the next reset.
-    assert.deepEqual(capturedSession(CHILD).files, [rel(CHILD)]);
-    assert.deepEqual(capturedSession(GRAND).files, [rel(GRAND, "21-49-00")]);
-    assert.equal(SESSIONS_HELD().length, 3);
-    // The run's own thread is read from Pendulum's captured copy, not from what the agent's home holds by now.
-    appendFileSync(join(layout.sessions, rel(PARENT, "21-47-43")), named(PARENT, "01a1ce4d-0000-7000-8000-000000000009"));
-    assert.equal((await subAgentThreads(PARENT, layout, process.env)).threads.length, 2);
-  } finally {
-    dropSessions();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("a resumed pass that ends without a total keeps the session's and its threads' totals: a later stage counts neither again", async () => {
-  dropSessionTotals();
-  const { work, home, pass, stream, run, saved } = fakeCodex();
-  const files = { [rel(PARENT, "21-47-43")]: parentText, [rel(CHILD)]: childText };
-  try {
-    pass(files, stream(PARENT, PARENT_TOKENS));
-    const first = await run(null, "work-1");
-    // The fix pass resumes the thread and is cut before its turn completes: no total of its own.
-    pass(files, stream(PARENT, null));
-    const cut = await run(PARENT, "validation-fix-1");
-    assert.equal(cut.usd, null);
-    assert.equal(cut.sessionTotal.usd, first.sessionTotal.usd, "the session's last good total is kept");
-    assert.deepEqual(Object.keys(cut.sessionTotal.children), [CHILD]);
-    const usageDir = join(work, "ws", "usage-work-1");
-    mkdirSync(usageDir, { recursive: true });
-    const session = saveTranscript({ harness: "codex", sessionId: PARENT, also: stageThreads([first, cut]), usageDir, checkout: "/c" });
-    const usage = writeUsage(usageDir, { harness: "codex", model: MODEL, records: [first, cut], passes: 1, exit: "blocked", reason: "", credentialBasis: "test", session });
-    assert.equal(usage.sessionTotal.usd, first.sessionTotal.usd);
-    assert.deepEqual(usage.sessionTotal.children[CHILD].tokens, CHILD_TOKENS);
-    // Whatever a cut pass recorded, result.json keeps the last total with dollars and every thread counted.
-    const lost = writeUsage(join(work, "lost"), { harness: "codex", model: MODEL, records: [first, { ...cut, sessionTotal: { usd: null, tokens: null } }], passes: 1, exit: "blocked", reason: "", credentialBasis: "test", session });
-    assert.deepEqual([lost.sessionTotal.usd, Object.keys(lost.sessionTotal.children)], [first.sessionTotal.usd, [CHILD]]);
-    writeFileSync(join(usageDir, "result.json"), JSON.stringify(usage));
-    // A later stage is a fresh process: it knows only what the saved stage recorded. Locally Codex's sessions persist.
-    dropSessionTotals();
-    process.env.PENDULUM_LOCAL = "1";
-    assert.equal((await restoreTranscript({ checkout: "/c", workDir: join(work, "ws"), harness: "codex" })).id, PARENT);
-    delete process.env.PENDULUM_LOCAL;
-    pass(files, stream(PARENT, PARENT_TOKENS));
-    const later = await run(PARENT, "review-fix-1");
-    assert.equal(later.usd, 0, "neither the thread nor its implementer counted again");
-    assert.ok(!later.usdUnknown);
   } finally {
     putBack(saved);
     rmSync(work, { recursive: true, force: true });

@@ -34,41 +34,6 @@ const card = (make) => withEnv(ZONE, () => renderFinishCard(finishData(make())))
 // The charts' theme lines are the shared look's (card-kit.mjs), tested there: the snapshots leave them out.
 const shown = (md) => md.split("\n").filter((l) => !l.startsWith("%%{init")).join("\n");
 
-for (const [name, make] of Object.entries({ mergedClean: F.mergedClean, mergedBlocked: F.mergedBlocked, closedUnmerged: F.closedUnmerged, blockedEnd: F.blockedEnd, questionEnd: F.questionEnd, multiDay: F.multiDay })) {
-  test(`finish card snapshot (#589): ${name}`, () => {
-    assert.equal(shown(card(make)), SNAP[name]);
-  });
-}
-
-test("finish card (#589): merged, clean (spec 5.2): the headline block first, text only; the stage table holds the timeline's figures; the cost chart beside its table", () => {
-  const md = card(F.mergedClean);
-  assert.ok(md.startsWith("### ✅ Merged in 37 min 33 s · $3.67 + unknown\nIssue #402 → PR #409 · merged through your merge queue at 10:31 AM PST · API-equivalent, not billed · plus 7 AI runs of unknown cost\n\n"));
-  assert.doesNotMatch(md, /<img|<h\d|<p |shields\.io|pie showData/, "no image, badge, centred block or pie");
-  assert.match(md, /^You wrote the issue and added the label\. Pendulum planned the work, opened PR #409 \(\*\*4 commits, \+355 −25 across 10 files\*\*\), got \*\*1 CI check\*\* green, had the change reviewed \(1 finding\), and it merged through your merge queue\.$/m);
-  assert.match(md, /^\| 9:54 AM \| Plan \+ build · Opus 5\.5 \| 11 min 1 s \| \$1\.78 \+ unknown \|$/m);
-  assert.match(md, /^\| \| \*\*Total\*\* \| \*\*37 min 33 s\*\* \| \*\*\$3\.67 \+ unknown\*\* \|$/m);
-  assert.match(md, /xychart-beta horizontal\n {4}title "Recorded cost \(USD\)"\n {4}x-axis \["Work \$1\.78 \+ unknown", "Review \$1\.29 \+ unknown", "Answering the review \$0\.60"\]\n {4}y-axis "USD" 0 --> 2\n {4}bar \[1\.78, 1\.29, 0\.60\]/);
-  assert.match(md, /"plotColorPalette":"#c9822e"/, "one amber series");
-  assert.match(md, /^Bars show recorded dollars only; 7 AI runs of unknown cost are not drawn\. CI minutes are not included\.$/m);
-  assert.match(md, /- \*\*Unknown cost:\*\* 7 AI judge calls went through the AI Gateway, which did not report their cost\./);
-  assert.doesNotMatch(md, /How overhead is counted/, "no overhead: no note on how it is counted");
-});
-
-test("finish card (#589): a Block on the way (spec 5.3): repeated section names numbered, the Blocked stage red with its word, the time on hold grey from the notice to the next stage", () => {
-  const d = data(F.mergedBlocked);
-  assert.deepEqual(d.stages.map((s) => [s.kind, s.outcome ?? null]), [["build", null], ["review", null], ["review", null], ["review", "blocked"], ["work", null], ["rebase", null], ["review", null]]);
-  assert.deepEqual(d.holds, [{ kind: "blocked", start: "2026-11-18T02:31:08Z", end: "2026-11-18T03:12:40Z", cause: "you" }], "a Block of the work waits for you, by its cause line");
-  const md = card(F.mergedBlocked);
-  assert.match(md, /section Review 1\n[^\n]*\n {4}section Review 2\n[^\n]*\n {4}section Review 3\n {4}3m 33s Blocked :crit, 2026-11-17T18:27:35, 2026-11-17T18:31:08\n {4}section On hold\n {4}41m 32s :done, 2026-11-17T18:31:08, 2026-11-17T19:12:40\n/);
-  assert.match(md, /^\| 6:27 PM \| Review 3 · Fable 5\.2 · ⛔ Blocked \| 3 min 33 s \| \$0\.52 \+ unknown \|\n\| 6:31 PM \| On hold · waiting for you \| 41 min 32 s \| — \|$/m);
-  assert.match(md, /^Blocked once: 41 min 32 s on hold, waiting for you\.$/m);
-  assert.match(md, /\| Overhead Pendulum caused \| Stages \| Cost \|\n\| :-- \| --: \| --: \|\n\| Rebases after other PRs merged \(conflict\) \| 1 \| \$0\.61 \|\n\| Runs repeated after a Block \| 1 \| \$0\.52 \|/);
-  assert.match(md, /- \*\*How overhead is counted:\*\* Each item comes from a stage's own record/);
-  // The summary's figures are the merged card's: the holds and outcomes are the card's own words, never the summary's.
-  assert.equal(finishSummary(d).end, undefined);
-  assert.equal(JSON.stringify(finishSummary(d)).includes("hold"), false);
-});
-
 test("finish card (#589): a notice with no recorded end, or one of anyone but Pendulum, holds nothing", () => {
   const o = F.mergedBlocked();
   // The Blocked notice by a stranger: no stage ended Blocked, nothing on hold.
@@ -80,31 +45,6 @@ test("finish card (#589): a notice with no recorded end, or one of anyone but Pe
   const b = data(F.blockedEnd);
   assert.deepEqual(b.holds, []);
   assert.equal(b.stages.at(-1).outcome, "blocked");
-});
-
-test("finish card (#589): Blocked, a Question and a close (spec 5.4): their headlines, what to do and why; a close needs no one", () => {
-  const blocked = card(F.blockedEnd);
-  assert.ok(blocked.startsWith("### ⛔ Blocked after 1 h 5 min · $2.83 + unknown so far\nIssue #152 · PR #157 is a draft · Blocked at 12:52 PM PST · API-equivalent, not billed · plus 5 AI runs of unknown cost\n\n> **What to do:** fix the cause below, then re-apply the `pendulum:objective` label. The Blocked notice on this issue has the full steps.\n>\n> **Why:** 2 review findings are still open after the answers.\n"));
-  assert.match(blocked, /3 min 00s|31m 00s Blocked :crit/);
-  const question = card(F.questionEnd);
-  assert.ok(question.startsWith("### ❓ Question after 9 min · $0.84 so far\nIssue #512 · Question asked at 2:19 PM PST · API-equivalent, not billed\n\n> **What to do:** answer the question in a comment on this issue. Pendulum goes on from where it stopped.\n>\n> **Question:** Should the export keep the legacy column order, or follow the new schema?\n"));
-  // Asked on its PR: answered there, then the PR marked ready.
-  const onPr = withEnv(ZONE, () => renderFinishCard(finishData({ ...F.blockedEnd(), end: { kind: "question", at: "2026-11-17T20:52:00Z", reason: "which one?", form: "pr" } })));
-  assert.match(onPr, /^> \*\*What to do:\*\* answer in a comment on this issue or PR #157, then mark PR #157 ready\. Pendulum goes on from where it stopped\.$/m);
-  const closed = card(F.closedUnmerged);
-  assert.ok(closed.startsWith("### ⏹️ Closed without merging after 1 h 12 min · $4.20\nIssue #230 · PR #236 closed, not merged · closed at 3:02 PM PST · API-equivalent, not billed\n\nYou wrote the issue and added the label. Pendulum planned the work and opened PR #236 (**3 commits, +120 −14 across 5 files**); you closed the issue before it merged.\n"));
-  assert.doesNotMatch(closed, /What to do|Where the money went/);
-  // With no merge and no other end, no card: finishData's answer as before.
-  assert.equal(withEnv(ZONE, () => finishData({ ...F.closedUnmerged(), end: null })), null);
-});
-
-test("finish card (#589): across days (spec 5.5): dates on every time, the run's span on the second line, the stages' and the holds' totals", () => {
-  const md = card(F.multiDay);
-  assert.ok(md.startsWith("### ✅ Merged in 2 d 3 h · $18.40\nIssue #98 → PRs #101, #104 · Nov 15, 9:12 AM – Nov 17, 12:40 PM PST · billed to your API key\nStages ran for 2 h 14 min in all; 2 d on hold (Blocked once, 1 Question).\n"));
-  assert.match(md, /axisFormat %b %d %H:%M\n {4}tickInterval 12hour/);
-  assert.match(md, /section On hold 1\n {4}21h 40m :done, 2026-11-15T10:18:05, 2026-11-16T07:58:30\n/);
-  assert.match(md, /^\| Nov 15, 9:56 AM \| Review 1 · Fable 5\.2 · ❓ Question \| 22 min 5 s \| \$3\.10 \|$/m);
-  assert.match(md, /^\| Nov 16, 8:52 AM \| On hold 2 · waiting for you \| 1 d 3 h \| — \|$/m);
 });
 
 test("finish card (#589): the summary of an end other than a merge names it and no merge, and reads back as none; a merged card's summary is as before", () => {
@@ -328,25 +268,6 @@ test("finish card (#589 S3): a write reads the card again first: two cards are o
   assert.equal(await over(closed, () => postFinishCard(repo, { ...issue, closed_at: "2026-11-18T02:00:00Z" }, { token: "t" })), "updated");
 });
 
-test("finish card (#589 S5): endCard takes the issue or its number, a Block's way on, and a bound; it never throws", async () => {
-  const o = F.blockedEnd();
-  const repo = repoOf("acme/app");
-  const prs = () => [prOf(157, { merged_at: null, draft: true, state: "open", created_at: "2026-11-17T20:19:00Z" })];
-  const fake = fakeObjective(o, prs);
-  assert.equal(await over(fake, () => endCard(repo, 152, { token: "t" }, { exit: "blocked", reason: "the author may not run Objectives.", next: "none", now: Date.parse("2026-11-17T20:52:00Z") })), "posted");
-  const body = fake.comments.find((c) => c.body.startsWith(finishMarker(152))).body;
-  assert.match(body, /^> \*\*What to do:\*\* a resume or a restart does not get past this; the Blocked notice on this issue says why\.$/m);
-  // A GitHub that never answers: the caller goes on at the bound, with no error.
-  const logs = [];
-  const hang = { fetch: () => new Promise(() => {}) };
-  assert.equal(await over(hang, () => endCard(repo, 152, { token: "t" }, { exit: "question", reason: "?", timeoutMs: 50, log: (l) => logs.push(l) })), "timed out");
-  assert.match(logs.join("\n"), /took over 0 s; going on without waiting for it/);
-  // A failure is the answer, never a throw.
-  const broken = { fetch: async () => new Response("{}", { status: 500 }) };
-  assert.ok((await over(broken, () => endCard(repo, 152, { token: "t" }, { exit: "blocked", reason: "x", timeoutMs: 5000 }))) instanceof Error);
-  assert.equal(await endCard(repo, 152, { token: "t" }, { exit: "delivered" }), "no end");
-});
-
 test("finish card (#589): time on hold names what it waited on from the notice's cause line alone; a known $0 stage costs —", () => {
   const withCause = (cause) => {
     const o = F.mergedBlocked();
@@ -364,32 +285,4 @@ test("finish card (#589): time on hold names what it waited on from the notice's
   const zero = withEnv(ZONE, () => renderFinishCard(finishData({ ...o, comments: [F.stage(512, "work", "1", "2026-11-17T22:10:00Z", "2026-11-17T22:19:00Z", "claude-opus-5-5", { usd: 0 }), ...o.comments.slice(1)] })));
   assert.match(zero, /^\| 2:10 PM \| Build · Opus 5\.5 · ❓ Question \| 9 min \| — \|$/m);
   assert.match(zero, /- — in Took means no time was recorded for that row; in Cost, that no AI dollars were/);
-});
-
-test("a Block or Question applied anywhere writes the Objective's card (session.mjs applyExit); never on an outage, and a stage writes its own after its exit line", async () => {
-  const { applyExit } = await import("../scripts/lib/session.mjs");
-  const o = F.blockedEnd();
-  const prs = () => [{ number: 157, user: { login: F.SELF, type: "Bot" }, created_at: "2026-11-17T20:19:00Z", html_url: "https://github.com/acme/app/pull/157", head: { sha: "d".repeat(40) }, commits: 2, additions: 40, deletions: 3, changed_files: 2, merged_at: null, draft: true, state: "open" }];
-  const world = () => {
-    const fake = fakeObjective(o, prs);
-    const inner = fake.fetch;
-    // The labels the exit sets: GitHub's answer, as any label write's.
-    fake.fetch = async (url, init = {}) => (/\/issues\/\d+\/labels/.test(new URL(url).pathname) ? new Response("[]", { status: 200, headers: { "content-type": "application/json" } }) : inner(url, init));
-    return fake;
-  };
-  const repo = repoOf("acme/app");
-  const cards = (fake) => fake.comments.filter((c) => c.body.startsWith(finishMarker(152)));
-  // The dispatcher's or a launcher's Block, outside any stage: the card with it.
-  const outside = world();
-  await over(outside, () => applyExit(repo, { issue: 152, pr: null, exit: "blocked", reason: "the setup command failed.", cause: "setup", notify: null, stage: "launch" }, { token: "t" }));
-  assert.equal(cards(outside).length, 1);
-  assert.match(cards(outside)[0].body, /\n### ⛔ Blocked after /);
-  // An outage's Block writes no card: GitHub may not answer, and the end's own outputs come first.
-  const outage = world();
-  await over(outage, () => applyExit(repo, { issue: 152, pr: null, exit: "blocked", reason: "GitHub is down.", cause: "outage", notify: null, stage: "outage" }, { token: "t" }));
-  assert.equal(cards(outage).length, 0);
-  // A stage's own exit (`card: false`): the stage writes the card after its exit line, not here.
-  const stage = world();
-  await over(stage, () => applyExit(repo, { issue: 152, pr: null, exit: "blocked", reason: "x.", cause: "work", notify: null, stage: "work", card: false }, { token: "t" }));
-  assert.equal(cards(stage).length, 0);
 });

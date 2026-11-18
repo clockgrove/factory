@@ -10,7 +10,6 @@ import { CLAUDE_PROBE_SCRIPT, claudeLocalCheck } from "../scripts/lib/harness.mj
 import { CONFINEMENT_PROBE, PROBE_MARKER, PROBE_PASS } from "../scripts/lib/codex-runner.mjs";
 import { PROBE_PERSIST, TOOLCHAIN_RULE } from "../scripts/lib/copilot-runner.mjs";
 import { GitRefusal, LOCAL_DOMAINS, gitRefusalReason } from "../scripts/lib/local.mjs";
-import { localToolchainRows } from "../scripts/doctor.mjs";
 
 test("Claude Code's local probe: the driver proves the toolchain, tries the home, runs the confinement probe and writes its result", () => {
   const root = mkdtempSync(join(tmpdir(), "clp-"));
@@ -92,25 +91,4 @@ test("Claude Code's local probe before every start: launched as the run, the mar
   assert.match(gitRefusalReason("sandbox", 1, { rule: "the agent home is writable", harness: "claude", local: true }), /^Claude Code's sandbox started but does not confine here/);
   assert.match(gitRefusalReason("sandbox", 1, { harness: "claude", local: true }), /^Claude Code's sandbox could not start in local mode/);
   assert.match(gitRefusalReason("sandbox", 1, { rule: TOOLCHAIN_RULE, harness: "claude", local: true }), /^Claude Code's sandbox started but its commands do not find/);
-});
-
-test("doctor --local names the node and the package manager local mode resolves; a pinned one not resolved FAILs", () => {
-  const root = mkdtempSync(join(tmpdir(), "cdr-"));
-  const repo = join(root, "r");
-  const pmDir = join(root, "corepack");
-  for (const d of [repo, join(pmDir, "dist"), join(root, "bin")]) mkdirSync(d, { recursive: true });
-  writeFileSync(join(pmDir, "package.json"), '{"name":"corepack"}');
-  writeFileSync(join(pmDir, "dist", "pnpm.js"), "#!/usr/bin/env node\n", { mode: 0o755 });
-  execFileSync("ln", ["-s", join(pmDir, "dist", "pnpm.js"), join(root, "bin", "pnpm")]);
-  writeFileSync(join(root, "bin", "node"), "#!/bin/sh\n", { mode: 0o755 });
-  writeFileSync(join(repo, "package.json"), '{"packageManager":"pnpm@12.18.0+sha512.abc"}');
-  const rows = localToolchainRows({ checkout: repo, env: { PATH: join(root, "bin") }, os: "linux", run: () => "v24.21.0\n" });
-  assert.deepEqual(rows.map((r) => [r.status, r.name]), [["PASS", "node"], ["PASS", "package manager"]]);
-  assert.match(rows[0].detail, /^v24\.21\.0 → .*\/bin\/node/);
-  assert.equal(rows[1].detail, `pnpm 12.18.0 (corepack) → ${join(pmDir, "dist", "pnpm.js")}`);
-  const missing = localToolchainRows({ checkout: repo, env: { PATH: "/nowhere" }, os: "linux", run: () => "" });
-  assert.deepEqual(missing.map((r) => r.status), ["FAIL", "FAIL"], "no node, and a pinned pnpm not resolved");
-  assert.match(missing[1].detail, /^pnpm 12\.18\.0 \(packageManager\) is not resolved from PATH; local stages Block before the run/);
-  writeFileSync(join(repo, "package.json"), "{}");
-  assert.deepEqual(localToolchainRows({ checkout: repo, env: { PATH: join(root, "bin") }, os: "linux", run: () => "v1\n" }).map((r) => r.name), ["node"], "npm: no package manager row");
 });

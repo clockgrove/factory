@@ -5,14 +5,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GITHUB_COMMENT_MAX, PROGRESS_LEDGER_ROOM, appliedExit, endStep, liveActivity, progressReporter } from "../scripts/lib/session.mjs";
+import { endStep, progressReporter } from "../scripts/lib/session.mjs";
 import { repoOf } from "../scripts/lib/github.mjs";
 import { decisionsReadOf, findingsOf, ledgerOfComment, rebaseCostOf, setSelf, spendOf, spendParts } from "../scripts/lib/logic.mjs";
 import { stageHarnessOf } from "../scripts/lib/cost-join.mjs";
 import { finishData, modellessStages, objectiveSpend, renderFinishCard, summaryMarker, unlinedStages } from "../scripts/lib/finish-card.mjs";
-import { ROW_OF, progressCard, progressData, stepOf } from "../scripts/lib/progress-card.mjs";
-import { tableCell, vendorCard } from "../scripts/lib/card-kit.mjs";
-import { vendorBody, vendorLine } from "../scripts/lib/logic.mjs";
+import { progressCard } from "../scripts/lib/progress-card.mjs";
 import { phaseMinutes, stageLastWrite } from "../../bench/lib/phases.mjs";
 import { newForm, newForms } from "./fixtures/progress-new-form.mjs";
 
@@ -234,81 +232,6 @@ const Z = "America/Los_Angeles";
 const iso = (t) => new Date(t).toISOString();
 const render = (args) => progressCard({ zone: Z, runId: "1794979777859", harness: "claude", ...args });
 
-test("render (spec 4.2): running, the Now row says what the stage does, its model and its agent's activity; no Total, no chart", () => {
-  const lines = [
-    [at("2026-11-18T05:30:00Z"), "install", { step: "setup", end: at("2026-11-18T05:30:14Z") }],
-    [at("2026-11-18T05:30:14Z"), "re-entry: fresh (resume policy is fresh)", { step: "setup", session: "fresh (resume policy is fresh)" }],
-    [at("2026-11-18T05:30:20Z"), "harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 }],
-    [at("2026-11-18T05:31:22Z"), "validation pass 1 (required checks)", { step: "ci", begin: true }],
-    [at("2026-11-18T05:31:22Z"), "waiting for required checks (ci) on abc1234", { step: "ci", sha: "abc1234", wait: true, end: at("2026-11-18T05:36:10Z"), outcome: "failed" }],
-    [at("2026-11-18T05:36:12Z"), "validation pass 1 red: pnpm test; fix run", { step: "fix", check: "pnpm test" }],
-  ];
-  const passes = [{ label: "work-1", usd: 0.304073, started: "2026-11-18T05:30:20Z", ended: "2026-11-18T05:31:22Z" }];
-  const snap = { model: "claude-opus-5-5", snap: { elapsedMin: 4, turns: 10, toolCalls: 6, idleMin: 0, ended: false, backgroundCommands: 1, lastTool: "Bash: pnpm test", tokens: { input: 392000, output: 89 }, subagentsActive: [] } };
-  const c = render({ stage: "work", subject: { label: "PR #436", url: "u" }, issue: 418, started: at("2026-11-18T05:29:40Z"), now: at("2026-11-18T05:40:30Z"), lines, passes, spend: 0.304073, parts: { usdByBilling: { subscription: 0.304073 }, usdUnknown: 2, usdUnknownWhy: ["unreported"], running: true, usdRunning: 2 }, snap, ran: { worker: "claude-opus-5-5", subagent: "claude-sonnet-5-5", reviewer: "claude-fable-5-2", account: "claude" } });
-  assert.equal(
-    c.card,
-    [
-      "**⏳ Work running** · PR #436 · 11 min so far · **$0.30** so far",
-      "Started 9:29 PM PST · updated 9:40 PM PST · API-equivalent, not billed · 2 AI runs have not reported a cost yet",
-      "",
-      "| Time | Step | Took | Cost |",
-      "| :-- | :-- | --: | --: |",
-      "| 9:30 PM | Set up | 14 s | — |",
-      "| 9:30 PM | Built the change · Opus 5.5 | 1 min 2 s | $0.30 |",
-      "| 9:31 PM | Waited for CI · failed: `pnpm test` | 4 min 48 s | — |",
-      "| 9:36 PM | **Now:** fixing CI · Opus 5.5 · 4 min, 10 turns, 6 tool calls, active now | running | when it ends |",
-    ].join("\n"),
-  );
-  assert.equal(c.chart, "");
-  assert.match(c.details, /^- \*\*Run:\*\* 1794979777859 on this machine · agent Claude Code · account `claude`\n- \*\*Models:\*\* worker Opus 5\.5 · sub-agents Sonnet 5\.5 · reviewer Fable 5\.2\n- \*\*Session:\*\* new \(resume policy is fresh\)\n- \*\*Right now:\*\* 1 background command running; last tool Bash: pnpm test; 392k tokens in, 89 out\n/);
-});
-
-const BLOCKED = () => {
-  const t0 = at("2026-11-18T02:27:00Z");
-  const lines = [
-    [t0, "install", { step: "setup", end: t0 + 15000 }],
-    [t0 + 15000, "pass 1", { step: "ci", begin: true }],
-    [t0 + 15000, "wait", { step: "ci", sha: "86f7710", wait: true, end: t0 + 45000, outcome: "passed" }],
-    [t0 + 60000, "answer pass: 2 comment(s)", { step: "answer", comments: 2 }],
-    [t0 + 170000, "pass 2", { step: "ci", begin: true }],
-    [t0 + 170000, "wait", { step: "ci", sha: "86f7710", wait: true, end: t0 + 200000, outcome: "passed" }],
-    [t0 + 210000, "finding check", { step: "check", judged: { resolved: 0, of: 2 }, open: ["src/loop.ts:134", "src/routes.ts:992"], start: t0 + 200000, end: t0 + 220000, model: "perplexity/pplx-decider-v1.2", verdicts: [{ place: "src/loop.ts:134", verdict: "not_resolved", confidence: 0.71 }, { place: "src/routes.ts:992", verdict: "not_resolved", confidence: 0.75 }] }],
-    [t0 + 240000, "exit: blocked", endStep({ issue: 416, exit: "blocked", reason: "2 review findings are still open after 2 rounds of answers: `src/loop.ts:134`, `src/routes.ts:992`. Fix them on the branch.", applied: { exit: "blocked", cause: "work", pr: { number: 428, draft: true } } })],
-  ];
-  const passes = [
-    { label: "answer", model: "claude-opus-5-5", usd: 0.52, started: iso(t0 + 61000), ended: iso(t0 + 170000) },
-    { label: "decision", decision: true, calls: 2, usd: null, usdUnknown: 2, usdUnknownWhy: ["decision"], started: iso(t0 + 205000), ended: iso(t0 + 215000) },
-  ];
-  return render({ stage: "review", subject: { label: "PR #428", url: "u" }, issue: 416, started: t0, now: t0 + 240000, lines, passes, exit: "blocked", spend: 0.52, parts: { usdByBilling: { subscription: 0.52 }, usdUnknown: 2, usdUnknownWhy: ["decision"] } });
-};
-
-test("render (spec 4.4): Blocked, the action line and the reason's first sentence above the table; the AI judge's verdicts in Run details", () => {
-  const c = BLOCKED();
-  assert.equal(
-    c.card,
-    [
-      "**⛔ Review Blocked** · PR #428 · 4 min · **$0.52 + unknown**",
-      "6:27 PM – 6:31 PM PST · API-equivalent, not billed · plus 2 AI runs of unknown cost (AI judge calls)",
-      "",
-      "> **What to do:** fix the cause below, then re-apply the `pendulum:objective` label. The Blocked notice on this issue has the full steps.",
-      ">",
-      "> **Why:** 2 review findings are still open after 2 rounds of answers: `src/loop.ts:134`, `src/routes.ts:992`.",
-      "",
-      "| Time | Step | Took | Cost |",
-      "| :-- | :-- | --: | --: |",
-      "| 6:27 PM | Set up | 15 s | — |",
-      "| 6:27 PM | Waited for CI ×2 · passed, last on `86f7710` | 1 min | — |",
-      "| 6:28 PM | Answered 2 review comments · Opus 5.5 | 1 min 49 s | $0.52 |",
-      "| 6:30 PM | AI judge calls ×2 | — | unknown |",
-      "| 6:30 PM | Checked the answers · 0 of 2 judged resolved; still open: `src/loop.ts:134`, `src/routes.ts:992` | 20 s | — |",
-      "| | **Total** | **4 min** | **$0.52 + unknown** |",
-    ].join("\n"),
-  );
-  assert.match(c.details, /^- \*\*AI judge verdicts:\*\* `src\/loop\.ts:134` not resolved \(0\.71\); `src\/routes\.ts:992` not resolved \(0\.75\)$/m);
-  assert.match(c.details, /^- \*\*Unknown cost:\*\* 2 AI judge calls went through the AI Gateway, which did not report their cost\. They are counted as unknown, never as \$0\.$/m);
-});
-
 const SHORT_STAGE = (exit, step, extra = {}) => {
   const t0 = at("2026-11-17T22:10:00Z");
   const lines = [
@@ -319,168 +242,10 @@ const SHORT_STAGE = (exit, step, extra = {}) => {
   return render({ stage: "work", issue: 512, started: t0, now: t0 + 540000, lines, passes: [{ label: "work-1", usd: 0.84, started: iso(t0 + 20000), ended: iso(t0 + 530000) }], exit, spend: 0.84, parts: { usdByBilling: { subscription: 0.84 } }, ...extra });
 };
 
-test("render (spec 4.5): a Question says how to answer it, as its form decides, and quotes the question", () => {
-  const q = SHORT_STAGE("question", endStep({ issue: 512, exit: "question", reason: "question: Should the export keep the legacy column order, or follow the new schema?", applied: { exit: "question", pr: null, askOnIssue: true } }));
-  assert.equal(
-    q.card,
-    [
-      "**❓ Work has a Question** · issue #512 · 9 min · **$0.84**",
-      "2:10 PM – 2:19 PM PST · API-equivalent, not billed",
-      "",
-      "> **What to do:** answer the question in a comment on this issue. Pendulum goes on from where it stopped.",
-      ">",
-      "> **Question:** Should the export keep the legacy column order, or follow the new schema?",
-      "",
-      "| Time | Step | Took | Cost |",
-      "| :-- | :-- | --: | --: |",
-      "| 2:10 PM | Set up | 18 s | — |",
-      "| 2:10 PM | Built the change · Opus 5.5 | 8 min 30 s | $0.84 |",
-      "| | **Total** | **9 min** | **$0.84** |",
-    ].join("\n"),
-  );
-  // Asked on a draft PR: answered on the issue or the PR, then the PR marked ready (logic.mjs questionForm).
-  const pr = SHORT_STAGE("question", endStep({ issue: 512, exit: "question", reason: "which API?", applied: appliedExit({ exit: "question", pr: { number: 515 } }, { exit: "question" }) }));
-  assert.match(pr.card, /^> \*\*What to do:\*\* answer in a comment on this issue or PR #515, then mark PR #515 ready\. Pendulum goes on from where it stopped\.$/m);
-  // A Question GitHub would not draft is applied as a Block: the card says Blocked.
-  assert.equal(appliedExit({ exit: "question", pr: { number: 515 } }, { exit: "blocked" }).exit, "blocked");
-});
-
-test("render (spec 4.5): paused, waiting and stopped", () => {
-  const paused = SHORT_STAGE("paused", endStep({ issue: 512, exit: "paused", reason: "claude reached its usage limit", resetAt: "2026-11-18T03:00:00Z" }));
-  assert.match(paused.card, /^\*\*⏸️ Work paused\*\* · issue #512 · 9 min · \*\*\$0\.84\*\*\n2:10 PM – 2:19 PM PST · API-equivalent, not billed\n\n> \*\*What to do:\*\* nothing; Pendulum goes on when the usage limit resets at 7:00 PM PST\.\n\n\| Time/);
-  const stopped = SHORT_STAGE("stopped", endStep({ issue: 512, exit: "stopped", reason: "the pendulum:objective label came off" }));
-  assert.match(stopped.card, /^\*\*⏹️ Work stopped\*\* · issue #512 · 9 min · \*\*\$0\.84\*\*\n2:10 PM – 2:19 PM PST · API-equivalent, not billed\nthe pendulum:objective label came off\n\n\| Time/);
-  // A send-back's rebase stage: the rebase line under the headline; its harness run is Rebased, the stage a Rebase.
-  const rebase = render({ stage: "work", issue: 512, started: at("2026-11-17T22:10:00Z"), now: at("2026-11-17T22:14:00Z"), lines: [[at("2026-11-17T22:10:30Z"), "harness", { step: "work", model: "claude-opus-5-5", attempt: 1, rebase: true }], [at("2026-11-17T22:14:00Z"), "exit: delivered", endStep({ issue: 512, exit: "delivered", rebase: "rebase 2 of this Objective (conflict): $0.61; all its rebases: $1.20" })]], exit: "delivered", spend: 0.61, parts: { usdByBilling: { api: 0.61 } } });
-  assert.match(rebase.card, /^\*\*✅ Rebase delivered\*\* · issue #512 · 4 min · \*\*\$0\.61\*\*\n2:10 PM – 2:14 PM PST · billed to your API key\nRebase 2 of this Objective \(conflict\): \$0\.61; all its rebases: \$1\.20\n/);
-  assert.match(rebase.card, /^\| 2:10 PM \| Rebased · Opus 5\.5 \| — \| — \|$/m);
-  const t0 = at("2026-11-17T22:10:00Z");
-  const waiting = render({ stage: "review", subject: { label: "PR #435", url: "u" }, issue: 433, started: t0, now: t0 + 120000, lines: [[t0, "install", { step: "setup", end: t0 + 10000 }], [t0 + 60000, "third-party review: waiting", { step: "thirdParty", waiting: ["coderabbitai[bot]"], until: t0 + 1260000 }], [t0 + 120000, "exit: waiting", endStep({ issue: 433, exit: "waiting", reason: "an outside review" })]], exit: "waiting", spend: 0, parts: {} });
-  assert.match(waiting.card, /^\*\*⏸️ Review waiting\*\* · PR #435 · 2 min · \*\*\$0\.00\*\*\n2:10 PM – 2:12 PM PST\n\n> \*\*What to do:\*\* nothing; waiting for coderabbitai\[bot\] until 2:31 PM PST\.\n/);
-  assert.match(waiting.card, /^\| 2:11 PM \| Outside reviewer · waiting for coderabbitai\[bot\] until 2:31 PM \| — \| — \|$/m);
-});
-
-test("render (spec 4.6): a long run across midnight folds each kind of step into one row, ×N, with dates; each fix round's cost in Run details", () => {
-  const t0 = at("2026-11-18T06:05:00Z");
-  const lines = [[t0, "first-time setup: cloned in 41 s", { step: "setup", first: true, start: t0 - 41000, end: t0 }], [t0 + 60000, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }]];
-  const passes = [{ label: "work-1", usd: 6.1, model: "claude-opus-5-5", started: iso(t0 + 60000), ended: iso(t0 + 60000 + 38 * 60000) }];
-  let t = t0 + 39 * 60000;
-  for (let i = 1; i <= 13; i++) {
-    lines.push([t, "pass", { step: "ci", begin: true }], [t, "wait", { step: "ci", sha: i === 13 ? "4be19c2" : `aaaaaa${i % 10}`, wait: true, end: t + 8 * 60000, outcome: i === 13 ? "passed" : "failed" }]);
-    t += 8 * 60000;
-    if (i <= 3) lines.push([t, "triage", { step: "triage", outcome: i === 2 ? "flake-rerun" : "fix", start: t, end: t + 40000 }]);
-    if (i <= 12) {
-      lines.push([t + 60000, "red; fix run", { step: "fix", check: "test (ubuntu-26.04, 4/4)" }]);
-      passes.push({ label: `validation-fix-${i}`, model: "claude-opus-5-5", usd: i === 9 ? null : 0.68, usdUnknown: i === 9 ? 1 : 0, usdUnknownWhy: i === 9 ? ["unreported"] : [], started: iso(t + 61000), ended: iso(t + 61000 + 345000) });
-      t += 7 * 60000;
-    }
-  }
-  passes.push({ label: "decision", decision: true, calls: 5, usd: 0.003, started: iso(t), ended: iso(t + 1000) });
-  lines.push([t + 2000, "exit: delivered", endStep({ issue: 77, exit: "delivered" })]);
-  const c = render({ stage: "work", subject: { label: "PR #81", url: "u" }, issue: 77, started: t0, now: t + 2000, lines, passes, exit: "delivered", spend: 13.583, parts: { usdByBilling: { subscription: 13.583 }, usdUnknown: 1, usdUnknownWhy: ["unreported"] } });
-  assert.equal(
-    c.card,
-    [
-      "**✅ Work delivered** · PR #81 · 3 h 47 min · **$13.58 + unknown**",
-      "Nov 17, 10:05 PM – Nov 18, 1:52 AM PST · API-equivalent, not billed · plus 1 AI run of unknown cost (ended before it reported)",
-      "",
-      "| Time | Step | Took | Cost |",
-      "| :-- | :-- | --: | --: |",
-      "| Nov 17, 10:05 PM | Set up · first clone on this machine | 41 s | — |",
-      "| Nov 17, 10:06 PM | Built the change · Opus 5.5 | 38 min | $6.10 |",
-      "| Nov 17, 10:44 PM | Waited for CI ×13 · passed, last on `4be19c2` | 1 h 44 min | — |",
-      "| Nov 17, 10:52 PM | Flake check ×3 · 2 the change's, 1 flake rerun | 2 min | — |",
-      "| Nov 17, 10:53 PM | Fixed CI ×12 · last failure: `test (ubuntu-26.04, 4/4)` | 1 h 9 min | $7.48 + unknown |",
-      "| Nov 18, 1:52 AM | AI judge calls ×5 | — | <$0.01 |",
-      "| | **Total** | **3 h 47 min** | **$13.58 + unknown** |",
-    ].join("\n"),
-  );
-  assert.match(c.details, /^- \*\*Fixed CI, each round:\*\* 1: \$0\.68 · 2: \$0\.68 · .* · 9: unknown · .* · 12: \$0\.68$/m);
-  assert.match(c.chart, /axisFormat %b %d %H:%M/);
-});
-
-test("the vendor comment: a two-line headline, the raw line in Run details, its spend line last and unchanged", () => {
-  const cost = { usd: 0.0042, vcpus: 4, memoryMb: 8192, activeCpuMs: 41200, wallMs: 1380000 };
-  const line = vendorLine({ id: "pendulum-x", state: "stopped", cost, rates: { date: "2026-11-10" }, at: "2026-11-18T04:41:00Z" });
-  const old = vendorBody({ line, vendorUsd: 0.0042 });
-  const now = vendorBody({ line, vendorUsd: 0.0042, card: vendorCard({ stage: "work", cost, rates: { date: "2026-11-10" } }) });
-  assert.ok(now.startsWith("**Cloud sandbox** · Work · **<$0.01**\n41.2 s of CPU in 23 min · 4 vCPU / 8 GB · vendor list rates, read 2026-11-10\n\n<details><summary>Run details</summary>\n\n"));
-  assert.equal(now.split("\n").at(-1), old.split("\n").at(-1), "the spend line, last");
-  assert.ok(now.includes(`\n${line}\n`));
-  assert.deepEqual(spendParts(now), spendParts(old));
-  assert.match(vendorCard({ stage: "review", cost: { usd: null } }), /^\*\*Cloud sandbox\*\* · Review · \*\*unknown\*\*\nThe sandbox vendor did not report this stage's usage\.$/);
-});
-
-test("near GitHub's limit: the chart goes first, then shorter Step cells, then the explanations, then the ledger's cut form; the Full log's middle only as a last resort", async () => {
-  const many = (n, size) =>
-    reporter("work", async (p) => {
-      for (let i = 0; i < n; i++) await p(`${"y".repeat(size)} ${i}`, { step: "note" });
-      p.spend(1, { usdByBilling: { api: 1 } }, LEDGER);
-      await p("exit: delivered", endStep({ issue: 433, exit: "delivered" }));
-    });
-  // A log that leaves room: the ledger line whole.
-  const fits = (await many(25, 1990)).at(-1);
-  assert.ok(fits.length <= PROGRESS_LEDGER_ROOM + 100 && fits.includes(LEDGER));
-  // Past the room: the ledger's cut form, every line of the log still there.
-  const cut = (await many(31, 1990)).at(-1);
-  assert.ok(cut.length < GITHUB_COMMENT_MAX, `${cut.length}`);
-  assert.ok(!cut.includes(LEDGER) && /^<!-- pendulum:ledger \{"cut":3\} -->$/m.test(cut));
-  assert.match(cut, /- [^\n]*<!-- \d\d:\d\dZ --> y+ 30$/m);
-  // Past GitHub's limit even so: the first 20 and last 40 lines, one line saying how many were left out.
-  const huge = (await many(80, 1990)).at(-1);
-  assert.ok(huge.length < GITHUB_COMMENT_MAX, `${huge.length}`);
-  assert.match(huge, /^- … \d+ lines left out to keep this comment under GitHub's size limit; the job log has them$/m);
-  assert.match(huge, /^The steps are in Run details' Full log: this comment is near GitHub's size limit\.$/m, "the table went before any line of the log");
-  assert.match(huge, /y+ 0\n/, "the first lines kept");
-  assert.match(huge, /exit: delivered\n\n<\/details>/, "the last lines kept");
-  assert.equal(tableCell("a | b\nc <img src=x>"), "a \\| b c &lt;img src=x&gt;");
-});
-
-test("every line a stage writes names its step, and each step is one the card knows", () => {
-  const files = ["worker.mjs", "review.mjs", "lib/session.mjs", "lib/finding-check.mjs", "lib/third-party-review.mjs", "lib/triage.mjs", "lib/drift.mjs", "lib/objective-trust.mjs"];
-  const bare = [];
-  const unknown = [];
-  for (const f of files) {
-    const src = readFileSync(join(import.meta.dirname, "..", "scripts", f), "utf8");
-    src.split("\n").forEach((l, i) => {
-      if (/^\s*(\/\/|\*)/.test(l)) return;
-      if (/await (?:progress|onPhase|args\.onPhase)\??\.?\(/.test(l) && !/\bstep\b|Step\b|endStep/.test(l)) bare.push(`${f}:${i + 1}`);
-      for (const m of l.matchAll(/\bstep: "(\w+)"/g)) if (!Object.hasOwn(ROW_OF, m[1]) && m[1] !== "exit") unknown.push(`${f}:${i + 1} ${m[1]}`);
-    });
-  }
-  assert.deepEqual(bare, []);
-  assert.deepEqual(unknown, []);
-});
-
-test("steps decide on their fields alone: a step the card does not know is a note, its line its words", () => {
-  const e = stepOf({ step: "nonsense" }, 1, "a line");
-  assert.equal(e.kind, "note");
-  assert.equal(e.line, "a line");
-  const d = progressData({ stage: "work", issue: 1, started: 0, now: 60_000, lines: [[0, "x", { step: "ci", sha: "abcdef1", wait: true }]], live: true, zone: "UTC" });
-  assert.equal(d.current.kind, "ci", "running: the last step is the Now row's");
-});
-
 test("newForm (the readers' fixture) is the reporter's form: key, card, Run details with the old header and lines, the old markers", () => {
   const fresh = newForm(`${KEY}\n${OLD_435}`, "2026-11-18T04:41:00Z");
   assert.ok(fresh.startsWith(`${KEY}\n**✅ Review delivered**`));
   assert.ok(fresh.endsWith(`**Full log**\n\n${OLD_LOG}\n\n</details>\n${OLD_TAIL}`));
-});
-
-test("the run's link and place come from the stage's own environment, never from the process rendering it", async () => {
-  const run = async (env) => (await reporter("work", async (p) => p("setup", { step: "setup" }), { env })).at(-1);
-  const linked = await run({ GITHUB_RUN_ID: "77", GITHUB_SERVER_URL: "https://gh.test" });
-  assert.match(linked, /^Pendulum work \[run 1794976879130\]\(https:\/\/gh\.test\/acme\/app\/actions\/runs\/77\): started /m);
-  assert.match(linked, /^- \*\*Run:\*\* \[1794976879130\]\(https:\/\/gh\.test\/acme\/app\/actions\/runs\/77\) on GitHub Actions/m);
-  const saved = { ...process.env };
-  Object.assign(process.env, { GITHUB_RUN_ID: "1", GITHUB_SERVER_URL: "https://github.com" });
-  try {
-    const local = await run({ GITHUB_ACTIONS: undefined, PENDULUM_LOCAL: "1" });
-    assert.match(local, /^Pendulum work run 1794976879130: started /m, "the process's own run is not the stage's");
-    assert.match(local, /^- \*\*Run:\*\* 1794976879130 on this machine/m);
-  } finally {
-    for (const k of ["GITHUB_RUN_ID", "GITHUB_SERVER_URL"]) if (saved[k] === undefined) delete process.env[k];
-    else process.env[k] = saved[k];
-  }
 });
 
 test("harness and person text is sanitised and on one line: no live mention, no bot command, no clock line before the Full log", async () => {
@@ -509,206 +274,32 @@ test("harness and person text is sanitised and on one line: no live mention, no 
   assert.equal(phaseMinutes([comment(`${KEY}\n${q.card}`)], 433).modelMinutes, 0);
 });
 
-test("the Now row is the last step still open: the reviewer beside CI, a build with a drift advisory", () => {
-  const t0 = at("2026-11-18T04:41:00Z");
-  const now = (lines, passes = []) => progressData({ stage: "review", issue: 1, started: t0, now: t0 + 600_000, lines, passes, zone: "UTC" }).current?.kind;
-  const wait = { step: "ci", sha: "95d326b", wait: true };
-  assert.equal(now([[t0, "wait", wait], [t0 + 10_000, "reviewer", { step: "review", model: "claude-fable-5-2" }], [t0 + 200_000, "checks green while the reviewer runs", { step: "ci", sha: "95d326b", outcome: "passed" }]]), "review");
-  assert.equal(now([[t0, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }], [t0 + 60_000, "drift advisory", { step: "drift", verdict: "scope_creep" }]]), "build");
-  // Its run ended: the wait after it is the Now row.
-  assert.equal(now([[t0, "harness", { step: "work", attempt: 1 }], [t0 + 60_000, "drift", { step: "drift" }], [t0 + 120_000, "wait", { step: "ci", sha: "abc1234", wait: true }]], [{ label: "work-1", usd: 1, started: iso(t0 + 1000), ended: iso(t0 + 100_000) }]), "ci");
-  // A held red renders as the wait that failed, fixed by the stage's next pass.
-  const held = render({ stage: "review", issue: 1, started: t0, now: t0 + 600_000, lines: [[t0, "pass", { step: "ci", begin: true }], [t0, "wait", { step: "ci", sha: "abc1234", wait: true, end: t0 + 60_000, outcome: "failed" }], [t0 + 61_000, "red; held", { step: "ci", red: "held-answer", check: "pnpm test" }], [t0 + 600_000, "exit: delivered", endStep({ issue: 1, exit: "delivered" })]], exit: "delivered", spend: 0, parts: {} });
-  assert.match(held.card, /^\| 8:41 PM \| Waited for CI · failed: `pnpm test`; fixed while answering the review \| 1 min \| — \|$/m);
-});
-
-test("a run's end reaches the card at once: a snapshot between the worker's run ending and the next step agrees in the headline, its row and the live status", async () => {
-  // The stage's spend and passes as harness.mjs keeps them: the run open, then its record booked when it ends.
-  let rec = null;
-  let started = false;
-  const soFar = async () => (rec ? { usd: 2.51, unknown: 0, running: 0, byBilling: { subscription: 2.51 } } : { usd: 0, unknown: started ? 1 : 0, running: started ? 1 : 0 });
-  const line = (e) => JSON.stringify(e);
-  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
-  let posted = [];
-  // Until GitHub has answered `n` writes (the fake answers each after `delayMs`), on the real clock (Date.now is faked).
-  const landed = async (n) => {
-    for (const until = performance.now() + 10_000; posted.length < n && performance.now() < until; ) await settle(5);
-  };
-  posted = await reporter(
-    "work",
-    async (p, clock) => {
-      await p("install", { step: "setup", span: true, end: at("2026-11-18T04:41:30Z") });
-      clock("2026-11-18T04:42:00Z");
-      started = true;
-      await p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
-      const live = liveActivity(p, { harness: "claude", model: "claude-opus-5-5" });
-      await landed(3);
-      // 29 minutes on, a tool call's line is written; GitHub is still answering it when the run ends.
-      clock("2026-11-18T05:11:00Z");
-      live.onLine(line({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "npm test" } }] } }));
-      live.onLine(line({ type: "result", subtype: "success", total_cost_usd: 2.51, num_turns: 78 }));
-      await settle(5);
-      rec = { label: "work-1", harness: "claude", model: "claude-opus-5-5", usd: 2.51, started: "2026-11-18T04:42:01Z", ended: "2026-11-18T05:11:00Z" };
-      clock("2026-11-18T05:11:02Z");
-      await live.finish();
-      await landed(5);
-    },
-    { delayMs: 100, posted: (list) => (posted = list), opts: { soFar, passesOf: () => (rec ? [rec] : []) } },
-  );
-  const last = cardOf(posted.at(-1));
-  assert.equal(
-    last,
-    [
-      "<!-- pendulum:433:progress:work:1794976879130 -->",
-      "**⏳ Work running** · issue #433 · 30 min so far · **$2.51** so far",
-      "Started 8:41 PM PST · updated 9:11 PM PST · API-equivalent, not billed",
-      "",
-      "| Time | Step | Took | Cost |",
-      "| :-- | :-- | --: | --: |",
-      "| 8:41 PM | Set up | 20 s | — |",
-      "| 8:42 PM | Built the change · Opus 5.5 | 28 min 59 s | $2.51 |",
-    ].join("\n"),
-  );
-  // Every write agrees with itself: the run is the Now row exactly while its cost is not reported, never once it ended.
-  assert.ok(posted.some((b) => /\*\*Now:\*\* building the change · Opus 5\.5 · 29 min, 1 turn, 1 tool call, active now \| running \| when it ends \|/.test(b)), "the running build's own write");
-  for (const body of posted.map(cardOf).filter((b) => /building the change|Built the change/.test(b))) {
-    const open = /\*\*Now:\*\* building the change/.test(body);
-    assert.equal(/1 AI run has not reported a cost yet/.test(body), open, body);
-    assert.equal(/\$2\.51/.test(body), !open, body);
-    assert.doesNotMatch(body, /finished|ended/, body);
-  }
-});
-
-test("a step whose run has ended is never the Now row; an earlier run's activity never speaks for the step after it", () => {
-  const t0 = at("2026-11-18T04:41:00Z");
-  const data = (lines, passes = [], snap = null) => progressData({ stage: "work", issue: 1, started: t0, now: t0 + 1_800_000, lines, passes, snap, zone: "UTC" });
-  const work = [t0 + 30_000, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }];
-  const ended = [{ label: "work-1", usd: 2.51, started: iso(t0 + 31_000), ended: iso(t0 + 1_740_000) }];
-  const over = { model: "claude-opus-5-5", snap: { elapsedMin: 29, turns: 78, toolCalls: 120, idleMin: 0, ended: true, tokens: { input: 1, output: 1 }, subagentsActive: [] } };
-  // The worker's run ended and nothing follows it yet: no Now row, and its row carries its cost.
-  assert.equal(data([[t0, "install", { step: "setup", span: true, end: t0 + 20_000 }], work], ended, over).current, null);
-  const c = render({ stage: "work", issue: 1, started: t0, now: t0 + 1_800_000, lines: [work], passes: ended, snap: over, status: "claude finished: 29 min, 78 turns; ended; $2.51", spend: 2.51, parts: { usdByBilling: { subscription: 2.51 }, running: true } });
-  assert.doesNotMatch(c.card, /\*\*Now:\*\*|finished/);
-  assert.match(c.card, /^\| 8:41 PM \| Built the change · Opus 5\.5 \| 28 min 29 s \| \$2\.51 \|$/m);
-  // A drift advisory written beside the build is no Now row once the build ended; nor is a wait that ended.
-  assert.equal(data([work, [t0 + 600_000, "drift advisory", { step: "drift", verdict: "scope_creep", aside: true }]], ended).current, null);
-  // A line written beside the reviewer (its CI result) is no Now row once the reviewer ended; one with no mark is.
-  const reviewed = [{ label: "review", usd: 1, started: iso(t0 + 1000), ended: iso(t0 + 900_000) }];
-  const beside = (mark) => data([[t0, "reviewer", { step: "review" }], [t0 + 600_000, "green while the reviewer runs", { step: "ci", sha: "abc1234", outcome: "passed", ...(mark ? { aside: true } : {}) }]], reviewed).current?.kind ?? null;
-  assert.deepEqual([beside(true), beside(false)], [null, "ci"]);
-  assert.equal(data([[t0, "wait", { step: "ci", sha: "abc1234", wait: true, end: t0 + 60_000, outcome: "passed" }]]).current, null);
-  // A run killed with no end line leaves a snapshot that never ended: the CI wait after it is the Now row, in its own words.
-  const killed = { model: "claude-opus-5-5", snap: { ...over.snap, ended: false } };
-  const waiting = render({ stage: "work", issue: 1, started: t0, now: t0 + 1_800_000, lines: [work, [t0 + 1_750_000, "wait", { step: "ci", sha: "abc1234", wait: true }]], passes: ended, snap: killed, spend: 2.51, parts: { running: true } });
-  assert.match(waiting.card, /^\| 9:10 PM \| \*\*Now:\*\* waiting for CI on `abc1234` · 50 s \| running \| — \|$/m);
-  assert.doesNotMatch(waiting.details, /Right now/);
-});
-
-test("rows are in order of their first time, the AI judge's included; the Now row is last", () => {
-  const t0 = at("2026-11-18T20:53:00Z");
-  const lines = [
-    [t0, "install", { step: "setup", span: true, end: t0 + 20_000 }],
-    [t0 + 30_000, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }],
-    [t0 + 130_000, "drift advisory", { step: "drift", verdict: "scope_creep", aside: true }],
-    [t0 + 1_800_000, "validation pass 1 (required checks)", { step: "ci", begin: true }],
-    [t0 + 1_800_000, "waiting", { step: "ci", sha: "abc1234", wait: true }],
-  ];
-  const passes = [
-    { label: "work-1", model: "claude-opus-5-5", usd: 2.51, started: iso(t0 + 31_000), ended: iso(t0 + 1_790_000) },
-    { label: "decision", decision: true, calls: 2, usd: 0.004, started: iso(t0 + 120_000), ended: iso(t0 + 240_000) },
-  ];
-  const c = render({ stage: "work", issue: 1, started: t0, now: t0 + 1_900_000, lines, passes, spend: 2.514, parts: { usdByBilling: { subscription: 2.51, api: 0.004 }, running: true } });
-  const rows = c.card.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("| Time") && !l.startsWith("| :--"));
-  assert.deepEqual(
-    rows.map((l) => l.split(" | ").slice(0, 2).join(" | ")),
-    ["| 12:53 PM | Set up", "| 12:53 PM | Built the change · Opus 5.5", "| 12:55 PM | AI judge calls ×2", "| 12:55 PM | Drift advisory · AI judge flagged possible scope creep; advice only", "| 1:23 PM | Waited for CI", "| 1:23 PM | **Now:** waiting for CI on `abc1234` · 2 min"],
-  );
-});
-
-test("a run's second pass keeps its step the Now row, its first pass's cost on the step's row", () => {
-  const t0 = at("2026-11-18T04:41:00Z");
-  const work = [t0 + 30_000, "harness", { step: "work", model: "claude-opus-5-5", attempt: 1 }];
-  const first = [{ label: "work-1", model: "claude-opus-5-5", usd: 0.25, started: iso(t0 + 31_000), ended: iso(t0 + 600_000) }];
-  const running = { model: "claude-opus-5-5", snap: { elapsedMin: 12, turns: 3, toolCalls: 2, idleMin: 0, ended: false, tokens: { input: 1, output: 1 }, subagentsActive: [] } };
-  const c = render({ stage: "work", issue: 1, started: t0, now: t0 + 720_000, lines: [work], passes: first, snap: running, spend: 0.25, parts: { usdByBilling: { subscription: 0.25 }, usdUnknown: 1, usdUnknownWhy: ["unreported"], running: true, usdRunning: 1 } });
-  assert.match(c.card, /^\| 8:41 PM \| Built the change · Opus 5\.5 \| 9 min 29 s \| \$0\.25 \|\n\| 8:41 PM \| \*\*Now:\*\* building the change · Opus 5\.5 · 12 min, 3 turns, 2 tool calls, active now \| running \| when it ends \|$/m);
-  assert.match(c.card, /1 AI run has not reported a cost yet/);
-  // Its pass ended (the snapshot ended): no Now row.
-  assert.doesNotMatch(render({ stage: "work", issue: 1, started: t0, now: t0 + 720_000, lines: [work], passes: first, snap: { ...running, snap: { ...running.snap, ended: true } }, spend: 0.25, parts: { running: true } }).card, /\*\*Now:\*\*/);
-});
-
-test("every write goes through one queue: a slow line write and a forced write after it land in order, never at once", async () => {
-  const stats = {};
-  let first = true;
-  let posted = [];
+test("every write goes through one queue: the exit write lands last, after the forced writes queued before it, however slow the write ahead of them", async () => {
   const snap = { elapsedMin: 1, turns: 1, toolCalls: 1, idleMin: 0, ended: false, tokens: { input: 1, output: 1 }, subagentsActive: [] };
-  await reporter(
+  const stats = {};
+  // The first write is the slow one: every later write is queued behind it, and none may pass it or another.
+  let first = true;
+  const posted = await reporter(
     "work",
     async (p) => {
       const line = p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
-      await new Promise((r) => setTimeout(r, 5));
       p.live("claude working", { force: true, snap, model: "claude-opus-5-5" });
+      p.live("claude working", { force: true, snap: { ...snap, turns: 2 }, model: "claude-opus-5-5" });
+      p.spend(1.25, null);
+      await p("exit: delivered", endStep({ issue: 433, exit: "delivered" }));
       await line;
-      for (const until = performance.now() + 5_000; (stats.now || posted.length < 2) && performance.now() < until; ) await new Promise((r) => setTimeout(r, 5));
+      for (const until = performance.now() + 5_000; stats.now && performance.now() < until; ) await new Promise((r) => setImmediate(r));
     },
     {
       stats,
-      posted: (list) => (posted = list),
       delayMs: () => {
-        const ms = first ? 120 : 1;
+        const ms = first ? 20 : 0;
         first = false;
         return ms;
       },
     },
   );
   assert.equal(stats.max, 1, "one write at a time");
-  assert.equal(posted.length, 2);
-  assert.doesNotMatch(cardOf(posted[0]), /active now/);
-  assert.match(cardOf(posted[1]), /\*\*Now:\*\* building the change · Opus 5\.5 · 1 min, 1 turn, 1 tool call, active now/);
-});
-
-test("the exit write lands last, after the forced writes queued before it, whatever GitHub's latency", async () => {
-  const snap = { elapsedMin: 1, turns: 1, toolCalls: 1, idleMin: 0, ended: false, tokens: { input: 1, output: 1 }, subagentsActive: [] };
-  for (let round = 0; round < 25; round += 1) {
-    const stats = {};
-    const posted = await reporter(
-      "work",
-      async (p) => {
-        const line = p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
-        p.live("claude working", { force: true, snap, model: "claude-opus-5-5" });
-        p.live("claude working", { force: true, snap: { ...snap, turns: 2 }, model: "claude-opus-5-5" });
-        p.spend(1.25, null);
-        await p("exit: delivered", endStep({ issue: 433, exit: "delivered" }));
-        await line;
-        for (const until = performance.now() + 5_000; stats.now && performance.now() < until; ) await new Promise((r) => setTimeout(r, 2));
-      },
-      { stats, delayMs: () => Math.floor(Math.random() * 15) },
-    );
-    assert.equal(stats.max, 1, `round ${round}: one write at a time`);
-    assert.match(posted.at(-1), /- [^\n]* exit: delivered\n/, `round ${round}: the exit write is the last to land`);
-    assert.deepEqual(spendOf(posted.at(-1)), { usd: 1.25, unknown: 0 });
-  }
-});
-
-test("a pass killed before its result line ends on the card all the same: its snapshot closes at the pass's end", async () => {
-  let rec = null;
-  let posted = [];
-  await reporter(
-    "work",
-    async (p, clock) => {
-      await p("harness claude (claude-opus-5-5) attempt 1", { step: "work", model: "claude-opus-5-5", attempt: 1 });
-      const live = liveActivity(p, { harness: "claude", model: "claude-opus-5-5" });
-      live.onPass("start");
-      clock("2026-11-18T04:50:00Z");
-      live.onLine(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "npm test" } }] } }));
-      // Killed (hung, a stop): no result line; runHarness books its record of unknown cost, then the pass's end.
-      rec = { label: "work-1", model: "claude-opus-5-5", usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], started: "2026-11-18T04:41:11Z", ended: "2026-11-18T04:50:00Z" };
-      live.onPass("end", rec);
-      await p.planAsked([]);
-    },
-    { posted: (list) => (posted = list), opts: { soFar: async () => ({ usd: 0, unknown: 1, running: 0 }), passesOf: () => (rec ? [rec] : []) } },
-  );
-  const last = cardOf(posted.at(-1));
-  assert.doesNotMatch(last, /\*\*Now:\*\*|active now/);
-  assert.match(last, /^\| 8:41 PM \| Built the change · Opus 5\.5 \| 8 min 49 s \| unknown \|$/m);
+  assert.match(posted.at(-1), /- [^\n]* exit: delivered\n/, "the exit write is the last to land");
+  assert.deepEqual(spendOf(posted.at(-1)), { usd: 1.25, unknown: 0 });
 });

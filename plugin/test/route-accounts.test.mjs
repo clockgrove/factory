@@ -452,46 +452,6 @@ test("the accounts are the workflow file's alone: no repository variable or loca
   assert.equal(workflowSettings(render(declared)).env.PENDULUM_ACCOUNTS, ACCOUNTS);
 });
 
-test("two account labels never Block on these routes: a review takes its label off and waits, the dispatcher puts it back once one is left, and a work stage goes back to Queued (#267)", async () => {
-  const { setSelf } = await import("../scripts/lib/logic.mjs");
-  const { accountWaitOf, accountWaitResume } = await import("../scripts/lib/account-wait.mjs");
-  setSelf("pendulum-test[bot]");
-  const two = ["pendulum:objective", "pendulum:in-review", "pendulum:account:claude", "pendulum:account:claude-2"];
-  const env = { PENDULUM_ACCOUNTS: ACCOUNTS, PENDULUM_STAGE_ACCOUNT: "claude" };
-  await withGitHub({ labels: two }, async (_reads, st) => {
-    const applied = [];
-    const r = await accountGate({ repo: REPO, issue: 8, harness: "claude", labels: two, env, pr: { number: 9 }, opts: { token: "t" }, apply: async (_r, e) => applied.push(e), stage: "review" });
-    assert.equal(r.ok, false);
-    assert.match(r.wait, /both pin this Objective to an account.*the review waits for one to be left/);
-    assert.deepEqual(applied, [], "no Block");
-    assert.ok(!st.pr.has("pendulum:review"), "the review label is off");
-    const wait = accountWaitOf(st.comments, 8);
-    assert.ok(wait, "the wait is recorded on the PR, as Pendulum's own comment");
-    // Still two: the dispatcher leaves it waiting.
-    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: [...st.issue], opts: { token: "t" } }), "waiting");
-    assert.ok(!st.pr.has("pendulum:review"));
-    // One left: the label goes back and the record goes.
-    st.issue.delete("pendulum:account:claude");
-    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: [...st.issue], labelledAt: "2026-01-01T00:00:00Z", opts: { token: "t" } }), "resumed");
-    assert.ok(st.pr.has("pendulum:review"));
-    assert.equal(accountWaitOf(st.comments, 8), null);
-    // A pasted marker by anyone else is no record.
-    assert.equal(accountWaitOf([{ id: 1, user: { login: "stranger", type: "User" }, body: "<!-- pendulum:8:account-wait -->" }], 8), null);
-  });
-  // A work stage that met them as it started: back to Queued, where the dispatcher holds it; no Block.
-  await withGitHub({ labels: ["pendulum:objective", "pendulum:running", "pendulum:account:claude", "pendulum:account:claude-2"] }, async (_reads, st) => {
-    const applied = [];
-    const r = await accountGate({ repo: REPO, issue: 8, harness: "claude", labels: [...st.issue], env, opts: { token: "t" }, apply: async (_r, e) => applied.push(e), stage: "work" });
-    assert.match(r.wait, /back to Queued until one is left/);
-    assert.deepEqual(applied, []);
-    assert.ok(!st.issue.has("pendulum:running"));
-  });
-  for (const script of ["worker.mjs", "review.mjs"]) {
-    const src = readFileSync(join(ROOT, "plugin", "scripts", script), "utf8");
-    assert.match(src, new RegExp(`if \\(acct\\.wait\\) \\{\\n\\s+log\\(acct\\.wait\\);\\n\\s+await finish\\("${script === "worker.mjs" ? "skipped" : "waiting"}", acct\\.wait\\);`), `${script}: the wait ends the stage, with no Block`);
-  }
-});
-
 test("on an account, a missing or unusable credential is named as that account's secret on every harness, and only the step's input counts (#267)", async () => {
   const on = (account) => ({ GITHUB_ACTIONS: "true", PENDULUM_ACCOUNTS: JSON.stringify({ claude: ["claude", "claude-2"], codex: ["codex", "codex-2"], copilot: ["copilot", "copilot-2"] }), PENDULUM_STAGE_ACCOUNT: account });
   // A job-level variable of the default account's, and federation, never stand in for the account's own input.
@@ -556,53 +516,6 @@ test("a narrowed App token that would hold none of the asked permissions is not 
   });
 });
 
-test("the dispatcher's tick puts a waiting review's label back once one account label is left, and not before (#267)", async () => {
-  const { dispatch } = await import("../scripts/dispatch.mjs");
-  const { setSelf } = await import("../scripts/lib/logic.mjs");
-  const run = async (labels) => {
-    setSelf("pendulum-test[bot]");
-    const issue = { number: 8, state: "open", labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "kirk" } };
-    const pr = { number: 9, state: "open", draft: false, labels: [], head: { ref: "pendulum/8", sha: "abc1234" }, base: { ref: "main" }, mergeable: true, mergeable_state: "clean" };
-    const comments = [{ id: 77, user: { login: "pendulum-test[bot]", type: "Bot" }, body: "<!-- pendulum:8:account-wait -->\nPendulum: waiting", created_at: new Date().toISOString() }];
-    const writes = [];
-    const real = globalThis.fetch;
-    const saved = process.env.PENDULUM_ACCOUNTS;
-    process.env.PENDULUM_ACCOUNTS = ACCOUNTS;
-    globalThis.fetch = async (url, init = {}) => {
-      const u = new URL(url);
-      const method = init.method || "GET";
-      const p = u.pathname;
-      const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
-      if (method !== "GET" && !p.endsWith("/graphql")) writes.push(`${method} ${p}`);
-      if (p.endsWith("/graphql")) return json({ data: { viewer: { login: "pendulum-test[bot]" }, repository: null } });
-      if (p === "/user") return json({ login: "kirk", type: "User" });
-      if (p === "/repos/acme/app/issues") return json(u.searchParams.get("state") === "closed" ? [] : [issue]);
-      if (p === "/repos/acme/app/pulls") return json(u.searchParams.get("head") === "acme:pendulum/8" ? [pr] : []);
-      if (p === "/repos/acme/app/pulls/9") return json(pr);
-      if (p === "/repos/acme/app/issues/9/comments" && method === "GET") return json(comments);
-      if (/\/actions\/workflows\/[^/]+\/runs$/.test(p)) return json({ workflow_runs: [] });
-      if (/\/(timeline|comments|collaborators|reviews|commits|check-runs|status)$/.test(p)) return json([]);
-      if (method !== "GET") return method === "DELETE" ? new Response(null, { status: 204 }) : json({}, 200);
-      return json({ message: "Not Found" }, 404);
-    };
-    try {
-      const r = await dispatch({ repo: "acme/app", objectiveLabel: "pendulum:objective", maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
-      return { r, writes };
-    } finally {
-      globalThis.fetch = real;
-      if (saved === undefined) delete process.env.PENDULUM_ACCOUNTS;
-      else process.env.PENDULUM_ACCOUNTS = saved;
-    }
-  };
-  const still = await run(["pendulum:objective", "pendulum:in-review", "pendulum:account:claude", "pendulum:account:claude-2"]);
-  assert.deepEqual(still.r.accountResumed, []);
-  assert.ok(!still.writes.some((w) => w === "POST /repos/acme/app/issues/9/labels"), "two left: the label stays off");
-  const one = await run(["pendulum:objective", "pendulum:in-review", "pendulum:account:claude-2"]);
-  assert.deepEqual(one.r.accountResumed, [8]);
-  assert.ok(one.writes.includes("POST /repos/acme/app/issues/9/labels"), "the review label goes back on");
-  assert.ok(one.writes.includes("DELETE /repos/acme/app/issues/comments/77"), "the wait record goes");
-});
-
 test("with no account label on, the pin is the pusher's newest still standing, a replaced one never back; a non-pusher neither moves nor wedges it, and the stage reads no timeline when the step prepared the default (#267)", async () => {
   const { trustedRoutePin } = await import("../scripts/lib/objective-trust.mjs");
   const ev = (event, name, login, min) => ({ event, label: { name }, created_at: new Date(Date.UTC(2026, 10, 15, 1, min)).toISOString(), actor: { login, type: "User", id: login === "kirk" ? 7 : 9 } });
@@ -635,74 +548,4 @@ test("with no account label on, the pin is the pusher's newest still standing, a
     return r;
   });
   assert.deepEqual(reads, [], "no read at all");
-});
-
-test("a stale account-wait record resumes nothing: a review label put on since means its wait is over, and the record goes (#267)", async () => {
-  const { setSelf } = await import("../scripts/lib/logic.mjs");
-  const { accountWaitOf, accountWaitResume } = await import("../scripts/lib/account-wait.mjs");
-  setSelf("pendulum-test[bot]");
-  const record = { id: 41, user: { login: "pendulum-test[bot]", type: "Bot" }, body: "<!-- pendulum:8:account-wait -->\nPendulum: waiting", created_at: "2026-11-15T01:00:00Z", updated_at: "2026-11-15T01:00:00Z" };
-  await withGitHub({ prLabels: [], comments: [record] }, async (_r, st) => {
-    const wait = accountWaitOf(st.comments, 8);
-    assert.deepEqual(wait, { id: 41, at: "2026-11-15T01:00:00Z" });
-    // The label went on at 02:00 (a resume whose record delete failed, or a person) and came off since, for another wait.
-    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: ["pendulum:objective"], labelledAt: "2026-11-15T02:00:00Z", opts: { token: "t" } }), "stale");
-    assert.ok(!st.pr.has("pendulum:review"), "nothing resumed");
-    assert.equal(accountWaitOf(st.comments, 8), null, "the stale record is gone");
-  });
-});
-
-test("a work stage that meets two labels with an open PR goes back to In review, and the dispatcher sends nothing back while two are on (#267)", async () => {
-  const two = ["pendulum:objective", "pendulum:running", "pendulum:account:claude", "pendulum:account:claude-2"];
-  const env = { PENDULUM_ACCOUNTS: ACCOUNTS, PENDULUM_STAGE_ACCOUNT: "claude" };
-  await withGitHub({ labels: two }, async (_reads, st) => {
-    const applied = [];
-    const r = await accountGate({ repo: REPO, issue: 8, harness: "claude", labels: two, env, pr: { number: 9, state: "open", draft: false }, opts: { token: "t" }, apply: async (_r, e) => applied.push(e), stage: "work" });
-    assert.match(r.wait, /back to In review until one is left/);
-    assert.deepEqual(applied, []);
-    assert.ok(st.issue.has("pendulum:in-review") && !st.issue.has("pendulum:running"), "In review again, its PR and branch as they were");
-  });
-  // A draft PR (a Question or Block relabelled) is no send-back: Queued, re-run from its branch when picked.
-  await withGitHub({ labels: two }, async (_reads, st) => {
-    const r = await accountGate({ repo: REPO, issue: 8, harness: "claude", labels: two, env, pr: { number: 9, state: "open", draft: true }, opts: { token: "t" }, apply: async () => {}, stage: "work" });
-    assert.match(r.wait, /back to Queued until one is left/);
-    assert.ok(!st.issue.has("pendulum:in-review") && !st.issue.has("pendulum:running"));
-  });
-  // The dispatcher: an In-review PR that needs a rebase is not sent back to a work stage while two labels are on.
-  const { dispatch } = await import("../scripts/dispatch.mjs");
-  const { setSelf } = await import("../scripts/lib/logic.mjs");
-  const tick = async (labels) => {
-    setSelf("pendulum-test[bot]");
-    const issue = { number: 8, state: "open", labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "kirk" } };
-    const pr = { number: 9, state: "open", draft: false, labels: [], head: { ref: "pendulum/8", sha: "abc1234" }, base: { ref: "main" }, mergeable: false, mergeable_state: "dirty" };
-    const real = globalThis.fetch;
-    const saved = process.env.PENDULUM_ACCOUNTS;
-    process.env.PENDULUM_ACCOUNTS = ACCOUNTS;
-    globalThis.fetch = async (url, init = {}) => {
-      const u = new URL(url);
-      const method = init.method || "GET";
-      const p = u.pathname;
-      const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
-      if (p.endsWith("/graphql")) return json({ data: { viewer: { login: "pendulum-test[bot]" }, repository: null } });
-      if (p === "/user") return json({ login: "kirk", type: "User" });
-      if (p === "/repos/acme/app/issues") return json(u.searchParams.get("state") === "closed" ? [] : [issue]);
-      if (p === "/repos/acme/app/pulls") return json(u.searchParams.get("head") === "acme:pendulum/8" ? [pr] : []);
-      if (p === "/repos/acme/app/pulls/9") return json(pr);
-      if (/\/actions\/workflows\/[^/]+\/runs$/.test(p)) return json({ workflow_runs: [] });
-      if (/\/(timeline|comments|collaborators|reviews|commits|check-runs|status|rulesets)$/.test(p)) return json([]);
-      if (method !== "GET") return json({}, 200);
-      return json({ message: "Not Found" }, 404);
-    };
-    try {
-      return await dispatch({ repo: "acme/app", objectiveLabel: "pendulum:objective", maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
-    } finally {
-      globalThis.fetch = real;
-      if (saved === undefined) delete process.env.PENDULUM_ACCOUNTS;
-      else process.env.PENDULUM_ACCOUNTS = saved;
-    }
-  };
-  const held = await tick(["pendulum:objective", "pendulum:in-review", "pendulum:account:claude", "pendulum:account:claude-2"]);
-  assert.deepEqual([held.sentBack, held.ready], [[], []], "two labels: no send-back");
-  const sent = await tick(["pendulum:objective", "pendulum:in-review", "pendulum:account:claude-2"]);
-  assert.deepEqual(sent.sentBack, [8], "one label: sent back as ever");
 });

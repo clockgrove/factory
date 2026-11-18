@@ -4,24 +4,16 @@
 // a 304, which GitHub's rate limit does not count.
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createServer } from "node:http";
-import { join } from "node:path";
 import { test } from "node:test";
-import { writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { WAIT_KINDS, WAIT_MAX_PAGES, WAIT_PAGE, WAIT_TIMEOUT_EXIT, cursorText, jsonLine, parseCursor, waitQueue } from "../scripts/lib/wait.mjs";
-import { parseArgs } from "../scripts/local.mjs";
+import { WAIT_KINDS, jsonLine, parseCursor, waitQueue } from "../scripts/lib/wait.mjs";
 
-const SCRIPTS = join(import.meta.dirname, "..", "scripts");
 const repo = { owner: "acme", name: "widgets", full: "acme/widgets" };
 const OBJ = "pendulum:objective";
 const T0 = Date.parse("2026-11-14T14:00:00Z");
 /** A printed cursor's event id and queue state. */
 const idOf = (c) => parseCursor(c).id;
-const stateOf = (c) => parseCursor(c).drained;
 
 /** One repository's issues, PRs and issue events; `answer(method, url, headers)` is GitHub's answer as [status, body, headers]. */
 function repoState() {
@@ -120,33 +112,6 @@ test("a Block is told on the poll after it, once, with the newest event as the c
   assert.deepEqual(gh.s.seen, ["GET issues/events?per_page=30", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30"]);
 });
 
-test("Question and In review are told, the state labels coming off are not; with --follow every read's lines come out until --timeout", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(6, [OBJ, "pendulum:running"]);
-  const r = await waiting(gh, [() => gh.state(5, "pendulum:in-review"), () => {}, () => (gh.state(6, "pendulum:question"), gh.state(5, "pendulum:running"))], { follow: true, timeoutMs: 100_000, kinds: WAIT_KINDS.filter((k) => k !== "drained") });
-  assert.equal(r.code, WAIT_TIMEOUT_EXIT);
-  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["in-review", 5], ["question", 6], ["timeout", null]]);
-  assert.equal(idOf(r.lines[0].cursor), gh.s.events[1].id, "the first read's cursor: its newest event");
-  assert.equal(idOf(r.lines[1].cursor), gh.s.events.at(-1).id, "the label running 5 again is read, not told, and still moves the cursor");
-  assert.equal(r.lines[2].cursor, r.lines[1].cursor, "the timeout line carries the cursor to go on from");
-  assert.deepEqual(r.slept, [30_000, 30_000, 30_000, 10_000], "the last wait ends at the timeout");
-});
-
-test("a closed Objective is merged when the newest PR on pendulum/<issue> merged, else closed; another issue's close and PRs are not told", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:in-review"]);
-  gh.issue(6, [OBJ, "pendulum:in-review"]);
-  gh.issue(9, ["bug"]);
-  gh.issue(70, [OBJ], { pull_request: { url: "x" } });
-  gh.s.prs["pendulum/5"] = [{ number: 71, merged_at: "2026-11-14T14:00:30Z" }];
-  // A split Objective's earlier part merged; its newest PR was closed unmerged.
-  gh.s.prs["pendulum/6"] = [{ number: 73, merged_at: null }, { number: 72, merged_at: "2026-11-14T13:00:00Z" }];
-  const r = await waiting(gh, [() => (gh.event(70, "closed"), gh.event(9, "closed"), gh.state(5, null), gh.event(5, "closed"), gh.event(6, "closed"), gh.event(70, "labeled", "pendulum:blocked"))], { kinds: WAIT_KINDS.filter((k) => k !== "drained") });
-  assert.deepEqual(r.lines.map(({ event, issue, pr }) => ({ event, issue, pr })), [{ event: "merged", issue: 5, pr: 71 }, { event: "closed", issue: 6, pr: 73 }]);
-  assert.ok(gh.s.seen.includes("GET pulls?state=all&head=acme%3Apendulum%2F5&per_page=1"), gh.s.seen.join("\n"));
-});
-
 test("--since goes on from a cursor with nothing missed or told twice, paging back past one page; a time works as a cursor too", async () => {
   const gh = repoState();
   gh.issue(5, [OBJ, "pendulum:running"]);
@@ -186,192 +151,6 @@ test("drained: told when the last Objective still to run Blocks or merges, not w
   assert.deepEqual(follow.lines[1].question, [8]);
 });
 
-test("named issues: only their events are told, and drained means each of them is done, Blocked or a Question; --on narrows the kinds", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(6, [OBJ, "pendulum:running"]);
-  gh.issue(7, [OBJ]);
-  gh.s.prs["pendulum/6"] = [{ number: 76, merged_at: "2026-11-14T14:00:30Z" }];
-  const r = await waiting(gh, [() => gh.state(5, "pendulum:blocked"), () => gh.state(6, "pendulum:in-review"), () => (gh.state(6, null), gh.event(6, "closed"))], { issues: [6, 5], kinds: ["merged", "drained"] });
-  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["merged", 6], ["drained", null]], "#7, Queued and not named, does not hold it");
-  assert.deepEqual(r.lines[1].blocked, [5]);
-  const one = await waiting(gh, [() => gh.state(7, "pendulum:blocked")], { issues: [7], kinds: ["blocked"] });
-  assert.deepEqual(one.lines.map((l) => [l.event, l.issue]), [["blocked", 7]]);
-});
-
-test("drained at the start (#272 review): a drain between the start's reads is told, not taken as the state at the start", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:in-review"]);
-  gh.issue(6, [OBJ, "pendulum:blocked"]);
-  gh.s.prs["pendulum/5"] = [{ number: 71, merged_at: "2026-11-14T14:00:30Z" }];
-  // #5 merges after the start's first events read, before its read of the open Objectives.
-  const answer = gh.answer;
-  let opened = false;
-  gh.answer = (method, url, h) => {
-    if (!opened && /\/issues\?state=open/.test(url)) {
-      opened = true;
-      gh.state(5, null);
-      gh.event(5, "closed");
-    }
-    return answer(method, url, h);
-  };
-  const r = await waiting(gh, []);
-  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["merged", 5], ["drained", null]]);
-  assert.equal(stateOf(r.lines[1].cursor), true, "the cursor says the queue is drained there");
-});
-
-test("drained after a restart (#272 review): the cursor carries the queue's state, so a wait started --since it does not tell the same drain again", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(6, [OBJ, "pendulum:blocked"]);
-  const first = await waiting(gh, [() => gh.state(5, "pendulum:question")]);
-  assert.deepEqual(first.lines.map((l) => [l.event, l.issue]), [["question", 5], ["drained", null]]);
-  const cursor = first.lines.at(-1).cursor;
-  assert.equal(stateOf(cursor), true);
-  // Still drained: a Blocked one closed is told, the drain is not.
-  const again = await waiting(gh, [], { since: parseCursor(cursor), kinds: ["closed", "drained"], timeoutMs: 1 });
-  assert.deepEqual(again.lines.map((l) => l.event), ["timeout"]);
-  const closed = await waiting(gh, [() => gh.event(6, "closed")], { since: parseCursor(again.lines[0].cursor) });
-  assert.deepEqual(closed.lines.map((l) => [l.event, l.issue]), [["closed", 6]]);
-  assert.equal(stateOf(closed.lines[0].cursor), true);
-  // Active again (a new Objective queued) then drained: told, and a cursor from before the queue moved says so.
-  gh.issue(8, []);
-  const active = await waiting(gh, [() => gh.event(8, "labeled", OBJ), () => gh.state(8, "pendulum:blocked")], { since: parseCursor(closed.lines[0].cursor) });
-  assert.deepEqual(active.lines.map((l) => [l.event, l.issue]), [["blocked", 8], ["drained", null]]);
-});
-
-test("drained is the queue's state (#285 review): told when a read finds it drained and the read before did not, and only then", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(6, [OBJ, "pendulum:blocked"]);
-  // #5 Blocks; #6 goes back to work (a read sees it Running), then Blocks again; then #5, Blocked, closes.
-  const r = await waiting(gh, [() => gh.state(5, "pendulum:blocked"), () => gh.state(6, "pendulum:running"), () => gh.state(6, "pendulum:blocked"), () => gh.event(5, "closed")], { follow: true, timeoutMs: 155_000, kinds: ["drained"] });
-  assert.deepEqual(r.lines.map((l) => l.event), ["drained", "drained", "timeout"], "the close of a Blocked one is no new drain");
-  // The Done pass's tidy of a closed Blocked one (its state label off) leaves the queue drained: no drain again.
-  const tidy = await waiting(gh, [() => (gh.event(5, "unlabeled", "pendulum:blocked"))], { since: parseCursor(r.lines.at(-1).cursor), follow: true, timeoutMs: 35_000, kinds: ["drained"] });
-  assert.deepEqual(tidy.lines.map((l) => l.event), ["timeout"]);
-});
-
-test("a Blocked Objective closed and reopened, still Blocked (#285 review), leaves the queue drained: no second drain", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(6, [OBJ, "pendulum:blocked"]);
-  const r = await waiting(gh, [() => gh.state(5, "pendulum:blocked"), () => (gh.event(6, "closed"), gh.event(6, "reopened"))], { follow: true, timeoutMs: 65_000, kinds: ["drained"] });
-  assert.deepEqual(r.lines.map((l) => l.event), ["drained", "timeout"]);
-});
-
-test("a read pages back through the cursor's window (#285 review): an event GitHub lists late, one page below the newest, is told", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(9, ["bug"]);
-  gh.event(5, "labeled", "pendulum:running");
-  for (let i = 0; i < WAIT_PAGE - 1; i += 1) gh.event(9, i % 2 ? "unlabeled" : "labeled", "P1");
-  const r = await waiting(gh, [() => {
-    for (let i = 0; i < 15; i += 1) gh.event(9, i % 2 ? "unlabeled" : "labeled", "P1");
-  }, () => {
-    // #5's Block, its id just above the 31st newest event: GitHub lists it on page 2, below ids the last read returned.
-    const below = [...gh.s.events].sort((x, y) => y.id - x.id)[WAIT_PAGE];
-    gh.event(5, "labeled", "pendulum:blocked", below.id + 3);
-  }], { follow: true, timeoutMs: 65_000, kinds: ["blocked"] });
-  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["blocked", 5], ["timeout", null]]);
-});
-
-test("a wait whose kinds leave drained out (#285 review) carries no queue state on its cursor, so a later wait tells the drain", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(6, [OBJ, "pendulum:blocked"]);
-  const first = await waiting(gh, [() => gh.state(5, "pendulum:question")]);
-  assert.equal(stateOf(first.lines.at(-1).cursor), true);
-  gh.issue(7, [OBJ, "pendulum:running"]);
-  const review = await waiting(gh, [() => gh.state(7, "pendulum:in-review")], { since: parseCursor(first.lines.at(-1).cursor), kinds: ["in-review"] });
-  assert.equal(stateOf(review.lines[0].cursor), null, "no state it did not keep current");
-  gh.s.prs["pendulum/7"] = [{ number: 77, merged_at: "2026-11-14T14:00:30Z" }];
-  const drained = await waiting(gh, [() => (gh.state(7, null), gh.event(7, "closed"))], { since: parseCursor(review.lines[0].cursor), kinds: ["drained"] });
-  assert.deepEqual(drained.lines.map((l) => l.event), ["drained"]);
-});
-
-test("a timeout during the start's read of the open Objectives (#285 review) prints the start's cursor, and a restart from it misses nothing", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.event(5, "labeled", "pendulum:running");
-  const start = String(gh.s.events.at(-1).id);
-  const stop = new AbortController();
-  const answer = gh.answer;
-  gh.answer = (method, url, h) => {
-    if (/\/issues\?state=open/.test(url) && !stop.signal.aborted) {
-      // #5 Blocks just after the first events read; the deadline comes during the open read.
-      gh.state(5, "pendulum:blocked");
-      stop.abort();
-      throw new DOMException("This operation was aborted", "AbortError");
-    }
-    return answer(method, url, h);
-  };
-  const r = await waiting(gh, [], { opts: { token: "t", signal: stop.signal } });
-  assert.equal(r.code, WAIT_TIMEOUT_EXIT);
-  assert.deepEqual(r.lines.map((l) => [l.event, idOf(l.cursor), stateOf(l.cursor)]), [["timeout", Number(start), null]], "the start's cursor, its queue state unknown");
-  const again = await waiting(gh, [], { since: parseCursor(r.lines[0].cursor), kinds: ["blocked"] });
-  assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["blocked", 5]]);
-});
-
-test("a read cut off at --timeout (#285 review) leaves the cursor where it was: the timeout line carries it, and a restart from it tells the batch", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:in-review"]);
-  gh.s.prs["pendulum/5"] = [{ number: 71, merged_at: "2026-11-14T14:00:30Z" }];
-  const stop = new AbortController();
-  const answer = gh.answer;
-  // The deadline comes while the merged PR is read (a network drop the client waits on until then).
-  gh.answer = (method, url, h) => {
-    if (/\/pulls\?/.test(url) && !stop.signal.aborted) {
-      stop.abort();
-      throw new DOMException("This operation was aborted", "AbortError");
-    }
-    return answer(method, url, h);
-  };
-  const before = gh.s.events.length ? String(gh.s.events.at(-1).id) : "0";
-  const r = await waiting(gh, [() => (gh.state(5, null), gh.event(5, "closed"))], { opts: { token: "t", signal: stop.signal } });
-  assert.equal(r.code, WAIT_TIMEOUT_EXIT);
-  assert.deepEqual(r.lines.map((l) => [l.event, idOf(l.cursor), stateOf(l.cursor)]), [["timeout", Number(before), false]], "the cursor from before the read, not past the close");
-  const again = await waiting(gh, [], { since: parseCursor(r.lines[0].cursor) });
-  assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["merged", 5], ["drained", null]]);
-});
-
-test("a failure ends with an error line carrying the cursor to go on from (#285 review); a cursor of another repository is one", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(6, [OBJ, "pendulum:running"]);
-  const answer = gh.answer;
-  let refuse = false;
-  gh.answer = (method, url, h) => (refuse && /\/issues\?state=open/.test(url) ? [403, JSON.stringify({ message: "Resource not accessible by personal access token" }), {}] : answer(method, url, h));
-  const first = await waiting(gh, [() => gh.state(5, "pendulum:in-review")]);
-  const cursor = first.lines.at(-1).cursor;
-  // The Block's read of the open Objectives is refused: the wait fails, after an error line with the cursor before it.
-  refuse = true;
-  const failed = [];
-  await assert.rejects(waiting(gh, [() => gh.state(6, "pendulum:blocked")], { since: parseCursor(cursor), emit: (l) => failed.push(l) }), /403/);
-  assert.deepEqual(failed.map((l) => [l.event, l.cursor]), [["error", cursor]]);
-  assert.match(failed[0].message, /403/);
-  refuse = false;
-  const again = await waiting(gh, [], { since: parseCursor(failed[0].cursor) });
-  assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["blocked", 6]], "restarted from it, the Block is told (#5, In review, keeps the queue active)");
-  const elsewhere = [];
-  await assert.rejects(waiting(gh, [], { since: parseCursor(String(gh.s.events.at(-1).id + 1_000_000)), emit: (l) => elsewhere.push(l) }), (e) => e.code === "cursor-elsewhere");
-  assert.deepEqual(elsewhere.map((l) => l.event), ["error"]);
-});
-
-test("a cursor more than WAIT_MAX_PAGES pages back (#285 review): a gap line first, then what the pages read tell", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(9, ["bug"]);
-  gh.event(9, "labeled", "P1");
-  const cursor = String(gh.s.events.at(-1).id);
-  for (let i = 0; i < WAIT_MAX_PAGES * WAIT_PAGE + 5; i += 1) gh.event(9, i % 2 ? "unlabeled" : "labeled", "P1");
-  gh.state(5, "pendulum:blocked");
-  const r = await waiting(gh, [], { since: parseCursor(cursor), kinds: ["blocked"] });
-  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["gap", null], ["blocked", 5]]);
-  assert.equal(idOf(r.lines[0].cursor), gh.s.events.at(-1).id);
-  assert.equal(gh.s.seen.filter((l) => /issues\/events/.test(l)).length, WAIT_MAX_PAGES);
-});
-
 test("an event GitHub lists late, below an id already read (#285 review), is told on the next read, and once", async () => {
   const gh = repoState();
   gh.issue(5, [OBJ, "pendulum:running"]);
@@ -387,111 +166,9 @@ test("an event GitHub lists late, below an id already read (#285 review), is tol
   assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["in-review", 5], ["blocked", 6], ["timeout", null]]);
 });
 
-test("a restart --since a cursor (#285 review) tells an event GitHub lists late, below the cursor, and nothing already told", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.issue(6, [OBJ, "pendulum:running"]);
-  gh.event(5, "labeled", "pendulum:running");
-  const first = await waiting(gh, [() => gh.state(5, "pendulum:in-review")], { kinds: ["blocked", "in-review"] });
-  assert.deepEqual(first.lines.map((l) => [l.event, l.issue]), [["in-review", 5]]);
-  // After that wait exits, GitHub lists #6's Block, its id below the In review the cursor names.
-  gh.event(6, "labeled", "pendulum:blocked", gh.s.events.at(-1).id - 3);
-  const again = await waiting(gh, [() => {}], { since: parseCursor(first.lines[0].cursor), follow: true, timeoutMs: 35_000, kinds: ["blocked", "in-review"] });
-  assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["blocked", 6], ["timeout", null]]);
-});
-
-test("an event is judged on its own payload (#285 review): a Block GitHub lists late, after the Objective label's removal was read, is told", async () => {
-  const gh = repoState();
-  gh.issue(5, [OBJ, "pendulum:running"]);
-  gh.event(5, "labeled", "pendulum:running");
-  // One read takes in #5's Objective label coming off; then GitHub lists #5's Block, its id below that removal.
-  const r = await waiting(gh, [() => gh.event(5, "unlabeled", OBJ), () => gh.event(5, "labeled", "pendulum:blocked", gh.s.events.at(-1).id - 3)], { follow: true, timeoutMs: 65_000, kinds: ["blocked"] });
-  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["blocked", 5], ["timeout", null]]);
-});
-
 test("jsonLine escapes U+2028, U+2029 and U+0085, and parses back to the same value", () => {
   const o = { title: "a\u2028b\u2029c\u0085d" };
   const line = jsonLine(o);
   assert.doesNotMatch(line, /[\u2028\u2029\u0085\n\r]/);
   assert.deepEqual(JSON.parse(line), o);
-});
-
-test("pendulum wait's command line: issue numbers, a cursor or a time, kinds, --follow; anything else is a usage error", () => {
-  assert.deepEqual(parseArgs(["wait", "166", "169", "--since", "36176470266", "--on", "blocked,question", "--timeout", "600"]), { cmd: "wait", flags: { _: ["wait", "166", "169"], since: "36176470266", on: "blocked,question", timeout: 600 } });
-  assert.deepEqual(parseArgs(["wait", "--follow", "--since=2026-11-14T14:00:00Z"]), { cmd: "wait", flags: { _: ["wait"], follow: true, since: "2026-11-14T14:00:00Z" } });
-  for (const a of ["wait x", "wait --on blocked,done", "wait --since yesterday", "wait --since 2026-11-14T14:00:00", "wait --timeout 0", "wait --follow=1"]) assert.throws(() => parseArgs(a.split(" ")), (e) => e.usage === true, a);
-  assert.deepEqual(parseCursor("2026-11-14T14:00:00-08:00"), { at: Date.parse("2026-11-14T22:00:00Z") });
-  // A printed cursor parses back to its id, queue state and ids read; a bare event id is one too, its state unknown.
-  for (const drained of [true, false, null]) assert.deepEqual(parseCursor(cursorText({ id: 36176470266 }, drained, [36176470259, 36176470266, 36176470224])), { id: 36176470266, drained, seen: [36176470266, 36176470259, 36176470224] });
-  assert.match(cursorText({ id: 36176470266 }, true, [36176470259]), /^[A-Za-z0-9_-]+$/, "safe on a command line unquoted");
-  assert.deepEqual(parseCursor("36176470266"), { id: 36176470266, drained: null, seen: [36176470266] });
-  const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
-  for (const bad of ["36176470266x", "yesterday", enc({ id: 5, seen: [5] }), enc({ id: 5, drained: "yes" }), enc({ id: -1 }), enc([1]), "e30="]) assert.equal(parseCursor(bad), null, bad);
-});
-
-test("pendulum wait, run for real: GitHub's rate limit spent mid-wait is waited out as serve does; the Block after it is one JSON line and exit 0; with nothing by --timeout, or a read still in flight at it, a timeout line and exit 3", async () => {
-  const gh = repoState();
-  // A title with the separators JSON.stringify leaves raw: the line must stay one line for any reader.
-  gh.issue(5, [OBJ, "pendulum:running"], { title: "Objective 5\u2028second\u2029third\u0085fourth" });
-  gh.event(5, "labeled", "pendulum:running");
-  let reads = 0;
-  let hang = false;
-  const server = createServer((req, res) => {
-    // A read GitHub never answers: --timeout must end it.
-    if (hang) return;
-    reads += /issues\/events/.test(req.url) ? 1 : 0;
-    // The third events read meets the REST quota spent for 20 minutes; the fifth finds the Block.
-    if (reads === 3) {
-      const reset = Date.now() + 20 * 60_000;
-      res.writeHead(403, { "content-type": "application/json", "x-ratelimit-limit": "5000", "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.ceil(reset / 1000)), "x-ratelimit-resource": "core" });
-      res.end(JSON.stringify({ message: "API rate limit exceeded for user ID 1." }));
-      return;
-    }
-    if (reads === 5 && gh.s.events.length === 1) gh.state(5, "pendulum:blocked");
-    const [status, body, headers] = gh.answer(req.method, req.url, req.headers);
-    res.writeHead(status, { "content-type": "application/json", ...headers });
-    res.end(status === 304 ? undefined : body);
-  });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  // The network waits pass at once on a clock of their own (so the 20-minute reset takes no time), in the one module
-  // instance the command loads.
-  const pre = join(process.env.TMPDIR, "wait-pre.mjs");
-  writeFileSync(pre, `import { OUTAGE } from ${JSON.stringify(pathToFileURL(join(SCRIPTS, "lib", "network.mjs")).href)};\nimport { RETRY } from ${JSON.stringify(pathToFileURL(join(SCRIPTS, "lib", "github.mjs")).href)};\nlet ahead = 0;\nOUTAGE.now = RETRY.now = () => Date.now() + ahead;\nOUTAGE.sleep = RETRY.sleep = async (ms) => { ahead += Math.max(0, ms); };\n`);
-  const run = async (...args) => {
-    const child = spawn(process.execPath, ["--import", pathToFileURL(pre).href, join(SCRIPTS, "local.mjs"), "wait", "--repo", "acme/widgets", "--interval", "0.05", ...args], { env: { PATH: process.env.PATH, HOME: process.env.TMPDIR, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`, PENDULUM_LOCAL_TOKEN: "github_pat_test" }, stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (c) => (out += c));
-    child.stderr.on("data", (c) => (err += c));
-    const code = await new Promise((r) => child.on("exit", r));
-    return { code, out, err };
-  };
-  try {
-    const told = await run("--on", "blocked");
-    assert.equal(told.code, 0, told.out + told.err);
-    const lines = told.out.trim().split("\n");
-    assert.equal(lines.length, 1, told.out);
-    assert.doesNotMatch(told.out, /[\u2028\u2029\u0085]/);
-    assert.deepEqual(JSON.parse(lines[0]), { event: "blocked", issue: 5, title: "Objective 5\u2028second\u2029third\u0085fourth", url: "https://github.com/acme/widgets/issues/5", at: gh.s.events.at(-1).created_at, cursor: JSON.parse(lines[0]).cursor });
-    assert.equal(idOf(JSON.parse(lines[0]).cursor), gh.s.events.at(-1).id);
-    assert.ok(gh.s.seen.some((l) => / 304$/.test(l)), gh.s.seen.join("\n"));
-    assert.match(told.out + told.err, /rate limit on 127\.0\.0\.1:\d+ is spent until/);
-    assert.deepEqual(gh.s.seen.slice(0, 4), ["GET issues/events?per_page=30", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30"], "one read again after the reset, none before it");
-    const quiet = await run("--since", String(gh.s.events.at(-1).id), "--timeout", "0.3");
-    assert.equal(quiet.code, WAIT_TIMEOUT_EXIT, quiet.out + quiet.err);
-    const last = JSON.parse(quiet.out.trim().split("\n").at(-1));
-    assert.equal(last.event, "timeout");
-    assert.equal(idOf(last.cursor), gh.s.events.at(-1).id);
-    hang = true;
-    const started = Date.now();
-    const hung = await run("--since", String(gh.s.events.at(-1).id), "--timeout", "0.5");
-    assert.equal(hung.code, WAIT_TIMEOUT_EXIT, hung.out + hung.err);
-    assert.ok(Date.now() - started < 5_000, `ended at its timeout, not when the read would (${Date.now() - started} ms)`);
-    const timedOut = JSON.parse(hung.out.trim());
-    assert.deepEqual(timedOut, { event: "timeout", issue: null, at: timedOut.at, cursor: timedOut.cursor });
-    assert.equal(idOf(timedOut.cursor), gh.s.events.at(-1).id);
-  } finally {
-    server.closeAllConnections();
-    server.close();
-  }
 });

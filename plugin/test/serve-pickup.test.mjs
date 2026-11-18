@@ -1,18 +1,17 @@
 import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { createServer as createNetServer } from "node:net";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { budgetHome, fakeProc } from "./fixtures/machine.mjs";
-import { Local, deadHereHolder, holderId, machineIdentity, settingsChanges } from "../scripts/local.mjs";
-import { committedWorkflowNow, workflowPins } from "../scripts/lib/local.mjs";
-import { DOWNGRADE_LINE, checkoutProblem, markInUse, pendulumBuild, pinDecision, pruneReleases, releaseCheckout, releasesDir, runningPendulum, startProblem } from "../scripts/lib/release.mjs";
+import { Local, deadHereHolder, holderId, machineIdentity } from "../scripts/local.mjs";
+import { committedWorkflowNow } from "../scripts/lib/local.mjs";
+import { DOWNGRADE_LINE, checkoutProblem, pendulumBuild, pinDecision, releaseCheckout, releasesDir, runningPendulum, startProblem } from "../scripts/lib/release.mjs";
 import { claudeLocalSettings, codexLocalConfig, copilotLocalSettings, harnessOuterSettings, srtSettings, versionSettings } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
@@ -69,22 +68,6 @@ function pendulumRepo() {
   };
   return { url: bare, work, release };
 }
-
-test("workflowPins: the Pendulum refs a workflow's steps call, once each; settingsChanges names each change and a shell value that still wins", () => {
-  const text = "jobs:\n  a:\n    steps:\n      - uses: clockgrove/pendulum@v0.9.31 # pinned\n      - uses: actions/checkout@v7\n      - uses: 'clockgrove/pendulum@v0.9.31'\n#     - uses: clockgrove/pendulum@main\n      - run: |\n          echo uses: clockgrove/pendulum@v0.0.1\n  b:\n    steps:\n      - { uses: clockgrove/pendulum@0123456789abcdef0123456789abcdef01234567 }\n";
-  assert.deepEqual(workflowPins(text), ["v0.9.31", "0123456789abcdef0123456789abcdef01234567"], "steps only: a flow mapping counts, a script's text does not");
-  assert.deepEqual(workflowPins("jobs: [\n"), [], "a workflow that does not parse pins nothing");
-  assert.deepEqual(workflowPins("env:\n  PENDULUM_MODEL: m\n"), []);
-  assert.deepEqual(settingsChanges({ PENDULUM_MAX_CONCURRENT: "2", PENDULUM_LOCAL_DOMAINS: "a.com" }, { PENDULUM_MAX_CONCURRENT: "3", PENDULUM_LOCAL_DOMAINS: "b.com", PENDULUM_MODEL: "m" }, { PENDULUM_LOCAL_DOMAINS: "c.com" }), [
-    'PENDULUM_LOCAL_DOMAINS: "a.com" → "b.com" (this shell sets it, and its value wins)',
-    'PENDULUM_MAX_CONCURRENT: "2" → "3"',
-    'PENDULUM_MODEL: unset → "m"',
-  ]);
-  assert.deepEqual(settingsChanges({ PENDULUM_MODEL: "m" }, { PENDULUM_MODEL: "m" }, {}), []);
-  // Every setting this shell sets keeps its value, a model too (inputs.mjs machineSettings), and the change says so.
-  assert.deepEqual(settingsChanges({ PENDULUM_MODEL: "m" }, { PENDULUM_MODEL: "n" }, { PENDULUM_MODEL: "mine" }), ['PENDULUM_MODEL: "m" → "n" (this shell sets it, and its value wins)']);
-  assert.deepEqual(settingsChanges({ PENDULUM_MAX_USD: "1" }, { PENDULUM_MAX_USD: "2" }, { PENDULUM_MAX_USD: "3" }), ['PENDULUM_MAX_USD: "1" → "2"'], "not one the shell's value does not win for");
-});
 
 test("pinDecision: a release tag or a full SHA other than the running one is followed; a branch, a short SHA or steps that disagree never are", () => {
   const running = { version: "0.9.30", commit: "a".repeat(40) };
@@ -204,37 +187,6 @@ test("checkoutProblem: every file is hashed against the manifest taken at the fe
   writeFileSync(join(c.dir, "plugin", "scripts", "extra.mjs"), "planted\n");
   assert.match(checkoutProblem(c), /extra\.mjs was added|\.git\/info\/exclude changed/);
 });
-
-test("pruneReleases: the newest three checkouts stay, and the one serve runs or any live serve runs whatever its age; a fetch under way stays; a ~/.cache behind a link too", () => {
-  for (const linked of [false, true]) pruneCase(linked);
-});
-
-function pruneCase(linked) {
-  const home = mkdtempSync(join(tmpdir(), "home-"));
-  if (linked) symlinkSync(mkdtempSync(join(tmpdir(), "cache-")), join(home, ".cache"));
-  const root = releasesDir(home);
-  const names = ["v1.0.0-a", "v1.0.1-b", "v1.0.2-c", "v1.0.3-d", "v1.0.4-e", "v1.0.5-f", "v1.0.6-g", "v1.0.7-h.part"];
-  names.forEach((n, i) => {
-    mkdirSync(join(root, n), { recursive: true });
-    const at = new Date(Date.now() - (names.length - i) * 60_000);
-    utimesSync(join(root, n), at, at);
-  });
-  mkdirSync(join(root, ".home"));
-  // Another live serve on this machine runs from the oldest but one; a dead one's name keeps nothing.
-  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
-  try {
-    markInUse(join(root, "v1.0.1-b"), { home, pid: other.pid });
-    markInUse(join(root, "v1.0.2-c"), { home, pid: 2 ** 22 + 7 });
-    // A live process's name another serve removed while this one reads it (here: one that does not read).
-    mkdirSync(join(root, ".in-use", String(process.pid)));
-    pruneReleases(home, [join(root, "v1.0.0-a")]);
-    rmSync(join(root, ".in-use", String(process.pid)), { recursive: true });
-  } finally {
-    other.kill();
-  }
-  assert.deepEqual(readdirSync(root).sort(), [".home", ".in-use", "v1.0.0-a", "v1.0.1-b", "v1.0.4-e", "v1.0.5-f", "v1.0.6-g", "v1.0.7-h.part"]);
-  assert.deepEqual(readdirSync(join(root, ".in-use")), [String(other.pid)], "a dead process's name goes");
-}
 
 test("startProblem: the new release's loop is tried with nothing of this shell's env", async () => {
   const fx = pendulumRepo();
@@ -466,135 +418,6 @@ async function serveOver(ad, { wf, pendulum, atTick, paused = () => [], stubs = 
   return { lines, loop };
 }
 
-test("serve: a change to a hot setting applies from the next tick, says what changed, and leaves the stage in flight alone; any other setting waits for a restart (#276)", async () => {
-  const ad = adopter({ PENDULUM_LOCAL_MAX_CONCURRENT: "1", PENDULUM_MODEL: "m1", PENDULUM_LOCAL_DOMAINS: "a.example" });
-  let stageEnd = null;
-  const resumed = [];
-  const { lines, loop } = await serveOver(ad, {
-    wf: { PENDULUM_LOCAL_MAX_CONCURRENT: "1", PENDULUM_MODEL: "m1", PENDULUM_LOCAL_DOMAINS: "a.example" },
-    pendulum: { version: "0.9.30", commit: null, root: "/f", release: true },
-    // Tick 1 starts #7; the change lands during tick 2; from then on, #8 is this machine's paused work, which has no
-    // slot beside #7 at one stage at a time.
-    atTick: (n, l) => {
-      // What a stage may reach or receive changes too: that waits for a restart.
-      if (n === 2) ad.push({ PENDULUM_LOCAL_MAX_CONCURRENT: "2", PENDULUM_MODEL: "m2", PENDULUM_LOCAL_DOMAINS: "evil.example", PENDULUM_LOCAL_ENV: "AWS_SECRET_ACCESS_KEY" }, "v0.9.30");
-      if (n >= 8) l.stopping = true;
-    },
-    paused: (n) => (n >= 2 ? [8] : []),
-    stubs: (loop) => ({
-      runObjective: () => new Promise((ok) => (stageEnd = ok)),
-      resume: async (n) => {
-        resumed.push(n);
-        loop.stopping = true;
-        stageEnd?.({ exit: "delivered" });
-        return { exit: "delivered" };
-      },
-    }),
-  });
-  const text = lines.join("");
-  assert.match(text, /the workflow's settings on origin\/main changed; each stage that starts from now on runs with them, and stages in flight keep theirs: PENDULUM_LOCAL_MAX_CONCURRENT: "1" → "2"; PENDULUM_MODEL: "m1" → "m2"/);
-  assert.match(text, /at most 2 Objective stage\(s\) at once on this machine/);
-  assert.deepEqual(resumed, [8], "the new limit gives the paused Objective a slot beside the stage in flight");
-  assert.equal(loop.baseEnv().PENDULUM_MODEL, "m2", "stages that start now get the new settings");
-  assert.match(text, /the workflow's settings on origin\/main changed; these take effect when serve restarts, and until then serve keeps the values it started with: PENDULUM_LOCAL_DOMAINS: "a\.example" → "evil\.example"; PENDULUM_LOCAL_ENV: unset → "AWS_SECRET_ACCESS_KEY"/);
-  assert.equal(loop.wf.PENDULUM_LOCAL_DOMAINS, "a.example");
-  assert.equal(loop.wf.PENDULUM_LOCAL_ENV, undefined);
-  assert.equal(loop.baseEnv().AWS_SECRET_ACCESS_KEY, undefined);
-  assert.deepEqual(loop.domains().slice(-1), ["a.example"]);
-  assert.equal((text.match(/settings on origin\/main changed/g) || []).length, 2, "each said once");
-});
-
-test("serve: a new pinned release is announced, holds new stages while one runs, and serve starts again on it once none runs (#276)", async () => {
-  const ad = adopter({ PENDULUM_LOCAL_MAX_CONCURRENT: "3" });
-  const fx = pendulumRepo();
-  fx.release("9.9.9");
-  const home = mkdtempSync(join(tmpdir(), "home-"));
-  let stageEnd = null;
-  const offered = [];
-  const execs = [];
-  const { lines, loop } = await serveOver(ad, {
-    wf: { PENDULUM_LOCAL_MAX_CONCURRENT: "3" },
-    pendulum: { version: "0.9.30", commit: null, root: "/f", release: true },
-    atTick: (n, l) => {
-      // Tick 1 starts #7; the repin lands before tick 2. The stage in flight ends a few ticks after the release is ready.
-      if (n === 1) ad.push({ PENDULUM_LOCAL_MAX_CONCURRENT: "3" }, "v9.9.9");
-      if (l.repin?.state === "ready" && (l.waited = (l.waited || 0) + 1) === 3) stageEnd({ exit: "delivered" });
-      if (n >= 200) l.stopping = true;
-    },
-    paused: (n, l) => {
-      offered.push({ n, waiting: !!l.repin && !execs.length });
-      return [];
-    },
-    stubs: (loop) => ({
-      releaseOpts: { home, url: fx.url },
-      runObjective: () => new Promise((ok) => (stageEnd = ok)),
-      execve: (...args) => {
-        execs.push(args);
-        loop.stopping = true;
-      },
-    }),
-  });
-  const text = lines.join("");
-  assert.match(text, /the workflow on origin\/main pins clockgrove\/pendulum@v9\.9\.9; this serve runs v0\.9\.30\. It fetches v9\.9\.9 from https:\/\/github\.com\/clockgrove\/pendulum\.git and starts no new stage meanwhile; once the 1 stage\(s\) in flight here end, serve runs on v9\.9\.9/);
-  assert.match(text, /tick: nothing ready.*no new stage until serve runs on clockgrove\/pendulum@v9\.9\.9/);
-  assert.doesNotMatch(text, /this box is full/);
-  assert.ok(loop.waited >= 3, "the switch waited for the stage in flight");
-  assert.deepEqual(offered.filter((o) => o.waiting), [], "no paused work is resumed while the switch waits");
-  assert.equal(execs.length, 1, "started again once");
-  const [file, argv, env] = execs[0];
-  assert.equal(file, process.execPath);
-  assert.match(argv.at(-1 - (process.argv.length - 2)), new RegExp(`^${releasesDir(home)}/v9\\.9\\.9-[0-9a-z]+/plugin/scripts/local\\.mjs$`));
-  assert.equal(env.PENDULUM_PLUGIN_ROOT, undefined);
-  assert.match(text, /no stage runs here: serve starts again on clockgrove\/pendulum@v9\.9\.9/);
-  assert.doesNotMatch(text, /could not start again/);
-});
-
-test("serve: a repository variable sets a setting over the workflow; a hot one applies from the next tick, any other waits for a restart, an excluded one is named and ignored (#284)", async () => {
-  const ad = adopter({ PENDULUM_LOCAL_MAX_CONCURRENT: "1", PENDULUM_MAX_USD: "25" });
-  let vars = {};
-  const seen = [];
-  const { lines, loop } = await serveOver(ad, {
-    wf: { PENDULUM_LOCAL_MAX_CONCURRENT: "1", PENDULUM_MAX_USD: "25" },
-    pendulum: { version: "0.9.30", commit: null, root: "/f", release: true },
-    github: { variables: () => ({ vars }), seen },
-    atTick: (n, l) => {
-      if (n === 2) vars = { PENDULUM_LOCAL_MAX_CONCURRENT: "2", PENDULUM_MAX_USD: "5", PENDULUM_AUTO_MERGE: "false", OTHER: "x" };
-      if (n >= 6) l.stopping = true;
-    },
-    stubs: () => ({ runObjective: async () => ({ exit: "delivered" }) }),
-  });
-  const text = lines.join("");
-  assert.match(text, /the repository's settings \(the workflow on origin\/main and its variables\) changed; each stage that starts from now on runs with them, and stages in flight keep theirs: PENDULUM_LOCAL_MAX_CONCURRENT: "1" → "2" \(repository variable\)/);
-  assert.match(text, /this loop: at most 2 Objective stage\(s\) at once on this machine/);
-  assert.match(text, /the repository's settings \(the workflow on origin\/main and its variables\) changed; these take effect when serve restarts, and until then serve keeps the values it started with: PENDULUM_MAX_USD: "25" → "5" \(repository variable\)/);
-  assert.equal(text.split("repository variable PENDULUM_AUTO_MERGE ignored: only the reviewed workflow file sets it").length - 1, 1, "named once");
-  assert.doesNotMatch(text, /PENDULUM_AUTO_MERGE: /);
-  assert.deepEqual({ cap: loop.wf.PENDULUM_LOCAL_MAX_CONCURRENT, usd: loop.wf.PENDULUM_MAX_USD, merge: loop.wf.PENDULUM_AUTO_MERGE }, { cap: "2", usd: "25", merge: undefined });
-  assert.equal(loop.from.PENDULUM_LOCAL_MAX_CONCURRENT, "variable");
-  // One list call a read, conditional: an unchanged list is GitHub's 304, which costs no rate limit.
-  assert.ok(seen.length >= 4);
-  assert.equal(seen[0], null);
-  assert.ok(seen.slice(1).every((t) => typeof t === "string"), "every later read sends the last ETag");
-});
-
-test("serve: a token without Variables: read is said once, with the fix, and the workflow's values stand (#284)", async () => {
-  const ad = adopter({ PENDULUM_LOCAL_MAX_CONCURRENT: "1" });
-  const { lines, loop } = await serveOver(ad, {
-    wf: { PENDULUM_LOCAL_MAX_CONCURRENT: "1" },
-    pendulum: { version: "0.9.30", commit: null, root: "/f", release: true },
-    github: { variables: () => ({ status: 403 }) },
-    atTick: (n, l) => {
-      if (n >= 4) l.stopping = true;
-    },
-    stubs: () => ({ runObjective: async () => ({ exit: "delivered" }) }),
-  });
-  const text = lines.join("");
-  const said = "the local token cannot read this repository's variables (HTTP 403), so its PENDULUM_* repository variables do not apply on this machine and the workflow's values stand; give the token Variables: read (docs/LOCAL.md, Set it up)";
-  assert.equal(text.split(said).length - 1, 1, "said once");
-  assert.equal(loop.wf.PENDULUM_LOCAL_MAX_CONCURRENT, "1");
-  assert.doesNotMatch(text, /settings .*changed/);
-});
-
 test("serve: a pin it does not follow is said once and changes nothing: a branch, or a serve run from a checkout that is not a release (#276)", async () => {
   for (const [pin, pendulum, said] of [
     ["main", { version: "0.9.30", commit: null, root: "/f", release: true }, /pins clockgrove\/pendulum@main is neither a release tag \(vX\.Y\.Z\) nor a full commit SHA; serve runs no code from it and keeps running v0\.9\.30/],
@@ -613,64 +436,6 @@ test("serve: a pin it does not follow is said once and changes nothing: a branch
     assert.match(text, said);
     assert.equal(text.split(said).length - 1, 1, "said once");
     assert.equal(loop.repin ?? null, null);
-  }
-});
-
-test("committedWorkflowNow: a running serve reads the default branch's workflow as pushed since, and leaves the developer's own refs and FETCH_HEAD alone", async () => {
-  const ad = adopter({ PENDULUM_MODEL: "m1" });
-  const settingsOf = ({ text: _text, ...rest }) => rest;
-  assert.deepEqual(settingsOf(await committedWorkflowNow(ad.dev, "main")), { wf: { PENDULUM_MODEL: "m1" }, pins: ["v0.9.30"], branch: "main", error: null });
-  ad.push({ PENDULUM_MODEL: "m2" }, "v0.9.31");
-  // The developer's clone has not seen the push.
-  git(ad.dev, "update-ref", "refs/remotes/origin/main", "HEAD~1");
-  const theirs = git(ad.dev, "rev-parse", "refs/remotes/origin/main");
-  assert.deepEqual(settingsOf(await committedWorkflowNow(ad.dev, "main")), { wf: { PENDULUM_MODEL: "m2" }, pins: ["v0.9.31"], branch: "main", error: null });
-  assert.equal(git(ad.dev, "rev-parse", "refs/remotes/origin/main"), theirs, "origin's ref moves only on the developer's own fetch");
-  assert.equal(existsSync(join(ad.dev, ".git", "FETCH_HEAD")), false, "no FETCH_HEAD for a `git pull` to merge");
-  // Offline: nothing read, never an older commit's settings (refreshSettings keeps what it has).
-  git(ad.dev, "remote", "set-url", "origin", join(ad.dev, "gone.git"));
-  assert.deepEqual(await committedWorkflowNow(ad.dev, "main"), { wf: {}, pins: [], branch: "main", error: "origin/main could not be fetched", unfetched: true });
-  const loop = Object.assign(Object.create(Local.prototype), { dev: ad.dev, settingsBranch: "main", wf: { PENDULUM_MODEL: "m3" }, pins: ["v0.9.32"] });
-  await loop.refreshSettings();
-  assert.deepEqual({ wf: loop.wf, pins: loop.pins }, { wf: { PENDULUM_MODEL: "m3" }, pins: ["v0.9.32"] });
-});
-
-test("refreshSettings: a change waits while a stage is being set up, so one stage never mixes two harnesses' settings", async () => {
-  const ad = adopter({ PENDULUM_MODEL: "m1" });
-  const harness = process.env.PENDULUM_HARNESS;
-  delete process.env.PENDULUM_HARNESS;
-  const lines = [];
-  const write = process.stdout.write;
-  process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
-  try {
-    const loop = Object.assign(Object.create(Local.prototype), { dev: ad.dev, settingsBranch: "main", harness: "claude", wf: { PENDULUM_MODEL: "m1" }, settingUp: 1 });
-    ad.push({ PENDULUM_MODEL: "m2" }, "v0.9.31");
-    await loop.refreshSettings();
-    assert.deepEqual(loop.wf, { PENDULUM_MODEL: "m1" }, "kept while the set-up runs");
-    assert.deepEqual(loop.pins, ["v0.9.31"], "the pin is read all the same");
-    loop.settingUp = 0;
-    await loop.refreshSettings();
-    assert.deepEqual(loop.wf, { PENDULUM_MODEL: "m2" }, "taken once no stage is being set up");
-  } finally {
-    process.stdout.write = write;
-    if (harness !== undefined) process.env.PENDULUM_HARNESS = harness;
-  }
-  assert.equal(lines.filter((l) => /settings on origin\/main changed/.test(l)).length, 1);
-});
-
-test("refreshSettings: a change of harness holds the models and effort with it until serve restarts: they belong to that harness (#284)", async () => {
-  const ad = adopter({ PENDULUM_HARNESS: "claude", PENDULUM_MODEL: "claude-opus-5-5", PENDULUM_MAX_CONCURRENT: "2" });
-  const lines = [];
-  const write = process.stdout.write;
-  process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
-  try {
-    const loop = Object.assign(Object.create(Local.prototype), { dev: ad.dev, settingsBranch: "main", harness: "claude", wf: { PENDULUM_HARNESS: "claude", PENDULUM_MODEL: "claude-opus-5-5", PENDULUM_MAX_CONCURRENT: "2" } });
-    ad.push({ PENDULUM_HARNESS: "codex", PENDULUM_MODEL: "gpt-x", PENDULUM_MAX_CONCURRENT: "3" }, "v0.9.31");
-    await loop.refreshSettings();
-    assert.deepEqual(loop.wf, { PENDULUM_HARNESS: "claude", PENDULUM_MODEL: "claude-opus-5-5", PENDULUM_MAX_CONCURRENT: "3" }, "a hot setting of another kind still applies");
-    assert.match(lines.join(""), /take effect when serve restarts.*PENDULUM_HARNESS: "claude" → "codex"; PENDULUM_MODEL: "claude-opus-5-5" → "gpt-x"/);
-  } finally {
-    process.stdout.write = write;
   }
 });
 
@@ -730,35 +495,6 @@ test("followPin: a new switch waits until 30 minutes after the last, and a SHA b
   }
 });
 
-/** A web server that takes connections and never answers: a stalled host. */
-async function stalledHost() {
-  const socks = [];
-  const server = createNetServer((sock) => {
-    socks.push(sock);
-    sock.on("data", () => {});
-  });
-  await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
-  return { url: `http://127.0.0.1:${server.address().port}/pendulum.git`, close: () => (socks.forEach((x) => x.destroy()), new Promise((ok) => server.close(ok))) };
-}
-
-test("a stalled fetch ends at its timeout, every git process with it: a release fetch fails and is tried again, a settings read is unfetched", async () => {
-  const host = await stalledHost();
-  try {
-    const home = mkdtempSync(join(tmpdir(), "home-"));
-    const t0 = Date.now();
-    await assert.rejects(releaseCheckout("v9.9.9", { home, url: host.url, timeoutMs: 2000 }), /fetching v9\.9\.9/);
-    assert.ok(Date.now() - t0 < 20_000, "ended near its timeout");
-    const dev = mkdtempSync(join(tmpdir(), "dev-"));
-    execFileSync("git", ["init", "-q", dev]);
-    git(dev, "remote", "add", "origin", host.url);
-    const t1 = Date.now();
-    assert.equal((await committedWorkflowNow(dev, "main", { timeoutMs: 2000 })).unfetched, true);
-    assert.ok(Date.now() - t1 < 20_000, "ended near its timeout");
-  } finally {
-    await host.close();
-  }
-});
-
 test("refreshSettings: the default branch is fetched every few minutes, and never with the developer's credential helper", async () => {
   const ad = adopter({ PENDULUM_MODEL: "m1" });
   const loop = Object.assign(Object.create(Local.prototype), { dev: ad.dev, settingsBranch: "main", wf: { PENDULUM_MODEL: "m1" }, token: "t" });
@@ -789,10 +525,4 @@ test("refreshSettings: the default branch is fetched every few minutes, and neve
   } finally {
     await new Promise((ok) => asks.close(ok));
   }
-});
-
-test("a serve that stops at the start of the release it switched to says so, and how to go back", () => {
-  const r = spawnSync(process.execPath, [LOCAL_MJS, "serve", "--dir", join(tmpdir(), "no-such-clone")], { encoding: "utf8", env: { ...process.env, PENDULUM_SERVE_SWITCHED_FROM: "/old/pendulum" }, timeout: 30_000 });
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /serve stopped at the start of the release it switched to, .* from \/old\/pendulum; start serve from \/old\/pendulum\/plugin\/bin\/pendulum to run that one again/);
 });

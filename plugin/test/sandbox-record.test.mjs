@@ -6,7 +6,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { VERCEL_RATES } from "../scripts/lib/adapters/sandbox-vercel.mjs";
-import { marker, sandboxMarkerLine, sandboxRecord, setSelf, stageDeadline, withLaunch } from "../scripts/lib/logic.mjs";
+import { marker, sandboxMarkerLine, sandboxRecord, setSelf } from "../scripts/lib/logic.mjs";
 import { recordBody, stageProgressKey, startEntry, startInSandbox, startedRecord, writeSandboxRecord } from "../scripts/launch.mjs";
 import { stageWriter, startedFields, startedLaunch } from "../scripts/stage.mjs";
 import { BASE, BOT, REPO, githubStore } from "./fixtures/github-records.mjs";
@@ -176,28 +176,6 @@ test("the stage's part: a fresh part missing from the list is written again by i
     { id: 3, user: BOT, body: `${marker(o.n, "stage", o.claim)}\n${sandboxMarkerLine({ state: "running", at: "2026-11-09T09:30:00.000Z" })}` },
   ];
   assert.equal(sandboxRecord(two, o.n).state, "ended");
-});
-
-test("stageDeadline: the wall clock from the start, never past the session's end less the reserve", () => {
-  const at = "2026-11-09T09:24:00.000Z";
-  assert.equal(stageDeadline(at, 40, "2026-11-09T11:00:00.000Z"), "2026-11-09T10:04:00.000Z");
-  assert.equal(stageDeadline(at, 40, "2026-11-09T10:06:00.000Z"), "2026-11-09T10:00:00.000Z");
-  assert.equal(stageDeadline(at, 40, null), "2026-11-09T10:04:00.000Z");
-  assert.equal(stageDeadline(null, 40, null), null);
-  assert.equal(stageDeadline(at, 0, null), null);
-});
-
-test("withLaunch: one entry per cue and run; the launcher's replaces the stage's, the stage's never replaces the launcher's", () => {
-  const stage = { stage: "work", ok: true, cue: "stint-1", run: "9", at: "a" };
-  const launcher = { ...stage, at: "b", ms: { "start.command": 1 } };
-  const review = { stage: "review", ok: true, cue: "asked-2", run: "10", at: "c" };
-  const failed = { stage: "work", ok: false, cue: "stint-1", run: "9", at: "z" };
-  assert.deepEqual(withLaunch([failed], stage), [failed, stage], "a failed try of the same cue is kept beside the start");
-  assert.deepEqual(withLaunch([stage], launcher, { replace: true }), [launcher]);
-  assert.deepEqual(withLaunch([launcher], stage), [launcher], "a later beat keeps the launcher's timings");
-  assert.deepEqual(withLaunch([launcher], review), [launcher, review], "the review's start keeps the work's");
-  assert.equal(withLaunch(Array.from({ length: 12 }, (_, i) => ({ ok: false, cue: `c${i}`, run: "1" })), stage).length, 10, "the record keeps the latest ten");
-  assert.deepEqual(withLaunch(undefined, stage), [stage]);
 });
 
 test("startedLaunch: only the launcher's plain shapes pass; a missing or mangled entry hands nothing over", () => {

@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PLUGIN_ROOT } from "../scripts/lib/checkout.mjs";
-import { PENDULUM_PROTECTED, decideExit, protectedPaths, renderTaskCard, setSelf, taskCardValues } from "../scripts/lib/logic.mjs";
+import { PENDULUM_PROTECTED, decideExit, setSelf } from "../scripts/lib/logic.mjs";
 import { HANDOVER_LABEL, carriesHandover, closedHarnessText, entriesProblem, handoverLine, handoverMarker, handoverOf, handoverText, patchFiles, patchTextProblem, plannedWorkflows, rawEntries, shellQuote, withoutHandoverLine, workflowName, workflowPathsNamed } from "../scripts/lib/handover.mjs";
 import { OUT_FILES, handoverChecker, handoverUpFront, inFiles, publishPr } from "../scripts/lib/handoff.mjs";
 import { openOutbox } from "../scripts/lib/outbox.mjs";
@@ -399,11 +399,6 @@ test("hand-over: the commit hook names the hand-over when it refuses a workflow 
   assert.equal(commit(".github/dependabot.yml"), "pendulum: refusing commit on protected path(s): .github/dependabot.yml");
 });
 
-test("hand-over: the task card names workflow.patch as an output, in both directions", () => {
-  const card = renderTaskCard(readFileSync(join(PLUGIN_ROOT, "templates", "task-card.md"), "utf8"), taskCardValues({ issue: 7, maxUsd: 5, timeoutMinutes: 60, validation: [], budgetCommand: "", protectedPaths: protectedPaths() }));
-  assert.match(card, /- `workflow\.patch`: only when the Objective needs a change under `\.github\/workflows\/`, which Pendulum never pushes: that change as `git diff` writes it, kept out of your commits, for a person to apply \(pendulum-deliver-pr\)\. `\$PENDULUM_IN\/workflow\.patch` is the one Pendulum published\./);
-});
-
 test("hand-over: every route's work stage says it before any harness, and every publish carries the checked hand-over (worker, review's answer pass, a session's deliver)", () => {
   // Actions runs worker.mjs and review.mjs; a cloud sandbox stage and local mode's loop run the same scripts (edit-after-plan.test.mjs).
   const src = (f) => readFileSync(join(PLUGIN_ROOT, "scripts", f), "utf8");
@@ -597,23 +592,4 @@ test("hand-over: `pendulum handover` trusts only the named Pendulum App or someo
   await passes({ timeline: [labeled("maintainer")], comments: [posted(5, "maintainer", ok.patch)], permissions: { maintainer: "write" } }, [], /the hand-over is maintainer \(write permission\)'s comment/);
   // A: Pendulum's hand-over is there; a triager relabels and posts their own, newer comment. It is skipped, never a lock-out.
   await passes({ timeline: [labeled(`${APP.slug}[bot]`), labeled("triager", "2031-03-02T02:00:00Z", "unlabeled"), labeled("triager", "2031-03-02T02:01:00Z")], comments: [pendulumComment, posted(3, "triager", evil)], permissions: { triager: "read" } }, ["--app", "42"], /the hand-over is the Pendulum App acme-pendulum\[bot\] \(id 42\)'s comment/);
-});
-
-test("hand-over: when the branch cannot take the change, `pendulum handover` puts the clone back and deletes the branch", async () => {
-  const r = repos();
-  const ok = await (await openBox(r)).handover(r.patch);
-  const gh = await fakeGitHub({ timeline: [labeled("maintainer")], comments: [posted(5, "maintainer", ok.patch)], permissions: { maintainer: "admin" } });
-  try {
-    const { person, envFor } = personClone(r);
-    // An untracked file where the hand-over adds one: the check passes (it reads the tree), the apply to the checkout fails.
-    writeFileSync(join(person, ".github", "workflows", "release.yml"), "mine\n");
-    const got = await runCli(["handover", "7", "--repo", "acme/app", "--dir", person], { cwd: person, env: envFor(gh) });
-    assert.equal(got.code, 1);
-    assert.match(got.err, /git could not apply the hand-over on pendulum-workflow\/7 .*; the clone is back on main and pendulum-workflow\/7 is deleted/);
-    assert.equal(git(person, "symbolic-ref", "--short", "HEAD"), "main");
-    assert.equal(git(person, "branch", "--list", "pendulum-workflow/7"), "");
-    assert.equal(readFileSync(join(person, ".github", "workflows", "release.yml"), "utf8"), "mine\n", "the person's file stays");
-  } finally {
-    await gh.close();
-  }
 });

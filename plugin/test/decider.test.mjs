@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { deciderKind, openDecider, settleDecisionCosts } from "../scripts/lib/decider.mjs";
-import { NEVER_SENT, answerCost, gatewayDecider } from "../scripts/lib/adapters/decider-ai-gateway.mjs";
+import { DECIDE_RETRY, NEVER_SENT, answerCost, gatewayDecider } from "../scripts/lib/adapters/decider-ai-gateway.mjs";
 import { decisionPrompt, parseAnswer } from "../scripts/lib/adapters/decider-harness.mjs";
 import { DECISION_RUN, DECISION_SH, decisionLaunch, decisionSpend, openPasses, carveDriftReserve, driftReserve, meterPass, passMaxUsd, reservedSpend, runDecision, stagePasses, stageSpendNow } from "../scripts/lib/harness.mjs";
 import { cacheSummary } from "../scripts/lib/usage.mjs";
@@ -22,6 +22,9 @@ import { setAgent } from "../scripts/lib/proc.mjs";
 import { answerDecider } from "../scripts/review.mjs";
 import { FINDING_QUESTION, openFindingCheck } from "../scripts/lib/finding-check.mjs";
 import { KEPT_QUESTION, openKeptCheck } from "../scripts/lib/kept.mjs";
+
+// The gateway's pause before its one retry is taken at once: the tries are what these tests count, not the 2 s.
+DECIDE_RETRY.sleep = async () => {};
 
 const fixture = (name) => readFileSync(join(import.meta.dirname, "fixtures", name), "utf8");
 const LIMIT_RUN = fixture("claude-2.1.323-usage-limit.jsonl");

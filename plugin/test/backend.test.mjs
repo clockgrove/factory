@@ -600,7 +600,7 @@ test("the sandboxes' scan (#154): srt, the outer sandbox and Claude Code (from t
 
 test("Copilot's outer probe: names each missing tool its sandbox needs, and slirp4netns's own error when it fails", { skip: !existsSync("/dev/net/tun") && "no /dev/net/tun here" }, async () => {
   const { COPILOT_OUTER_PROBE, OUTER_PROBE_WAIT_S } = await import("../scripts/lib/local.mjs");
-  const { mkdtempSync, mkdirSync, writeFileSync: write, symlinkSync, renameSync } = await import("node:fs");
+  const { mkdtempSync, mkdirSync, readFileSync, writeFileSync: write, symlinkSync, renameSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { spawnSync } = await import("node:child_process");
   const { join } = await import("node:path");
@@ -631,14 +631,16 @@ test("Copilot's outer probe: names each missing tool its sandbox needs, and slir
   const u = run();
   assert.equal(u.status, 5);
   assert.match(u.stderr.trim(), /^unshare cannot make a user and network namespace mapping the user/);
-  // #421: slirp4netns slow to configure (a loaded box: 4 s, past any fixed poll) is waited for on its --ready-fd, and
-  // the address is then checked once.
+  // #421: slirp4netns slow to configure (a loaded box) is waited for on its --ready-fd, and the address is then checked
+  // once: a fixed poll (every 0.3 s) looks more than once in its second, or gives up before it.
   stub("unshare", unshare);
-  stub("slirp4netns", 'fd=""; for a do case "$a" in --ready-fd=*) fd=${a#--ready-fd=};; esac; done\nsleep 4\n: > "$TMPDIR/configured"\n[ -n "$fd" ] && eval "printf 1 >&$fd; exec $fd>&-"\nexec sleep 60');
-  stub("nsenter", '[ -f "$TMPDIR/configured" ] && echo "2: tap0    inet 10.0.2.100/24 scope global tap0"');
+  stub("slirp4netns", 'fd=""; for a do case "$a" in --ready-fd=*) fd=${a#--ready-fd=};; esac; done\nsleep 1\n: > "$TMPDIR/configured"\n[ -n "$fd" ] && eval "printf 1 >&$fd; exec $fd>&-"\nexec sleep 60');
+  const looks = join(dir, "nsenter.looks");
+  stub("nsenter", `echo look >> "${looks}"\n[ -f "$TMPDIR/configured" ] && echo "2: tap0    inet 10.0.2.100/24 scope global tap0"`);
   const slow = run();
   assert.equal(slow.status, 0, slow.stderr);
   assert.equal(slow.stdout, "ok\n");
+  assert.equal(readFileSync(looks, "utf8"), "look\n", "the address is checked once, once it is ready");
   // One that exits without configuring closes the descriptor unwritten: a no at once, with its own error.
   stub("slirp4netns", "echo 'cannot open tap0' >&2\nexit 1");
   const t = Date.now();
@@ -647,10 +649,11 @@ test("Copilot's outer probe: names each missing tool its sandbox needs, and slir
   assert.equal(failed.stderr.trim(), "slirp4netns did not configure its interface: cannot open tap0");
   assert.ok(Date.now() - t < 3_000, "no wait on a clock");
   // #421: one that hangs (neither writes its --ready-fd nor exits) is a no once the bounded wait ends, never a wait as
-  // long as the caller's own limit; `timeout` here keeps the probe's bound at one second.
+  // long as the caller's own limit; `timeout` here keeps the probe's bound on slirp4netns's ready pipe at a tenth of a
+  // second.
   const real = spawnSync("sh", ["-c", "command -v timeout"], { encoding: "utf8" }).stdout.trim();
   renameSync(join(bin, "timeout"), join(dir, "timeout.real"));
-  stub("timeout", `[ "$1" = ${OUTER_PROBE_WAIT_S} ] || { echo "timeout $1, not the probe's bound" >&2; exit 9; }\nshift\nexec ${real} 1 "$@"`);
+  stub("timeout", `[ "$1" = ${OUTER_PROBE_WAIT_S} ] || { echo "timeout $1, not the probe's bound" >&2; exit 9; }\nshift\ncase "$*" in *slirp.ready*) exec ${real} 0.1 "$@";; esac\nexec ${real} ${OUTER_PROBE_WAIT_S} "$@"`);
   stub("slirp4netns", "exec sleep 60");
   const h = Date.now();
   const hung = run();

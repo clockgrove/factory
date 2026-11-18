@@ -408,9 +408,10 @@ test("outbox: a push while the remote's host does not answer waits for it and go
       try {
         waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
         // Four dropped connections: one more than the client's three retries allow, unless the outage's own is no try.
+        // The hook lets go of the push's output before it waits out its kill, so git sees the drop at once.
         const drops = join(root, "drops");
         writeFileSync(drops, "x\n".repeat(4));
-        writeFileSync(join(origin, "hooks", "pre-receive"), `#!/bin/sh\nif [ -s "${drops}" ]; then sed -i 1d "${drops}"; kill -9 $PPID; sleep 1; exit 1; fi\nexit 0\n`, { mode: 0o755 });
+        writeFileSync(join(origin, "hooks", "pre-receive"), `#!/bin/sh\nif [ -s "${drops}" ]; then sed -i 1d "${drops}"; kill -9 $PPID; exec >/dev/null 2>&1; sleep 1; exit 1; fi\nexit 0\n`, { mode: 0o755 });
         assert.equal(await box.push(), true, box.error);
         assert.equal(run(origin, "rev-parse", "pendulum/1"), run(work, "rev-parse", "HEAD"));
         assert.equal(netLines(lines).length, 2);

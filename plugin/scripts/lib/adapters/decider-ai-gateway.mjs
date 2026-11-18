@@ -113,8 +113,11 @@ export const DECISION_UNKNOWN = Object.freeze({ noCost: "decision-no-cost", look
 // the micro-dollar per call, so a sum of many is not inflated (#565).
 export const roundCallUsd = (n) => Math.round(n * 1e10) / 1e10;
 
+/** The pause before the one retry, 2 s; `sleep` is its clock, which tests replace. */
+export const DECIDE_RETRY = { ms: 2_000, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
+
 /**
- * One retry on a 429, a 5xx or a network error. The verdict comes back as soon as the gateway answers; the answer
+ * One retry on a 429, a 5xx or a network error, after DECIDE_RETRY's pause. The verdict comes back as soon as the gateway answers; the answer
  * carries `spend`: `calls` (the tries that reached the gateway: one that never left this machine, or that `signal` ended
  * before it was sent, costs nothing and is no call), `model`, `started`, `ended`, and `settled`, a promise (never
  * rejected) of what they cost in usage.mjs's unknown-spend shape: `usd` the known dollars (null when none was priced),
@@ -169,7 +172,7 @@ export function gatewayDecider({ key, model, endpoint = GATEWAY_DECISIONS, origi
           error = "unavailable";
         }
         if (signal?.aborted) break;
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
+        if (attempt < 2) await DECIDE_RETRY.sleep(DECIDE_RETRY.ms);
       }
       return done({ verdict: null, confidence: null, error: DECIDER_ERRORS.includes(error) ? error : "vendor" });
     },

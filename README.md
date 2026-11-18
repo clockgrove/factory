@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/clockgrove/pendulum/releases"><img src="https://img.shields.io/github/v/release/clockgrove/pendulum" alt="Release"></a>
-  <a href="https://github.com/clockgrove/pendulum/actions/workflows/quality.yml"><img src="https://github.com/clockgrove/pendulum/actions/workflows/quality.yml/badge.svg" alt="Quality"></a>
+  <a href="https://github.com/clockgrove/pendulum/actions/workflows/quality.yml?query=event%3Amerge_group"><img src="https://github.com/clockgrove/pendulum/actions/workflows/quality.yml/badge.svg?event=merge_group" alt="Quality"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/clockgrove/pendulum" alt="License: MIT"></a>
 </p>
 

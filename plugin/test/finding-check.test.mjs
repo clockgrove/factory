@@ -272,8 +272,11 @@ test("#368, #516: every verdict that resolves a finding counts only at the confi
 
 test("#368: only a reply by someone who can push answers Pendulum's finding; a stranger's does not", async () => {
   const stranger = { id: 150, in_reply_to_id: 100, user: { login: "mallory", type: "User" }, author_association: "NONE", body: "looks fine to me" };
-  const gh = github({ lineComments: [root(100, "src/a.ts", 5, "FINDING-A"), stranger] });
+  const gh = github({ lineComments: [root(100, "src/a.ts", 5, "FINDING-A"), stranger], writers: ["kirk"] });
   await withGitHub(gh, async () => {
+    assert.deepEqual((await list()).map((c) => c.id), [100]);
+    // #605: an organization member whose permission reads as read-only answers nothing either.
+    gh.state.lineComments.push({ id: 152, in_reply_to_id: 100, user: { login: "viewer", type: "User" }, author_association: "MEMBER", body: "Fine as is." });
     assert.deepEqual((await list()).map((c) => c.id), [100]);
     gh.state.lineComments.push({ id: 151, in_reply_to_id: 100, user: { login: "kirk", type: "User" }, author_association: "MEMBER", body: "Keep it: decided." });
     assert.deepEqual(await list(), []);
@@ -960,7 +963,7 @@ test("#516: a finding in the review body gets the test's evidence in its resolve
 });
 
 test("#516: Pendulum's evidence is never a person's answer: a thread a maintainer reopens stays open, and one whose resolve failed after the evidence went up is not resolved by it", async () => {
-  const gh = github({ lineComments: [root(100, "src/a.ts", 5, "FINDING-A"), root(200, "src/b.ts", 9, "FINDING-B")] });
+  const gh = github({ lineComments: [root(100, "src/a.ts", 5, "FINDING-A"), root(200, "src/b.ts", 9, "FINDING-B")], writers: ["kirk"] });
   await withGitHub(gh, async () => {
     const replies = JSON.stringify([{ id: 100, body: "Fixed in abc1234.", fixed: true }]);
     await postReplies(REPO, 12, 7, replies, [100], { token: "t" });

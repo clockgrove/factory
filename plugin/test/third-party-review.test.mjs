@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { RETRY, resolvePendulumThreads, reviewThreads } from "../scripts/lib/github.mjs";
+import { RETRY, listComments, resolvePendulumThreads, reviewThreads } from "../scripts/lib/github.mjs";
 import { inFiles, postReplies } from "../scripts/lib/handoff.mjs";
 import { logTo, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { selfLogin, setSelf } from "../scripts/lib/logic.mjs";
@@ -24,6 +24,9 @@ const personReply = real.comments.find((c) => c.in_reply_to_id === greptileRoot.
 const greptileReview = real.reviews.find((r) => r.id === greptileRoot.pull_request_review_id);
 const repo = { full: "o/r", owner: "o", name: "r" };
 const HEAD = greptileReview.commit_id;
+
+// The people who can push to o/r: the maintainer who replied on #271, and the maintainers the tests name.
+const WRITERS = [personReply.user.login, "kirk", "dana"];
 
 const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 
@@ -82,6 +85,8 @@ function github({ reviews = [], lineComments = [], threads = [], comments = [], 
       }
       return json(200, { data: { repository: { pullRequest: { reviewThreads: { nodes: threads } } } } });
     }
+    // Each person's permission: the maintainers in WRITERS can write, anyone else reads (#605).
+    if (method === "GET" && (m = /\/collaborators\/([^/]+)\/permission$/.exec(u))) return json(200, { permission: WRITERS.includes(decodeURIComponent(m[1])) ? "write" : "read" });
     return json(404, { message: "Not Found" });
   };
   return { fetch, asked, posts, comments, threads, state, reads: () => reads, writes: () => asked.filter((a) => !a.startsWith("GET ")) };
@@ -954,7 +959,8 @@ test("#311: a writer's record counts on every route (a local loop writes as its 
   const gh = github({ reviews: [], comments: [theirs], clock: () => clock.t });
   await withGitHub(gh, async () => {
     assert.deepEqual(waitOf([stranger], 7), null, "anyone else's is no record");
-    const w = waitOf([theirs], 7);
+    // Read as every route reads it: kirk's MEMBER association counts once kirk's permission reads as write (#605).
+    const w = waitOf(await listComments(repo, 7, { token: "t" }), 7);
     assert.deepEqual([w.id, w.own], [41, false]);
     // The dispatcher (the Action's, say) acts on it.
     const pr = { number: 7, state: "open", draft: false, head: { sha: HEAD }, labels: [] };

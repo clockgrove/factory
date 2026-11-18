@@ -2387,20 +2387,32 @@ export function updateBranchHead(commit, recorded, secondOnDefault) {
 
 export const marker = (issue, kind, id = "") => `<!-- pendulum:${issue}:${kind}${id ? `:${id}` : ""} -->`;
 
-/** People who can push; on a public repository anyone else may still comment and review. */
-export const PUSH_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+/**
+ * The author associations that say only that a person belongs to the repository's organization or was added to it: an
+ * organization member with read-only base permission, and a read- or triage-role collaborator, have one without write
+ * access. Such an author counts as someone who can push only once that is verified (verifiedWriter). The repository's
+ * owner (OWNER) always can.
+ */
+export const MEMBER_ASSOCIATIONS = new Set(["MEMBER", "COLLABORATOR"]);
 /**
  * The writers of the one repository this process works on, by login (primeWriters in github.mjs fills and refreshes
  * it). author_association alone is not enough: an App's token sees an organization member whose membership is private
  * as CONTRIBUTOR or NONE. Set for another repository, the list starts over, so one repository's writers never count in
- * another.
+ * another (a process serves one repository; one that read another's comments would read this list again). `checks`: the
+ * permission reads of MEMBER and COLLABORATOR authors the writer list does not name (github.mjs verifyAuthors), kept for
+ * one window of VERIFIED_TTL_MS from `since`, whatever becomes of the writer list's own reads: `verified`, each login's
+ * answer; `failed`, when a login's read last failed; `reads`, how many were made; `over`, the logins refused past
+ * AUTHOR_READS_MAX. The window then starts over, so a permission revoked meanwhile stops counting.
  */
-let WRITERS = { repo: null, logins: new Set(), maintainers: new Set(), unpinned: [] };
+const freshChecks = () => ({ since: Date.now(), verified: new Map(), failed: new Map(), reads: 0, over: new Set() });
+const freshWriters = (repo) => ({ repo, listed: false, logins: new Set(), maintainers: new Set(), unpinned: [], checks: freshChecks() });
+let WRITERS = freshWriters(null);
 // GitHub logins are unique ignoring case, so they are compared lowercased; a leading @ is dropped.
 export const loginKey = (l) => String(l ?? "").trim().replace(/^@/, "").toLowerCase();
 const loginSet = (logins) => new Set((logins || []).map(loginKey).filter(Boolean));
 export const setWriters = (repoFull, logins) => {
-  WRITERS = { repo: repoFull, logins: loginSet(logins), maintainers: WRITERS.repo === repoFull ? WRITERS.maintainers : new Set(), unpinned: WRITERS.repo === repoFull ? WRITERS.unpinned : [] };
+  const same = WRITERS.repo === repoFull;
+  WRITERS = { ...freshWriters(repoFull), listed: true, logins: loginSet(logins), ...(same ? { maintainers: WRITERS.maintainers, unpinned: WRITERS.unpinned, checks: WRITERS.checks } : {}) };
 };
 /** A maintainers entry as `{login, id}`: `login#id` pins the account by its numeric id; a bare login has id null. */
 export function parseMaintainer(entry) {
@@ -2415,7 +2427,7 @@ export function parseMaintainer(entry) {
  * A bare login is trusted for nothing (doctor names the `login#id` to write).
  */
 export const setMaintainers = (repoFull, entries) => {
-  if (WRITERS.repo !== repoFull) WRITERS = { repo: repoFull, logins: new Set() };
+  if (WRITERS.repo !== repoFull) WRITERS = freshWriters(repoFull);
   const parsed = (entries || []).map(parseMaintainer).filter(Boolean);
   WRITERS.maintainers = new Set(parsed.filter((m) => m.id).map((m) => m.id));
   WRITERS.unpinned = parsed.filter((m) => !m.id).map((m) => m.login);
@@ -2424,13 +2436,89 @@ export const setMaintainers = (repoFull, entries) => {
 export const unpinnedMaintainers = () => [...(WRITERS.unpinned || [])];
 /** The repository the writer list is for: a process that serves another repository reads it again for that one. */
 export const writersRepo = () => WRITERS.repo;
+/** Whether a writer list read is in memory for writersRepo (setWriters), not only maintainers or permission reads. */
+export const writersListed = () => WRITERS.listed;
 /** Whether this login is on the writer list (true), or unknown (null). The writer list is never complete, so never false. */
 export const knownWriter = (login) => (login && WRITERS.logins?.has(loginKey(login)) ? true : null);
 /** Whether this user is one of the workflow's maintainers, by numeric id. */
 export const pinnedMaintainer = (user) => Number.isInteger(user?.id) && !!WRITERS.maintainers?.has(user.id);
 
-/** A person who can push: by the association the reader sees, the writer list, or the workflow's pinned maintainers. */
-export const pushAuthor = (item) => PUSH_ASSOCIATIONS.has(item?.author_association) || knownWriter(item?.user?.login) === true || pinnedMaintainer(item?.user);
+/** How long a permission read's answer counts: the window of `checks` (freshWriters), which AUTHOR_READS_MAX also bounds. */
+export const VERIFIED_TTL_MS = 10 * 60_000;
+/** How long after a failed permission read the login is not read again: one flapping login costs a read a minute at most. */
+export const FAILED_READ_MS = 60_000;
+/** The most permission reads verifyAuthors makes per window: past it, an author it would read is not trusted. */
+export const AUTHOR_READS_MAX = 30;
+/** The permission reads of this window, for `repoFull` when given (another repository's list starts over). */
+const checksNow = (repoFull) => {
+  if (repoFull !== undefined && WRITERS.repo !== repoFull) WRITERS = freshWriters(repoFull);
+  if (Date.now() - WRITERS.checks.since >= VERIFIED_TTL_MS) WRITERS.checks = freshChecks();
+  return WRITERS.checks;
+};
+/**
+ * Whether a permission read in this window found this login able to push to the writer list's repository (true), unable
+ * (false), or no read answered for it (null): never read, read in an earlier window, or the read failed, which trusts
+ * nobody.
+ */
+export const verifiedWriter = (login) => (login ? (checksNow().verified.get(loginKey(login)) ?? null) : null);
+/** Record a permission read's answer for `login` on `repoFull` (github.mjs verifyAuthors, session.mjs objectiveDecisions). */
+export const setVerified = (repoFull, login, canPush) => {
+  const checks = checksNow(repoFull);
+  if (!loginKey(login)) return;
+  checks.verified.set(loginKey(login), canPush === true);
+  checks.failed.delete(loginKey(login));
+};
+/** Record that `login`'s permission read on `repoFull` failed now: it is not read again for FAILED_READ_MS. */
+export const setReadFailed = (repoFull, login) => {
+  if (loginKey(login)) checksNow(repoFull).failed.set(loginKey(login), Date.now());
+};
+/**
+ * Take one of the permission reads AUTHOR_READS_MAX allows this window on `repoFull`, for `login`: true; else "over" the
+ * first time this login is refused in the window (the caller says so once), false after.
+ */
+export const takeAuthorRead = (repoFull, login) => {
+  const checks = checksNow(repoFull);
+  if (checks.reads < AUTHOR_READS_MAX) {
+    checks.reads += 1;
+    return true;
+  }
+  if (checks.over.has(loginKey(login))) return false;
+  checks.over.add(loginKey(login));
+  return "over";
+};
+/**
+ * The logins among `items` (comments, reviews, timeline events on `repoFull`: the author is `user`, else `actor`) whose
+ * push access only a permission read can tell: a MEMBER or COLLABORATOR author that is not Pendulum itself, not on the
+ * writer list, not a pinned maintainer, not read yet this window, and whose read did not fail in the last
+ * FAILED_READ_MS. Each once, lowercased.
+ */
+export function unverifiedAuthors(repoFull, items) {
+  const checks = checksNow(repoFull);
+  const out = new Set();
+  for (const item of items || []) {
+    const user = item?.user ?? item?.actor;
+    const key = loginKey(user?.login);
+    if (!key || !MEMBER_ASSOCIATIONS.has(item?.author_association)) continue;
+    if (isSelf({ user }) || knownWriter(key) || pinnedMaintainer(user) || checks.verified.has(key)) continue;
+    if (Date.now() - (checks.failed.get(key) ?? -Infinity) < FAILED_READ_MS) continue;
+    out.add(key);
+  }
+  return [...out];
+}
+
+/**
+ * A person who can push: the repository's owner by association, on the writer list, one of the workflow's pinned
+ * maintainers, or one a permission read verified (a MEMBER or COLLABORATOR association alone is not enough:
+ * MEMBER_ASSOCIATIONS).
+ */
+export const pushAuthor = (item) => item?.author_association === "OWNER" || knownWriter(item?.user?.login) === true || pinnedMaintainer(item?.user) || verifiedWriter(item?.user?.login) === true;
+/**
+ * Whether an item's author can push by what GitHub shows of them alone: pushAuthor, or a MEMBER or COLLABORATOR
+ * association, unverified. Only for reading spend and stage records into a summary (the finish card, finish-card.mjs,
+ * and the report, report.mjs, which reads the same records as the card and no permission per author): neither acts on
+ * what it reads. Never for a decision Pendulum acts on.
+ */
+export const claimedPushAuthor = (item) => MEMBER_ASSOCIATIONS.has(item?.author_association) || pushAuthor(item);
 
 /**
  * The login Pendulum itself writes as in this process: the App's `<slug>[bot]` on Actions, the token's owner in local

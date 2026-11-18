@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { BACKENDS, backend } from "../scripts/lib/backend.mjs";
-import { setSelf, trustedAuthor } from "../scripts/lib/logic.mjs";
+import { setSelf, setVerified, setWriters, trustedAuthor } from "../scripts/lib/logic.mjs";
 
 const issue = (...labels) => ({ labels: labels.map((name) => ({ name })) });
 
@@ -61,7 +61,13 @@ test("trustedAuthor: Pendulum acts on a marker only from its own login or someon
   assert.equal(trustedAuthor({ user: { type: "Bot", login: "github-actions[bot]" }, author_association: "NONE" }), false, "the job token's comments forge nothing");
   assert.equal(trustedAuthor({ user: { type: "Bot", login: "other-app[bot]" }, author_association: "NONE" }), false);
   setSelf(null);
-  for (const a of ["OWNER", "MEMBER", "COLLABORATOR"]) assert.equal(trustedAuthor({ user: { type: "User" }, author_association: a }), true);
+  assert.equal(trustedAuthor({ user: { type: "User", login: "owner" }, author_association: "OWNER" }), true);
+  // #605: a MEMBER or COLLABORATOR can be read-only; only a verified write permission makes one a writer.
+  setWriters("acme/app", []);
+  for (const a of ["MEMBER", "COLLABORATOR"]) assert.equal(trustedAuthor({ user: { type: "User", login: "member" }, author_association: a }), false);
+  setVerified("acme/app", "member", true);
+  for (const a of ["MEMBER", "COLLABORATOR"]) assert.equal(trustedAuthor({ user: { type: "User", login: "Member" }, author_association: a }), true);
+  setWriters(null, []);
   for (const a of ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", undefined]) assert.equal(trustedAuthor({ user: { type: "User" }, author_association: a }), false);
 });
 

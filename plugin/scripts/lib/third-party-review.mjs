@@ -9,7 +9,7 @@
 // dispatcher's tick, on every route (the Action's, a cloud sandbox's, `serve`'s), puts the label back once that review
 // exists or the bound has passed (waitState), and the label starts the review stage again as it always does. That stage
 // finds Pendulum's own review already posted, so no reviewer pass runs again, and goes on to the answer pass.
-import { addLabels, listComments, objectiveLabeledAt, removeLabel, resolutionRule, rest, setStateLabel } from "./github.mjs";
+import { addLabels, listComments, listReviews, objectiveLabeledAt, removeLabel, resolutionRule, rest, setStateLabel } from "./github.mjs";
 import { sanitize } from "./handoff.mjs";
 import { THIRD_PARTY_WAIT_MAX_MINUTES, log } from "./inputs.mjs";
 import { clockText } from "./clock.mjs";
@@ -109,7 +109,7 @@ export function reviewedHead(reviews, sha, logins) {
 }
 
 /** The PR's reviews, or null when they cannot be read (no reading: the wait goes on). */
-const readReviews = (repo, prNumber, opts) => rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true }).catch(() => null);
+const readReviews = (repo, prNumber, opts) => listReviews(repo, prNumber, opts).catch(() => null);
 
 /** The wait record's first line starts with this; JSON follows on the same line. */
 const WAIT_MARK = (issue) => `<!-- pendulum:${Number(issue)}:third-party `;

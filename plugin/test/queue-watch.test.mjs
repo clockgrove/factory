@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { watchQueue } from "../scripts/dispatch.mjs";
 import { approvalPolicyCheck, githubChecks } from "../scripts/doctor.mjs";
-import { HUNG_CODE, marker, setSelf } from "../scripts/lib/logic.mjs";
+import { HUNG_CODE, marker, setSelf, setVerified } from "../scripts/lib/logic.mjs";
 import { mergeBlockCause, mergeBlockReason, mergeReadyOne, queueDropBlock, queueRedBody, queueRedMarker, queueRedRecords, queueTryEnd, readQueueRed, recordQueueTry, writeQueueRed } from "../scripts/lib/session.mjs";
 import { openTriage } from "../scripts/lib/triage.mjs";
 import { openProgressCheck } from "../scripts/lib/fix-progress.mjs";
@@ -1220,6 +1220,10 @@ test("queue red: a record another trusted writer wrote is read (the merge pass a
     queueRed(fake, { id: 680 });
     fake.s.removals = [queueDrop(ago(5 * MIN))];
     assert.equal(await merge({}), "queue-red");
+    // #605: a MEMBER is a writer once its permission read says write (github.mjs verifyAuthors); a read-only one is not.
+    for (const c of fake.s.comments[ISSUE]) if (c.body.includes("queue-red")) Object.assign(c, { user: { login: "viewer" }, author_association: "MEMBER" });
+    assert.equal(records(fake).length, 0, "a read-only member's record does not count");
+    setVerified(repo.full, "kirk", true);
     for (const c of fake.s.comments[ISSUE]) if (c.body.includes("queue-red")) Object.assign(c, { user: { login: "kirk" }, author_association: "MEMBER" });
     assert.equal(records(fake).length, 1, "a writer's record counts");
     assert.equal((await reviewReads(fake, own)).state, "fixing");

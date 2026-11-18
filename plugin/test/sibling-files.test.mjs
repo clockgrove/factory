@@ -150,6 +150,8 @@ function world(issues, { comments = {}, prs = {} } = {}) {
     if (method === "GET" && p === "/rulesets") return json(state.queue ? [{ id: 1, target: "branch", enforcement: "active" }] : []);
     if (method === "GET" && p === "/rulesets/1" && state.queue) return json({ conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "merge_queue", parameters: {} }] });
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    // kirk, a developer whose local loop writes records as their own login, can write; anyone else's permission is unread.
+    if (method === "GET" && p === "/collaborators/kirk/permission") return json({ permission: "write" });
     if (method === "GET" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) return json(state.comments[m[1]] || []);
     if (method === "POST" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) {
       const c = { id: id++, user: { login: SELF, type: "Bot" }, body: body.body, created_at: new Date().toISOString() };

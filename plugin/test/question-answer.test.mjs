@@ -949,6 +949,40 @@ test("launcher (the cloud sandbox route) with an AI Gateway key: a comment that 
 });
 
 
+test("#605: on the launcher, a MEMBER's comment wakes a Question only when their permission reads as write: a read- or triage-role member's does not", async () => {
+  const { launchOne } = await import("../scripts/launch.mjs");
+  const gh = fakeGitHub([{ number: 7 }]);
+  await ask(gh, 7);
+  const realFetch = globalThis.fetch;
+  const keys = ["GITHUB_API_URL", "GITHUB_ACTIONS", "GITHUB_RUN_ID"];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  process.env.GITHUB_API_URL = "https://github.test";
+  delete process.env.GITHUB_ACTIONS;
+  delete process.env.GITHUB_RUN_ID;
+  globalThis.fetch = gh.fetch;
+  setSelf(BOT.login);
+  // The association GitHub shows any organization member; only TRIAGER's and UNLISTED's permission reads tell them apart.
+  const launch = (user) => {
+    gh.comment(7, user, "go with the second one");
+    const c = gh.comments(7).at(-1);
+    return launchOne({ inputs: { repo: REPO.full, appToken: "t", objectiveLabel: OBJ, timeoutMinutes: 60, ciChecks: [], maintainers: [] }, eventName: "issue_comment", payload: { action: "created", issue: { number: 7 }, comment: { ...c, author_association: "MEMBER" } } });
+  };
+  try {
+    const triager = await launch(TRIAGER);
+    assert.equal(triager.exit, "skipped", JSON.stringify(triager));
+    assert.match(triager.reason, /not a maintainer/);
+    assert.ok(gh.labels(7).includes("pendulum:question"));
+    const writer = await launch(UNLISTED);
+    assert.equal(writer.exit, "queued", JSON.stringify(writer));
+    assert.ok(!gh.labels(7).includes("pendulum:question"));
+  } finally {
+    globalThis.fetch = realFetch;
+    setSelf(null);
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
+
 /**
  * One tick of the real serve (local.mjs) on `gh`, as the person's login: its own pendingReviews and dispatch, with a stage
  * recorded instead of run (`started`: each stage it starts, `work` or `review`, by issue).

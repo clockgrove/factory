@@ -26,7 +26,7 @@ import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } 
 import { DEFAULTS } from "./inputs.mjs";
 import { appIdSetLine, appIdWhyText, readAppIdVariable } from "./app-id.mjs";
 import { PREVIOUS_NAME } from "./local.mjs";
-import { FINDING_OUTCOMES, STATE_LABELS, decisionSpendEntries, findingsOf, ledgerOfComment, loginKey, publishedModels, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
+import { FINDING_OUTCOMES, STATE_LABELS, decisionSpendEntries, findingsOf, ledgerOfComment, loginKey, publishedModels, claimedPushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { ASKED, CHURN, clockRenamed, finishMarker, labelTime, markChurn, modellessStages, pendulumOwn, readSummary, reportStageKind, spendBreakdown, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, CLAUDE_MODELS, UNKNOWN_WHY, codexRow, longShare, modelName, passKind, sumLong } from "./usage.mjs";
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
@@ -370,7 +370,7 @@ export const PARTIAL_CODES = Object.freeze(["stopped", "legacy-records"]);
 export function ownPredicate(appId = null, self = []) {
   const app = pendulumOwn(appId);
   const named = new Set((self || []).map(loginKey));
-  return (c) => app(c) || (named.has(loginKey(c?.user?.login)) && pushAuthor(c));
+  return (c) => app(c) || (named.has(loginKey(c?.user?.login)) && claimedPushAuthor(c));
 }
 
 /**
@@ -397,7 +397,7 @@ export function lastCard(n, own) {
  * a merge (#589: Blocked, a Question, closed unmerged) carries no merged summary (readSummary): its stages are read. A card with no stage is none.
  * Anyone else's card, or a summary that does not read, is none: the stages are read. Returns {comment, summary}.
  */
-export function summaryFor(n, comments, scope, { mine, pushed = (c) => pushAuthor(c) || throughApp(c), by = [], stages = false } = {}) {
+export function summaryFor(n, comments, scope, { mine, pushed = (c) => claimedPushAuthor(c) || throughApp(c), by = [], stages = false } = {}) {
   if (stages || (by || []).some((b) => STAGE_DETAIL.includes(b))) return null;
   const on = (comments || []).filter((c) => markerIssue(c) === n);
   let found = null;
@@ -608,7 +608,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       // the floor, so the thread is read page by page until a comment written at or after it, each kept once.
       threadsLeft = new Set();
       if (floor) {
-        const pushed = (c) => mine(c) || pushAuthor(c) || throughApp(c);
+        const pushed = (c) => mine(c) || claimedPushAuthor(c) || throughApp(c);
         const recorded = new Set(comments.filter(pushed).map(markerIssue).filter((n) => n !== null));
         const begun = [...issues.values()].filter((i) => recorded.has(i.number) && !(ms(i.created_at) >= ms(floor))).map((i) => i.number).sort((a, b) => a - b);
         threadsLeft = new Set(begun);
@@ -777,7 +777,7 @@ async function clockTimelines(repo, { issues, comments, mine, budget, opts, rena
  * the call budget stopped (their outcome is then null).
  */
 async function olderPulls({ base, repo, floor, issues, pulls, comments, mine, setMode, budget, opts, source }) {
-  const marked = new Set(comments.filter((c) => mine(c) || pushAuthor(c) || throughApp(c)).map(markerIssue).filter((n) => n !== null));
+  const marked = new Set(comments.filter((c) => mine(c) || claimedPushAuthor(c) || throughApp(c)).map(markerIssue).filter((n) => n !== null));
   const decided = (i) => (i.labels || []).some((l) => ["Blocked", "Question"].includes(STATE_LABELS[typeof l === "string" ? l : l?.name]));
   const want = [...issues.values()]
     .filter((i) => i.state === "closed" && !decided(i) && ms(i.created_at) < ms(floor) && (setMode || marked.has(i.number)) && !(ms(newestPull(i.number, pulls)?.created_at) >= ms(floor)))
@@ -1307,7 +1307,7 @@ function breakdown() {
 export function buildReport(read, { prices = loadPrices(), by = [], rates = null, tables = rateTables(prices), now = new Date().toISOString(), wholePass = false } = {}) {
   const { repo, scope, issues, pulls, comments, artifacts, local, source } = read;
   const mine = ownPredicate(read.appId ?? null, read.self ?? []);
-  const pushed = (c) => pushAuthor(c) || throughApp(c);
+  const pushed = (c) => claimedPushAuthor(c) || throughApp(c);
   const totals = zeroCost();
   const totalTokens = zeroTokens();
   const unknownItems = [];
@@ -2027,7 +2027,7 @@ function perMergedOf(read, objectives, opts) {
   // The Objectives with a record of cost among the comments read, Pendulum's own or one it counts as unknown cost: a
   // stage's progress or vendor comment, a decision-spend line, or a finish card with a summary. Any other marker (a
   // plan, a notice) is no record of cost: a merged Objective with only that is `no-records`, never $0.
-  const pushed = (c) => mine(c) || pushAuthor(c) || throughApp(c);
+  const pushed = (c) => mine(c) || claimedPushAuthor(c) || throughApp(c);
   const costed = (c) => {
     const n = markerIssue(c);
     const body = c.body || "";

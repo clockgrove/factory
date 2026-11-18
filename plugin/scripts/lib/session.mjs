@@ -46,6 +46,7 @@ import {
   listComments,
   objectiveLabeledAt,
   listReviewComments,
+  listReviews,
   moveCard,
   branchState,
   prComment,
@@ -65,7 +66,7 @@ import { endCard } from "./finish-card.mjs";
 import { lineClock, logTime, timeZone, whenText } from "./clock.mjs";
 import { SHORT_DETAIL, progressBody, progressCard } from "./progress-card.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
-import { EXIT_PROMPT, activityLine, latestRuns, answersComment, loginKey, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, latestRuns, answersComment, loginKey, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setVerified, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions, verifiedWriter } from "./logic.mjs";
 import { REAP_NOW_MS, agentUser, atStop, exec, git, reapAgentNow, runnerCommand, trapStops } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -687,20 +688,28 @@ export async function objectiveDecisions(repo, { issue, prNumber = null }, opts,
   const all = (await read(`issue #${issue} comments`, listComments(repo, issue, opts))).map((c) => ({ ...c, on: "issue" }));
   if (prNumber) {
     all.push(...(await read(`PR #${prNumber} comments`, listComments(repo, prNumber, opts))).map((c) => ({ ...c, on: "pr" })));
-    for (const r of (await read(`PR #${prNumber} reviews`, rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true }))) || []) all.push({ ...r, kind: "review", created_at: r.submitted_at, on: "pr" });
+    for (const r of (await read(`PR #${prNumber} reviews`, listReviews(repo, prNumber, opts))) || []) all.push({ ...r, kind: "review", created_at: r.submitted_at, on: "pr" });
     for (const c of await read(`PR #${prNumber} review comments`, listReviewComments(repo, prNumber, opts))) all.push({ ...c, kind: "line", body: `${c.path}:${c.line ?? c.original_line ?? "?"}: ${c.body || ""}`, on: "pr" });
   }
   const candidates = maintainerDecisions(all);
   const can = new Map();
   await primeWriters(repo, opts);
   for (const login of new Set(candidates.map((d) => d.author))) {
-    // The repository's writer list or a pinned maintainer answers without a call; a per-author read only when neither does.
+    // The repository's writer list, a pinned maintainer or this window's permission read (logic.mjs verifiedWriter)
+    // answers without a call; a per-author read only when none does, its answer kept for the trust checks too.
     if (knownWriter(login) || candidates.some((d) => d.author === login && pinnedMaintainer({ id: d.authorId }))) {
       can.set(login, true);
       continue;
     }
+    if (verifiedWriter(login) !== null) {
+      can.set(login, verifiedWriter(login));
+      continue;
+    }
+    const before = failed.length;
     const perm = await read(`${login}'s permission`, collaboratorPermission(repo, login, opts));
-    can.set(login, ["admin", "maintain", "write"].includes(perm));
+    const writes = ["admin", "maintain", "write"].includes(perm);
+    if (failed.length === before) setVerified(repo.full, login, writes);
+    can.set(login, writes);
   }
   const kept = candidates.filter((d) => can.get(d.author));
   // Structured enough to tell "nobody answered" from "an answer was dropped" when a Question does not resume.
@@ -782,7 +791,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const comments = await listReviewComments(repo, prNumber, { token });
   const byId = new Map(comments.map((c) => [c.id, c]));
   // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push); a failed read throws.
-  const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
+  const reviews = await listReviews(repo, prNumber, { token });
   const marked = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r));
   // A root is Pendulum's reviewer's by its review ids; not given, by the App's login. With neither (local mode, the ids'
   // read failed) the ids are those of the reviews just read: never every root, so no other text passes as the reviewer's,
@@ -835,7 +844,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
  */
 export async function ownReviewIds(repo, prNumber, issue, opts) {
   try {
-    return new Set(((await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true })) || []).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
+    return new Set((await listReviews(repo, prNumber, opts)).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
   } catch (e) {
     log(`#${issue}: Pendulum's reviews on PR #${prNumber} could not be read (${errCode(e)})`);
     return null;
@@ -1564,7 +1573,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const noProgress = (x, s) => (x.hung?.length && s.kind === "running" ? { ...s, noProgress: true, reason: `no progress: ${hungChecks(x.hung)}; ${s.reason}; when this change makes that step slower, re-apply the Objective's label: ${sha.slice(0, 7)} is then waited for up to the stage's wall clock` } : s);
     const history = async () => {
       // Older commits that ran the checks: the PR's last green head, then the default branch's newest.
-      const green = lastGreenHead(await rest(`repos/${checks.repo.full}/issues/${checks.prNumber}/comments?per_page=100`, { token: checks.token, paginate: true }).catch(() => []), checks.issue);
+      const green = lastGreenHead(await listComments(checks.repo, checks.prNumber, { token: checks.token }).catch(() => []), checks.issue);
       const branch = (await getRepo(checks.repo, { token: checks.token }).catch(() => null))?.default_branch;
       const base = branch ? ((await rest(`repos/${checks.repo.full}/commits?sha=${encodeURIComponent(branch)}&per_page=3`, { token: checks.token }).catch(() => [])) || []).map((c) => c.sha) : [];
       return [...(green ? [green] : []), ...base];
@@ -3146,7 +3155,7 @@ export async function postNoProgress(repo, prNumber, issue, sha, { token }) {
  * records on it (coveredHead).
  */
 export async function headMarks(repo, prNumber, issue, sha, { token }) {
-  const comments = (await rest(`repos/${repo.full}/issues/${prNumber}/comments?per_page=100`, { token, paginate: true }).catch(() => [])) || [];
+  const comments = (await listComments(repo, prNumber, { token }).catch(() => [])) || [];
   const has = (m) => comments.some((c) => trustedAuthor(c) && (c.body || "").includes(m));
   return { validated: has(validatedMarker(issue, sha)), handedOff: has(handedOffMarker(issue, sha)), noProgress: has(noProgressMarker(issue, sha)), comments };
 }
@@ -4309,7 +4318,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     report.watch = true;
     log(`#${issue}: PR #${prNumber}'s queue commit ${st.head.slice(0, 7)} ${what}; taken out of the merge queue`);
   }
-  const reviews = ((await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true })) || []).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
+  const reviews = (await listReviews(repo, prNumber, opts)).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
   const reviewed = reviews.length > 0;
   // The review the merge rests on: queue drops before it belong to an earlier head or an earlier review.
   const reviewedAt = reviews.map((r) => r.submitted_at).filter((t) => Number.isFinite(Date.parse(t))).sort().at(-1) ?? null;

@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyExit, mergeBlockCause, mergeBlockReason, mergeReadyOne, rebaseBlock, rebaseMarkers, rebaseNotice, recordMergeable } from "../scripts/lib/session.mjs";
-import { REBASE_LIMIT, marker, ontoRecord, setSelf, staleDecision } from "../scripts/lib/logic.mjs";
+import { REBASE_LIMIT, marker, ontoRecord, setSelf, setWriters, staleDecision } from "../scripts/lib/logic.mjs";
 import { Local } from "../scripts/local.mjs";
 import { RETRY, transientError } from "../scripts/lib/github.mjs";
 import { planTextMarker } from "../scripts/lib/handoff.mjs";
@@ -67,7 +67,7 @@ function fakeGitHub(g) {
   // `checkRuns`: the check runs on any head; `queueTimeout`: the merge queue ruleset's check timeout (minutes), with which
   // the repository and its rulesets are read (0: a ruleset with no merge queue), else they are unread. `entry`: a queued
   // PR's merge queue entry (GraphQL's shape), else none is read; `entryFails`: the entry read fails.
-  const state = { checkRuns: [{ id: 1, name: "ci", status: "completed", conclusion: "success" }], queueTimeout: null, entry: null, entryFails: false, race: null, removals: [], entries: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [], timeline: [], refuseOnce: false };
+  const state = { checkRuns: [{ id: 1, name: "ci", status: "completed", conclusion: "success" }], queueTimeout: null, entry: null, entryFails: false, race: null, removals: [], entries: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [], timeline: [], refuseOnce: false, permissions: { dana: "write", kirk: "write" } };
   // GitHub's own rule: an unresolved conversation refuses the merge when protection or a ruleset requires them resolved.
   const conversationsHeld = () => state.threads.some((t) => !t.isResolved) && (state.protection || state.rules.some((r) => r.type === "pull_request" && r.parameters?.required_review_thread_resolution));
   let id = 1;
@@ -165,6 +165,8 @@ function fakeGitHub(g) {
     if (method === "GET" && /\/commits\/[0-9a-f]+\/status$/.test(u)) return json(200, { statuses: [] });
     if (method === "GET" && (m = /\/repos\/o\/r\/commits\/([0-9a-f]+)$/.exec(u))) return json(200, { sha: m[1], parents: [], commit: { committer: { date: "2026-01-01T00:00:00Z" } } });
     if (method === "GET" && /\/timeline/.test(u)) return json(200, state.timeline);
+    // Each login's permission (`permissions`): dana and kirk, maintainers who write in threads, can write.
+    if (method === "GET" && (m = /\/repos\/o\/r\/collaborators\/([^/]+)\/permission$/.exec(u)) && state.permissions[m[1]]) return json(200, { permission: state.permissions[m[1]] });
     return json(404, { message: `Not Found: ${method} ${u}` });
   };
   const open = (number, issue, sha) => {
@@ -187,6 +189,8 @@ async function withGitHub(fn) {
   } finally {
     globalThis.fetch = real;
     setSelf(null);
+    // No writer list or permission read carries over to the next test (#605).
+    setWriters(null, []);
   }
 }
 

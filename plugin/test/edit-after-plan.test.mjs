@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { setSelf } from "../scripts/lib/logic.mjs";
+import { setSelf, setVerified, setWriters } from "../scripts/lib/logic.mjs";
 import { planHanded, planOf, planSync, planTextMarker, planTextOf } from "../scripts/lib/handoff.mjs";
 import { EDITED_FIX, EDITED_REASON, editedSincePlan, objectiveSha, planGate, planStateNow, planTextState } from "../scripts/lib/objective-trust.mjs";
 import { blockedLine, mergeBlockCause, mergeBlockReason } from "../scripts/lib/session.mjs";
@@ -261,6 +261,10 @@ test("edit after plan: the plan comment of another Pendulum login counts: a writ
   assert.equal((await gate([bot], { sha: B, work: false, editedAt: "2026-11-13T09:00:00Z" })).r.ok, true);
   setSelf("pendulum-app[bot]");
   const writer = { id: 5, user: { login: "dev", type: "User" }, author_association: "MEMBER", body: `<!-- pendulum:7:plan -->${planTextMarker({ sha256: A, label: L1 })}\n## Plan from local mode`, created_at: L1, updated_at: L1 };
+  // #605: a MEMBER counts as a writer once its permission read says write; a read-only one's plan is no plan.
+  setWriters("acme/app", []);
+  assert.equal(planOf([bot, { ...writer, user: { login: "viewer", type: "User" } }], 7).id, 2);
+  setVerified("acme/app", "dev", true);
   const fromWriter = planOf([bot, writer], 7);
   assert.deepEqual([fromWriter.id, fromWriter.text, fromWriter.record], [5, "## Plan from local mode", { sha256: A, label: L1 }], "the newest written");
   const moved = await gate([bot, writer], { sha: B, work: false });

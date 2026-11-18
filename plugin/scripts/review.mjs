@@ -20,7 +20,7 @@ import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
-import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, markReady, postReview, prBodyHistory, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
+import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, listReviews, markReady, postReview, prBodyHistory, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor } from "./lib/logic.mjs";
@@ -1319,7 +1319,7 @@ async function main() {
   }
   // What Pendulum's reviews on the PR cover (handoff.mjs reviewsCover): the first pass, and the foundation pass. Whether
   // the head still needs a pass is decided once the branch is in Pendulum's mirror (reviewScope, below).
-  const reviews = await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true });
+  const reviews = await listReviews(repo, pr.number, token);
   const covered = reviewsCover(reviews, issue);
 
   // Pendulum's git runs only in its own mirror (lib/outbox.mjs): the branch reaches the agent's checkout as a bundle, and

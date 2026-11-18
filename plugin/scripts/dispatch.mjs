@@ -15,7 +15,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activePendulumJobs, addLabels, blockedByRelations, checksOn, downloadArtifactResult, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activePendulumJobs, addLabels, blockedByRelations, checksOn, downloadArtifactResult, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, listTimeline, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { clockText, logTime, whenText } from "./lib/clock.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
@@ -626,7 +626,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
   };
   const pendulumQuiet = async (n) => {
     if (!selfLogin()) return false;
-    const events = await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true }).catch(() => null);
+    const events = await listTimeline(repo, n, opts).catch(() => null);
     if (!Array.isArray(events)) return false;
     const after = Date.now() - claimPause;
     const recent = (...ts) => ts.some((t) => Date.parse(t) > after);

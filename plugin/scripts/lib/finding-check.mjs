@@ -168,7 +168,8 @@ export function changeOf(diff, path) {
 }
 
 /**
- * What one answered finding is asked about: the finding (its reviewer, file and line, and its body, which names the
+ * What one answered finding is asked about: the finding (who raised it: Pendulum's reviewer, a reviewer outside it
+ * (`from`) or a maintainer (`writer`); its file and line, and its body, which names the
  * acceptance entry or rule), the reply, the change since the finding was raised (`diff`, changeOf), the issue's
  * acceptance entries (logic.mjs acceptanceEntries), for a reply that says its fix is in the PR body only, what the body
  * changed since the finding was raised (`bodyDiff`, #584: its diff, "" for none, null when that could not be read; no
@@ -180,7 +181,8 @@ export function changeOf(diff, path) {
  */
 export function findingInput({ repo, prNumber, finding, reply, diff, bodyDiff, issue = "", rules = "", decisions = [] }, tag = randomBytes(8).toString("hex")) {
   const data = (title, text) => [title, `<<<BEGIN ${tag}>>>`, String(text).trimEnd(), `<<<END ${tag}>>>`, ""];
-  const by = finding.from ? `${finding.from}, a reviewer outside Pendulum` : "Pendulum's reviewer";
+  // A writer's own line comment (third-party-review.mjs writerComment: `writer`, its author) is a maintainer's, not Pendulum's reviewer's.
+  const by = finding.writer ? `${finding.writer}, a maintainer (someone with write access to the repository)` : finding.from ? `${finding.from}, a reviewer outside Pendulum` : "Pendulum's reviewer";
   const { own, other } = changeOf(diff, finding.path);
   const entries = acceptanceEntries(issue);
   return redactSecrets(
@@ -433,7 +435,7 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     const inBody = (f) => !!bodyDiffOf && !!replies.get(String(f.id)).prBody;
     const bodies = new Map();
     for (const at of new Set(judged.filter(inBody).map((f) => f.raisedAt ?? null))) bodies.set(at, at ? await Promise.resolve(bodyDiffOf(at)).catch(() => null) : null);
-    const items = judged.map((f) => ({ id: f.id, path: f.path ?? null, line: f.line ?? f.original_line ?? null, body: f.body, ...(f.from ? { from: f.from } : {}), ...(f.raisedAt ? { raisedAt: f.raisedAt } : {}), reply: replies.get(String(f.id)).body, fixed: !!replies.get(String(f.id)).fixed, diff: diffs.get(f.raisedOn || since) ?? null, ...(inBody(f) ? { bodyDiff: bodies.get(f.raisedAt ?? null) ?? null } : {}) }));
+    const items = judged.map((f) => ({ id: f.id, path: f.path ?? null, line: f.line ?? f.original_line ?? null, body: f.body, ...(f.writer ? { writer: f.writer } : f.from ? { from: f.from } : {}), ...(f.raisedAt ? { raisedAt: f.raisedAt } : {}), reply: replies.get(String(f.id)).body, fixed: !!replies.get(String(f.id)).fixed, diff: diffs.get(f.raisedOn || since) ?? null, ...(inBody(f) ? { bodyDiff: bodies.get(f.raisedAt ?? null) ?? null } : {}) }));
     const verdicts = await check.judge(items, { repo: repo.full, prNumber, issue: issueBody, rules, decisions });
     // The question may have shown a decision a later one, left out for length, overruled: then `decided` settles nothing.
     const overruled = newerLeftOut(decisionsPart(decisions));

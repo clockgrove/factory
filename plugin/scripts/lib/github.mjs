@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answerableReviewer, answersComment, evaluateChecks, latestRuns, personAnswer, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { AUTHOR_READS_MAX, VERIFIED_TTL_MS, setReadFailed, setVerified, takeAuthorRead, unverifiedAuthors, writersListed } from "./logic.mjs";
 import { addBilling } from "./usage.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
@@ -712,8 +713,9 @@ export async function openRecordIssue(repo, { label, color, description, title, 
   return issue;
 }
 
+/** An issue's or PR's comments, oldest first, their authors' push access verified for trustedAuthor (verifyAuthors). */
 export async function listComments(repo, number, opts) {
-  return (await rest(`repos/${repo.full}/issues/${number}/comments?per_page=100`, { ...opts, paginate: true })) || [];
+  return verifyAuthors(repo, (await rest(`repos/${repo.full}/issues/${number}/comments?per_page=100`, { ...opts, paginate: true })) || [], opts);
 }
 
 /**
@@ -825,8 +827,19 @@ export async function requestReviewers(repo, number, reviewers, opts) {
   await rest(`repos/${repo.full}/pulls/${number}/requested_reviewers`, { ...opts, method: "POST", body: { reviewers } });
 }
 
+/** A PR's line comments, their authors' push access verified for trustedAuthor (verifyAuthors). */
 export async function listReviewComments(repo, number, opts) {
-  return (await rest(`repos/${repo.full}/pulls/${number}/comments?per_page=100`, { ...opts, paginate: true })) || [];
+  return verifyAuthors(repo, (await rest(`repos/${repo.full}/pulls/${number}/comments?per_page=100`, { ...opts, paginate: true })) || [], opts);
+}
+
+/** A PR's reviews, their authors' push access verified for trustedAuthor (verifyAuthors). */
+export async function listReviews(repo, number, opts) {
+  return verifyAuthors(repo, (await rest(`repos/${repo.full}/pulls/${number}/reviews?per_page=100`, { ...opts, paginate: true })) || [], opts);
+}
+
+/** An issue's or PR's timeline (label events and comments), its commenters' push access verified for trustedAuthor (verifyAuthors). */
+export async function listTimeline(repo, number, opts) {
+  return verifyAuthors(repo, (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [], opts);
 }
 
 /**
@@ -896,6 +909,8 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
   // An author as REST shows it (GraphQL names a Bot without "[bot]"), for trustedAuthor.
   const asRest = (author, association, body) => ({ user: { type: author?.__typename, login: author?.__typename === "Bot" ? `${author.login}[bot]` : author?.login, ...(Number.isInteger(author?.databaseId) ? { id: author.databaseId } : {}) }, author_association: association, body });
   const named = new Set(thirdParty.map((l) => String(l).toLowerCase()));
+  // Every author's push access the trust checks below read, verified first (verifyAuthors).
+  await verifyAuthors(repo, nodes.flatMap((t) => (t.comments?.nodes || []).flatMap((c) => [asRest(c.author, c.authorAssociation), asRest(c.pullRequestReview?.author, c.pullRequestReview?.authorAssociation)])), opts);
   return nodes.map((t) => {
     const comments = t.comments?.nodes || [];
     const root = comments[0];
@@ -1721,7 +1736,8 @@ const USAGE_DOWNLOADS = 8;
 export async function localSpendToday(repo, { dateIso = new Date().toISOString().slice(0, 10), token } = {}) {
   const since = new Date(Date.parse(`${dateIso}T00:00:00Z`) - 86_400_000).toISOString().replace(/\.\d{3}Z$/, "Z");
   // One paged read of the repository's comments updated since (issues and PRs alike), not one per Objective.
-  const comments = (await rest(`repos/${repo.full}/issues/comments?since=${since}&per_page=100`, { token, paginate: true })) || [];
+  // Only Pendulum's marked comments count, so only their authors' push access is verified.
+  const comments = await verifyAuthors(repo, ((await rest(`repos/${repo.full}/issues/comments?since=${since}&per_page=100`, { token, paginate: true })) || []).filter((c) => /^<!-- pendulum:\d+:/.test(c.body || "")), { token });
   let usd = 0;
   let unknown = 0;
   const lines = [];
@@ -1946,8 +1962,10 @@ export async function ensureRuleset(repo, { branch, checks, queue = true }, opts
 
 /**
  * Learn the repository's writers (push or more; org members and owners included, whatever their membership's
- * visibility) so trustedAuthor can tell them apart from strangers. Once per process per repository; a failed read
- * leaves the association check alone, logged. True when a list read for this repository is in memory.
+ * visibility) so trustedAuthor can tell them apart from strangers. Read again when older than WRITERS_TTL_MS, or for
+ * another repository; a failed read is logged, an earlier list of this repository's stays in use, and a MEMBER or
+ * COLLABORATOR author the list does not name counts only on its own permission read (verifyAuthors). True when a list
+ * read for this repository is in memory.
  */
 const WRITERS_TTL_MS = 10 * 60_000;
 const primed = new Map();
@@ -1958,7 +1976,8 @@ export async function primeWriters(repo, opts, { maintainers = null } = {}) {
   if (!selfLogin()) await primeSelf(opts);
   // A long-lived loop (local serve) re-reads them, so access revoked meanwhile stops counting within minutes.
   // Fresh and for this repository: the list is one per process, so another repository's read never counts here.
-  if (same && Date.now() - (primed.get(repo.full) ?? -Infinity) < WRITERS_TTL_MS) return true;
+  // Listed too: reads for another repository start the list over (logic.mjs setVerified), so this one's is read again.
+  if (same && writersListed() && Date.now() - (primed.get(repo.full) ?? -Infinity) < WRITERS_TTL_MS) return true;
   try {
     const list = (await rest(`repos/${repo.full}/collaborators?affiliation=all&permission=push&per_page=100`, { ...opts, paginate: true })) || [];
     setWriters(repo.full, list.map((u) => u.login));
@@ -1967,8 +1986,8 @@ export async function primeWriters(repo, opts, { maintainers = null } = {}) {
     return true;
   } catch (e) {
     // Not marked primed: the next call tries again. An earlier list of this repository's stays in use meanwhile.
-    process.stdout.write(`[pendulum] writers of ${repo.full} could not be read (${e.status || String(e.message).slice(0, 80)}); trusting by author association only\n`);
-    return same && primed.has(repo.full);
+    process.stdout.write(`[pendulum] writers of ${repo.full} could not be read (${e.status || String(e.message).slice(0, 80)}); writers count only by a pinned id or their own permission read\n`);
+    return writersRepo() === repo.full && writersListed();
   }
 }
 
@@ -1991,6 +2010,43 @@ export async function primeSelf(opts) {
     }
   }
   return selfLogin();
+}
+
+/**
+ * Verify the push access of `items`' authors (comments, reviews, timeline events) that only a permission read can tell
+ * (logic.mjs unverifiedAuthors: MEMBER and COLLABORATOR authors the writer list does not name), so trustedAuthor, which
+ * reads no API, counts each as a writer only on GitHub's own answer of write, maintain or admin. Each login is read at
+ * most once per window of logic.mjs VERIFIED_TTL_MS (its answer counts no longer), at most AUTHOR_READS_MAX reads a
+ * window in all. A read that fails, or one past that bound, leaves the author untrusted; a failed one is read again only
+ * after FAILED_READ_MS, and a login past the bound is logged once a window. For a repository other than the one the
+ * writer list is for, that list starts over (logic.mjs setVerified), as primeWriters' does. Returns `items`.
+ */
+const WRITE_PERMISSIONS = new Set(["admin", "maintain", "write"]);
+const authorReads = new Map();
+export async function verifyAuthors(repo, items, opts) {
+  if (!Array.isArray(items)) return items;
+  for (const login of unverifiedAuthors(repo.full, items)) {
+    const key = `${repo.full}\n${login}`;
+    if (!authorReads.has(key)) {
+      const take = takeAuthorRead(repo.full, login);
+      if (take !== true) {
+        if (take === "over") log(`writers: ${login}'s permission on ${repo.full} is not read (over ${AUTHOR_READS_MAX} reads in ${VERIFIED_TTL_MS / 60_000} minutes); their comments count as no writer's until then`);
+        continue;
+      }
+      authorReads.set(
+        key,
+        collaboratorPermission(repo, login, opts).then(
+          (p) => setVerified(repo.full, login, WRITE_PERMISSIONS.has(p)),
+          (e) => {
+            setReadFailed(repo.full, login);
+            log(`writers: ${login}'s permission on ${repo.full} could not be read (${e?.status || String(e?.message).slice(0, 60)}); their comments count as no writer's for now`);
+          },
+        ).finally(() => authorReads.delete(key)),
+      );
+    }
+    await authorReads.get(key);
+  }
+  return items;
 }
 
 export async function collaboratorPermission(repo, login, opts) {

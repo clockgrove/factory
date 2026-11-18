@@ -4,7 +4,7 @@
 // starts the Objective's work again on its branch, in the slot it held, at most RELAUNCH_MAX times since a person last
 // started it; past that it Blocks for a person. The count is a record Pendulum owns on the issue, so a dispatcher that
 // restarts keeps it. The local route pauses and resumes a stage itself (local.mjs) and never gets here.
-import { addLabels, moveCard, removeLabel, rest, setStateLabel, upsertComment, workflowFile } from "./github.mjs";
+import { addLabels, listTimeline, moveCard, removeLabel, rest, setStateLabel, upsertComment, workflowFile } from "./github.mjs";
 import { CLOCK_SKEW_MS, blockCauseOf, isSelf, marker, restartedAt, selfLogin, trustedAuthor } from "./logic.mjs";
 import { startTime } from "./objective-trust.mjs";
 import { failedStep, neverStarted, reports } from "./triage.mjs";
@@ -302,7 +302,7 @@ export async function stintWorkJob(repo, n, since, opts, { run = null, only = fa
 export const relaunchRun = (record) => record?.tries?.at(-1)?.run ?? null;
 
 /** The issue's timeline (label events and comments), for personStart, the outage notice and the record. */
-export const timelineOf = async (repo, n, opts) => (await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+export const timelineOf = (repo, n, opts) => listTimeline(repo, n, opts);
 
 /** Write the record (one comment, updated in place). */
 export const writeRelaunchRecord = (repo, n, record, count, opts) => upsertComment(repo, n, marker(n, "relaunch"), relaunchBody(record, count), opts);

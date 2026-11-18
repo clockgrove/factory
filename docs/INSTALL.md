@@ -73,6 +73,14 @@ With the plugin, ask a session in your repository's clone to set up Pendulum (th
 3. **The model credential.** Your model credential from the table above, with `gh secret set` (for Claude on your subscription, [Claude on your subscription](#claude-on-your-subscription)).
 4. **Land the workflow file.** Commit `.github/workflows/pendulum.yml` on a branch and merge it to the default branch through a pull request; its cron and triggers start then.
 
+## Validation commands
+
+`validation` (`PENDULUM_VALIDATION`, setup's `--validation`; in local mode `PENDULUM_LOCAL_VALIDATION` where set) lists the repository's validation commands, comma- or newline-separated. The worker's task card names them, and without `ci_checks` (and in local mode) Pendulum runs them as its own validation.
+
+List your test runner among them as a command that takes a test file or filter, not only a lint or typecheck command. Answer rounds settle a reviewer finding by test only through such a command: the worker's reply names one of the validation commands exactly as listed and the arguments that run one test, and Pendulum runs that line on the PR's head and on the code the finding was raised on; failing there and passing on the head resolves the finding ([PLAN.md](PLAN.md), Review and merge). With only lint and typecheck commands, a reply has no test to name. A reproduction written in a reply's prose is never run.
+
+For example, `PENDULUM_VALIDATION: "npm run lint, npx vitest run"` lets a reply name `npx vitest run` with `src/parse.test.ts`.
+
 ## Claude on your subscription
 
 On a repository of your own, Claude Code can run on your Claude subscription (Pro, Max, Ultra, Team or Enterprise) instead of an API key: the `plan` credential.

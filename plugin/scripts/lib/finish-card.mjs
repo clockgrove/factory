@@ -715,9 +715,9 @@ function costTable(d, t, rows) {
 }
 
 /** The pass kinds' and stages' words in the breakdown (usage.mjs PASS_KEYS less `conflict`, which is churn), in its order. */
-const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answer passes", fix: "Fix passes", decision: "Decision calls" });
+export const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answer passes", fix: "Fix passes", decision: "Decision calls" });
 /** The churn the breakdown names apart (markChurn), in its order. */
-const CHURN = Object.freeze({
+export const CHURN = Object.freeze({
   "rebase-conflict": "Conflict rebases after other PRs merged",
   "rebase-clean": "Clean rebases after other PRs merged",
   "catch-up": "Catch-up passes after the default branch changed a workflow",

@@ -83,7 +83,7 @@ test("vendor comment: the vendor line carries state, seconds, size and dated rat
   assert.ok(body.includes(line));
   close(spendOf(body).usd, cost.usd, "daily_usd adds the vendor's dollars to the progress comment's model dollars");
   assert.equal(spendOf(body).unknown, 0);
-  assert.deepEqual(spendParts(body), { usd: spendOf(body).usd, modelUsd: null, vendorUsd: spendOf(body).usd });
+  assert.deepEqual(spendParts(body), { usd: spendOf(body).usd, modelUsd: null, vendorUsd: spendOf(body).usd, route: "sandbox" });
   // A stage that left no progress comment: the usage record's model dollars are here, so the daily sum counts them, and
   // its runs of unknown cost with them.
   const alone = vendorBody({ line, vendorUsd: 0.01, modelUsd: 2, modelUnknown: { usdUnknown: 1, usdUnknownWhy: ["unreported"] } });

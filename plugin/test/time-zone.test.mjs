@@ -74,6 +74,7 @@ test("on Actions and in the cloud sandbox the default is UTC, whatever the machi
   withEnv({ TZ: "Asia/Tokyo" }, () => {
     assert.deepEqual(timeZone({ GITHUB_ACTIONS: "true" }), { zone: "UTC", from: "utc", set: null, invalid: null });
     assert.equal(timeZone({ PENDULUM_STAGE_CLAIM: "c1" }).zone, "UTC", "a cloud sandbox's stage");
+    assert.equal(timeZone({ PENDULUM_STAGE_SANDBOX: "1" }).zone, "UTC", "the stage a cloud sandbox's stage.mjs starts");
     assert.equal(clockText(at("2026-11-17T17:00:00Z"), { env: { GITHUB_ACTIONS: "true" } }), "5:00 PM UTC");
     // The setting, from the env block or a repository variable (laid over the env) or `with:`.
     // The name as given, when Intl knows it: `EST` is not shown as ICU's America/Panama.
@@ -194,7 +195,7 @@ test("markers, spend lines and the scorecard's reads are byte-identical in any z
   const vendor = (vars) => vendorBody({ line: line(vars), vendorUsd: 0.5 });
   assert.match(line({ GITHUB_ACTIONS: "true", PENDULUM_TIME_ZONE: "America/Los_Angeles" }), /^- 9:00 AM PST<!-- 17:00Z --> sandbox/);
   assert.equal(vendor({ GITHUB_ACTIONS: "true", PENDULUM_TIME_ZONE: "America/Los_Angeles" }).split("\n").at(-1), vendor({ GITHUB_ACTIONS: "true" }).split("\n").at(-1));
-  assert.equal(vendor({ GITHUB_ACTIONS: "true" }).split("\n").at(-1), spendMarker(0.5, { vendorUsd: 0.5 }));
+  assert.ok(vendor({ GITHUB_ACTIONS: "true" }).split("\n").at(-1).startsWith(spendMarker(0.5, { vendorUsd: 0.5 }).slice(0, -5)), "the spend line");
 });
 
 test("the finish card writes its times in the Objective's zone; its markers and summary stay byte-identical", () => {

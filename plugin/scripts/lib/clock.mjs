@@ -14,9 +14,10 @@ export const machineZone = () => new Intl.DateTimeFormat().resolvedOptions().tim
 
 /**
  * Whether `env` is a run on the machine of the person reading it: local mode (PENDULUM_LOCAL), or a command run by hand,
- * which is neither an Actions job (GITHUB_ACTIONS) nor a cloud sandbox's stage (the launcher's PENDULUM_STAGE_CLAIM).
+ * which is neither an Actions job (GITHUB_ACTIONS) nor a cloud sandbox's stage (stage.mjs: PENDULUM_STAGE_CLAIM, and
+ * PENDULUM_STAGE_SANDBOX for the stage it starts; backend.mjs stageRoute reads the same).
  */
-export const onOwnMachine = (env = process.env) => env.PENDULUM_LOCAL === "1" || (env.GITHUB_ACTIONS !== "true" && !env.PENDULUM_STAGE_CLAIM);
+export const onOwnMachine = (env = process.env) => env.PENDULUM_LOCAL === "1" || (env.GITHUB_ACTIONS !== "true" && env.PENDULUM_STAGE_SANDBOX !== "1" && !env.PENDULUM_STAGE_CLAIM);
 
 /** The hidden line of an Objective's body that names its filer's zone (`pendulum zone` prints this machine's). */
 export const zoneMarker = (zone) => `<!-- pendulum:tz ${zone} -->`;

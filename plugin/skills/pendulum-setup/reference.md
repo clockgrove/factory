@@ -21,7 +21,7 @@ A first setup asks only the harness and its credential, the caps and auto-merge 
 | `--notify` | none | no | The GitHub handle Blocked and Question reach; setup pins it as `login#id`. |
 | `--setup` | none | no | The toolchain command run before the worker. |
 | `--install` | `auto` | no | `auto` installs from the lockfiles, `none`, or a command. |
-| `--validation` | none | `PENDULUM_VALIDATION` | The validation commands, comma-separated. |
+| `--validation` | none | `PENDULUM_VALIDATION` | The validation commands, comma-separated. List the test runner among them as a command that takes a test file or filter, not only lint or a typecheck (`npm run lint, npx vitest run`): an answer round settles a finding by test only when a reply can name one of these commands with arguments that run one test; a reproduction in a reply's prose is never run. |
 | `--budget-command` | none | no | The repository's test-budget command. |
 | `--protected-paths` | none | no | Paths added to the protected list; workers' commits may not touch them. |
 | `--ci-checks` | none | no | The CI's required check names, also the protection step's; only this flag writes them into the workflow, and `--ci-checks=` clears them. Without it the protection step keeps the default branch's existing required checks, else requires none, and its preview lists candidates: the checks that passed on the latest pull request, else the job names of the workflows on pull_request, each marked when its workflow has no `merge_group` trigger (with a merge queue) or a `paths` filter. The user picks; pass exactly those. |

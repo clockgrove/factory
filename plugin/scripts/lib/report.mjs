@@ -648,9 +648,6 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       } else for (const n of issues.keys()) source.threadsWhole.add(n);
     }
     source.comments = comments.length;
-    // The issues whose clock a finish card from before it recorded why a clock is not known would give (#587): each one's
-    // timeline, read once, so one labelled before the rename has no clock rather than a short one.
-    await clockTimelines(repo, { issues, comments, mine, budget, opts, renamed, timelines });
     // The merged Objectives read from their finish card's summary: none of their stages' usage artifacts is read.
     readSummaries();
     // The usage artifacts of the Objectives with a stage of Pendulum's own in the period whose record the report needs: one
@@ -727,6 +724,10 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       artifacts.set(n, recs);
       source.artifactsRead.add(n);
     }
+    // Last, after the dollars (the usage artifacts above), so a call budget that runs out costs a wall clock before a
+    // dollar figure: the issues whose clock a finish card from before it recorded why a clock is not known would give
+    // (#587), each one's timeline read once, so one labelled before the rename has no clock rather than a short one.
+    await clockTimelines(repo, { issues, comments, mine, budget, opts, renamed, timelines });
   } catch (e) {
     if (e instanceof BudgetStop) source.stopped = e.what;
     else if (!(e instanceof NothingToRead)) throw e;
@@ -752,16 +753,18 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
 
 /**
  * The issues among `issues` whose clock comes from a finish card that does not record why a clock is not known (its
- * summary has no `clockWhy`: a card written before #587, whatever release it names), whose timeline no read has read
+ * summary has no `clockWhy`: a card written before #587, whatever release it names) and that names a labelled start
+ * (one with none gives no clock to protect), whose timeline no read has read
  * yet: each one's, a paged read planned before it is made, checked exactly for a label from before the rename to
  * Pendulum (finish-card.mjs clockRenamed), as such a card's start may be too late (#567). Fills `renamed` and `timelines`;
  * a BudgetStop, or a timeline GitHub refuses (403, 404), leaves its clock unknown (buildReport: `clockWhy`
  * `timeline-unread`).
  */
 async function clockTimelines(repo, { issues, comments, mine, budget, opts, renamed, timelines }) {
+  // An old card with no labelled start gives no clock to check (its row's `clockWhy` is `no-label`): no read for it.
   const old = (n) => {
     const card = lastCard(n, comments.filter((c) => markerIssue(c) === n && mine(c)));
-    return !!card && card.clockWhy === undefined;
+    return !!card && card.clockWhy === undefined && !!card.labelled;
   };
   const want = [...issues.keys()].filter((n) => !timelines.has(n) && old(n)).sort((a, b) => a - b);
   if (!want.length) return;
@@ -1856,7 +1859,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     // either (`timeline-unread`), nor one GitHub refused: never a short one.
     const card = lastCard(n, ownAll);
     const renamed = card?.clockWhy === "renamed" || !!read.renamed?.has(n);
-    const unchecked = !renamed && !!card && card.clockWhy === undefined && !read.timelines?.has(n);
+    const unchecked = !renamed && !!card?.labelled && card.clockWhy === undefined && !read.timelines?.has(n);
     const started = renamed || unchecked ? null : card ? card.labelled : (read.started?.get(n) ?? null);
     const mergedAt = row.outcome === "merged" ? lastOf(card?.merged, lastMerge(n, pulls)) : null;
     row.started = started;

@@ -128,6 +128,8 @@ function fakeGitHub(w) {
     if (p === "/issues/comments") return page(w.comments.filter((c) => !u.searchParams.get("since") || Date.parse(c.updated_at) >= Date.parse(u.searchParams.get("since"))), u);
     if (p === "/issues") return page(w.issues.filter((i) => i.labels.some((l) => l.name.toLowerCase() === String(u.searchParams.get("labels")).toLowerCase())), u);
     let m = /^\/issues\/(\d+)\/timeline$/.exec(p);
+    // `timelineStatus`: an issue whose timeline GitHub refuses (403) or no longer has (404).
+    if (m && w.timelineStatus?.[m[1]]) return json({ message: "refused" }, w.timelineStatus[m[1]]);
     if (m) return page(w.timelines[m[1]] || [], u);
     // One issue and its own comments, as --issue reads them.
     m = /^\/issues\/(\d+)$/.exec(p);
@@ -536,4 +538,62 @@ test("report (#587): an Objective labelled before the rename is clocked `renamed
   const { code, json: cut } = await report(world(), ["--issue", "12", "--json", "--max-calls", String(full.source.calls.made - 1)]);
   assert.equal(code, 3);
   assert.deepEqual(clock(cut, 12), [null, null, "timeline-unread"]);
+});
+
+test("report (#587): a timeline GitHub refuses leaves the clock unknown; a timeline over several pages is read whole, each page planned", async () => {
+  const card = await import("../scripts/lib/finish-card.mjs");
+  const old = (w) => {
+    for (const c of w.comments.filter((x) => /^<!-- pendulum:\d+:finish -->/.test(x.body))) c.body = c.body.replace(/,"clockWhy":null/, "");
+    return w;
+  };
+  const clockOf = (r, n) => {
+    const o = r.objectives.find((x) => x.issue === n);
+    return [o.wallMinutes, o.clockWhy];
+  };
+  for (const status of [403, 404]) {
+    const w = old(carded(experiment(), card));
+    w.timelineStatus = { 12: status };
+    const { code, json: r } = await report(w, ["--issue", "11,12", "--json"]);
+    assert.equal(code, 0, `${status}: no stop`);
+    assert.deepEqual([clockOf(r, 12), clockOf(r, 11)], [[null, "timeline-unread"], [60, null]], String(status));
+  }
+  // #12's label from before the rename on the second page of its timeline (150 comments' events first).
+  const w = old(carded(experiment(), card));
+  w.timelines[12] = [...Array.from({ length: 150 }, (_, i) => ({ event: "commented", actor: ME, created_at: at(-200 + i) })), { event: "labeled", label: { name: `${PREVIOUS_NAME}:objective` }, actor: ME, created_at: at(-20) }, ...w.timelines[12]];
+  const { json: r, calls } = await report(w, ["--issue", "12", "--json"]);
+  assert.deepEqual(clockOf(r, 12), [null, "renamed"]);
+  assert.equal(calls.filter((c) => c.includes("/issues/12/timeline")).length, 2, "both pages");
+  assert.equal(r.source.calls.planned, r.source.calls.made);
+  // An old card with no labelled start has no clock to protect: no timeline read, its row `no-label`.
+  const bare = old(carded(experiment(), card));
+  for (const c of bare.comments.filter((x) => x.body.startsWith("<!-- pendulum:12:finish -->"))) c.body = c.body.replace(/"labelled":"[^"]*"/, '"labelled":null');
+  const { json: nl, calls: nlCalls } = await report(bare, ["--issue", "12", "--json"]);
+  assert.deepEqual(clockOf(nl, 12), [null, "no-label"]);
+  assert.ok(!nlCalls.some((c) => c.includes("/timeline")));
+});
+
+test("report (#587): the timelines are read after the usage artifacts, so a budget that runs out costs wall clocks before dollars", async () => {
+  const card = await import("../scripts/lib/finish-card.mjs");
+  // Every card from before #587. The Objectives with no card (#14, Blocked) and those whose card a period cannot read
+  // them from have their dollars in their usage artifacts, as the experiment's Actions stages write no spend line.
+  const world = () => {
+    const w = carded(experiment(), card);
+    for (const c of w.comments.filter((x) => /^<!-- pendulum:\d+:finish -->/.test(x.body))) c.body = c.body.replace(/,"clockWhy":null/, "");
+    return w;
+  };
+  const args = ["--since", "2026-11-16", "--json"];
+  const { json: full, calls } = await report(world(), args);
+  const firstTimeline = calls.findIndex((c) => c.includes("/timeline"));
+  assert.ok(firstTimeline > 0 && calls.slice(0, firstTimeline).some((c) => c.startsWith("DOWNLOAD")), "artifacts first");
+  assert.ok(!calls.slice(firstTimeline).some((c) => c.includes("/actions/artifacts") || c.startsWith("DOWNLOAD")), "no artifact after a timeline");
+  // A budget that covers every artifact but one timeline short: the dollars are all known, the clocks not read unknown.
+  const cap = full.source.calls.made - 1;
+  const { code, json: cut } = await report(world(), [...args, "--max-calls", String(cap)]);
+  assert.equal(code, 3);
+  assert.deepEqual(cut.totals.cost, full.totals.cost, "every dollar figure as with no stop");
+  assert.deepEqual(cut.objectives.map((o) => [o.issue, o.cost]), full.objectives.map((o) => [o.issue, o.cost]));
+  const unread = cut.objectives.filter((o) => o.clockWhy === "timeline-unread").map((o) => o.issue);
+  assert.equal(unread.length, 1, "the one timeline the budget did not reach");
+  assert.equal(full.objectives.find((o) => o.issue === unread[0]).clockWhy, null, "a clock with no stop");
+  assert.equal(cut.objectives.find((o) => o.issue === unread[0]).wallMinutes, null, "never a short one");
 });

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, latestRuns, personAnswer, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answerableReviewer, answersComment, evaluateChecks, latestRuns, personAnswer, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { addBilling } from "./usage.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
@@ -866,19 +866,24 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
  * names a Bot without the suffix), `line` the current line, else the original one. `by` is "ours" for a thread Pendulum's
  * reviewer opened (the root belongs to the review carrying marker(issue, "review"), by a trusted author: trustedAuthor),
  * "named" for one a reviewer Pendulum answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
- * root comment's author), else null. `answered` is a person's answer, as the answer pass's list judges it: ours once a
- * person's answer exists (logic.mjs personAnswer: by someone who can push, and none of Pendulum's marked comments, its
- * answer or the finding check's evidence) or the root is Pendulum's placeholder; named once a
- * person's reply answers it (logic.mjs answersComment). Pendulum's own answer is the finding check's to judge
+ * root comment's author), with `unlisted` "unlisted" for one any other reviewer the answer pass may take opened (logic.mjs
+ * answerableReviewer: someone who can push, `writer` true, or an App but github-actions[bot]), which it takes only when
+ * the base's rules require every conversation resolved (#595), else null. This is the one classification of a thread:
+ * the answer pass's list (session.mjs unaddressedReviewComments) and the merge pass both read it, since REST and GraphQL
+ * name some Apps differently (Copilot's reviewer is `Copilot` in REST). `answered` is a person's answer, as the answer
+ * pass's list judges it: ours once a person's answer exists (logic.mjs personAnswer: by someone who can push, and none of
+ * Pendulum's marked comments, its answer or the finding check's evidence) or the root is Pendulum's placeholder; named
+ * and an unlisted App's once a person's reply answers it (logic.mjs answersComment); a writer's never (only the finding
+ * check's yes, or a person resolving it, settles it). Pendulum's own answer is the finding check's to judge
  * (finding-check.mjs): only its yes resolves the thread.
  */
-export async function reviewThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
+export async function reviewThreads(repo, number, issue, opts, { thirdParty = [], unlisted = false } = {}) {
   const nodes = [];
   let after = null;
   // Every thread, a page of 100 at a time (THREAD_PAGES at most).
   for (let page = 0; page < THREAD_PAGES; page += 1) {
     const data = await graphql(
-      `query($owner: String!, $name: String!, $n: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id isResolved path line originalLine comments(first: 50) { nodes { databaseId body authorAssociation author { __typename login } pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
+      `query($owner: String!, $name: String!, $n: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id isResolved path line originalLine comments(first: 50) { nodes { databaseId body authorAssociation author { __typename login ... on User { databaseId } } pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
       { owner: repo.owner, name: repo.name, n: Number(number), after },
       opts,
     );
@@ -889,7 +894,7 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
   }
   const mark = marker(issue, "review");
   // An author as REST shows it (GraphQL names a Bot without "[bot]"), for trustedAuthor.
-  const asRest = (author, association, body) => ({ user: { type: author?.__typename, login: author?.__typename === "Bot" ? `${author.login}[bot]` : author?.login }, author_association: association, body });
+  const asRest = (author, association, body) => ({ user: { type: author?.__typename, login: author?.__typename === "Bot" ? `${author.login}[bot]` : author?.login, ...(Number.isInteger(author?.databaseId) ? { id: author.databaseId } : {}) }, author_association: association, body });
   const named = new Set(thirdParty.map((l) => String(l).toLowerCase()));
   return nodes.map((t) => {
     const comments = t.comments?.nodes || [];
@@ -899,9 +904,13 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
     // A reviewer outside Pendulum is told by the root comment's own author, as the answer pass's list tells it.
     const author = root?.author ? asRest(root.author).user.login : null;
     const theirs = !!root && !ours && named.has(String(author || "").toLowerCase());
+    const opener = !!root && asRest(root.author, root.authorAssociation);
+    const other = unlisted && !!root && !ours && !theirs && answerableReviewer(opener);
+    // A writer's own thread is answered only by the finding check's yes: a writer's reply (its opener's included) is no answer.
+    const writer = other && trustedAuthor(opener);
     const replies = comments.slice(1).map((c) => asRest(c.author, c.authorAssociation, c.body));
-    const answered = ours ? isPlaceholder(root.body) || replies.some(personAnswer) : theirs ? replies.some((r) => answersComment(author, r)) : false;
-    return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : null, answered };
+    const answered = ours ? isPlaceholder(root.body) || replies.some(personAnswer) : theirs || (other && !writer) ? replies.some((r) => answersComment(author, r)) : false;
+    return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : other ? "unlisted" : null, ...(other ? { writer } : {}), answered };
   });
 }
 /** The most pages of 100 review threads reviewThreads reads. */
@@ -944,15 +953,17 @@ export async function resolveThread(id, opts) {
 }
 
 /**
- * Resolve the review threads Pendulum handles (reviewThreads: its own reviewer's, and those of the reviewers in
- * `thirdParty`) that a person answered or that hold Pendulum's placeholder, so a rule that requires resolved
- * conversations can merge; they stay visible on the PR. A thread Pendulum's own answer is in is resolved by the finding
- * check's yes (finding-check.mjs), never here. Returns the number resolved.
+ * Resolve the review threads Pendulum handles (reviewThreads: its own reviewer's, those of the reviewers in
+ * `thirdParty`, and, when `unlisted` (async) says the base's rules require every conversation resolved, those of the
+ * reviewers nobody named that the answer pass takes) that a person answered or that hold Pendulum's placeholder, so a
+ * rule that requires resolved conversations can merge; they stay visible on the PR. A thread Pendulum's own answer is in
+ * is resolved by the finding check's yes (finding-check.mjs), never here. Returns the number resolved.
  */
-export async function resolvePendulumThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
+export async function resolvePendulumThreads(repo, number, issue, opts, { thirdParty = [], unlisted = async () => false } = {}) {
   let resolved = 0;
-  for (const t of await reviewThreads(repo, number, issue, opts, { thirdParty })) {
+  for (const t of await reviewThreads(repo, number, issue, opts, { thirdParty, unlisted: true })) {
     if (t.resolved || !t.by || !t.answered) continue;
+    if (t.by === "unlisted" && !(await unlisted())) continue;
     await resolveThread(t.id, opts);
     resolved += 1;
   }

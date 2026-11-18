@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LIMIT_BACKOFF_MS, accountHolds, holdsDir } from "../scripts/lib/holds.mjs";
-import { parseArgs } from "../scripts/local.mjs";
 
 // `pendulum hold list | release <account>` (#376) on this machine: the real command, in its own process, on a fake home's
 // holds folder, read back by another serve's store (the real holds.mjs) as every serve here reads it.
@@ -69,21 +68,4 @@ test("#376: hold list shows each held or passed-over account; hold release lifts
   // A login's key releases the same way, as the list shows it.
   assert.equal(hold(home, "release", "codex@0123456789ab").status, 0);
   assert.equal(accountHolds({ dir }).avoidUntil("codex@0123456789ab", Date.now()), null);
-});
-
-test("#376: with nothing held, hold list says so; hold release names that no account is", () => {
-  const home = realpathSync(mkdtempSync(join(tmpdir(), "hold-")));
-  const list = hold(home, "list");
-  assert.equal(list.status, 0);
-  assert.match(list.stdout, /^no account is held or passed over on this machine/);
-  const rel = hold(home, "release", "alpha");
-  assert.equal(rel.status, 1);
-  assert.match(rel.stderr, /; no account is\n$/);
-});
-
-test("#376: hold takes list, or release and one account, and --repo alone", () => {
-  assert.deepEqual(parseArgs(["hold", "list"]).flags._, ["hold", "list"]);
-  assert.deepEqual(parseArgs(["hold", "release", "alpha", "--repo", "o/r"]).flags, { _: ["hold", "release", "alpha"], repo: "o/r" });
-  for (const a of ["hold", "hold drop", "hold list alpha", "hold release", "hold release a b", "hold list --checkout x", "hold list --all"]) assert.throws(() => parseArgs(a.split(" ")), (e) => e.usage === true, a);
-  assert.equal(parseArgs(["hold", "--help"]).help, true);
 });

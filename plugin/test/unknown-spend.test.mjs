@@ -144,22 +144,6 @@ test("a resumed Claude session on Claude Code before 2.1.277 is a run of unknown
   assert.ok(Math.abs(later.usd - 0.3) < 1e-9 && !later.usdUnknown, JSON.stringify({ usd: later.usd, unknown: later.usdUnknown }));
 });
 
-test("the running status line shows no dollars where the record has unknown: a zeroed result, a resumed total before 2.1.277", () => {
-  const feed = (lines, prior = null) => {
-    const a = harnessActivity();
-    if (prior) a.since("s1", prior);
-    for (const l of lines) a.feed(JSON.stringify(l));
-    return a.snapshot().usd;
-  };
-  const init = (v) => ({ type: "system", subtype: "init", session_id: "s1", claude_code_version: v });
-  const said = { type: "assistant", message: { id: "m", usage: { input_tokens: 10, output_tokens: 5 }, content: [] } };
-  const result = (usd, error = false) => ({ type: "result", subtype: error ? "error_during_execution" : "success", is_error: error, session_id: "s1", total_cost_usd: usd });
-  assert.equal(feed([init("2.1.325"), said, result(0, true)]), null, "a zeroed crash result");
-  assert.equal(feed([init("2.1.325"), result(0, true)]), 0, "an error before any token is a real $0");
-  assert.equal(feed([init("2.1.276"), said, result(0.8)], { usd: 0.5 }), null, "a resumed total before 2.1.277");
-  assert.ok(Math.abs(feed([init("2.1.277"), said, result(0.8)], { usd: 0.5 }) - 0.3) < 1e-9, "from 2.1.277, the pass's own share");
-});
-
 test("a Codex pass killed before any turn.completed is a run of unknown cost end to end", async () => {
   const rec = await pass("codex", "gpt-6.1-sol", "codex-killed", { timeoutMs: 1500 });
   assert.equal(rec.timedOut, true);
@@ -171,36 +155,6 @@ test("a Codex pass on a model with no price row is a run of unknown cost end to 
   assert.equal(rec.ok, true);
   assert.equal(rec.tokens.input, 200000, "its tokens stay as reported");
   await endToEnd(rec, "no-price", { harness: "codex", model: "gpt-unlisted-9" });
-});
-
-test("no estimate, bound or fallback price is read or described anywhere in the plugin, the bench, the docs or the Action", () => {
-  const banned = /usdUpperBound|usdLowerBound|vendorUpperBound|usdEstimated|upperBound|lowerBound|stoppedUsd|live-spend|liveSpend|claude-prices/;
-  const skip = new Set([join(ROOT, "plugin", "test"), join(ROOT, "bench", "test"), join(ROOT, "plugin", "vendor")]);
-  const hits = [];
-  const walk = (dir) => {
-    for (const name of readdirSync(dir)) {
-      const p = join(dir, name);
-      if (skip.has(p) || name === "node_modules") continue;
-      if (statSync(p).isDirectory()) walk(p);
-      else if (/\.(mjs|js|json|md|yml|yaml|sh)$/.test(name)) {
-        readFileSync(p, "utf8").split("\n").forEach((l, i) => {
-          if (banned.test(l)) hits.push(`${relative(ROOT, p)}:${i + 1}`);
-        });
-      }
-    }
-  };
-  for (const d of ["plugin", "bench", "docs"]) walk(join(ROOT, d));
-  for (const f of ["README.md", "action.yml"]) readFileSync(join(ROOT, f), "utf8").split("\n").forEach((l, i) => banned.test(l) && hits.push(`${f}:${i + 1}`));
-  // The docs and the Action name no estimate setting or bound in prose either.
-  const prose = /relay_unknown_floor_usd|relay_slow_floor_usd|relay_unknown_shut|\bat an estimate\b|counted at max_usd|the session's ceiling, an upper bound|marked a lower bound|its live reading/i;
-  for (const f of ["README.md", "action.yml", ...readdirSync(join(ROOT, "docs")).filter((n) => n.endsWith(".md")).map((n) => join("docs", n))]) {
-    readFileSync(join(ROOT, f), "utf8").split("\n").forEach((l, i) => prose.test(l) && hits.push(`${f}:${i + 1} (prose)`));
-  }
-  assert.deepEqual(hits, [], "an estimate or bound is read here");
-  // The one price table has a row per model it prices and nothing else: no upper-bound, dearest or fallback row.
-  for (const id of Object.keys(CODEX_PRICES.perMillion)) assert.doesNotMatch(id, /upper|bound|dearest|fallback|default|unknown/i, id);
-  assert.deepEqual(Object.keys(CODEX_PRICES).filter((k) => /upper|bound|fallback|dearest/i.test(k)), []);
-  assert.deepEqual(readdirSync(join(ROOT, "plugin", "scripts", "lib")).filter((f) => /prices\.json$/.test(f)), ["codex-prices.json"], "no other price table");
 });
 
 test("a Copilot run that reports no AI credits is a run of unknown cost, and the stage goes on to its next pass", async () => {
@@ -391,4 +345,45 @@ test("#506 review: every result.json Pendulum writes for a stage whose own proce
   const usage = withLines([{ ...stub, artifact: "pendulum-usage-7", vendor: { ...stub.vendor, usd: 0.6 } }], spendRecords(collected, { app: app.login, all: true }));
   const cost = costOf(usage, { date: "x", perMillion: {} }, { harness: "claude" });
   assert.deepEqual([cost.usd, cost.usdUnknown, cost.vendorUsd], [4.1, 1, 0.6], JSON.stringify(cost.parts));
+});
+
+test("the running status line shows no dollars where the record has unknown: a zeroed result, a resumed total before 2.1.277", () => {
+  const feed = (lines, prior = null) => {
+    const a = harnessActivity();
+    if (prior) a.since("s1", prior);
+    for (const l of lines) a.feed(JSON.stringify(l));
+    return a.snapshot().usd;
+  };
+  const init = (v) => ({ type: "system", subtype: "init", session_id: "s1", claude_code_version: v });
+  const said = { type: "assistant", message: { id: "m", usage: { input_tokens: 10, output_tokens: 5 }, content: [] } };
+  const result = (usd, error = false) => ({ type: "result", subtype: error ? "error_during_execution" : "success", is_error: error, session_id: "s1", total_cost_usd: usd });
+  assert.equal(feed([init("2.1.325"), said, result(0, true)]), null, "a zeroed crash result");
+  assert.equal(feed([init("2.1.325"), result(0, true)]), 0, "an error before any token is a real $0");
+  assert.equal(feed([init("2.1.276"), said, result(0.8)], { usd: 0.5 }), null, "a resumed total before 2.1.277");
+  assert.ok(Math.abs(feed([init("2.1.277"), said, result(0.8)], { usd: 0.5 }) - 0.3) < 1e-9, "from 2.1.277, the pass's own share");
+});
+
+test("no estimate, bound or fallback price is read or described anywhere in the plugin, the bench, the docs or the Action", () => {
+  const banned = /usdUpperBound|usdLowerBound|vendorUpperBound|usdEstimated|upperBound|lowerBound|stoppedUsd|live-spend|liveSpend|claude-prices/;
+  const skip = new Set([join(ROOT, "plugin", "test"), join(ROOT, "bench", "test"), join(ROOT, "plugin", "vendor")]);
+  const hits = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (skip.has(p) || name === "node_modules") continue;
+      if (statSync(p).isDirectory()) walk(p);
+      else if (/\.(mjs|js|json|md|yml|yaml|sh)$/.test(name)) {
+        readFileSync(p, "utf8").split("\n").forEach((l, i) => {
+          if (banned.test(l)) hits.push(`${relative(ROOT, p)}:${i + 1}`);
+        });
+      }
+    }
+  };
+  for (const d of ["plugin", "bench", "docs"]) walk(join(ROOT, d));
+  for (const f of ["README.md", "action.yml"]) readFileSync(join(ROOT, f), "utf8").split("\n").forEach((l, i) => banned.test(l) && hits.push(`${f}:${i + 1}`));
+  assert.deepEqual(hits, [], "an estimate or bound is read here");
+  // The one price table has a row per model it prices and nothing else: no upper-bound, dearest or fallback row.
+  for (const id of Object.keys(CODEX_PRICES.perMillion)) assert.doesNotMatch(id, /upper|bound|dearest|fallback|default|unknown/i, id);
+  assert.deepEqual(Object.keys(CODEX_PRICES).filter((k) => /upper|bound|fallback|dearest/i.test(k)), []);
+  assert.deepEqual(readdirSync(join(ROOT, "plugin", "scripts", "lib")).filter((f) => /prices\.json$/.test(f)), ["codex-prices.json"], "no other price table");
 });

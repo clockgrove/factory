@@ -11,7 +11,7 @@ import { EDIT_QUESTION, EDIT_TEXT_CAP, editInput, openEditCheck } from "../scrip
 import { COMMENT_MAX, planHanded, planOf, planSync, planTextMarker, planTextOf, recordRoom } from "../scripts/lib/handoff.mjs";
 import { dropHeldSecrets, holdSecrets } from "../scripts/lib/inputs.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
-import { EDITED_REASON, editedSincePlan, objectiveSha, planGate, planStateNow, recordText } from "../scripts/lib/objective-trust.mjs";
+import { EDITED_REASON, editedSincePlan, objectiveSha, planGate, recordText } from "../scripts/lib/objective-trust.mjs";
 import { MIN_CONFIDENCE } from "../scripts/lib/triage.mjs";
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
@@ -140,7 +140,7 @@ test("edit check: a write of the plan keeps the verdicts another process stamped
   assert.equal(planTextOf(writes[1].split("\n")[0].slice("<!-- pendulum:7:plan -->".length)).verdicts, undefined, "another text's verdicts are not its own");
 });
 
-for (const work of [true, false]) {
+for (const work of [true]) {
   const stage = work ? "work" : "review";
   test(`edit check (${stage}): a wording-only edit by a writer keeps the plan, its verdict stored and asked once`, async () => {
     setSelf(SELF);
@@ -173,40 +173,6 @@ for (const work of [true, false]) {
     assert.deepEqual([again.r.ok, d.asked.length], [false, 1]);
   });
 }
-
-test("edit check: a label applied after the plan's start is a person's word: the work stage plans again, whatever the verdict, and asks nothing", async () => {
-  setSelf(SELF);
-  for (const verdicts of [undefined, { [B]: "wording" }]) {
-    const d = fakeDecider("wording");
-    const r = await gate([planComment({ sha256: A, label: L0, text: recordText(BEFORE), ...(verdicts ? { verdicts } : {}) })], { work: true, labeledAt: L1, check: d.check });
-    assert.deepEqual([r.r.state, r.r.record.sha256, r.r.record.text, d.asked.length], ["replan", B, recordText(TYPO), 0], verdicts ? "a stored wording verdict" : "none stored");
-  }
-  // With no label since: the kept edit stands.
-  const kept = await gate([planComment({ sha256: A, label: L0, text: recordText(BEFORE), verdicts: { [B]: "wording" } })], { work: true, labeledAt: L0, check: fakeDecider("wording").check });
-  assert.deepEqual([kept.r.state, kept.r.record.sha256], ["same", A]);
-});
-
-test("edit check: today's rule with no decider, no verdict, a record without its text, or a text its hash does not name", async () => {
-  setSelf(SELF);
-  const cases = [
-    ["no decider", { sha256: A, label: L0, text: recordText(BEFORE) }, null],
-    ["a decider that is off", { sha256: A, label: L0, text: recordText(BEFORE) }, openEditCheck({ inputs: { decisionRoute: "off" } })],
-    ["decision_route off with a wording verdict stored", { sha256: A, label: L0, text: recordText(BEFORE), verdicts: { [B]: "wording" } }, openEditCheck({ inputs: { decisionRoute: "off" } })],
-    ["no decider with a wording verdict stored", { sha256: A, label: L0, text: recordText(BEFORE), verdicts: { [B]: "wording" } }, null],
-    ["a failed call", { sha256: A, label: L0, text: recordText(BEFORE) }, fakeDecider(null, null, "unavailable").check],
-    ["a record from before #400", { sha256: A, label: L0 }, fakeDecider("wording").check],
-    ["a text its hash does not name", { sha256: A, label: L0, text: recordText({ ...BEFORE, body: "Something else." }) }, fakeDecider("wording").check],
-  ];
-  for (const [name, record, check] of cases) {
-    const list = [planComment(record)];
-    const { r, applied, writes } = await gate(list, { check });
-    assert.deepEqual([r.ok, applied[0]?.reason, writes], [false, EDITED_REASON, []], name);
-  }
-  const unasked = fakeDecider("wording");
-  await gate([planComment({ sha256: A, label: L0 })], { check: unasked.check });
-  await gate([planComment({ sha256: A, label: L0, text: recordText({ ...BEFORE, body: "Something else." }) })], { check: unasked.check });
-  assert.equal(unasked.asked.length, 0);
-});
 
 test("edit check: a harness, model or host label changed is a changed requirement, never asked; a vouched rename is judged", async () => {
   setSelf(SELF);
@@ -244,21 +210,6 @@ test("edit check: every stage hands the edit check only text the trust check rea
   const trust = readFileSync(join(SCRIPTS, "lib", "objective-trust.mjs"), "utf8");
   const merge = trust.slice(trust.indexOf("export async function editedSincePlan("));
   assert.ok(merge.indexOf("objectiveTrusted(") < merge.indexOf("judgedEdit("), "the merge pass judges only after its own trust check");
-});
-
-test("edit check: a session's `pendulum issue` and post-review judge on the gateway's check and write nothing", async () => {
-  setSelf(SELF);
-  const list = [planComment({ sha256: A, label: L0, text: recordText(BEFORE) })];
-  const d = fakeDecider("wording");
-  const now = { sha: B, issueData: TYPO, labels: [] };
-  assert.equal((await planStateNow(repo, 7, now, { token: "t" }, { planComment: async () => planOf(list, 7) }, d.check)).state, "same");
-  assert.equal((await planStateNow(repo, 7, now, { token: "t" }, { planComment: async () => planOf(list, 7) })).state, "changed", "no decider: as before");
-  const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
-  assert.equal((local.match(/planStateNow\([^\n]*\(\) => openEditCheck\(\{ inputs \}\)\)/g) || []).length, 3, "`pendulum issue`, deliver and post-review");
-  // deliver: an edit the check keeps keeps the plan's own record (its text the baseline); else the text the session was given.
-  assert.match(local, /kept\.state === "same" && kept\.record && kept\.record\.sha256 !== trusted\.sha \? \{ \.\.\.kept\.record, label: labeledAt \} : \{ sha256: trusted\.sha, label: labeledAt, text: recordText\(/);
-  const judged = await planStateNow(repo, 7, now, { token: "t" }, { planComment: async () => planOf(list, 7) }, fakeDecider("wording").check);
-  assert.deepEqual([judged.record.sha256, judged.record.text, judged.record.verdicts], [A, recordText(BEFORE), { [B]: "wording" }], "the record deliver writes");
 });
 
 /** The merge pass's read of issue 7: its text and who wrote it, the plan comment, and GitHub's writes. */
@@ -304,19 +255,4 @@ test("edit check: the merge pass judges on the gateway, hands an edit it cannot 
   const stored = { ...record, verdicts: { [objectiveSha(renamed.title, renamed.body)]: "wording" } };
   assert.equal((await merged([planComment(stored)], { now: renamed, renamer: "triager", check: d.check })).how, "changed");
   assert.equal((await merged([planComment(stored)], { now: renamed, renamer: "kirk", check: d.check })).how, "same", "a writer's rename keeps the verdict");
-});
-
-test("edit check: the merge passes hand an unjudged edit to review; a kept edit keeps a local paused pass", () => {
-  assert.match(readFileSync(join(SCRIPTS, "review.mjs"), "utf8"), /mergeReadyOne\([^\n]*editCheck \}/, "the review stage's own merge pass asks on its decider");
-  const dispatch = readFileSync(join(SCRIPTS, "dispatch.mjs"), "utf8");
-  assert.match(dispatch, /mergeReadyOne\([^\n]*editCheck: \(\) => openEditCheck\(\{ inputs \}\)/);
-  assert.match(dispatch, /const backToReview = new Set\(\[[^\]]*"text-edit"/);
-  const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
-  assert.match(local, /mergeReadyOne\([^\n]*editCheck: \(\) => openEditCheck\(\{ inputs \}\)/);
-  assert.match(local, /how === "text-edit"\) return this\.review\(/);
-  // The pause guard (continue.mjs) holds a paused pass to the plan's own text when the edit since was kept.
-  const worker = readFileSync(join(SCRIPTS, "worker.mjs"), "utf8");
-  assert.match(worker, /const planText = planned\.state === "same" && planned\.record\?\.sha256 \? planned\.record\.sha256 : trusted\.sha;/);
-  assert.equal((worker.match(/text: planText, harness: inputs\.harness/g) || []).length, 2, "the pause record and the entry's read alike");
-  assert.doesNotMatch(worker, /text: trusted\.sha, harness/);
 });

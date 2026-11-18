@@ -892,10 +892,11 @@ const fromMicros = (m) => m / 1e6;
  * dollars the parts fall short of are left, under the stage's model; dollars they pass it by within the records' rounding
  * (half a millionth for each of `n` figures and the stage's own) come off the own model's part when it holds them, and
  * anything more, or runs of unknown cost or a token count over the stage's (or one the stage does not report), is no fit.
- * The left runs of unknown cost name the stage's reasons no part names, where there are any.
+ * The left runs of unknown cost name the stage's reasons no part names and those of the ledger entries no part took
+ * (`unplaced`, their `usdUnknownWhy`), or the stage's own reasons when that names none.
  */
-function splitOf(cost, tokens, parts, n) {
-  const tol = Math.ceil(0.5 * (n + 1));
+function splitOf(cost, tokens, parts, n, unplaced = []) {
+  const tol = Math.floor(0.5 * (n + 1));
   const out = parts.map((x) => ({ ...x, cost: { ...x.cost, usd: { ...x.cost.usd } } }));
   const left = zeroCost();
   for (const k of COST_KINDS) {
@@ -907,8 +908,8 @@ function splitOf(cost, tokens, parts, n) {
   left.unknownRuns = cost.unknownRuns - out.reduce((t, x) => t + x.cost.unknownRuns, 0);
   if (left.unknownRuns < 0) return null;
   const named = new Set(out.flatMap((x) => x.cost.unknownWhy));
-  const others = cost.unknownWhy.filter((w) => !named.has(w));
-  left.unknownWhy = !left.unknownRuns ? [] : others.length && others.length <= left.unknownRuns ? others : [...cost.unknownWhy];
+  const why = [...new Set([...cost.unknownWhy.filter((w) => !named.has(w)), ...unplaced])].sort();
+  left.unknownWhy = !left.unknownRuns ? [] : why.length ? why : [...cost.unknownWhy];
   const leftTokens = zeroTokens();
   for (const k of TOKEN_KINDS) {
     const taken = countSum(...out.map((x) => x.tokens?.[k]));
@@ -943,7 +944,7 @@ function claudeModelParts(usage, entries, named, prices) {
   }
   const passes = entries.reduce((t, [, p]) => t + COST_KINDS.reduce((s, k) => s + micros(p.cost.usd[k]), 0), 0);
   const total = parts.reduce((t, x) => t + COST_KINDS.reduce((s, k) => s + micros(x.cost.usd[k]), 0), 0);
-  return Math.abs(passes - total) <= Math.ceil(0.5 * (entries.length + models.length)) ? parts : null;
+  return Math.abs(passes - total) <= Math.floor(0.5 * (entries.length + models.length)) ? parts : null;
 }
 
 /**
@@ -987,7 +988,9 @@ export function modelParts({ model, recorded = null, cost, tokens, stages, ledge
   const n = (parts) => entries.length + parts.length;
   const claude = harness === "claude" && usage ? claudeModelParts(usage, entries, publishedName, prices) : null;
   const passes = byPass();
-  const split = (claude && splitOf(cost, tokens, withOwn(claude), n(claude))) || (passes.length ? splitOf(cost, tokens, withOwn(passes), n(passes)) : null);
+  // The reasons of the runs of unknown cost of the ledger entries no part took (a pass on a model the ledger does not name).
+  const unplaced = entries.filter(([e]) => !named(e.model)).flatMap(([, p]) => p.cost.unknownWhy);
+  const split = (claude && splitOf(cost, tokens, withOwn(claude), n(claude))) || (passes.length ? splitOf(cost, tokens, withOwn(passes), n(passes), unplaced) : null);
   if (!split) return whole;
   const out = split.parts.map((x, i) => ({ key: x.key, basis: "pass", stages: i === 0 ? stages : 0, cost: x.cost, tokens: x.tokens }));
   const { left } = split;

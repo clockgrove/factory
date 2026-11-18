@@ -1667,6 +1667,14 @@ test("report (#568): what no pass names stays under the stage's model by stage, 
     ["claude-opus-5-5", "pass", 1, ["unreported"]],
     ["claude-fable-5-2", "stage", 1, ["sandbox"]],
   ]);
+  // A reason a named pass shares with one no part took stays on the left runs: three runs, `sandbox` and `unreported`,
+  // an unreported pass on Opus, an unreported pass with no model and the sandbox's run.
+  const shared = modelParts({ model: "claude-fable-5-2", cost: cost(0.3, { unknownRuns: 3, unknownWhy: ["sandbox", "unreported"] }), tokens, stages: 1, ledger: [entry("claude-fable-5-2", 0.3), entry("claude-opus-5-5", null, { usdUnknown: 1, usdUnknownWhy: ["unreported"] }), entry(null, null, { usdUnknown: 1, usdUnknownWhy: ["unreported"] })], prices });
+  assert.deepEqual(shared.map((x) => [x.key, x.basis, x.cost.unknownRuns, x.cost.unknownWhy]), [
+    ["claude-fable-5-2", "pass", 0, []],
+    ["claude-opus-5-5", "pass", 1, ["unreported"]],
+    ["claude-fable-5-2", "stage", 2, ["sandbox", "unreported"]],
+  ]);
   // From local mode's own record, a pass's model counts only where the stage publishes it, as its ledger line would: a
   // Bedrock inference profile ARN (it names an AWS account) is no row; its pass stays under the stage's model.
   const ARN = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";

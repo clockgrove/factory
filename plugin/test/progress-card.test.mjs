@@ -393,6 +393,9 @@ test("#635: a CI wait keeps its own start, end and outcome through an overlappin
   Object.assign(again, { outcome: "failed" });
   lines.push([again.end, "checks cancelled", { step: "ci", red: "stuck", outcome: "cancelled" }]);
   assert.match(render(done).chart, /section CI · cancelled\n    4m 00s :done,/);
+  again.crossOs = true;
+  lines.at(-1)[2].crossOs = true;
+  assert.match(render(done).chart, /section Cross-OS CI · cancelled\n    4m 00s :done,/);
 });
 
 test("#635: the review stage's pass for a red required check alone is a fix pass: its label, its row and the report's count", () => {

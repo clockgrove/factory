@@ -1999,7 +1999,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (v.stuck) {
       passes -= 1;
       log(`${label}: ${v.stuck.reason}; no fix run`);
-      if (onPhase) await onPhase(`${label}: ${v.stuck.reason}; no fix run`, { step: "ci", red: "stuck", clause: v.stuck.reason, ...(v.stuck.kind === "cancelled" ? { outcome: "cancelled" } : {}) });
+      if (onPhase) await onPhase(`${label}: ${v.stuck.reason}; no fix run`, { step: "ci", crossOs: !!checks?.request, red: "stuck", clause: v.stuck.reason, ...(v.stuck.kind === "cancelled" ? { outcome: "cancelled" } : {}) });
       return { green: false, passes, lastOutput: "", command: v.command, usage, stuck: v.stuck, sha: v.sha };
     }
     // A required job GitHub never started: infrastructure, not this change's, so no fix pass; the stage Blocks quoting GitHub.

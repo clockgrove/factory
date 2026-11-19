@@ -392,6 +392,22 @@ export function workerRun(inputs) {
 }
 
 /**
+ * The worker pass the review job runs after its reviewer, by what it is given (counts, and `red`: the red required
+ * check the stage held, a PR check's or the merge queue's run's). With nothing to answer but the red it is a fix pass:
+ * its label and its scope hold's are the pre-review loop's own for a fix on its pass `passes` (usage.mjs passKind
+ * `fix`, the report's passes.fix), and its step is a `fix`. Any other is the answer pass. Returns `{fix, label,
+ * scopeLabel, step}`.
+ */
+export function answerPass({ comments = 0, thirdParty = 0, decisions = 0, question = false, red = null, passes = 0 }) {
+  const sha = red?.sha || null;
+  if (red && !comments && !decisions && !question) {
+    const n = Math.max(1, passes);
+    return { fix: true, label: `pre-review-validation-fix-${n}`, scopeLabel: `pre-review-validation-scope-${n}`, step: { step: "fix", check: red.failures?.[0]?.command ?? null, sha } };
+  }
+  return { fix: false, label: "answer", scopeLabel: "answer-scope", step: { step: "answer", comments, thirdParty, decisions: comments ? 0 : decisions, question, sha, queue: !!red?.queue } };
+}
+
+/**
  * What the comments an answer pass is given add to its fix-pass scope (outbox.mjs fence): each comment's file and text,
  * but of code scanning's alert only its file, and never a protected or toolchain one: an alert there is fixed by no
  * answer pass, and the scope's refusal Blocks it.
@@ -1936,7 +1952,9 @@ async function main() {
   }
   const fromThirdParty = toAnswer.filter((c) => c.from).length;
   const redSaid = heldRed ? `the red required checks on ${String(heldRed.sha || "").slice(0, 7)}${heldRed.queue ? " (the merge queue's run)" : ""}` : "";
-  if (answering) await progress(toAnswer.length ? `answer pass: ${toAnswer.length} comment(s)${fromThirdParty ? ` (${fromThirdParty} from third-party reviewers)` : ""}${answerQuestion ? " and the maintainers' answer" : ""}${redSaid ? ` and ${redSaid}` : ""}` : afterPush.length ? `answer pass: ${afterPush.length} unread maintainer decision(s)${redSaid ? ` and ${redSaid}` : ""}` : answerQuestion ? `answer pass: the maintainers' answer to the question${redSaid ? ` and ${redSaid}` : ""}` : `answer pass: ${redSaid}`, { step: "answer", comments: toAnswer.length, thirdParty: fromThirdParty, decisions: toAnswer.length ? 0 : afterPush.length, question: !!answerQuestion, sha: heldRed?.sha || null, queue: !!heldRed?.queue });
+  // The pass this is: the answer pass, or a fix pass when the held red is all it is given (answerPass).
+  const afterPass = answerPass({ comments: toAnswer.length, thirdParty: fromThirdParty, decisions: afterPush.length, question: !!answerQuestion, red: heldRed, passes });
+  if (answering) await progress(toAnswer.length ? `answer pass: ${toAnswer.length} comment(s)${fromThirdParty ? ` (${fromThirdParty} from third-party reviewers)` : ""}${answerQuestion ? " and the maintainers' answer" : ""}${redSaid ? ` and ${redSaid}` : ""}` : afterPush.length ? `answer pass: ${afterPush.length} unread maintainer decision(s)${redSaid ? ` and ${redSaid}` : ""}` : answerQuestion ? `answer pass: the maintainers' answer to the question${redSaid ? ` and ${redSaid}` : ""}` : `fix run: ${redSaid}`, afterPass.step);
 
   // One worker pass to answer, then validation again. Its exit record (JSON it writes, or answers
   // with) says whether it raised a question; the PR's draft state does not.
@@ -1982,7 +2000,7 @@ async function main() {
         env: passEnv,
         timeoutMs: remainingMs(deadlineAt),
         eventsFile,
-        label: "answer",
+        label: afterPass.label,
       };
     };
     // The answer pass is a fix pass (outbox.mjs fence): the plan, the issue, the decisions and the comments it answers name its scope.
@@ -2005,7 +2023,7 @@ async function main() {
     if (answerFreshAfter(resumeAnswer, rec) && !mark(rec, rec).budgetExceeded) {
       records.push(rec);
       log(`resumed session ${resumeAnswer.slice(0, 8)} failed (${rec.error}); answering fresh`);
-      await progress("re-entry: resume failed; answering fresh", { step: "answer", freshAfterFail: true, pass: false });
+      await progress("re-entry: resume failed; answering fresh", { step: afterPass.step.step, freshAfterFail: true, pass: false });
       reentry = { ...(reentry || {}), resumed: false, reason: "resume failed" };
       session.id = null;
       rec = await runHarness(answerArgs(null));
@@ -2018,7 +2036,7 @@ async function main() {
     let out = await io.collect();
     // Toolchain files the answer changed outside its scope: one turn to put them back, else the push below is refused.
     if (!crashed(rec) && !rec.timedOut && !rec.budgetExceeded && !rec.refusal) {
-      const held = await holdScope({ outbox, session, harness: inputs.harness, model: inputs.model, effort: inputs.effort, taskCard, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: passCap(), spentUsd: sumSpend(records).usd, label: "answer-scope", progress, io });
+      const held = await holdScope({ outbox, session, harness: inputs.harness, model: inputs.model, effort: inputs.effort, taskCard, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: passCap(), spentUsd: sumSpend(records).usd, label: afterPass.scopeLabel, progress, io });
       for (const r of held.usage) mark(r, r);
       records.push(...held.usage);
       if (held.usage.length) out = io.files();

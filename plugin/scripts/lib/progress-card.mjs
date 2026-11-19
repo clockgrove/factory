@@ -3,10 +3,11 @@
 //   stepOf        each line's step, as the stage wrote it (`{step, ...fields}`), its fields checked and kept; the card
 //                 decides on those fields and on the passes' labels, never on a line's words. A step object the stage
 //                 keeps may get its end (`end`) and its result (`outcome`) later: they are read at each write;
-//   progressData  the steps as rows, one per kind of step in order of first occurrence, ×N for repeats; each row's
-//                 Took from recorded starts and ends only (an AI run's record; a wait's own start and end), its cost
-//                 from the AI runs that ended in it; the AI judge calls in a row of their own. The table and the
-//                 timeline chart read this one data;
+//   progressData  the steps as rows, one per kind of step in order of first occurrence, ×N for repeats (CI waits fold
+//                 only while consecutive: a wait after another step is a row of its own, in time order); each row's
+//                 Took from recorded starts and ends only (an AI run's record; a wait's own span, from the line that
+//                 began its round to its end), its cost from the AI runs that ended in it; the AI judge calls in a row
+//                 of their own. The table and the timeline chart read this one data;
 //   progressCard  the markdown: the two-line headline, the action line, the table, the timeline chart, Run details.
 // Run details ends with the Full log: the comment as every reader reads it (session.mjs progressReporter writes it there
 // byte for byte: its header, its `- <time> <text>` lines with their hidden UTC stamps). The card itself never writes a
@@ -16,30 +17,30 @@ import { AGENTS, BASIS_NOTE, codeSpan, basisText, causeSentences, causesShort, c
 import { passKind } from "./usage.mjs";
 import { sanitize } from "./handoff.mjs";
 
-/** The rows' words: [name, what the Now row says, the timeline's section]. */
+/** The rows' words: [name, what the Now row says]. */
 export const ROWS = Object.freeze({
-  setup: ["Set up", "setting up", "Set up"],
-  edit: ["Checked your edit", "checking your edit", "Edit check"],
-  build: ["Built the change", "building the change", "Build"],
-  rebased: ["Rebased", "rebasing", "Rebase"],
-  conflict: ["Resolved a conflict", "resolving a conflict", "Conflict"],
-  drift: ["Drift advisory", "checking for drift", "Drift"],
-  ci: ["Waited for CI", "waiting for CI", "CI wait"],
-  commands: ["Ran your checks", "running your checks", "Checks"],
-  crossOs: ["Waited for cross-OS CI", "waiting for cross-OS CI", "Cross-OS CI"],
-  flake: ["Flake check", "checking for a flake", "Flake check"],
-  fix: ["Fixed CI", "fixing CI", "CI fix"],
-  handoff: ["Handed CI to the review", "handing CI to the review", "Hand-off"],
-  scope: ["Kept the change in scope", "putting files back", "Scope"],
-  review: ["Reviewed the change", "reviewing the change", "Review"],
-  queue: ["Merge queue failure", "reading the merge queue", "Queue"],
-  outside: ["Outside reviewer", "waiting for an outside reviewer", "Outside review"],
-  answer: ["Answered", "answering the review", "Answers"],
-  check: ["Checked the answers", "checking the answers", "Check"],
-  comments: ["Read new comments", "reading new comments", "Comments"],
-  wrapup: ["Wrap-up", "wrapping up", "Wrap-up"],
-  judge: ["AI judge calls", "asking the AI judge", "AI judge"],
-  note: ["Note", "working", "Note"],
+  setup: ["Set up", "setting up"],
+  edit: ["Checked your edit", "checking your edit"],
+  build: ["Built the change", "building the change"],
+  rebased: ["Rebased", "rebasing"],
+  conflict: ["Resolved a conflict", "resolving a conflict"],
+  drift: ["Drift advisory", "checking for drift"],
+  ci: ["Waited for CI", "waiting for CI"],
+  commands: ["Ran your checks", "running your checks"],
+  crossOs: ["Waited for cross-OS CI", "waiting for cross-OS CI"],
+  flake: ["Flake check", "checking for a flake"],
+  fix: ["Fixed CI", "fixing CI"],
+  handoff: ["Handed CI to the review", "handing CI to the review"],
+  scope: ["Kept the change in scope", "putting files back"],
+  review: ["Reviewed the change", "reviewing the change"],
+  queue: ["Merge queue failure", "reading the merge queue"],
+  outside: ["Outside reviewer", "waiting for an outside reviewer"],
+  answer: ["Answered", "answering the review"],
+  check: ["Checked the answers", "checking the answers"],
+  comments: ["Read new comments", "reading new comments"],
+  wrapup: ["Wrap-up", "wrapping up"],
+  judge: ["AI judge calls", "asking the AI judge"],
+  note: ["Note", "working"],
 });
 /** The rows whose steps are AI runs: each open until an ended run of its kind closes it. */
 const AI = new Set(["build", "rebased", "conflict", "review", "answer", "fix", "scope"]);
@@ -47,9 +48,15 @@ const AI = new Set(["build", "rebased", "conflict", "review", "answer", "fix", "
 export const ROW_OF = Object.freeze({ setup: "setup", edit: "edit", work: "build", conflict: "conflict", rebase: "rebased", drift: "drift", ci: "ci", commands: "commands", triage: "flake", fix: "fix", handoff: "handoff", scope: "scope", review: "review", queue: "queue", thirdParty: "outside", answer: "answer", check: "check", comments: "comments", note: "note" });
 /** Rows whose count shows (×N) when more than one of their steps happened. */
 const COUNTED = new Set(["build", "rebased", "conflict", "ci", "commands", "crossOs", "flake", "fix", "review", "answer"]);
+/** The rows that fold only consecutive steps: a CI wait written after a step of another kind is a row of its own. */
+const WAITS = new Set(["ci", "crossOs"]);
 /** A step cell's detail clause, in characters (Step-cell details are cut to SHORT_DETAIL when the comment is near the limit). */
 export const DETAIL_MAX = 140;
 export const SHORT_DETAIL = 60;
+/** A timeline section's name, in characters, and the room the chart keeps for it (and the chart's width with that room). */
+const SECTION_MAX = 32;
+const SECTION_PAD = 250;
+const CHART_WIDTH = 900;
 
 /** The stage's name in its headline, by its kind (a work stage that only rebases is a Rebase). */
 const STAGE_NAMES = Object.freeze({ work: "Work", review: "Review", merge: "Merge check" });
@@ -201,10 +208,12 @@ export function progressData({ stage, subject = null, issue, started, now, lines
   const inProgress = (c) => !!c && !c.aside && closedAt(c) === null;
   const current = live && !exit && steps.length ? (steps.findLast(open) ?? (inProgress(steps.at(-1)) ? steps.at(-1) : null)) : null;
   // One row per kind of step, ordered by its first time (a step's line, else its first AI run's start), the AI judge's
-  // row and the wrap-up's included; the Now row follows them all.
+  // row and the wrap-up's included; the Now row follows them all. CI waits (WAITS) fold only while consecutive: one
+  // written after a step of another kind opens a row of its own, at its own time (a line beside a step, `aside`, opens
+  // none and ends no run of waits).
   const rows = [];
-  const rowFor = (kind, t) => {
-    let r = rows.find((x) => x.kind === kind);
+  const rowFor = (kind, t, fresh = false) => {
+    let r = fresh ? null : rows.findLast((x) => x.kind === kind);
     if (!r) rows.push((r = { kind, t, events: [], passes: [] }));
     return r;
   };
@@ -216,7 +225,23 @@ export function progressData({ stage, subject = null, issue, started, now, lines
     const same = steps.filter((e) => e.kind === current.kind);
     for (let i = same.indexOf(current) - 1; i >= 0 && same[i].step?.begin === true; i -= 1) began.unshift(same[i]);
   }
-  for (const e of steps) if (e !== current && !began.includes(e)) rowFor(e.kind, e.t).events.push(e);
+  let lastKind = null;
+  for (const e of steps) {
+    if (e !== current && !began.includes(e)) rowFor(e.kind, e.t, WAITS.has(e.kind) && !e.aside && lastKind !== e.kind).events.push(e);
+    if (!e.aside) lastKind = e.kind;
+  }
+  // A CI wait runs from the line that began its round (`begin`: the validation pass that waits) to the checks' result,
+  // as the Now row's does while it runs.
+  for (const r of rows.filter((x) => WAITS.has(x.kind))) {
+    let from = null;
+    for (const e of r.events) {
+      if (e.step?.begin === true) from ??= e.t;
+      else {
+        if (e.step?.wait === true && from !== null && time(e.step.start) === null) e.start = from;
+        from = null;
+      }
+    }
+  }
   for (const p of (passes || []).filter((x) => x && !x.noRun)) {
     const at = Date.parse(p.started);
     const r = rowFor(passRow(p, { rebase: stageRebase }), Number.isFinite(at) ? at : now);
@@ -300,7 +325,7 @@ function rowDetail(r, { at, max, data }) {
       else {
         const outcome = last((e) => e.outcome)?.outcome;
         // A failed round's failing check, from the fix that followed it.
-        const failedCheck = outcome === "failed" ? [...(data.rows.find((x) => x.kind === "fix")?.events ?? []), ...(data.current?.kind === "fix" ? [data.current] : [])].findLast((e) => e.check)?.check : null;
+        const failedCheck = outcome === "failed" ? [...(data.rows.find((x) => x.kind === "fix")?.events ?? []), ...(data.current?.kind === "fix" ? [data.current] : [])].find((e) => e.check && e.t >= ev.at(-1).t)?.check : null;
         const where = sha ? `${r.count > 1 ? "last " : ""}on \`${sha}\`` : "";
         if (outcome === "passed") w.push(`passed${where ? `${r.count > 1 ? ", " : " "}${where}` : ""}`);
         else if (outcome === "failed") w.push(failedCheck ? `failed: ${codeSpan(failedCheck)}` : `failed${where ? ` ${where}` : ""}`);
@@ -420,6 +445,30 @@ function rowName(r) {
   return `${base}${shown > 1 || (r.kind === "judge" && shown) ? ` ×${shown}` : ""}${r.model && ["build", "rebased", "conflict", "review", "answer"].includes(r.kind) ? ` · ${modelName(r.model)}` : ""}`;
 }
 
+/** How a CI row's waits ended, from its steps: `red` (a red that stands, or a failed round), else the last outcome; null for none. */
+function waitEnd(r) {
+  const ev = r.events;
+  const wait = ev.findLastIndex((e) => e.wait);
+  const red = ev.findLastIndex((e) => e.red && e.red !== "late-start");
+  if (red >= 0 && red > wait) return "red";
+  const outcome = ev.findLast((e) => e.outcome)?.outcome ?? null;
+  return outcome === "failed" ? "red" : outcome;
+}
+
+/**
+ * A row in the timeline chart: its section, named as its table row (a CI wait's with how it ended: `CI · red`,
+ * `CI · passed`), and its bars, one per recorded span: an AI run amber (`active`) with its cost, a wait or any other
+ * step grey (`done`), a CI wait that ended red red (`crit`).
+ */
+function chartRow(r) {
+  const end = WAITS.has(r.kind) ? waitEnd(r) : null;
+  const section = WAITS.has(r.kind) ? `${r.kind === "crossOs" ? "Cross-OS CI" : "CI"}${end ? ` · ${end}` : ""}` : `${ROWS[r.kind][0]}${COUNTED.has(r.kind) && r.count > 1 ? ` ×${r.count}` : ""}${r.model && AI.has(r.kind) ? ` · ${modelName(r.model)}` : ""}`;
+  const tag = AI.has(r.kind) ? "active" : end === "red" ? "crit" : "done";
+  const runs = r.passes.map((p) => ({ start: Date.parse(p.started), end: Date.parse(p.ended), label: typeof p.usd === "number" && p.usd >= 0.005 ? `· ${moneyText(p.usd)}` : "" }));
+  const bars = (r.passes.length ? runs : r.spans.map(([a, b]) => ({ start: a, end: b, label: "" }))).filter((b) => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start);
+  return { section: clip(section, SECTION_MAX), bars: bars.map((b) => ({ ...b, tag })) };
+}
+
 /** A row's cost cell: its AI runs' known cents and runs of unknown cost; "—" when no AI ran in it. */
 const costCell = (r) => ((r.usd === null || r.usd === 0) && !r.unknown ? "—" : cellCost(r.cents ? r.cents / 100 : (r.usd ?? 0), r.unknown));
 
@@ -431,7 +480,7 @@ function nowCell(d, at) {
   const s = d.snapNow?.snap;
   // What the step's agent last reported (its run's activity snapshot), else how long the step has run. An ended run's
   // snapshot is never the Now row's: its step is closed.
-  const activity = s ? `${s.elapsedMin} min, ${many(s.turns, "turn")}, ${many(s.toolCalls, "tool call")}, ${s.idleMin === 0 || s.idleMin === null ? "active now" : `last activity ${s.idleMin} min ago`}` : minutesText(Math.max(0, d.now - c.t));
+  const activity = s ? `${s.elapsedMin} min, ${many(s.turns, "turn")}, ${many(s.toolCalls, "tool call")}, ${s.idleMin === 0 || s.idleMin === null ? "active now" : `last activity ${s.idleMin} min ago`}` : minutesText(Math.max(0, d.now - c.since));
   const where = (c.kind === "ci" || c.kind === "crossOs") && c.sha ? ` on \`${c.sha}\`` : "";
   return `**Now:** ${tableCell(`${doing}${where}${model ? ` · ${model}` : ""} · ${activity}`)}`;
 }
@@ -483,9 +532,10 @@ export function progressCard({ status = "", ran = null, harness = null, runId = 
   else if (running && !d.rows.length) rows.push(`| ${at(d.started)} | **Now:** ${tableCell(clean(status, 400) ?? "starting")} | running | — |`);
   if (!running && d.live) rows.push(`| | **Total** | **${minutesText(wall)}** | **${usd === null ? "—" : cellCost(usd, u.runs)}** |`);
   const table = !showTable ? ["", "The steps are in Run details' Full log: this comment is near GitHub's size limit."] : rows.length ? ["", "| Time | Step | Took | Cost |", "| :-- | :-- | --: | --: |", ...rows] : [];
-  // The timeline chart: at the end only, with three or more rows that took a recorded time.
+  // The timeline chart: at the end only, with three or more rows that took a recorded time, one section per row in the
+  // table's order (chartRow).
   const timed = d.rows.filter((r) => r.took !== null && r.spans.length);
-  const gantt = chart && !running && timed.length >= 3 ? ganttChart(timed.map((r) => ({ section: ROWS[r.kind][2], bars: r.spans.map(([a, b]) => ({ start: a, end: b, tag: "active" })) })), { zone: d.zone, days: d.crosses, leftPadding: 110 }) : null;
+  const gantt = chart && !running && timed.length >= 3 ? ganttChart(timed.map(chartRow), { zone: d.zone, days: d.crosses, leftPadding: SECTION_PAD, width: CHART_WIDTH }) : null;
   const chartBlock = gantt ? `<details><summary>Timeline chart</summary>\n\n${gantt}\n\nEvery bar's figures are in the table above.\n\n</details>` : "";
   return { card: [...head, ...table].join("\n"), details: runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at }), chart: chartBlock };
 }

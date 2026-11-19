@@ -196,10 +196,13 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
     const first = Object.entries(diffLines(diff)).find(([, v]) => v.lines.size);
     placeholder = true;
     // A pass that judged no entry (reviewMissed) is not a clean pass: the placeholder says so.
+    // An entry not met with no comment (assigned by a decision, or its finding already open) is in the body.
     const said =
       review && judgedNone(review, entries)
         ? "the reviewer judged none of the acceptance entries; this is not a clean pass."
-        : "no findings; the pass ran and returned nothing line-tied.";
+        : judged.some((a) => !a.met && !(splitPart && a.deferred))
+          ? "no new line findings; the review body lists the acceptance entries not met."
+          : "no findings; the pass ran and returned nothing line-tied.";
     comments = [{ path: first?.[0] ?? null, line: first ? (first[1].first ?? Math.min(...first[1].lines)) : null, side: "RIGHT", body: `${PLACEHOLDER_MARKER}\nPendulum reviewer: ${said}` }];
   }
   const checked = "checked the shared contracts the diff changes against their callers";

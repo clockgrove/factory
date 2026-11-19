@@ -487,6 +487,13 @@ export async function headMovedFrom({ repo, prNumber, own, token, before = null 
 }
 
 /**
+ * Pendulum's open findings (`open`) a not-met entry may rely on for its comment (handoff.mjs reviewPost `open`): those
+ * whose answer the last stage's check left without a verdict (`unjudged`, checkState) are judged again after the review
+ * goes up and may be resolved then, so they are left out and their entries get their comment (#638).
+ */
+export const settledOpen = (open, unjudged) => open.filter((c) => !unjudged.some((id) => String(id) === String(c.id)));
+
+/**
  * The review comments the answer pass gets: every open one, but after a first review that found nothing (its
  * placeholder) only the third-party reviewers' and code scanning's (`from`). A later pass that found nothing leaves the
  * earlier reviews' open findings to answer.
@@ -1827,10 +1834,21 @@ async function main() {
   // Pendulum's own findings still open on the PR from an earlier review (never a third party's or a writer's comment):
   // an entry judged not met again gets no second comment beside its open one. Read only when an earlier review of
   // Pendulum's exists and this answer judges an entry not met; unread, each such entry gets its comment as before.
+  // One whose answer the last stage's check got no verdict on is judged again after this review goes up and may be
+  // resolved then, so it holds no entry back (settledOpen); with that record unread, none does.
   const openFindings =
     !alreadyReviewed && !scope.first && (reviewOf(answer).acceptance || []).some((a) => !a.met)
       ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds() }).then(
-          (open) => open.filter((c) => !c.from && !c.writer),
+          async (open) => {
+            const mine = open.filter((c) => !c.from && !c.writer);
+            if (!mine.length) return mine;
+            const rec = await readAnswerRounds(repo, { issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel }, token).catch((e) => {
+              if (outageMet(e)) throw e;
+              log(`open findings: the answer-rounds record could not be read (${String(e?.message || e).slice(0, 120)})`);
+              return null;
+            });
+            return rec ? settledOpen(mine, checkState(rec).unjudged) : [];
+          },
           (e) => {
             // Unread because of an outage (network.mjs outageMet): the stage ends on it, as on any read.
             if (outageMet(e)) throw e;

@@ -56,7 +56,7 @@ export const DETAIL_MAX = 140;
 export const SHORT_DETAIL = 60;
 /** A timeline section's name, in characters, and the room the chart keeps for it (and the chart's width with that room). */
 const SECTION_MAX = 32;
-const SECTION_PAD = 290;
+const SECTION_PAD = 360;
 const SECTION_MODEL_MAX = 9;
 const CHART_WIDTH = 900;
 

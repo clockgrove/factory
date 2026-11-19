@@ -36,9 +36,9 @@
       "words": 689,
       "files": {
         "reference.md": {
-          "sha256": "06b3858e1559922eef5039dbc680927785e537cc508fa9e03f6ca51ab49844e9",
+          "sha256": "36be69ca498e7b5c168674210b8b8fbb5a972a68162466c348f6234a0987717c",
           "lines": 67,
-          "words": 1374
+          "words": 1356
         }
       }
     },
@@ -147,14 +147,14 @@
       }
     },
     "pendulum-run": {
-      "sha256": "c4159d5e9963a1f89f67e7a4b90ef712a3a9a38af1f15448cfd2ede5f6ed035e",
+      "sha256": "df1eca1d80fc1b27306633f143c5a409bcf3fe37d292a233bdf809df0598686f",
       "lines": 53,
-      "words": 685,
+      "words": 672,
       "files": {
         "reference.md": {
-          "sha256": "f2108baad9ce2f7c8e223fab1af4648c562cd10a3b16f7cdda430ba44a9921bf",
-          "lines": 17,
-          "words": 266
+          "sha256": "3c68ad93139560ddd7e07f3e698b2ddd61ba5edbf8695402644ffd0930ad1ba8",
+          "lines": 23,
+          "words": 370
         }
       }
     },

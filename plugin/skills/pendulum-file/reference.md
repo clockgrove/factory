@@ -49,7 +49,7 @@ Then offer the next step: keep working on it, leave it as a draft, or start it (
 
 Starting a draft takes `pendulum:draft` off and applies `pendulum:objective`; the dispatcher then picks it up like a new Objective. A draft is never run, on any route, even with `pendulum:objective` on it too. Confirm first: a started Objective runs unattended and spends model budget.
 
-**Check the issue.** `pendulum:objective` without `pendulum:draft`: it is started already; do not start it again. Say so and point to the next step that fits: the pendulum-status skill resumes a Blocked one or answers a Question, and the pendulum-restart skill starts one over from its issue's current text. No `pendulum:draft`: not a draft, but starting it is the same step. No goal or no acceptance entries (SKILL.md's shape): say so, and offer to refine it first.
+**Check the issue.** `pendulum:objective` without `pendulum:draft` means already admitted. Keep the labels as they are, check dependencies and readiness, then follow the configured dispatcher or existing run. Use pendulum-status for a Blocked one or a Question, and pendulum-restart only for a requested restart. A draft or unlabelled issue without a goal or acceptance entries needs refinement first (SKILL.md).
 
 Read open dependencies with `gh api --paginate repos/OWNER/NAME/issues/<issue>/dependencies/blocked_by --jq '.[] | select(.state == "open") | .number'`. On a GitHub host without issue dependencies, use the body fallback described under Blocking Objectives. Report the dependency as a queue condition and preserve the link.
 

@@ -7,7 +7,7 @@ description: "Run one admitted Pendulum Objective by issue number on the user's 
 
 `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
 
-Read the issue and its Pendulum state before opening source files or preparing a branch. For a draft or an issue without `pendulum:objective`, use pendulum-file to admit it first. If Pendulum already owns an active or paused run, follow it or use its supported resume operation.
+Read the issue and its state before exploring source or preparing a branch. Follow an active or paused run through its existing lifecycle. For a draft or unlabelled issue, use pendulum-file when the user wants dispatcher admission.
 
 ## Local mode (the default)
 
@@ -29,7 +29,7 @@ Work the Objective here, unsandboxed, when the user explicitly selects this rout
 
 ### Preconditions
 
-- The issue is open, carries `pendulum:objective`, has no `pendulum:draft` or [open dependency](../pendulum-file/reference.md#start-a-draft), and has no active or paused run. Check before preparing a branch.
+- Verify eligibility and ownership using [In-session readiness](reference.md#in-session-readiness) before preparing a branch.
 - The current directory is a clone of the target repository with its toolchain installed, and either local mode's token or a `gh` login for `pendulum deliver`. When `.github/workflows/pendulum.yml` exists, read its `env:` block: `PENDULUM_VALIDATION`, `PENDULUM_BUDGET_COMMAND`, `PENDULUM_PROTECTED_PATHS`, `PENDULUM_MAX_USD`, `PENDULUM_TIMEOUT_MINUTES`, `PENDULUM_CI_CHECKS`. Otherwise ask once for whatever is missing, before the run starts. Say the budget (`PENDULUM_MAX_USD`, else the user's): this session keeps to it itself.
 - Never on Pendulum's own repository (`clockgrove/pendulum`); stop and say so.
 
@@ -45,7 +45,7 @@ The rendered task card is your instructions, `$PENDULUM_IN/issue.md` verbatim th
 
 Show the commits (`git log --oneline origin/<default branch>..HEAD`), PR title (first line of `$PENDULUM_OUT/pr.md`) and exit record. Explain that `pendulum deliver <issue>` rechecks trust and protected paths, pushes `pendulum/<issue>`, posts the PR and hand-off records, and applies the exit. A delivered PR becomes ready with `pendulum:review`. The Action reviews it and merges once green if `auto_merge` is on. Ask for a yes.
 
-On a yes, run `pendulum deliver <issue>` from the clone. Without the workflow, say that the PR waits for the pendulum-review-here skill and a human merge.
+On a yes, recheck that no Pendulum run owns the issue, then run `pendulum deliver <issue>` from the clone. Without the workflow, say that the PR waits for the pendulum-review-here skill and a human merge.
 
 ### After
 

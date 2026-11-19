@@ -39,7 +39,7 @@
  *                          comments alone are read (default: the App that
  *                          applied pendulum:running to the issue)
  *   --label NAME           the Objective label (default pendulum:objective)
- *   --clock-after DATE     start each clock at the first label event at or
+ *   --clock-after DATE     start each clock at the first activation event at or
  *                          after DATE (an issue an earlier Pendulum ran under
  *                          the same label keeps its old events; this floors them)
  *   --check CMD            validation command(s) for the grade-auto line
@@ -221,14 +221,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       if (!sinceAt) usage(`--since ${sinceTag}: no such tag in ${pendulumRepo}`);
     }
     for (const repo of repos) {
-      const numbers = issues.length ? issues : await listObjectives(api, repo, { since: sinceAt, label });
+      const numbers = issues.length ? issues : await listObjectives(api, repo, { since: sinceAt, label, app: values.app ?? null });
       if (!numbers.length) {
         process.stderr.write(`no ${label} issue in ${repo} closed${values.since ? ` since ${values.since}` : ""}, Blocked, Question, In review, Running or parked\n`);
         if (!pooled) process.exit(65);
       }
       byRepo[repo] = [];
       for (const issue of numbers) {
-        const collected = snapshot?.collected?.[issue] ?? (await collectObjective(api, repo, issue, { download, usage: usageFor(issue, numbers.length) ?? (usageDir ? [] : null), jobs: !values["no-jobs"], graphql, app: values.app ?? null, ...(values.workflow ? { workflow: values.workflow } : {}) }));
+        const collected = snapshot?.collected?.[issue] ?? (await collectObjective(api, repo, issue, { download, usage: usageFor(issue, numbers.length) ?? (usageDir ? [] : null), jobs: !values["no-jobs"], graphql, app: values.app ?? null, label, ...(values.workflow ? { workflow: values.workflow } : {}) }));
         // --usage decides on a replay too: an issue without its own directory has none, whatever the snapshot stored.
         if (usageDir && snapshot) collected.usage = usageFor(issue, numbers.length) ?? [];
         collected.harness = collected.usage.find((r) => r.harness)?.harness ?? collected.harness ?? null;

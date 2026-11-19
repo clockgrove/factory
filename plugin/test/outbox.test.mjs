@@ -70,7 +70,7 @@ test("outbox: a protected path or a plain blob LFS should hold is refused before
   r.run(r.work, "commit", "-q", "-m", "widen ci");
   const before = r.run(r.origin, "rev-parse", "pendulum/1");
   assert.equal(await box.push(), false);
-  assert.equal(box.error, "touched protected path .github/workflows/ci.yml; Pendulum never pushes a workflow file: the worker hands the change over in $PENDULUM_OUT/workflow.patch (pendulum-deliver-pr), so re-apply the label to rerun");
+  assert.equal(box.error, "touched protected path .github/workflows/ci.yml; Pendulum never pushes a workflow file: the worker hands the change over in $PENDULUM_OUT/workflow.patch (pendulum-deliver-pr), so resume through Draft to rerun");
   assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), before);
 
   const r2 = repos();

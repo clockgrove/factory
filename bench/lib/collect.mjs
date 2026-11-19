@@ -16,7 +16,8 @@ import { basename } from "node:path";
 import { findFile } from "./gh.mjs";
 import { ownRunArtifact } from "../../plugin/scripts/lib/github.mjs";
 import { parseUsageText, sessionsOf } from "./cost.mjs";
-import { OBJECTIVE_LABEL } from "./objective.mjs";
+import { DRAFT_LABEL } from "../../plugin/scripts/lib/activation.mjs";
+import { labelTime, OBJECTIVE_LABEL } from "./objective.mjs";
 import { bySelf, pendulumLogin } from "./phases.mjs";
 
 const PER_PAGE = "per_page=100";
@@ -30,21 +31,31 @@ export const REVIEW_ARTIFACT = (issue) => `pendulum-usage-${issue}-review`;
 /**
  * The Objectives worth a row: issues with the label that closed at or after
  * `since` (ISO date), plus open ones carrying a Pendulum state label (Blocked,
- * Question, In review, Running), so the misses that never merged are rows too.
+ * Question, In review, Running), so the misses that never merged are rows too. A draft that already ran is kept
+ * after its state labels have been cleared by stopping it. Closing a draft before activation does not create a row.
  * With `since`, also every issue whose label was removed at or after it (a
  * parked Objective, waiting on other work) and that Pendulum picked up then (a
  * state label applied at or after `since`): it ran and cost money, whatever its
  * labels are now, after the labelled ones.
  */
-export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_LABEL, state = "all" } = {}) {
+export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_LABEL, state = "all", app = null } = {}) {
   const query = [`labels=${encodeURIComponent(label)}`, `state=${state}`, since ? `since=${encodeURIComponent(since)}` : null, "sort=updated", "direction=desc", PER_PAGE].filter(Boolean).join("&");
+  const from = since ? Date.parse(since) : -Infinity;
   const issues = await api(`repos/${repoFull}/issues?${query}`, { paginate: true });
-  const numbers = new Set(
-    issues
-      .filter((i) => !i.pull_request)
-      .filter((i) => (i.state === "closed" ? !since || Date.parse(i.closed_at ?? i.updated_at) >= Date.parse(since) : labelNames(i).some((n) => STATE_LABELS.includes(n))))
-      .map((i) => i.number),
-  );
+  const numbers = new Set();
+  for (const issue of issues.filter((i) => !i.pull_request)) {
+    const closed = issue.state === "closed";
+    if (closed && since && !(Date.parse(issue.closed_at ?? issue.updated_at) >= from)) continue;
+    const labels = labelNames(issue);
+    if (labels.some((name) => STATE_LABELS.includes(name)) || (closed && !labels.includes(DRAFT_LABEL))) {
+      numbers.add(issue.number);
+    } else if (labels.includes(DRAFT_LABEL)) {
+      const events = await api(`repos/${repoFull}/issues/${issue.number}/${closed ? "timeline" : "events"}?${PER_PAGE}`, { paginate: true });
+      const worked = events.some((e) => e.event === "labeled" && STATE_LABELS.includes(e.label?.name) && (closed || Date.parse(e.created_at) >= from));
+      const self = pendulumLogin(events, app);
+      if (worked || (closed && labelTime(issue, events, label, null, { mine: (c) => bySelf(c, self) }))) numbers.add(issue.number);
+    }
+  }
   if (since) for (const n of await parkedSince(api, repoFull, { since, label, skip: new Set(issues.map((i) => i.number)) })) numbers.add(n);
   return [...numbers];
 }
@@ -207,17 +218,18 @@ const JOB_ISSUE = /^(?:work|launch|merge tick) \((\d+)\)$|^review \(pendulum\/(\
 
 /**
  * The runs of Pendulum's workflow a person started (`workflow_dispatch`) or re-ran (attempt 2 and up) while the
- * Objective was live: from its first Objective or Running label to its merge (or its close, or now). Bots' runs are
+ * Objective was live: from its first activation to its merge (or its close, or now). Bots' runs are
  * left out here already. Each is `{id, event, attempt, created_at, run_started_at, by, issues}`, `issues` being the
  * Objectives its jobs name (`work (N)`, `launch (N)`, `merge tick (N)`, `review (pendulum/N)`), empty for a run tied to
  * none (a dispatcher tick). Throws when the runs cannot be read, or when GitHub's 1,000-run cap on a `created` filter
- * may have cut the list. A re-run of a run created before the first label is not listed (the filter is on creation).
+ * may have cut the list. A re-run of a run created before activation is not listed (the filter is on creation).
  */
-export async function humanWorkflowRuns(api, repoFull, issueData, timeline, pulls, { workflow = PENDULUM_WORKFLOW } = {}) {
-  const starts = (timeline || []).filter((e) => e.event === "labeled" && (e.label?.name === OBJECTIVE_LABEL || e.label?.name === "pendulum:running")).map((e) => Date.parse(e.created_at)).filter(Number.isFinite);
-  if (!starts.length) return [];
+export async function humanWorkflowRuns(api, repoFull, issueData, timeline, pulls, { workflow = PENDULUM_WORKFLOW, label = OBJECTIVE_LABEL, comments = [], app = null } = {}) {
+  const self = pendulumLogin(timeline, app);
+  const started = labelTime(issueData, timeline, label, null, { comments, mine: (c) => bySelf(c, self) });
+  if (!started) return [];
   const iso = (t) => new Date(t).toISOString().replace(/\.\d{3}Z$/, "Z");
-  const from = iso(Math.min(...starts));
+  const from = iso(Date.parse(started));
   const merged = (pulls || []).map((p) => Date.parse(p.merged_at)).filter(Number.isFinite);
   const endMs = merged.length ? Math.max(...merged) : Date.parse(issueData.closed_at) || null;
   const range = endMs ? `${from}..${iso(endMs)}` : `>=${from}`;
@@ -250,7 +262,7 @@ export async function humanWorkflowRuns(api, repoFull, issueData, timeline, pull
  * (lib/gh.mjs's downloadArtifact bound to a token) or is null offline.
  * `usage` is a list of records read from --usage <dir> when given.
  */
-export async function collectObjective(api, repoFull, issue, { download = null, usage = null, jobs: wantJobs = true, graphql = null, app = null, workflow = PENDULUM_WORKFLOW } = {}) {
+export async function collectObjective(api, repoFull, issue, { download = null, usage = null, jobs: wantJobs = true, graphql = null, app = null, workflow = PENDULUM_WORKFLOW, label = OBJECTIVE_LABEL } = {}) {
   const base = `repos/${repoFull}`;
   const issueData = await api(`${base}/issues/${issue}`);
   const [issueTimeline, issueComments, pullsOpen, pullsClosed] = await Promise.all([
@@ -326,7 +338,7 @@ export async function collectObjective(api, repoFull, issue, { download = null, 
   }
   let workflowRuns = null;
   try {
-    workflowRuns = await humanWorkflowRuns(api, repoFull, issueData, issueTimeline, pulls, { workflow });
+    workflowRuns = await humanWorkflowRuns(api, repoFull, issueData, issueTimeline, pulls, { workflow, label, comments: issueComments, app });
   } catch {
     workflowRuns = null; // not readable with this token (actions: read): the row says so
   }

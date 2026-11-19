@@ -114,7 +114,7 @@ import {
   redLines,
 } from "./lib/session.mjs";
 import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
-import { claimExit, commitExit, confirmRunning, holdIfStopped, goTrust, labelTrust, objectiveReader, parked, requeuedIn, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
+import { claimExit, commitExit, confirmRunning, holdIfStopped, draftActivationHold, goTrust, labelTrust, objectiveReader, parked, requeuedIn, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { timelineOf } from "./lib/relaunch.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, unlistedRule, waitEnd } from "./lib/third-party-review.mjs";
 import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
@@ -457,19 +457,20 @@ export function workOwnsBranch({ action = null, sender = null, issue = null }) {
 
 /**
  * Why a person's ready mark starts no review, or null, read on the issue's timeline too: workOwnsBranch, or a Question
- * whose Objective `label` a person who can push re-applied since it was asked (stop.mjs requeuedIn, the dispatcher's own
- * rule). That go wins over the mark beside it: the dispatcher puts the Objective back to Queued and starts its work
- * stage, so this review ends at once. A re-apply by anyone else changes nothing, and one whose actor could not be
- * checked for now, or a timeline that cannot be read, leaves the mark's review to run (the dispatcher waits for a
- * Question's live review job before it requeues it). The timeline is read only for a person's mark on a Question.
+ * a person who can push reactivated since it was asked (stop.mjs requeuedIn, the dispatcher's own rule). That activation
+ * puts the Objective back to Queued and starts its work stage. The Draft check applies to every review entry point.
+ * For older question activations without Draft, an unauthorized or unread actor leaves the mark's review to run
+ * (the dispatcher waits for a live Question review before it requeues work).
  */
 export async function readyOwner({ repo, action = null, sender = null, issue = null, label, opts }) {
   const owned = workOwnsBranch({ action, sender, issue });
-  if (owned || action !== "ready_for_review" || sender?.type === "Bot" || !issue || stateOf(issue, null) !== "Question") return owned;
+  if (owned || !issue) return owned;
   const events = await timelineOf(repo, issue.number, opts).catch(() => null);
-  if (!events) return null;
-  const go = await requeuedIn(events, label, goTrust(events, issue.number, labelTrust(repo, opts)));
-  return go.requeued ? `marked ready beside ${label} re-applied since the Question: its work stage runs again on pendulum/${issue.number}` : null;
+  const trusted = labelTrust(repo, opts);
+  const hold = await draftActivationHold(events, issue.number, label, trusted);
+  if (hold || action !== "ready_for_review" || sender?.type === "Bot" || stateOf(issue, null) !== "Question") return hold;
+  const go = await requeuedIn(events, label, goTrust(events, issue.number, trusted));
+  return go.requeued ? `marked ready beside an activation since the Question: its work stage runs again on pendulum/${issue.number}` : null;
 }
 
 /**

@@ -14,6 +14,7 @@
 // process, never in a harness: the notice and the comments are data between random-tag markers, never instructions.
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
+import { RESUME_OBJECTIVE, activationEvents } from "./activation.mjs";
 import { openDecider } from "./decider.mjs";
 import { findProject, listComments, moveCard, primeSelf, setStateLabel, upsertComment } from "./github.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
@@ -202,8 +203,8 @@ export async function judgeAnswer({ check, repo, issue, comments, decisions, sin
 const conf = (c) => (typeof c === "number" ? `, confidence ${c.toFixed(2)}` : "");
 
 /** The unanswered notice's text (judgeAnswer `open`): one per comment version judged, a Question notice of the same form. */
-export function unansweredNotice(open, { label = "pendulum:objective" } = {}) {
-  const how = open.form === "pr" ? "Answer it in a comment on the issue or the PR, then mark the PR ready." : `Answer it in a comment on the issue, or re-apply \`${label}\` to go on without an answer.`;
+export function unansweredNotice(open) {
+  const how = open.form === "pr" ? "Answer it in a comment on the issue or the PR, then mark the PR ready." : `Answer it in a comment on the issue, or ${RESUME_OBJECTIVE} without an answer.`;
   return `Question still open: the comment by ${open.author} (${open.at}) does not give a decision on the Question above, as the decision model (${open.model}${conf(open.confidence)}) reads it. ${how}`;
 }
 
@@ -211,7 +212,7 @@ export function unansweredNotice(open, { label = "pendulum:objective" } = {}) {
  * Post the unanswered notice on the issue, with Pendulum's own token (its login is what judgedOf trusts), `extra` at its
  * end (the decision calls' spend it carries, decision-spend.mjs). Throws on failure.
  */
-export const postUnanswered = (repo, open, { label, opts, extra = "" }) => upsertComment(repo, open.issue, unansweredMarker(open.issue, open), `${unansweredNotice(open, { label })}${extra}`, opts);
+export const postUnanswered = (repo, open, { opts, extra = "" }) => upsertComment(repo, open.issue, unansweredMarker(open.issue, open), `${unansweredNotice(open)}${extra}`, opts);
 
 /**
  * The unanswered notice said again (judgeAnswer `judged` with its `notice`): the same comment, edited with the time
@@ -259,17 +260,19 @@ export async function screenAnswer({ check, repo, issue, since, comments, decisi
 
 /**
  * When the Question this stint resumes was asked: the issue's last pendulum:question label, unless a Block, a delivery
- * (a send-back's In review included), a restart or the objective label applied after it started the stint instead (a
- * person's go needs no answer: a re-apply counts only from someone `trusted` takes as a person, stop.mjs requeuedIn's
- * rule). `events` is the issue's timeline. Null when the stint resumes no Question.
+ * (a send-back's In review included), a restart, or a trusted activation started the stint after it. A person can
+ * explicitly resume work without an answer by removing Draft. Older Objective label applications count too.
+ * `events` is the issue's timeline. Null when the stint resumes no Question.
  */
 export async function questionResumedAt(events, { objectiveLabel, trusted }) {
   const ends = new Set(["pendulum:blocked", "pendulum:in-review", RESTART_LABEL]);
+  const starts = new Set(activationEvents(events, objectiveLabel, { assumeObjective: true }));
+  const changes = (events || []).filter((e) => starts.has(e) || (e?.event === "labeled" && (e.label?.name === "pendulum:question" || ends.has(e.label?.name))));
   let asked = null;
-  for (const e of [...(events || [])].filter((x) => x?.event === "labeled" && x.label?.name).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))) {
+  for (const e of changes.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))) {
     if (e.label.name === "pendulum:question") asked = e.created_at;
     else if (ends.has(e.label.name)) asked = null;
-    else if (asked && e.label.name === objectiveLabel && (await trusted(e.actor ?? null, e)) === true) asked = null;
+    else if (asked && (await trusted(e.actor ?? null, e)) === true) asked = null;
   }
   return asked;
 }

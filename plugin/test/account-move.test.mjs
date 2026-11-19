@@ -572,7 +572,7 @@ test("#332: PENDULUM_LOCAL_ENV never carries a control variable into a stage, so
       await off.spentPaused(8, { stage: "work", account: "alpha", hold: { key: "alpha", shared: true }, usageLimit: { harness: "claude", reset: null, since: new Date(t).toISOString(), noReset: true } });
       assert.equal(off.holds.avoidUntil("alpha", t), null, "no guess");
       assert.equal(gh.blocked().length, 1, "Blocked, as with no move");
-      assert.match(gh.blocked()[0].body, /Re-apply `pendulum:objective` once a Claude Code account is free again\./);
+      assert.match(gh.blocked()[0].body, /Resume through Draft once a Claude Code account is free again\./);
     });
   } finally {
     gh.restore();

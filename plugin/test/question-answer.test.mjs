@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { DRAFT_LABEL } from "../scripts/lib/activation.mjs";
 import { LOOKUP_DELAYS_MS } from "../scripts/lib/gateway-relay.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { questionMarker, setSelf } from "../scripts/lib/logic.mjs";
@@ -513,7 +514,7 @@ test("#479 a decisions comment's write: one gone by the write (PATCH 404) is pos
   }
 });
 
-test("work stage, the real wiring: with nothing judged before, a no decision commits the exit, puts the Objective back to Question with one notice and ends it held; a relaunch, a re-applied label or a send-back asks nothing", async () => {
+test("work stage judges a new answer once and skips judging after explicit activation, relaunch, or send-back", async () => {
   const { openAnswerCheck } = await import("../scripts/lib/answer-check.mjs");
   const { stopHold } = await import("../scripts/lib/local.mjs");
   const gh = fakeGitHub([{ number: 7, pr: PR_BODY }]);
@@ -544,6 +545,7 @@ test("work stage, the real wiring: with nothing judged before, a no decision com
   assert.equal(gh.gateway.calls.length, 2, "and asks nothing");
 
   // A person re-applying the label is a go; a send-back's stage follows an In review: neither resumes a Question.
+  gh.unlabel(7, OBJ, PERSON);
   gh.label(7, OBJ);
   gh.comment(7, PERSON, "hmm, not sure");
   assert.equal((await workStage(gh, 7, check())).ended, false);
@@ -553,6 +555,14 @@ test("work stage, the real wiring: with nothing judged before, a no decision com
   sentBack.label(9, "pendulum:in-review");
   assert.equal((await workStage(sentBack, 9, check())).ended, false);
   assert.equal(gh.gateway.calls.length + sentBack.gateway.calls.length, 2, "neither asks");
+
+  const drafted = fakeGitHub([{ number: 11 }]);
+  await ask(drafted, 11);
+  drafted.comment(11, PERSON, "hmm, not sure");
+  drafted.label(11, DRAFT_LABEL);
+  drafted.unlabel(11, DRAFT_LABEL, PERSON);
+  assert.equal((await workStage(drafted, 11, check())).ended, false);
+  assert.equal(drafted.gateway.calls.length, 0, "trusted Draft removal resumes without judging the comment");
 
   // No decider (`decision_route` off): today's rule, nothing asked.
   const off = fakeGitHub([{ number: 10 }]);
@@ -697,7 +707,7 @@ test("#448 Actions: a Question's PR marked ready and its label re-applied by a w
   gh.reviewJob(7, true);
   gh.unlabel(7, OBJ);
   gh.label(7, OBJ);
-  assert.match(await readyCheck(gh, 7), /re-applied since the Question: its work stage runs again on pendulum\/7/, "the review job ends at once");
+  assert.match(await readyCheck(gh, 7), /activation since the Question: its work stage runs again on pendulum\/7/, "the review job ends at once");
   const during = await tick(gh);
   assert.ok(!during.ready.includes(7), "no worker while its review job still runs");
   assert.ok(gh.labels(7).includes("pendulum:question"), "nothing changed on it yet");
@@ -713,6 +723,39 @@ test("#448 Actions: a Question's PR marked ready and its label re-applied by a w
   await ask(plain, 8, { pr: plain.pr(8) });
   plain.ready(8);
   assert.equal(await readyCheck(plain, 8), null);
+});
+
+test("Actions stands down a Question's PR-ready review while Draft removal is unread and when a trusted removal requeues work", async () => {
+  const gh = fakeGitHub([{ number: 7, pr: PR_BODY }]);
+  await ask(gh, 7, { pr: gh.pr(7) });
+  gh.ready(7);
+  gh.label(7, DRAFT_LABEL);
+  gh.unlabel(7, DRAFT_LABEL, PERSON);
+  const removed = gh.timeline(7).pop();
+  assert.match(await readyCheck(gh, 7), /Draft removal is not yet visible/);
+  gh.timeline(7).push(removed);
+  assert.match(await readyCheck(gh, 7), /activation since the Question/);
+});
+
+test("a refusal belongs to its GitHub activation event even when a maintainer activates in the same second", async () => {
+  const gh = fakeGitHub([{ number: 7 }]);
+  await ask(gh, 7);
+  gh.age(7, 36_000);
+  gh.label(7, DRAFT_LABEL);
+  gh.unlabel(7, DRAFT_LABEL, TRIAGER);
+  const refused = gh.timeline(7).at(-1);
+  refused.id = 1001;
+  assert.deepEqual((await tick(gh)).ready, []);
+  assert.match(refusals(gh, 7)[0].body, /relabel-refused:id-1001/);
+
+  gh.label(7, DRAFT_LABEL);
+  gh.unlabel(7, DRAFT_LABEL, PERSON);
+  const followed = gh.timeline(7).slice(-2);
+  followed.forEach((e) => { e.created_at = refused.created_at; });
+  followed[1].id = 1003;
+  assert.deepEqual((await tick(gh)).ready, [7]);
+  assert.ok(gh.labels(7).includes(OBJ));
+  assert.equal(refusals(gh, 7).length, 1);
 });
 
 test("#449 dispatcher: a re-applied pendulum:objective requeues a Question only from a person who can push; a triager's or an App's changes nothing and is said once", async () => {
@@ -781,10 +824,10 @@ test("#449 the newest start decides, in the pick and in requeuedIn alike: a writ
   const at = (m) => new Date(Date.parse("2026-11-15T10:00:00Z") + m * MIN).toISOString();
   const ev = (event, name, m, actor) => ({ event, label: { name }, actor, created_at: at(m) });
   const trusted = async (actor) => actor?.login === PERSON.login;
-  const events = [ev("labeled", OBJ, 0, PERSON), ev("labeled", "pendulum:question", 1, BOT), ev("labeled", OBJ, 2, PERSON), ev("unlabeled", OBJ, 3, TRIAGER), ev("labeled", OBJ, 4, TRIAGER)];
+  const events = [ev("labeled", OBJ, 0, PERSON), ev("labeled", "pendulum:question", 1, BOT), ev("unlabeled", OBJ, 2, PERSON), ev("labeled", OBJ, 2, PERSON), ev("unlabeled", OBJ, 3, TRIAGER), ev("labeled", OBJ, 4, TRIAGER)];
   const go = await requeuedIn(events, OBJ, trusted);
   assert.deepEqual([go.requeued, go.refused.map((r) => r.actor.login)], [false, ["triager"]], "the triager's re-apply is the go that decides");
-  assert.equal((await requeuedIn(events.slice(0, 3), OBJ, trusted)).requeued, true, "the writer's alone requeues");
+  assert.equal((await requeuedIn(events.slice(0, 4), OBJ, trusted)).requeued, true, "the writer's alone requeues");
 
   // Through the dispatcher: a Question the writer re-applied, then the triager took off and on again.
   const q = fakeGitHub([{ number: 7, pr: PR_BODY }]);

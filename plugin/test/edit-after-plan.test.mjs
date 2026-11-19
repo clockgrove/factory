@@ -85,7 +85,7 @@ for (const { route, self, person } of ROUTES) {
     assert.equal(BLOCK_CAUSES[review.applied[0].cause].external, false, "an edit is a person's action, never External");
     const notice = blockedLine({ issue: 7, pr: { number: 9 }, stage: "review", reason: EDITED_REASON, fix: EDITED_FIX });
     assert.match(notice, /title, body or harness, model and host labels \(`pendulum:harness:`, `pendulum:model:`, `pendulum:subagent-model:`, `pendulum:reviewer-model:`, `pendulum:host:`\) changed after its plan was made/);
-    assert.match(notice, /Re-apply `pendulum:objective` to work from the issue as it is now, its text and its harness, model and host labels: the worker makes its plan again from it/);
+    assert.match(notice, /To work from the issue as it is now, add `pendulum:draft` if it is missing, then remove it to resume. The worker makes its plan again from the current text and harness, model and host labels/);
   });
 
   test(`edit after plan (${route}): a comment answering a Question is no edit`, async () => {

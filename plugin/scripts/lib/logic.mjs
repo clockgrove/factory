@@ -149,7 +149,7 @@ export function protectedCovers(rule, path) {
  */
 export function protectedReason(hits) {
   const why = `touched protected path ${hits.join(", ")}`;
-  return hits.every((h) => h.startsWith(WORKFLOWS_DIR)) ? `${why}; Pendulum never pushes a workflow file: the worker hands the change over in $PENDULUM_OUT/workflow.patch (pendulum-deliver-pr), so re-apply the label to rerun` : why;
+  return hits.every((h) => h.startsWith(WORKFLOWS_DIR)) ? `${why}; Pendulum never pushes a workflow file: the worker hands the change over in $PENDULUM_OUT/workflow.patch (pendulum-deliver-pr), so resume through Draft to rerun` : why;
 }
 
 /**
@@ -687,7 +687,7 @@ export function fenceDecidable(entry, { extra = [], unknown = [], protectedList 
  * what the fence check said of the files it was asked about (`<path>: <why>`, outbox.mjs box.fenceVerdict).
  */
 export const fixScopeReason = (files, unknown = [], judged = []) =>
-  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names${judged.length ? `; the fence check: ${judged.slice(0, 3).join("; ")}${judged.length > 3 ? `; and ${judged.length - 3} more` : ""}` : ""}; to allow it, name the file in the issue or a maintainer comment and re-apply pendulum:objective${unknown.length ? `. The setup or install command runs ${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ` and ${unknown.length - 3} more` : ""}, which Pendulum cannot resolve to repository files, so every file counts as one it may run; name each file literally in the command, or move the command into a script file` : ""}`;
+  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names${judged.length ? `; the fence check: ${judged.slice(0, 3).join("; ")}${judged.length > 3 ? `; and ${judged.length - 3} more` : ""}` : ""}; to allow it, name the file in the issue or a maintainer comment and resume through Draft${unknown.length ? `. The setup or install command runs ${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ` and ${unknown.length - 3} more` : ""}, which Pendulum cannot resolve to repository files, so every file counts as one it may run; name each file literally in the command, or move the command into a script file` : ""}`;
 
 /**
  * The Blocked reason for a push GitHub refused because it would create or update a workflow file, which a token
@@ -697,10 +697,10 @@ export const fixScopeReason = (files, unknown = [], judged = []) =>
  */
 export const workflowScopeReason = ({ branch, defaultBranch, paths = [], own = [] }) => {
   const list = (p) => `${p.slice(0, 3).join(", ")}${p.length > 3 ? ` and ${p.length - 3} more` : ""}`;
-  if (own.length) return `push rejected (workflow scope): GitHub refused ${branch} because it changes ${list(own)}, and Pendulum's token may not create or update workflow files; the worker hands a workflow change over in $PENDULUM_OUT/workflow.patch instead (pendulum-deliver-pr), so re-apply the label to rerun`;
-  if (paths.length) return `push rejected (workflow scope): GitHub refused ${branch} because its ${list(paths)} is not the version ${defaultBranch} has, and Pendulum's token may not create or update workflow files; bring the branch up to date with ${defaultBranch} (re-apply the label to rerun)`;
+  if (own.length) return `push rejected (workflow scope): GitHub refused ${branch} because it changes ${list(own)}, and Pendulum's token may not create or update workflow files; the worker hands a workflow change over in $PENDULUM_OUT/workflow.patch instead (pendulum-deliver-pr), so resume through Draft to rerun`;
+  if (paths.length) return `push rejected (workflow scope): GitHub refused ${branch} because its ${list(paths)} is not the version ${defaultBranch} has, and Pendulum's token may not create or update workflow files; bring the branch up to date with ${defaultBranch} (resume through Draft to rerun)`;
   // The branch's workflow files match the default branch as Pendulum last read it: it moved again before the push.
-  return `push rejected (workflow scope): GitHub refused ${branch} for a workflow file Pendulum's token may not create or update, though its workflow files matched ${defaultBranch} when Pendulum read it; ${defaultBranch} likely changed one again during the push (re-apply the label to rerun)`;
+  return `push rejected (workflow scope): GitHub refused ${branch} for a workflow file Pendulum's token may not create or update, though its workflow files matched ${defaultBranch} when Pendulum read it; ${defaultBranch} likely changed one again during the push (resume through Draft to rerun)`;
 };
 
 /**
@@ -969,7 +969,7 @@ export const AGENT_MODELS = Object.freeze({
 function subAgentRefusalReason(r, fields) {
   const pin = Object.hasOwn(AGENT_MODELS, r.subAgent) ? AGENT_MODELS[r.subAgent] : null;
   const who = r.subAgent ? `its \`${r.subAgent}\` sub-agent` : "a sub-agent";
-  const fix = pin ? `the ${pin.what} model, which a \`${pin.label}<id>\` label on the issue (else ${pin.variable}) chooses: name a model this login serves, then re-apply \`pendulum:objective\`` : "the agent's own model: name one this login serves in the agent's file, or fix the credential's account";
+  const fix = pin ? `the ${pin.what} model, which a \`${pin.label}<id>\` label on the issue (else ${pin.variable}) chooses: name a model this login serves, then resume through Draft` : "the agent's own model: name one this login serves in the agent's file, or fix the credential's account";
   return `${r.harness} was refused by its provider for ${who}${fields ? ` (${fields})` : ""}${r.message ? `: ${clip(r.message)}` : ""}; the run was stopped, since the main session would go on without that work. The fix is ${fix}`;
 }
 
@@ -993,8 +993,8 @@ export function usageLimitReason(r, { waited = false } = {}) {
   const fields = refusalFields(r);
   const reset = Number.isFinite(r.resetAt) ? whenText(r.resetAt) : null;
   const why = `${r.harness} reached its subscription's usage limit${fields ? ` (${fields})` : ""}${reset ? `, which resets at ${reset}` : ", with no reset time reported"}`;
-  if (waited) return `${why}; the stage waited for the reset until its time ran out. Re-apply the label to run it again.`;
-  return `${why}; not run again on another model, since every model of the subscription draws on the same limit. Re-apply the label ${reset ? "after the reset" : "once the limit has reset"}.`;
+  if (waited) return `${why}; the stage waited for the reset until its time ran out. Resume through Draft to run it again.`;
+  return `${why}; not run again on another model, since every model of the subscription draws on the same limit. Resume through Draft ${reset ? "after the reset" : "once the limit has reset"}.`;
 }
 
 /** A Question from the worker's exit record: its first question, else the generic line. */
@@ -1037,11 +1037,11 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
   const tick = (h) => `\`${h}\``;
   const labels = left.map((h) => `pendulum:host:${h}`).filter((l) => l.length <= 50);
   const short = labels.length < left.length ? " (the rest are too long for a label)" : "";
-  const alone = labels.length ? `a person who can push applies ${labels.map(tick).join(", ")} to this issue${short}, which opens ${labels.length === 1 ? "it" : "them"} to this Objective alone, then re-applies \`pendulum:objective\`. To open ${them} to every Objective, ` : "";
+  const alone = labels.length ? `a person who can push applies ${labels.map(tick).join(", ")} to this issue${short}, which opens ${labels.length === 1 ? "it" : "them"} to this Objective alone, then resumes through Draft. To open ${them} to every Objective, ` : "";
   // On Actions and in a cloud sandbox, each harness's sandbox: the workflow's `allowed_domains` input (harness.mjs
   // claudeRunner, codexRunner, copilotRunner).
   const setting = route === "runner" ? "the Pendulum workflow's `allowed_domains` input (or `PENDULUM_ALLOWED_DOMAINS` in its env block)" : "`PENDULUM_LOCAL_DOMAINS` (a running `serve` reads it when it restarts)";
-  return `${route === "runner" ? "The harness's sandbox" : "The local sandbox"} denied ${left.map(tick).join(", ")}. If the Objective needs ${them}, ${alone}add ${them} to ${setting}, then re-apply \`pendulum:objective\`.`;
+  return `${route === "runner" ? "The harness's sandbox" : "The local sandbox"} denied ${left.map(tick).join(", ")}. If the Objective needs ${them}, ${alone}add ${them} to ${setting}, then resume through Draft.`;
 }
 
 /**

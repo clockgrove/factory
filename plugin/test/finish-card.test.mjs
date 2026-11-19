@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { setSelf, setWriters } from "../scripts/lib/logic.mjs";
 import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
-import { centsOf, finishData, finishMarker, objectiveRecords, renderFinishCard } from "../scripts/lib/finish-card.mjs";
+import { centsOf, finishCardBody, finishData, finishMarker, labelTime, objectiveRecords, readSummary as readClockSummary, renderFinishCard } from "../scripts/lib/finish-card.mjs";
+import { refusedMarker } from "../scripts/lib/stop.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -34,6 +35,24 @@ const withSelf = (fn) => {
     setSelf(null);
   }
 };
+
+test("finish card: creating a draft does not start the clock; removing Draft does", () =>
+  withSelf(() => {
+    const label = real.timeline.find((e) => e.event === "labeled" && e.label?.name === "pendulum:objective");
+    const filed = { ...label, created_at: new Date(Date.parse(label.created_at) - 3_600_000).toISOString() };
+    const draft = { ...filed, label: { name: "pendulum:draft" } };
+    const start = { ...draft, event: "unlabeled", created_at: label.created_at, actor: { login: "maintainer", type: "User" } };
+    for (const creation of [[filed, draft], [draft, filed]]) {
+      assert.equal(labelTime(real.issue, creation), null);
+      const timeline = [...creation, start, ...real.timeline.filter((e) => e !== label)];
+      const d = data({ timeline });
+      assert.equal(d.started, label.created_at);
+      assert.equal(d.labelled, label.created_at);
+      assert.equal(d.labeller, "maintainer");
+      assert.match(renderFinishCard(d), /\*\*maintainer\*\* removed the Draft label to start it\./);
+      assert.match(renderFinishCard(d), /removed `pendulum:draft`: the clock starts/);
+    }
+  }));
 // A stage's spend line (logic.mjs spendMarker), as a local or cloud sandbox stage writes it into its progress comment.
 const spendLine = (v) => `<!-- pendulum:spend ${JSON.stringify(v)} -->`;
 const withSpend = (lines, comments = real.comments) =>
@@ -42,6 +61,28 @@ const withSpend = (lines, comments = real.comments) =>
     return key && lines[key] ? { ...c, body: `${c.body}\n${spendLine(lines[key])}` } : c;
   });
 const comment = (id, created, body, updated = created) => ({ id, user: bot, created_at: created, updated_at: updated, body });
+
+test("finish clocks skip a trusted refusal and show unknown without a recorded Draft release", () =>
+  withSelf(() => {
+    const label = real.timeline.find((e) => e.event === "labeled" && e.label?.name === "pendulum:objective");
+    const filed = { ...label, created_at: new Date(Date.parse(label.created_at) - 3_600_000).toISOString() };
+    const draft = { ...filed, label: { name: "pendulum:draft" } };
+    const rejected = { ...draft, id: 901, event: "unlabeled", created_at: new Date(Date.parse(label.created_at) - 600_000).toISOString(), actor: { login: "triager", type: "User" } };
+    const accepted = { ...rejected, id: 902, created_at: label.created_at, actor: { login: "maintainer", type: "User" } };
+    const refusal = comment(903, rejected.created_at, refusedMarker(real.issue.number, { id: rejected.id, at: rejected.created_at }));
+    const after = real.timeline.filter((e) => e !== label);
+    const timeline = [filed, draft, rejected, { ...draft, created_at: rejected.created_at }, accepted, ...after];
+    const good = data({ timeline, comments: [...real.comments, refusal] });
+    assert.deepEqual([good.started, good.labelled, good.labeller], [label.created_at, label.created_at, "maintainer"]);
+    const running = after.find((e) => e.event === "labeled" && e.label?.name === "pendulum:running");
+    assert.equal(labelTime(real.issue, timeline, "pendulum:objective", new Date(Date.parse(accepted.created_at) + 1000).toISOString(), { comments: [refusal] }), running.created_at, "a previous Draft activation does not shadow a Running start in a new window");
+
+    const missing = data({ timeline: [filed, draft, ...after] });
+    const md = finishCardBody(missing);
+    const summary = readClockSummary(md, real.issue.number);
+    assert.deepEqual([summary.wallMs, summary.labelledWallMs, summary.labelled], [null, null, null]);
+    assert.match(md, /wall clock is not known because its activation was not recorded/);
+  }));
 
 test("finish card: the merged run, every figure from the run's own records (scratch #3, the approved mock-up's run)", () => {
   const d = withSelf(() => data());

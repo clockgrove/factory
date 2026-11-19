@@ -48,13 +48,13 @@ export const crossOsRoute = (env = process.env) => stageRoute(env) ?? "actions";
 export function dispatchRefusal(e, { workflow, branch, route = "actions" }) {
   const status = e?.status ?? null;
   const head = `cross-OS CI: GitHub refused to run ${workflow} on ${branch}${status ? ` (${status})` : ""}`;
-  if (e?.rateLimited) return { reason: `${head}: rate limited; re-apply the label once the limit resets`, cause: "provider-quota" };
+  if (e?.rateLimited) return { reason: `${head}: rate limited; resume through Draft once the limit resets`, cause: "provider-quota" };
   if (status === 403) {
     const fix = route === "sandbox" ? "the launcher dispatches it for a cloud sandbox stage with its job token: give the workflow's launch-event job `actions: write`" : route === "local" ? "give the repository token Actions read and write" : "give the workflow's work job `actions: write`";
-    return { reason: `${head}: the token cannot dispatch a workflow (Actions write); ${fix}, then re-apply the label`, cause: "setup" };
+    return { reason: `${head}: the token cannot dispatch a workflow (Actions write); ${fix}, then resume through Draft`, cause: "setup" };
   }
-  if (status === 404) return { reason: `${head}: no workflow .github/workflows/${workflow} on the default branch; fix cross_os_workflow, then re-apply the label`, cause: "setup" };
-  if (status === 422) return { reason: `${head}: ${String(e?.message || "").replace(/^.*?failed \(422\): /, "").slice(0, 200)}; give the workflow a \`workflow_dispatch:\` trigger, then re-apply the label`, cause: "setup" };
+  if (status === 404) return { reason: `${head}: no workflow .github/workflows/${workflow} on the default branch; fix cross_os_workflow, then resume through Draft`, cause: "setup" };
+  if (status === 422) return { reason: `${head}: ${String(e?.message || "").replace(/^.*?failed \(422\): /, "").slice(0, 200)}; give the workflow a \`workflow_dispatch:\` trigger, then resume through Draft`, cause: "setup" };
   return { reason: `${head}: ${String(e?.message || e).slice(0, 200)}`, cause: "outage" };
 }
 
@@ -168,10 +168,10 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
       try {
         doc = parseYaml(String(await rest(`repos/${repo.full}/contents/.github/workflows/${encodeURIComponent(workflow)}?ref=${sha}`, { token: actionsToken, raw: "Accept: application/vnd.github.raw+json" })));
       } catch (e) {
-        return e.status === 404 ? refused(`no workflow .github/workflows/${workflow} on ${sha.slice(0, 7)}; fix cross_os_workflow, then re-apply the label`) : refused(`.github/workflows/${workflow} could not be read on ${sha.slice(0, 7)}: ${String(e.message || e).slice(0, 160)}`, e.status === 403 ? "setup" : "outage");
+        return e.status === 404 ? refused(`no workflow .github/workflows/${workflow} on ${sha.slice(0, 7)}; fix cross_os_workflow, then resume through Draft`) : refused(`.github/workflows/${workflow} could not be read on ${sha.slice(0, 7)}: ${String(e.message || e).slice(0, 160)}`, e.status === 403 ? "setup" : "outage");
       }
       const problem = workflowProblem(doc, workflow);
-      if (problem) return refused(`${problem}; fix the workflow, then re-apply the label`);
+      if (problem) return refused(`${problem}; fix the workflow, then resume through Draft`);
       const h = { id: null, run: null, suites: new Set(), since: 0 };
       // A cloud sandbox stage: its launcher dispatches the run (or reuses one on the head) and names it.
       if (route === "sandbox") {
@@ -179,8 +179,8 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
         // The relay's own bound, within what is left of the stage's wall clock.
         const boundMs = Math.min(RELAY_WAIT_MS, Number.isFinite(left) ? left : Infinity);
         const a = relay ? await relay({ workflow, ref: branch, sha, boundMs }) : null;
-        if (!a) return refused(`the stage has no channel to its launcher, which dispatches the run for a cloud sandbox stage; re-apply the label`, "pendulum");
-        if (a.timedOut) return refused(`the launcher gave no run for the stage's request to run ${workflow} on ${sha.slice(0, 7)} within ${Math.round(boundMs / 60_000)} min; check the workflow's launch-event job runs, then re-apply the label`, "outage");
+        if (!a) return refused(`the stage has no channel to its launcher, which dispatches the run for a cloud sandbox stage; resume through Draft`, "pendulum");
+        if (a.timedOut) return refused(`the launcher gave no run for the stage's request to run ${workflow} on ${sha.slice(0, 7)} within ${Math.round(boundMs / 60_000)} min; check the workflow's launch-event job runs, then resume through Draft`, "outage");
         if (a.refused) return { refused: a.refused };
         heads.set(sha, h);
         if (a.run) {
@@ -213,7 +213,7 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
         const run = await rest(`repos/${repo.full}/actions/runs/${id}`, actions).catch(() => null);
         if (run?.head_sha && run.head_sha !== sha) {
           heads.delete(sha);
-          return refused(`the run GitHub made (${id}) is on ${String(run.head_sha).slice(0, 7)}, not on ${sha.slice(0, 7)}: ${branch} moved; re-apply the label`, "pendulum");
+          return refused(`the run GitHub made (${id}) is on ${String(run.head_sha).slice(0, 7)}, not on ${sha.slice(0, 7)}: ${branch} moved; resume through Draft`, "pendulum");
         }
         if (run?.id === id) track(h, run);
       }
@@ -231,8 +231,8 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
       const failed = runs.filter((r) => r.status === "completed" && !["success", ...NOT_RUN].includes(r.conclusion) && !setting.checks.includes(r.name));
       const what = skipped.map((l) => `${l.n} ${l.r.conclusion}`).join("; ");
       return failed.length
-        ? { reason: `cross-OS CI: ${what} on ${sha.slice(0, 7)}, so ${skipped.length > 1 ? "they" : "it"} did not run: the run's job ${failed.map((r) => `${r.name} ended ${r.conclusion}`).join(", ")} first; read that job on GitHub, fix the branch, then re-apply the label`, cause: "work" }
-        : { reason: `cross-OS CI: ${what} on ${sha.slice(0, 7)}, so ${skipped.length > 1 ? "they" : "it"} did not run; run the leg on workflow_dispatch in ${workflow}, then re-apply the label`, cause: "setup" };
+        ? { reason: `cross-OS CI: ${what} on ${sha.slice(0, 7)}, so ${skipped.length > 1 ? "they" : "it"} did not run: the run's job ${failed.map((r) => `${r.name} ended ${r.conclusion}`).join(", ")} first; read that job on GitHub, fix the branch, then resume through Draft`, cause: "work" }
+        : { reason: `cross-OS CI: ${what} on ${sha.slice(0, 7)}, so ${skipped.length > 1 ? "they" : "it"} did not run; run the leg on workflow_dispatch in ${workflow}, then resume through Draft`, cause: "setup" };
     },
     resultLine: (sha, runs) => legsLine({ workflow, names: setting.checks, sha, runs }),
   };
@@ -343,13 +343,13 @@ export async function launcherDispatch({ inputs, repo, issue, ask = {}, token, a
   const passing = (e) => !e?.status || e.status >= 500 || !!e.rateLimited;
   const pause = () => new Promise((r) => setTimeout(r, pauseMs));
   const { setting } = crossOs(inputs);
-  if (!setting) return no("the launcher's settings have cross-OS CI off (cross_os_workflow, cross_os_checks), so it dispatches nothing; set both in the workflow's env block, then re-apply the label", "setup");
+  if (!setting) return no("the launcher's settings have cross-OS CI off (cross_os_workflow, cross_os_checks), so it dispatches nothing; set both in the workflow's env block, then resume through Draft", "setup");
   const { workflow } = setting;
   // A stage that read another setting than the launcher's (cross_os_workflow changed while it ran) asks for another file.
-  if (ask.workflow !== workflow) return no(`the stage asked the launcher for another workflow than ${workflow}, the one cross_os_workflow names in the launcher's settings and the only one it dispatches; when that setting changed while the stage ran, re-apply the label`, "setup");
-  if (ask.ref !== branch) return no(`the stage asked the launcher for another ref than its branch ${branch}, the only one it dispatches on; re-apply the label`);
-  if (!sha) return no(`the stage asked the launcher with no head; re-apply the label`);
-  if (!actionsToken) return no(`the launch job has no token of its own (github_token) to dispatch ${workflow} with; give the workflow's launch-event job \`actions: write\`, then re-apply the label`, "setup");
+  if (ask.workflow !== workflow) return no(`the stage asked the launcher for another workflow than ${workflow}, the one cross_os_workflow names in the launcher's settings and the only one it dispatches; when that setting changed while the stage ran, resume through Draft`, "setup");
+  if (ask.ref !== branch) return no(`the stage asked the launcher for another ref than its branch ${branch}, the only one it dispatches on; resume through Draft`);
+  if (!sha) return no(`the stage asked the launcher with no head; resume through Draft`);
+  if (!actionsToken) return no(`the launch job has no token of its own (github_token) to dispatch ${workflow} with; give the workflow's launch-event job \`actions: write\`, then resume through Draft`, "setup");
   const app = { token, noRateWait: true };
   const actions = { token: actionsToken, noRateWait: true };
   let head;
@@ -357,19 +357,19 @@ export async function launcherDispatch({ inputs, repo, issue, ask = {}, token, a
     head = (await rest(`repos/${repo.full}/git/ref/heads/${branch}`, app))?.object?.sha ?? null;
   } catch (e) {
     if (passing(e)) return again;
-    if (e.status !== 404) return no(`${branch} could not be read (${e.status}); re-apply the label`, "setup");
+    if (e.status !== 404) return no(`${branch} could not be read (${e.status}); resume through Draft`, "setup");
     head = null;
   }
-  if (head !== sha) return no(`${branch} is ${head ? `at ${head.slice(0, 7)}` : "gone"}, not at ${sha.slice(0, 7)}, the head the stage asked for: the branch moved; re-apply the label`);
+  if (head !== sha) return no(`${branch} is ${head ? `at ${head.slice(0, 7)}` : "gone"}, not at ${sha.slice(0, 7)}, the head the stage asked for: the branch moved; resume through Draft`);
   let doc;
   try {
     doc = parseYaml(String(await rest(`repos/${repo.full}/contents/.github/workflows/${encodeURIComponent(workflow)}?ref=${sha}`, { ...app, raw: "Accept: application/vnd.github.raw+json" })));
   } catch (e) {
     if (passing(e)) return again;
-    return e.status === 404 ? no(`no workflow .github/workflows/${workflow} on ${sha.slice(0, 7)}; fix cross_os_workflow, then re-apply the label`, "setup") : no(`.github/workflows/${workflow} could not be read on ${sha.slice(0, 7)} (${e.status})`, "setup");
+    return e.status === 404 ? no(`no workflow .github/workflows/${workflow} on ${sha.slice(0, 7)}; fix cross_os_workflow, then resume through Draft`, "setup") : no(`.github/workflows/${workflow} could not be read on ${sha.slice(0, 7)} (${e.status})`, "setup");
   }
   const problem = workflowProblem(doc, workflow);
-  if (problem) return no(`${problem}; fix the workflow, then re-apply the label`, "setup");
+  if (problem) return no(`${problem}; fix the workflow, then resume through Draft`, "setup");
   const listRuns = async () => ((await rest(`repos/${repo.full}/actions/runs?head_sha=${sha}&event=workflow_dispatch&per_page=100`, actions)) || {}).workflow_runs || [];
   const newest = (runs) => runs.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || b.id - a.id)[0] || null;
   // A run dispatched on this head already (an earlier ask whose answer was lost or named no suite, a second launcher):
@@ -378,7 +378,7 @@ export async function launcherDispatch({ inputs, repo, issue, ask = {}, token, a
   try {
     runs = await listRuns();
   } catch (e) {
-    return passing(e) ? again : no(`the launch job's token could not list ${workflow}'s runs (${e.status}); give the workflow's launch-event job \`actions: write\`, then re-apply the label`, "setup");
+    return passing(e) ? again : no(`the launch job's token could not list ${workflow}'s runs (${e.status}); give the workflow's launch-event job \`actions: write\`, then resume through Draft`, "setup");
   }
   const before = newest(runs.filter((w) => dispatchedRun(w, workflow, sha)));
   if (before) return { sha, run: before.id, suite: id(before.check_suite_id), reused: true };
@@ -397,7 +397,7 @@ export async function launcherDispatch({ inputs, repo, issue, ask = {}, token, a
       if (i) await pause();
       run = (await rest(`repos/${repo.full}/actions/runs/${runId}`, actions).catch(() => null)) ?? run;
       // GitHub made it on another head (the branch moved after the read above): refused, and left to finish.
-      if (run?.head_sha && run.head_sha !== sha) return no(`the run GitHub made (${runId}) is on ${String(run.head_sha).slice(0, 7)}, not on ${sha.slice(0, 7)}: ${branch} moved; re-apply the label`);
+      if (run?.head_sha && run.head_sha !== sha) return no(`the run GitHub made (${runId}) is on ${String(run.head_sha).slice(0, 7)}, not on ${sha.slice(0, 7)}: ${branch} moved; resume through Draft`);
     }
     return { sha, run: runId, suite: id(run?.check_suite_id) };
   }

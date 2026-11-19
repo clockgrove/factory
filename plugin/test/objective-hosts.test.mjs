@@ -116,7 +116,7 @@ test("Actions and the cloud sandbox: every harness's runner sandbox adds the ope
     // The Block for a host its sandbox still denies leaves out the ones the labels opened, and offers the label first.
     assert.equal(BACKENDS.actions.sandbox.deniedFix(["huggingface.co"], env, "claude"), null);
     const fix = BACKENDS.actions.sandbox.deniedFix(["cdn-lfs.hf.co", "models.example.org"], env, "codex");
-    assert.match(fix, /denied `models\.example\.org`\. If the Objective needs it, a person who can push applies `pendulum:host:models\.example\.org` to this issue, which opens it to this Objective alone, then re-applies `pendulum:objective`\. To open it to every Objective, add it to the Pendulum workflow's `allowed_domains` input/);
+    assert.match(fix, /denied `models\.example\.org`\. If the Objective needs it, a person who can push applies `pendulum:host:models\.example\.org` to this issue, which opens it to this Objective alone, then resumes through Draft\. To open it to every Objective, add it to the Pendulum workflow's `allowed_domains` input/);
   } finally {
     openStageHosts([]);
   }

@@ -30,7 +30,7 @@ import { workflowTokenChecks } from "./doctor.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { harnessBudgetUsd, openSandbox, sessionCeilingUsd, stageVendorCost, storedUsd } from "./lib/adapters/sandbox.mjs";
 import { PLUGIN_ROOT, pluginDigest } from "./lib/checkout.mjs";
-import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, objectiveLabeledAt, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment, verifyAuthors } from "./lib/github.mjs";
+import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, objectiveLabeledAt, primeWriters, projectStatuses, repoOf, requiredChecks, rest, setStateLabel, upsertComment, verifyAuthors } from "./lib/github.mjs";
 import { CLI, CODEX_LOGIN_REFUSED } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
 import { clockText, whenText } from "./lib/clock.mjs";
@@ -49,7 +49,9 @@ import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
 import { unknownOf } from "./lib/usage.mjs";
 import { sealCollected, sealKey, sealKeyProblem, usageSeal } from "./lib/seal.mjs";
-import { DRAFT_LABEL, RESTART_LABEL, stopCause } from "./lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, draftActivationHold, goTrust, labelTrust, requeuedIn, stopCause } from "./lib/stop.mjs";
+import { latestDraftEvent } from "./lib/activation.mjs";
+import { lastRunningAt, timelineOf } from "./lib/relaunch.mjs";
 import { launcherDispatch } from "./lib/cross-os.mjs";
 import { pendulumBuild } from "./lib/release.mjs";
 
@@ -100,7 +102,7 @@ export function missingCredential(inputs, account = null) {
   // An account's own secrets carry its suffix (lib/accounts.mjs routeSecretSuffix): the names its fix gives.
   const suffix = account ? routeSecretSuffix(account, inputs.harness) : "";
   const names = (HARNESS_SECRET_NAMES[inputs.harness] ?? "for that harness").replace(/\b(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|PENDULUM_CODEX_GATEWAY_KEY|CODEX_API_KEY|COPILOT_GITHUB_TOKEN)\b/g, `$1${suffix}`);
-  return { reason: `no ${inputs.harness} credential${account ? ` of account \`${account}\`` : ""} reached the launch job, so a stage on ${inputs.harness} cannot run`, fix: `Add the repository secret ${names} (gh secret set NAME), which the workflow passes to the launch job, then re-apply \`pendulum:objective\`.` };
+  return { reason: `no ${inputs.harness} credential${account ? ` of account \`${account}\`` : ""} reached the launch job, so a stage on ${inputs.harness} cannot run`, fix: `Add the repository secret ${names} (gh secret set NAME), which the workflow passes to the launch job, then resume through Draft.` };
 }
 
 /**
@@ -109,7 +111,7 @@ export function missingCredential(inputs, account = null) {
  */
 export function refusedCredential(inputs) {
   if (inputs.harness !== "codex" || ![inputs.codexGatewayKey, inputs.codexApiKey].some(chatgptLogin)) return null;
-  return { reason: CODEX_LOGIN_REFUSED, fix: "Replace that secret's value with an OpenAI API key (or a Vercel AI Gateway key), then re-apply `pendulum:objective`." };
+  return { reason: CODEX_LOGIN_REFUSED, fix: "Replace that secret's value with an OpenAI API key (or a Vercel AI Gateway key), then resume through Draft." };
 }
 
 /** The GitHub context a stage's scripts read, as an Actions job has it. */
@@ -262,7 +264,7 @@ export async function readContext({ repo, n, ev, inputs, opts, readEventTime, ru
     // Read as GitHub has them, with no author's permission read: only Pendulum's own comments (isSelf, pendulumOwn) are
     // taken from them; the writer list is still loading beside them.
     rest(`repos/${repo.full}/issues/${n}/comments?per_page=100`, { ...opts, paginate: true }).then((c) => c || []),
-    due ? runningSince(repo, n, opts).catch(() => null) : null,
+    timelineOf(repo, n, opts).catch(() => null),
     due
       ? findPr(repo, `pendulum/${n}`, opts).then((pr) => reviewRequest(repo, pr, opts, { labelledOnly: true })).catch(() => null)
       : ev.kind === "review" && Number.isSafeInteger(ev.pr)
@@ -282,11 +284,23 @@ export async function readContext({ repo, n, ev, inputs, opts, readEventTime, ru
   // Whether it may run is lib/stop.mjs stopCause's answer, as on every route: a draft (pendulum:draft) or a restart
   // pending (pendulum:restart) starts nothing either; the dispatcher restarts the latter first.
   const cause = issueData.pull_request ? "pull request" : stopCause(issueData, inputs.objectiveLabel);
-  const closed = !!cause;
-  if (closed && ev.kind !== "stage") return { skip: cause === "restart" ? `#${n} waits for its restart (${RESTART_LABEL})` : cause === "draft" ? `#${n} is a draft (${DRAFT_LABEL}): never run` : `#${n} is not an open ${inputs.objectiveLabel} issue` };
+  if (cause && ev.kind !== "stage") return { skip: cause === "restart" ? `#${n} waits for its restart (${RESTART_LABEL})` : cause === "draft" ? `#${n} is a draft (${DRAFT_LABEL}): never run` : `#${n} is not an open ${inputs.objectiveLabel} issue` };
   if (ev.kind !== "stage" && (await backend().trigger.stepsAside(repo, n, opts, issueData))) return { skip: `#${n} is held by a local loop` };
-  const [{ project, card }, comments, since, review, headSha, at] = await reads;
+  const [{ project, card }, comments, events, review, headSha, at] = await reads;
   const state = stateOf(issueData, card);
+  // A stage's own cleanup can still collect usage and stop its sandbox when the Objective is held.
+  let hold = null;
+  if (!cause && (ev.kind !== "stage" || ev.want === "ended")) {
+    const draft = latestDraftEvent(events);
+    if (draft) await primeWriters(repo, opts, { maintainers: inputs.maintainers });
+    const trusted = labelTrust(repo, opts);
+    hold = await draftActivationHold(events, n, inputs.objectiveLabel, trusted);
+    if (hold && ev.kind !== "stage") return { skip: `#${n}: ${hold}` };
+    if (draft && ev.kind === "review" && ev.ready && state === "Question") {
+      const go = await requeuedIn(events, inputs.objectiveLabel, goTrust(events, n, trusted));
+      if (go.requeued) return { skip: `#${n}: Draft activation since the Question requeues the work stage` };
+    }
+  }
   const record = sandboxRecord(comments, n);
   // The sweep naming a stage that waits on CI (its check event lost): the branch's head now, and whether its checks are done.
   let head = headSha;
@@ -296,7 +310,7 @@ export async function readContext({ repo, n, ev, inputs, opts, readEventTime, ru
     const names = inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, opts).catch(() => []);
     checksDone = head === record.head && names.length > 0 && !!(await checksOn(repo, head, names, opts).catch(() => null))?.done;
   }
-  return { labels, project, state, closed, issueClosed: issueData.state !== "open", record, runningSince: since, review, headSha: head, checksDone, eventAt: at, comments };
+  return { labels, project, state, closed: !!(cause || hold), issueClosed: issueData.state !== "open", record, runningSince: due ? lastRunningAt(events) : null, review, headSha: head, checksDone, eventAt: at, comments };
 }
 
 /**
@@ -1043,6 +1057,7 @@ function startCue(run, ctx, decision) {
     watch.mark("lock");
     const now = await reread(run, ctx);
     watch.mark("reread");
+    if (now.closed) return out({ exit: "skipped", reason: `#${n}: the Objective is held or closed` });
     const again = now.skip ? { skip: now.skip } : decide(now, ev.kind === "stage" ? { kind: "swept", issue: n, at: null } : ev);
     if (again.stage !== stage) return out({ exit: "skipped", reason: `#${n}: under the lock the decision changed (${again.skip || again.stage || again.block || "requeue"})` });
     // A cue whose start the record already shows (another launcher held the lock first and has released it) starts nothing again.
@@ -1268,7 +1283,7 @@ async function quotaWait(run, ctx, { stage, error, quota }) {
   const freed = `Pendulum destroyed ${sandboxes} sandbox(es) and ${images} image(s) no live Objective needs${storage ? `; ${storageLine(storage)}` : ""}.`;
   if (quota.giveUp) {
     await dropQuotaNote(run);
-    return block(run, `launcher: the ${plain(inputs.sandbox)} sandbox's plan quota stayed used up (${code}) for ${quota.tries} tries over ${Math.round(quota.waitedMs / 60_000)} min after pruning; free the vendor's snapshot storage or raise its plan, then re-apply ${inputs.objectiveLabel}`, failedStartCause("quota"));
+    return block(run, `launcher: the ${plain(inputs.sandbox)} sandbox's plan quota stayed used up (${code}) for ${quota.tries} tries over ${Math.round(quota.waitedMs / 60_000)} min after pruning; free the vendor's snapshot storage or raise its plan, then resume through Draft`, failedStartCause("quota"));
   }
   const until = new Date(Date.parse(quota.since) + QUOTA_WAIT_MS).toISOString();
   const note = `Pendulum: the ${stage} stage did not start: the ${plain(inputs.sandbox)} sandbox's plan quota is used up (${code}). ${freed} Snapshot storage is the part Pendulum frees. Try ${quota.tries} failed; the next is after ${clock(quota.retryAt)}. If the quota still refuses at ${clock(until)}, the Objective is handed back Blocked. Freeing the vendor's snapshot storage or raising its plan lets it start sooner.`;

@@ -18,21 +18,21 @@ import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, openRegeneration, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
-import { addLabels, findPr, getIssue, getRepo, listComments, listReviews, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
+import { addLabels, findPr, getIssue, getRepo, listComments, listReviews, listTimeline, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { useObjectiveZone } from "./lib/clock.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, appliedExit, endStep, stateCard, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, workValidation, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
 import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
-import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, claimExit, draftActivationHold, goTrust, labelTrust, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { GENERATED_ATTR, openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
 import { routeInputs, stageMoves } from "./lib/accounts.mjs";
 import { routeLimits } from "./lib/route-holds.mjs";
 import { reviewHold, waitReason } from "./lib/overlap.mjs";
-import { accountGate, authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
+import { accountGate, authorGate, choiceGate, planGate, startTime } from "./lib/objective-trust.mjs";
 import { stageStart } from "./lib/objective-cap.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { agentUser, exec } from "./lib/proc.mjs";
@@ -125,7 +125,7 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
       ? `; this pass left nothing to keep, so the result of an earlier one kept on the branch \`${kept.name}\` of ${clone} was removed`
       : kept.failed
         ? `; its result could not be kept on a branch of ${clone} (the local loop's log says why)`
-        : `; the conflict pass's result is kept as ${kept.sha} on the branch \`${kept.name}\` of ${clone}. To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Pendulum's push checks did not run on it), then run \`git push --force-with-lease origin ${kept.name}:${kept.branch}\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`;
+        : `; the conflict pass's result is kept as ${kept.sha} on the branch \`${kept.name}\` of ${clone}. To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Pendulum's push checks did not run on it), then run \`git push --force-with-lease origin ${kept.name}:${kept.branch}\` in that clone and resume through Draft: the stages after it validate and review that head like any other`;
   const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed${resume}`;
   outbox.block(why);
   log(why);
@@ -262,8 +262,6 @@ async function main() {
   checkout = access.checkout;
   // notice: local mode's App, for the notices that @mention a person (session.mjs applyExit).
   const token = { token: keeper.getter, notice: access.notice };
-  // No agent uid on this runner (no sudo, no systemd): the run Blocks before anything else.
-  const agentError = access.agentError || null;
   await primeWriters(repo, token, { maintainers: inputs.maintainers });
   const app = keeper.app;
   progress = progressReporter(repo, issue, token, { stage: "work", harness: inputs.harness, model: inputs.model });
@@ -383,12 +381,6 @@ async function main() {
   }
 
   async function run() {
-  if (agentError) {
-    const block = doctorBlock([agentError]);
-    await applyExit(repo, { issue, pr: null, exit: "blocked", ...block, notify: inputs.notify }, token);
-    await finish("blocked", block.reason);
-    return;
-  }
   // 1. The issue.
   let issueData = await getIssue(repo, issue, token);
   // Its visible times from here on in the zone its body names, if any (lib/clock.mjs); the progress comment's too.
@@ -420,6 +412,24 @@ async function main() {
     return;
   }
 
+  // The dispatcher's admission can be stale by the time a queued job begins. Use the same fresh timeline for admission
+  // and for the plan clock, before reading the text's author and starting any work.
+  const events = await listTimeline(repo, issue, token);
+  const mayGo = labelTrust(repo, token);
+  const activationHold = await draftActivationHold(events, issue, inputs.objectiveLabel, mayGo);
+  if (activationHold) {
+    await finish("skipped", activationHold);
+    return;
+  }
+
+  // No agent uid on this runner (no sudo, no systemd): an admitted run Blocks here.
+  if (access.agentError) {
+    const block = doctorBlock([access.agentError]);
+    await applyExit(repo, { issue, pr: null, exit: "blocked", ...block, notify: inputs.notify }, token);
+    await finish("blocked", block.reason);
+    return;
+  }
+
   // From here the stage stops when a person stops its Objective (its label removed, its issue closed): every harness
   // pass ends, its spend is recorded, its PR is left a draft, and the stage exits (session.mjs stopStage).
   // The stopped stage's end when the usual one runs out of time (session.mjs stopStage): written at once, its stream
@@ -448,10 +458,7 @@ async function main() {
   watch = watchObjective({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
   beforeExit = (commit = false) => confirmRunning({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
 
-  // When the Objective was last started (its label applied, or its draft label taken off: objective-trust.mjs startedAt),
-  // read before the text (planGate): an edit and a start landing between the two reads then count as after this stage's
-  // plan, never as before it.
-  const labeledAt = await startedAt(repo, issue, inputs.objectiveLabel, token);
+  const labeledAt = await startTime(events, inputs.objectiveLabel, goTrust(events, issue, mayGo));
   // Only text a writer wrote reaches a harness (objective-trust.mjs): the stage acts on the title and body read with their
   // author, last editor and latest title renamer, and Blocks before any harness when one cannot push and is not a pinned
   // maintainer.

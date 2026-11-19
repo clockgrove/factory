@@ -15,7 +15,7 @@
 // comment by someone else who can push counts as a run of unknown cost, never its dollars; anyone else's counts nothing.
 
 import { pendulumBuild } from "./release.mjs";
-import { DRAFT_LABEL } from "./stop.mjs";
+import { activationEvents, DRAFT_LABEL, latestDraftEvent, RESUME_OBJECTIVE } from "./activation.mjs";
 import { DEFAULTS } from "./inputs.mjs";
 import { clockText, objectiveZone, timeZone, zoneDay, zoneOffsetMs } from "./clock.mjs";
 import { stageHarnessOf } from "./cost-join.mjs";
@@ -24,6 +24,7 @@ import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, pri
 import { RUNNING_LABEL, STATE_LABELS, blockCauseOf, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, githubWriter, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
 import { sanitize } from "./handoff.mjs";
+import { goNoted } from "./stop.mjs";
 import { BASIS, BASIS_NOTE, COLORS, basisText, billingBasis, billingWords, causeSentences, cellCost, centsOf, costChart, costText, durationText, ganttChart, kindsOf, many, modelId, modelName, plainText, tableCell } from "./card-kit.mjs";
 
 // The shared look's helpers this module has always exported (card-kit.mjs holds them now).
@@ -41,20 +42,31 @@ const SECOND = 1000;
 
 
 /**
- * The Objective's clock, as the scorecard starts it (bench/lib/objective.mjs reads it from here): its first
- * `pendulum:objective` label at or after `clockAfter`, or the first time Pendulum picked it up (its Running label) if
- * that came first, so a recovery's re-applied label is never mistaken for its start. A draft's clock is the last of its
- * label's applications and its draft label's removals before Pendulum first picked it up. Null with neither label event.
+ * The first activation since `clockAfter`, shared with the scorecard. If the matching start did not survive in the
+ * timeline, use the first Running label before any later recovery only if this window has no unaccounted-for Draft.
+ * Pendulum's own refusal records identify activation events that did not start work.
  */
-export function labelTime(issue, timeline, label = OBJECTIVE, clockAfter = null) {
+export function clockStart(timeline = [], label = OBJECTIVE, clockAfter = null, { issue, comments = [], mine = isSelf } = {}) {
   const floor = clockAfter ? ms(clockAfter) : Number.NEGATIVE_INFINITY;
-  const events = (timeline || []).filter((e) => e.event === "labeled" && (e.label?.name === label || e.label?.name === RUNNING_LABEL) && ms(e.created_at) >= floor).sort((a, b) => ms(a.created_at) - ms(b.created_at));
-  const first = events[0]?.created_at ?? null;
-  if (!first || !(timeline || []).some((e) => e.event === "labeled" && e.label?.name === DRAFT_LABEL)) return first;
-  const running = events.find((e) => e.label?.name === RUNNING_LABEL)?.created_at ?? null;
-  const starts = (timeline || []).filter((e) => ((e.event === "labeled" && e.label?.name === label) || (e.event === "unlabeled" && e.label?.name === DRAFT_LABEL)) && ms(e.created_at) >= ms(first) && (!running || ms(e.created_at) <= ms(running)));
-  return starts.map((e) => e.created_at).sort((a, b) => ms(a) - ms(b)).at(-1) ?? first;
+  const history = timeline || [];
+  const markers = [...(comments || []), ...history.filter((e) => e.event === "commented")];
+  const events = activationEvents(history, label);
+  const refused = (e) => !!issue && goNoted(markers, issue, { at: e.created_at, id: e.id }, mine);
+  const start = events.find((e) => ms(e.created_at) >= floor && !refused(e));
+  const running = history.filter((e) => e.event === "labeled" && e.label?.name === RUNNING_LABEL && ms(e.created_at) >= floor).sort((a, b) => ms(a.created_at) - ms(b.created_at))[0];
+  if (!running) return start ?? null;
+  const runningAt = ms(running.created_at);
+  const runningIndex = history.indexOf(running);
+  const byRunning = (e, index) => ms(e.created_at) < runningAt || (ms(e.created_at) === runningAt && index <= runningIndex);
+  if (start && byRunning(start, history.indexOf(start))) return start;
+  if (events.some((e) => ms(e.created_at) >= floor && byRunning(e, history.indexOf(e)) && refused(e))) return null;
+  const draft = latestDraftEvent(history.filter(byRunning));
+  if (draft && (ms(draft.created_at) >= floor || !events.includes(draft) || refused(draft))) return null;
+  return running;
 }
+
+export const labelTime = (issue, timeline, label = OBJECTIVE, clockAfter = null, options) =>
+  clockStart(timeline, label, clockAfter, { issue: issue?.number, ...options })?.created_at ?? null;
 
 /**
  * Whether the issue's clock started before the rename to Pendulum (#567): a label event named exactly
@@ -69,6 +81,7 @@ export const CLOCK_WHY = Object.freeze(["renamed"]);
 
 /** Why a card's wall clock is not known (clockRenamed), as the card says it. */
 export const RENAMED_CLOCK_WHY = "its wall clock is not known: it was labelled before the rename to Pendulum";
+const UNRECORDED_ACTIVATION_WHY = "its wall clock is not known because its activation was not recorded";
 
 /**
  * Whether a comment, review or PR is Pendulum's own, whose markers the card trusts: by the login this process writes as
@@ -284,7 +297,7 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
 /**
  * Where an Objective's run starts over (#517): the latest of its restart record (`pendulum:restart`, logic.mjs
  * restartedAt) and its reopening (the timeline's `reopened` event), or null. The finish card's clock starts at the
- * first label at or after it, and max_objective_usd counts from it.
+ * first activation or proved start at or after it, and max_objective_usd counts from it.
  */
 export function objectiveWindow(comments = [], timeline = []) {
   const times = [restartedAt(comments), ...(timeline || []).filter((e) => e?.event === "reopened").map((e) => e.created_at)].filter((t) => Number.isFinite(ms(t)));
@@ -528,8 +541,10 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
   // Objective's branch (open, a draft, or closed unmerged).
   const open = other ? pulls.filter((p) => p?.pr?.number && !p.pr.merged_at).slice(-1) : [];
   const shown = [...merged, ...open];
-  // The clock: the first label at or after the run's last start over (a restart or a reopen), max_objective_usd's window too.
-  const started = labelTime(issue, timeline, label, objectiveWindow(comments.filter((c) => mine(c)), timeline)) ?? shown[0]?.pr.created_at ?? endAt;
+  // The clock starts at the first activation after the most recent restart or reopen.
+  const window = objectiveWindow(comments.filter((c) => mine(c)), timeline);
+  const start = clockStart(timeline, label, window, { issue: n, comments, mine });
+  const started = start?.created_at ?? window ?? shown[0]?.pr.created_at ?? endAt;
   const inRun = (at) => ms(at) >= ms(started) && ms(at) <= ms(endAt);
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
   // Which merged part a stage worked on: the parts merged before it started (a split Objective's PRs merge in order).
@@ -582,8 +597,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     findings += (reviewComments || []).filter((c) => ids.has(c.pull_request_review_id) && !c.in_reply_to_id && !isPlaceholder(c.body)).length;
   }
 
-  // Who filed the issue, and who applied the label that started the clock (its latest application by then).
-  const labelled = (timeline || []).filter((e) => e.event === "labeled" && e.label?.name === label && ms(e.created_at) <= ms(started)).sort((a, b) => ms(a.created_at) - ms(b.created_at)).at(-1);
+  const startKind = start?.label.name === DRAFT_LABEL ? "draft" : start?.label.name === label ? "objective" : start ? "running" : null;
   const sum = (k) => shown.reduce((s, p) => s + (Number.isInteger(p.pr[k]) ? p.pr[k] : 0), 0);
   const holds = apart([...blockedWaits({ repo, timeline, blockers, started, stages }), ...holdsOf(n, own.filter((c) => inRun(noticeAt(c))), stages)]);
   const closer = (timeline || []).filter((e) => e.event === "closed").sort((a, b) => ms(a.created_at) - ms(b.created_at)).at(-1)?.actor?.login;
@@ -591,7 +605,8 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     repo,
     issue: n,
     author: login(issue.user?.login),
-    labeller: login(labelled?.actor?.login),
+    labeller: login(startKind === "draft" || startKind === "objective" ? start.actor?.login : null),
+    startKind,
     prs: shown.map((p) => ({ number: p.pr.number, url: p.pr.html_url ?? `https://github.com/${repo}/pull/${p.pr.number}`, opened: p.pr.created_at, merged: p.pr.merged_at ?? null, ours: mine(p.pr), draft: p.pr.draft === true, open: p.pr.state === "open" && !p.pr.merged_at })),
     started,
     merged: mergedAt,
@@ -608,10 +623,11 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     // each Blocked or Question notice and each paused stage until the next stage started, no time in two of them (apart).
     holds,
     planned: own.some((c) => (c.body || "").startsWith(marker(n, "plan")) && inRun(c.created_at)),
-    // The scorer's start of the clock: the first label with no restart window (labelTime), null with no label event.
-    labelled: labelTime(issue, timeline, label),
+    // The scorecard's first activation without the restart window.
+    labelled: labelTime(issue, timeline, label, null, { comments, mine }),
     // Labelled before the rename to Pendulum: no wall clock (clockRenamed).
     clockRenamed: clockRenamed(timeline),
+    clockActivationMissing: !start && latestDraftEvent(timeline) !== null,
     commits: sum("commits"),
     additions: sum("additions"),
     deletions: sum("deletions"),
@@ -666,7 +682,7 @@ export function finishTotals(d) {
   // No stage found at all: the run's cost was not read, so it is unknown, never $0.
   const unknown = d.stages.reduce((s, x) => s + (x.unknown || 0), 0) + (d.sandbox?.unknown ?? 0) + (d.stages.length ? 0 : 1);
   const why = [...new Set([...d.stages.flatMap((x) => (x.unknown ? x.why ?? [] : [])), ...sandboxWhy(d), ...(d.stages.length ? [] : ["no-record"])])].sort();
-  const wall = d.clockRenamed ? null : ms(d.ended ?? d.merged) - ms(d.started);
+  const wall = d.clockRenamed || d.clockActivationMissing ? null : ms(d.ended ?? d.merged) - ms(d.started);
   const waited = waitedMs(d);
   return { wall, waited, worked: wall === null ? null : Math.max(0, wall - waited), usd: Math.round(usd * 1e6) / 1e6, unknown, why, byBilling: addBilling(...d.stages.map((s) => s.byBilling)) };
 }
@@ -722,7 +738,10 @@ export function subline(d) {
   const basis = t.usd > 0 ? basisText(t.usd, t.byBilling) || BASIS.unknown : "";
   if (basis) parts.push(basis);
   if (t.unknown) parts.push(`plus ${many(t.unknown, "AI run")} of unknown cost`);
-  if (t.wall === null) parts.push(`${RENAMED_CLOCK_WHY[0].toUpperCase()}${RENAMED_CLOCK_WHY.slice(1)}`);
+  if (t.wall === null) {
+    const why = d.clockRenamed ? RENAMED_CLOCK_WHY : UNRECORDED_ACTIVATION_WHY;
+    parts.push(`${why[0].toUpperCase()}${why.slice(1)}`);
+  }
   return parts.join(" · ");
 }
 
@@ -747,7 +766,7 @@ function holdLine(d) {
     by.set(words, (by.get(words) ?? 0) + (ms(h.end) - ms(h.start)));
   }
   const waits = listed([...by].map(([words, took]) => `${durationText(took)} ${words}`));
-  const span = t.wall === null ? "" : `; ${durationText(t.wall)} from the label to ${{ merged: "the merge", closed: "the close", blocked: "the Block", question: "the Question" }[d.end]}`;
+  const span = t.wall === null ? "" : `; ${durationText(t.wall)} from ${d.startKind === "draft" ? "Draft removal" : "the label"} to ${{ merged: "the merge", closed: "the close", blocked: "the Block", question: "the Question" }[d.end]}`;
   return `Waited ${waits}${span}.`;
 }
 
@@ -766,7 +785,7 @@ function actionLines(d) {
   const reason = String(d.reason ?? "").replace(/^question:\s*/i, "");
   if (d.end === "blocked") {
     // Its way on (session.mjs nextStep): one that no resume or restart gets past is said so; any other is fixed, then resumed.
-    const todo = d.next === "none" ? "a resume or a restart does not get past this; the Blocked notice on this issue says why." : "fix the cause below, then re-apply the `pendulum:objective` label. The Blocked notice on this issue has the full steps.";
+    const todo = d.next === "none" ? "a resume or a restart does not get past this; the Blocked notice on this issue says why." : `fix the cause below, then ${RESUME_OBJECTIVE}. The Blocked notice on this issue has the full steps.`;
     return [`> **What to do:** ${todo}`, ">", `> **Why:** ${oneLine(reason.split(/(?<=[.!?])\s/)[0])}`];
   }
   if (d.end === "question") {
@@ -779,7 +798,8 @@ function actionLines(d) {
 
 /** Who did what, and what Pendulum did, in plain sentences: only what the records say. */
 export function summary(d) {
-  const person = d.author && d.labeller ? (d.author === d.labeller ? "You wrote the issue and added the label." : `**${d.author}** wrote the issue and **${d.labeller}** added the label.`) : d.author ? `**${d.author}** wrote the issue.` : "";
+  const act = d.startKind === "draft" ? "removed the Draft label to start it" : "added the label";
+  const person = d.author && d.labeller ? (d.author === d.labeller ? `You wrote the issue and ${act}.` : `**${d.author}** wrote the issue and **${d.labeller}** ${act}.`) : d.author ? `**${d.author}** wrote the issue.` : "";
   const did = [];
   if (d.planned) did.push("planned the work");
   const change = `${many(d.commits, "commit")}, +${d.additions} −${d.deletions} across ${many(d.files, "file")}`;
@@ -1049,7 +1069,11 @@ function runLog(d) {
   const day = spansDays(d);
   const zone = zoneOf(d);
   const at = (t) => clockText(ms(t), { zone, seconds: true, date: day, abbr: false });
-  const out = [[d.started, "labelled `pendulum:objective`: the clock starts"]];
+  const start = d.startKind === "draft" ? "removed `pendulum:draft`: the clock starts"
+    : d.startKind === "running" ? "marked Running: the first record of the start"
+    : d.startKind === null ? "the first recorded point of the run"
+    : "labelled `pendulum:objective`: the clock starts";
+  const out = [[d.started, start]];
   for (const s of d.stages) {
     if (!s.start) continue;
     const name = stageName(s, d.planned).toLowerCase();
@@ -1151,8 +1175,8 @@ export const reportStageKind = (kind) => (kind === "review" || kind === "rebase"
  * records, which are no pass and are counted apart as the report counts them, report.mjs foldPasses, #617; null as
  * `passes` is), `modelMinutes` (the minutes of every harness pass, null unless
  * `passes` is known and each harness pass has its times), `tokens` (every stage's, summed), and `labelled` and
- * `labelledWallMs` (the scorer's start of the clock, the first `pendulum:objective` label with no restart window, and the
- * wall clock from it to the merge; null with no label event, or one labelled before the rename to Pendulum: clockRenamed),
+ * `labelledWallMs` (the first activation with no restart window, and the wall clock from it to the merge; null with
+ * no clock event, or one labelled before the rename to Pendulum: clockRenamed),
  * and `clockWhy`, why the wall clock is not known when that is the rename (`renamed`; null otherwise), so a reader takes
  * it from the card (#587) rather than from the shape of its other fields.
  */
@@ -1525,7 +1549,8 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
   // Question card stands over an older end of this kind.
   const stands = (had) => !!had && (had.end === "merged" || (had.end === "closed" && ending?.kind === "closed" && (!had.at || ms(had.at) >= ms(ending.at))) || (ending && had.end !== "closed" && !!had.at && ms(had.at) > ms(ending.at)));
   if (stands(cardsOf(comments)[0] && finishEndOf(cardsOf(comments)[0].body, n))) return "had";
-  const started = labelTime(issue, timeline, label, objectiveWindow(comments.filter((c) => mine(c)), timeline));
+  const window = objectiveWindow(comments.filter((c) => mine(c)), timeline);
+  const started = labelTime(issue, timeline, label, window, { comments, mine }) ?? window;
   // The PRs to read whole: the Objective's merged PRs since its clock (a split Objective's parts), oldest first; at another
   // end, then, the newest unmerged one on its branch.
   const sinceClock = (p) => !started || ms(p.merged_at) >= ms(started);

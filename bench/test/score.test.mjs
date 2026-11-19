@@ -7,12 +7,13 @@ import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, stat
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { collectObjective, snapshotApi, usageDirFor, usageFromDir } from "../lib/collect.mjs";
+import { collectObjective, humanWorkflowRuns, snapshotApi, usageDirFor, usageFromDir } from "../lib/collect.mjs";
 import { costOf, loadPrices, parseUsageText, priceTokens } from "../lib/cost.mjs";
 import { RENAMED_WHY, humanActions, localPendulumActions, markdownTable, scoreObjective, summaryLine } from "../lib/objective.mjs";
 import { blocked, cleanMerge, humanPush, localMerge, OPERATOR, REPO, snapshotOf, withHandover } from "./fixtures/github.mjs";
 import { CODEX_NO_TOKENS } from "../../plugin/scripts/lib/usage.mjs";
 import { PREVIOUS_NAME } from "../../plugin/scripts/lib/local.mjs";
+import { refusedMarker } from "../../plugin/scripts/lib/stop.mjs";
 import { newForms } from "../../plugin/test/fixtures/progress-new-form.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
@@ -36,6 +37,101 @@ test("clean merge: walk-away yes, operator 0, Claude dollars from total_cost_usd
   assert.equal(row.quality.status, "pending");
   assert.deepEqual(row.missing, []);
   assert.equal(row.mergedBy, "acme-pendulum[bot]");
+});
+
+test("Draft removal starts the walk-away clock and workflow lookback; preparation and activation are not interventions", async () => {
+  const c = cleanMerge(42, usage("claude"));
+  const [filed, ...working] = c.issueTimeline;
+  const draft = { ...filed, label: { name: "pendulum:draft" } };
+  const startAt = "2031-03-02T01:02:00Z";
+  const start = { ...draft, created_at: startAt, event: "unlabeled" };
+  const preparation = { user: OPERATOR, created_at: "2031-03-02T01:01:00Z", body: "Prep the acceptance wording." };
+  c.issueTimeline = [filed, draft, start, ...working];
+  c.issueComments.unshift(preparation);
+  let query;
+  await humanWorkflowRuns(async (path) => {
+    query = decodeURIComponent(path);
+    return [];
+  }, REPO, c.issue, c.issueTimeline, c.pulls);
+  assert.match(query, /created=2031-03-02T01:02:00Z\.\./);
+  const row = scoreObjective(c, { prices });
+  assert.deepEqual([row.walkAway.since, row.walkAway.sinceBasis, row.walkAway.humanActions, row.walkAway.value, row.wallMinutes], [startAt, 'first removal of "pendulum:draft"', 0, true, 148]);
+
+  const held = { ...c, issue: { ...c.issue, state: "open", closed_at: null, labels: [filed.label, draft.label] }, issueTimeline: [draft, filed], pulls: [] };
+  const waiting = scoreObjective(held, { prices });
+  assert.deepEqual([waiting.walkAway.since, waiting.wallMinutes, waiting.parked], [null, null, false]);
+
+  const resumeAt = "2031-03-02T02:00:00Z";
+  c.issueTimeline.push({ ...draft, created_at: "2031-03-02T01:45:00Z" }, { ...start, created_at: resumeAt });
+  const resumed = scoreObjective(c, { prices });
+  assert.deepEqual([resumed.walkAway.since, resumed.walkAway.humanActions, resumed.walkAway.value], [startAt, 2, false]);
+});
+
+test("issue-timeline order counts human actions after the exact activation in the same second", () => {
+  const c = cleanMerge(42, usage("claude"));
+  const [filed, ...working] = c.issueTimeline;
+  c.issue.created_at = filed.created_at;
+  const draft = { ...filed, label: { name: "pendulum:draft" } };
+  const at = "2031-03-02T01:00:20Z";
+  const held = { ...draft, created_at: at };
+  const start = { ...held, event: "unlabeled" };
+  const comment = (body) => ({ actor: OPERATOR, created_at: at, event: "commented", body });
+  const ownerLabel = { ...filed, actor: c.issue.user, label: { name: "priority" }, created_at: "2031-03-02T01:00:40Z" };
+  c.issueTimeline = [filed, draft, comment("Preparatory note"), start, comment("Change after start"), { ...held }, { ...start }, ownerLabel, ...working];
+  const actions = humanActions(c, at);
+  assert.deepEqual(actions.map(({ kind, detail }) => [kind, detail]), [
+    ["comment", "Change after start"],
+    ["labeled pendulum:draft", ""],
+    ["unlabeled pendulum:draft", ""],
+    ["labeled priority", ""],
+  ]);
+  assert.equal(scoreObjective(c, { prices }).walkAway.humanActions, 4);
+});
+
+test("legacy direct starts keep bundled filing metadata out of walk-away and count a later Draft hold", () => {
+  const c = cleanMerge(42, usage("claude"));
+  const [filed, ...working] = c.issueTimeline;
+  c.issue.created_at = filed.created_at;
+  const ownerLabel = (name, created_at = filed.created_at) => ({ ...filed, label: { name }, actor: c.issue.user, created_at });
+  c.issueTimeline = [filed, ownerLabel("priority"), ownerLabel("pendulum:local"), ...working];
+  assert.equal(scoreObjective(c, { prices }).walkAway.value, true);
+
+  c.issueTimeline.splice(3, 0, ownerLabel("pendulum:draft", "2031-03-02T01:00:40Z"));
+  const row = scoreObjective(c, { prices });
+  assert.deepEqual([row.walkAway.value, row.walkAway.humanActions, row.walkAway.firstHumanAction.kind], [false, 1, "labeled pendulum:draft"]);
+});
+
+test("only a Pendulum-owned refusal excludes the exact Draft removal from clock and workflow lookback", async () => {
+  const c = cleanMerge(42, usage("claude"));
+  const [filed, ...working] = c.issueTimeline;
+  const draft = { ...filed, label: { name: "pendulum:draft" } };
+  const at = "2031-03-02T01:02:00Z";
+  const rejected = { ...draft, id: 901, created_at: at, event: "unlabeled" };
+  const chosen = { ...rejected, id: 902 };
+  const bot = working.find((e) => e.label?.name === "pendulum:running").actor;
+  const refusal = (id, user) => ({ user, created_at: at, body: refusedMarker(c.issue.number, { id, at }) });
+  c.issueTimeline = [filed, draft, rejected, { ...draft, created_at: at }, chosen, ...working];
+  c.issueComments.unshift(refusal(901, bot), refusal(902, OPERATOR));
+  const row = scoreObjective(c, { prices });
+  assert.deepEqual([row.walkAway.since, row.walkAway.humanActions, row.walkAway.value], [at, 0, true]);
+  c.issueTimeline.splice(4, 1, { ...chosen, created_at: "2031-03-02T01:03:00Z" });
+  let query;
+  await humanWorkflowRuns(async (path) => {
+    query = decodeURIComponent(path);
+    return [];
+  }, REPO, c.issue, c.issueTimeline, c.pulls, { comments: c.issueComments });
+  assert.match(query, /created=2031-03-02T01:03:00Z\.\./);
+});
+
+test("missing Draft removal leaves the merged wall clock and walk-away unknown", () => {
+  const c = cleanMerge(42, usage("claude"));
+  const [filed, ...working] = c.issueTimeline;
+  c.issueTimeline = [filed, { ...filed, label: { name: "pendulum:draft" } }, ...working];
+  const row = scoreObjective(c, { prices });
+  assert.deepEqual([row.walkAway.since, row.walkAway.value, row.walkAway.askedOnly.value, row.walkAway.bucket, row.wallMinutes], [null, null, null, "unknown", null]);
+  assert.ok(row.missing.includes("Draft activation event"));
+  assert.equal(row.operator.minutes, "unknown");
+  assert.match(summaryLine([row]), /Not known \(Draft activation was not recorded\), in no count: #42\./);
 });
 
 test("human push: a maintainer's commit on the branch after the label breaks walk-away and names itself", () => {

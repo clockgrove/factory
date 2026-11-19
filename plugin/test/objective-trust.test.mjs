@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setMaintainers } from "../scripts/lib/logic.mjs";
-import { AUTHOR_FIX, authorGate, trustedIssue } from "../scripts/lib/objective-trust.mjs";
+import { DRAFT_LABEL } from "../scripts/lib/activation.mjs";
+import { AUTHOR_FIX, authorGate, startsOf, trustedIssue } from "../scripts/lib/objective-trust.mjs";
 import { blockedLine } from "../scripts/lib/session.mjs";
 import { inFiles } from "../scripts/lib/handoff.mjs";
 
@@ -26,6 +27,32 @@ const gh = ({ author, editor = null, lastEditedAt = editor ? "2026-11-09T10:00:0
   permission: async (_, login) => perms[login] ?? null,
 });
 const rest = { number: 7, title: "Objective", body: "Build the thing.", labels: [{ name: "pendulum:objective" }] };
+
+test("objective activation leaves identity alone and uses the latest Draft removal for runtime trust", () => {
+  const e = (event, name, created_at, login) => ({ event, label: { name }, created_at, actor: { login, type: "User" } });
+  const createAt = "2031-03-02T01:00:00Z";
+  const startAt = "2031-03-02T01:01:00Z";
+  const identity = e("labeled", "pendulum:objective", createAt, "writer");
+  const held = e("labeled", DRAFT_LABEL, createAt, "writer");
+  const first = e("unlabeled", DRAFT_LABEL, startAt, "maintainer");
+  const laterHold = e("labeled", DRAFT_LABEL, startAt, "maintainer");
+  const later = e("unlabeled", DRAFT_LABEL, startAt, "triager");
+  const duplicateIdentity = e("labeled", "pendulum:objective", createAt, "triager");
+  const duplicateRelease = e("unlabeled", DRAFT_LABEL, startAt, "writer");
+  for (const creation of [[identity, held], [held, identity]]) {
+    assert.deepEqual(startsOf(creation, "pendulum:objective"), []);
+    assert.deepEqual(startsOf([...creation, first, laterHold, later], "pendulum:objective"), [later, first]);
+  }
+  assert.deepEqual(startsOf([identity], "pendulum:objective"), [identity], "legacy identity-only activation");
+  assert.deepEqual(startsOf([identity, duplicateIdentity, held], "pendulum:objective"), [], "duplicate applications cannot leave the Draft with an early clock");
+  assert.deepEqual(startsOf([identity, duplicateIdentity], "pendulum:objective"), [identity], "a duplicate cannot take over the legacy Objective activation");
+  assert.deepEqual(startsOf([identity, held, first, duplicateRelease, laterHold, later], "pendulum:objective"), [later, first], "only real Draft removals activate");
+  const reportedRelease = { ...first, id: 101 };
+  assert.deepEqual(startsOf([identity, held, reportedRelease, laterHold, { ...reportedRelease }, later], "pendulum:objective"), [later, reportedRelease], "a repeated event ID after a real hold cannot consume the next release");
+  assert.deepEqual(startsOf([held, first], "pendulum:objective"), [first], "runtime can vouch for a currently-labelled Objective");
+  const removed = e("unlabeled", "pendulum:objective", startAt, "writer");
+  assert.deepEqual(startsOf([identity, held, removed, first], "pendulum:objective"), [], "Draft removal without the recorded identity does not activate");
+});
 
 test("objective trust: a stranger's body Blocks, naming the stranger, and no text comes back", async () => {
   const t = await trustedIssue(repo, 7, rest, {}, gh({ author: user("stranger") }));
@@ -109,7 +136,7 @@ test("objective trust: a triager's rename before the first plan Blocks, naming t
   assert.equal(t.issueData, undefined, "no title or body for a harness");
   assert.match(t.reason, /^the issue's title was last renamed by `reader`, who cannot push to acme\/app and is not a pinned maintainer, so Pendulum acts on none of its text$/);
   assert.deepEqual(applied, [{ issue: 7, pr: null, exit: "blocked", reason: t.reason, fix: AUTHOR_FIX["title renamer"], cause: "setup", notify: "boss", stage: "author" }], "Blocked as an untrusted body is, resumed once a writer renames it");
-  assert.match(blockedLine({ issue: 7, stage: "author", reason: t.reason, fix: AUTHOR_FIX["title renamer"] }), /person who can push read the title and change it \(saving the same title records no rename; .* re-apply `pendulum:objective`/);
+  assert.match(blockedLine({ issue: 7, stage: "author", reason: t.reason, fix: AUTHOR_FIX["title renamer"] }), /person who can push read the title and change it \(saving the same title records no rename; .* add `pendulum:draft` if it is missing, then remove it to resume/);
   const stranger = await trustedIssue(repo, 7, rest, {}, gh({ author: user("kirk"), renamed: [user("stranger")] }));
   assert.match(stranger.reason, /title was last renamed by `stranger`, who cannot push/);
 });
@@ -132,7 +159,7 @@ test("objective trust: an App's rename never vouches for the title, nor a rename
 // The session's route (local.mjs issue, deliver, post-review) against a GitHub that answers like the real one.
 const LOCAL = join(import.meta.dirname, "..", "scripts", "local.mjs");
 const run = (args, env, cwd) => new Promise((ok) => execFile(process.execPath, [LOCAL, ...args, "--repo", "acme/app"], { cwd, env, encoding: "utf8", timeout: 60_000 }, (e, stdout, stderr) => ok({ code: e ? e.code : 0, stdout, stderr })));
-async function fakeGitHub({ author, editor = null, renamer = null, perms: p = perms, issueComments = [], commentsStatus = 200 }) {
+async function fakeGitHub({ author, editor = null, renamer = null, perms: p = perms, issueComments = [], issueTimeline = [], commentsStatus = 200 }) {
   const calls = [];
   const send = (res, status, body) => {
     res.writeHead(status, { "content-type": "application/json" });
@@ -154,6 +181,7 @@ async function fakeGitHub({ author, editor = null, renamer = null, perms: p = pe
       if (path === "/repos/acme/app") return send(res, 200, { full_name: "acme/app", default_branch: "main" });
       if (path === "/user") return send(res, 200, { login: "dev", type: "User" });
       if (path === "/repos/acme/app/issues/7") return send(res, 200, { number: 7, title: "REST title", body: "REST body.", state: "open", labels: [{ name: "pendulum:objective" }] });
+      if (path === "/repos/acme/app/issues/7/timeline") return send(res, 200, issueTimeline);
       if (path === "/repos/acme/app/issues/7/comments") return send(res, commentsStatus, commentsStatus === 200 ? issueComments : { message: "Not Found" });
       if (path === "/repos/acme/app/pulls/9") return send(res, 200, { number: 9, head: { ref: "pendulum/7", sha: "a".repeat(40) }, base: { ref: "main" } });
       const perm = /^\/repos\/acme\/app\/collaborators\/([^/]+)\/permission$/.exec(path);
@@ -191,6 +219,25 @@ function clone({ branch = "main", workflow = null } = {}) {
 }
 const envFor = (url, root) => ({ PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: url, PENDULUM_LOCAL_TOKEN: "github_pat_test", GIT_CONFIG_NOSYSTEM: "1" });
 const writes = (calls) => calls.filter((c) => c.method !== "GET" && c.path !== "/graphql");
+
+test("session commands decline work and review delivery when the latest Draft removal was unauthorized", async () => {
+  const c = clone({ branch: "pendulum/7" });
+  const out = join(c.root, "issue.md");
+  const event = (id, event, login) => ({ id, event, actor: { login, type: "User" }, label: { name: "pendulum:draft" }, created_at: "2026-11-19T12:00:00Z" });
+  const fake = await fakeGitHub({ author: user("kirk"), issueTimeline: [event(1, "labeled", "kirk"), event(2, "unlabeled", "reader")] });
+  try {
+    for (const args of [["issue", "7", "--out", out], ["deliver", "7"], ["post-review", "9", "findings.json"]]) {
+      const r = await run(args, envFor(fake.url, c.root), c.work);
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /Draft activation was not authorized/);
+    }
+    assert.equal(existsSync(out), false, "no body reaches the session");
+    assert.deepEqual(writes(fake.calls), [], "no handoff or review was written");
+    assert.doesNotMatch(c.refs(), /pendulum\/7/, "nothing was pushed");
+  } finally {
+    await fake.close();
+  }
+});
 
 test("session route: `pendulum deliver` Blocks a stranger's Objective with the author notice and pushes nothing", async () => {
   const c = clone({ branch: "pendulum/7" });

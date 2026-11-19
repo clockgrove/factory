@@ -1060,7 +1060,7 @@ export async function redCancels(repo, failedRuns, { token, actionsToken = token
 }
 
 /** What a Block says of cancels Pendulum cannot place (redCancels `unplaced`). */
-export const unplacedCancelReason = (unplaced) => `${unplaced.map((c) => c.text).join("; ")}: not a flake and not known to be the PR's change; re-apply the label`;
+export const unplacedCancelReason = (unplaced) => `${unplaced.map((c) => c.text).join("; ")}: not a flake and not known to be the PR's change; resume through Draft`;
 
 /** Triggers that never start a workflow on a PR's head commit: they run on the queue's, the default branch's or a tag's. */
 const NOT_ON_HEAD = ["merge_group", "schedule", "workflow_call", "workflow_run", "release"];
@@ -1246,11 +1246,11 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
     const runs = [...new Set(ended.map((x) => x.w))];
     // GitHub could not start a run: most often the workflow file on the default branch, the repository's (setup). A
     // cancellation may be the repository's own concurrency setting: the work's.
-    return { waits: false, kind: "ended", cause: runs.some((w) => w.conclusion === "startup_failure") ? "setup" : "work", runs, reason: `required check(s) ${list(ended.map((x) => x.n))} never reported on ${short}: ${list(runs.map((w) => `workflow run ${label(w)} ended ${w.conclusion}`))} before ${ended.length > 1 ? "their jobs" : "its job"} ran${runs.some((w) => w.conclusion === "startup_failure") ? " (GitHub could not start the workflow: its file or GitHub's side, as the run's page says)" : ""}; rerun it on GitHub or fix the workflow, then re-apply the label; no failing run to fix` };
+    return { waits: false, kind: "ended", cause: runs.some((w) => w.conclusion === "startup_failure") ? "setup" : "work", runs, reason: `required check(s) ${list(ended.map((x) => x.n))} never reported on ${short}: ${list(runs.map((w) => `workflow run ${label(w)} ended ${w.conclusion}`))} before ${ended.length > 1 ? "their jobs" : "its job"} ran${runs.some((w) => w.conclusion === "startup_failure") ? " (GitHub could not start the workflow: its file or GitHub's side, as the run's page says)" : ""}; rerun it on GitHub or fix the workflow, then resume through Draft; no failing run to fix` };
   }
   if (unreported.length) return { waits: false, kind: "unreported", runs: [], reason: `required check(s) ${list(unreported)} never reported on ${short}: no workflow run on it produces ${unreported.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map((w) => `${label(w)} ${w.status === "completed" ? `completed ${w.conclusion}` : w.status}`))}${workflowRuns.length > 3 ? `, ${workflowRuns.length - 3} more` : ""}); check the required check names; no failing run to fix` };
   if (filtered.length) return { waits: false, kind: "filtered", runs: [], reason: `required check(s) ${list(filtered.map((x) => x.n))} never run on ${short}: ${list([...new Set(filtered.map((x) => x.key))])} of ${filtered.length > 1 ? "their workflows skips" : "its workflow skips"} this change, so GitHub starts no run for it; run the check on every change, or stop requiring it; no failing run to fix` };
-  if (approval.length) return { waits: false, kind: "approval", runs: [], reason: `required check(s) ${list(approval)} on ${short} wait for a deployment approval; approve ${approval.length > 1 ? "them" : "it"}, then re-apply the label; no failing run to fix` };
+  if (approval.length) return { waits: false, kind: "approval", runs: [], reason: `required check(s) ${list(approval)} on ${short} wait for a deployment approval; approve ${approval.length > 1 ? "them" : "it"}, then resume through Draft; no failing run to fix` };
   if (started.length) {
     // Who has not started them: GitHub, the service whose app owns the check, or the repository's own concurrency group.
     const who = [...new Set(started.map((x) => x.by || "GitHub"))];
@@ -1274,7 +1274,7 @@ export function refusedRerunText(refusal) {
   const why = refusal?.earlier ? "a rerun was refused earlier on this Objective" : refusal?.permission ? `${status}: the token cannot rerun jobs` : refusal?.rateLimited ? `${status}: rate limited` : status;
   const grant = refusal?.where === "actions" ? "give the workflow's work and review jobs `actions: write`" : "give the token Actions read and write";
   const what = refusal?.unchanged ? "GitHub refused the rerun of the failed jobs" : `red-check triage read it as a flake or infrastructure (${jobs}), but GitHub refused the rerun`;
-  return `${what} (${why}); rerun the failed jobs on GitHub${refusal?.permission || refusal?.earlier ? `, or ${grant},` : ""} then re-apply the label`;
+  return `${what} (${why}); rerun the failed jobs on GitHub${refusal?.permission || refusal?.earlier ? `, or ${grant},` : ""} then resume through Draft`;
 }
 
 /**

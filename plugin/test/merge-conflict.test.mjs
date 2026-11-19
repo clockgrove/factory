@@ -516,7 +516,7 @@ test("#331: another unresolved thread a ruleset or branch protection requires re
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "threads");
     assert.deepEqual(gh.attempts, []);
     const why = mergeBlockReason("threads", report);
-    assert.equal(why, "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: dana on src/store.ts:41. Answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
+    assert.equal(why, "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: dana on src/store.ts:41. Answer or resolve each on the PR, then add `pendulum:draft` if it is missing, then remove it to resume");
     assert.equal(mergeBlockCause("threads", report), "work");
     assert.deepEqual(gh.state.labelled, [], "a stranger's thread is never Pendulum's to answer");
 
@@ -604,7 +604,7 @@ test("#331: code scanning's review rounds at the merge are bounded per re-entry,
     gh.state.threads = [alert("A3", 260), alert("A4", 12)];
     const report = {};
     assert.equal(await pass(report), "threads");
-    assert.equal(mergeBlockReason("threads", report), "code scanning still has 2 open alert(s) on PR #12 after 2 answer rounds: packages/application/src/wake-triage-cases.ts:260; packages/application/src/wake-triage-cases.ts:12. Fix them on the branch or resolve them on the PR, then re-apply `pendulum:objective` to resume");
+    assert.equal(mergeBlockReason("threads", report), "code scanning still has 2 open alert(s) on PR #12 after 2 answer rounds: packages/application/src/wake-triage-cases.ts:260; packages/application/src/wake-triage-cases.ts:12. Fix them on the branch or resolve them on the PR, then add `pendulum:draft` if it is missing, then remove it to resume");
     assert.equal(mergeBlockCause("threads", report), "work");
     assert.equal(gh.state.labelled.length, 2, "two rounds, two review labels");
     assert.equal((gh.comments[2] || []).filter((c) => c.body.startsWith(marker(2, "answer-rounds"))).length, 1, "one record on the issue");
@@ -672,7 +672,7 @@ test("#595: an unlisted App's open thread goes to the answer pass before the mer
     // Past the rounds it Blocks, naming the App, its file and line.
     const report = {};
     assert.equal(await pass(report), "threads");
-    assert.equal(mergeBlockReason("threads", report), "1 review thread(s) still open on PR #12 after 2 answer rounds: chatgpt-codex-connector[bot] on src/store.ts:41. Fix them on the branch, or answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
+    assert.equal(mergeBlockReason("threads", report), "1 review thread(s) still open on PR #12 after 2 answer rounds: chatgpt-codex-connector[bot] on src/store.ts:41. Fix them on the branch, or answer or resolve each on the PR, then add `pendulum:draft` if it is missing, then remove it to resume");
     assert.equal(mergeBlockCause("threads", report), "work");
     // The finding check resolved it: the merge goes on.
     thread.isResolved = true;
@@ -700,7 +700,7 @@ test("#595: a writer's open thread goes to the answer pass, and one a writer ans
     gh.state.threads = [structuredClone(personThread), actions];
     const report = {};
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "threads");
-    assert.equal(mergeBlockReason("threads", report), "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 2 are open: dana on src/store.ts:41; github-actions[bot] on src/b.ts:7. Answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
+    assert.equal(mergeBlockReason("threads", report), "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 2 are open: dana on src/store.ts:41; github-actions[bot] on src/b.ts:7. Answer or resolve each on the PR, then add `pendulum:draft` if it is missing, then remove it to resume");
     assert.deepEqual(gh.state.labelled, ["12:pendulum:review"], "no review runs for them");
     // An App's open thread beside a stranger's: the stranger's holds the merge anyway, so it Blocks at once, no round spent.
     gh.state.threads = [codexThread("PRRT_codex2", 12), structuredClone(personThread)];

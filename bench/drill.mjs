@@ -2,7 +2,7 @@
 /**
  * `node bench/drill.mjs --repo OWNER/NAME --count N`: the adopter drill. Files N small,
  * fresh Objectives on a scratch repository (each a one-function addition over the
- * repository's `greet`, named uniquely), lets the Action take them (the opened-issue tick,
+ * repository's `greet`, named uniquely). Removes Draft after filing so the Action takes them (the Draft-removal tick,
  * or `--dispatch` to fire one manually), waits until every one is closed or Blocked, then
  * scores them with bench/score.mjs. Exit 0 when every Objective merged with no human
  * input; 1 otherwise; 64 usage.
@@ -17,7 +17,7 @@
  *                            unit and database tests, suffixed so repeated runs never collide; every one changes
  *                            the scratch adopter alone
  *   --count N                Objectives to file (default 2 for small, 5 for medium)
- *   --dispatch               dispatch pendulum.yml after filing (when the opened tick is not trusted); the run's id
+ *   --dispatch               dispatch pendulum.yml after activation (when the label tick is not trusted); the run's id
  *                            is recorded on each filed Objective, so the scorer reads it as the drill's, not input
  *   --local                  also label each Objective pendulum:local, so a local loop (plugin/scripts/local.mjs serve)
  *                            takes it and the Actions path leaves it alone
@@ -40,6 +40,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { promisify } from "node:util";
 import { awaitUsage } from "./lib/collect.mjs";
+import { DRAFT_LABEL } from "../plugin/scripts/lib/activation.mjs";
 import { ghApi } from "./lib/gh.mjs";
 import { mediumObjectives } from "./lib/medium.mjs";
 import { drillRecord } from "./lib/objective.mjs";
@@ -134,14 +135,15 @@ for (const o of objectives) {
   writeFileSync(file, o.body);
   let url;
   try {
-    url = await gh("issue", "create", "-R", repo, "--title", o.title, "--body-file", file, "--label", "pendulum:objective", "--label", "P1", ...(values.local ? ["--label", "pendulum:local"] : []));
+    url = await gh("issue", "create", "-R", repo, "--title", o.title, "--body-file", file, "--label", "pendulum:objective", "--label", DRAFT_LABEL, "--label", "P1", ...(values.local ? ["--label", "pendulum:local"] : []));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
   const number = Number(url.split("/").pop());
   await setType(number);
   filed.push({ number, title: o.title, url, filedAt: new Date().toISOString() });
-  process.stderr.write(`filed #${number} ${o.title}\n`);
+  await gh("issue", "edit", String(number), "-R", repo, "--remove-label", DRAFT_LABEL);
+  process.stderr.write(`filed and activated #${number} ${o.title}\n`);
 }
 // The drill's own tick: dispatched through the API, which returns the run's id, recorded on each Objective it filed
 // (objective.mjs drillRecord) so the scorer reads that run as the drill's and not as operator input. A dispatch whose

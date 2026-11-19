@@ -685,7 +685,7 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
     t = since + OUTAGE.blockMs;
     assert.equal((await loop.resume(7)).exit, "blocked");
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
-    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from Nov 14, 8:47 AM UTC for 12 h, past Pendulum's 12 h bound for an outage\. The network is back: re-apply the label/);
+    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from Nov 14, 8:47 AM UTC for 12 h, past Pendulum's 12 h bound for an outage\. The network is back: resume through Draft/);
     assert.match(notice, /<!-- pendulum:block \{"cause":"outage"\} -->/);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     // A later pause long after a resume is a new outage: its own since.

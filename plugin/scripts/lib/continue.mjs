@@ -12,7 +12,7 @@ import { basename, join, resolve } from "node:path";
 import { decisionsShown } from "./logic.mjs";
 
 /** Why a fresh work stage Blocks (cause setup) when its clone's untracked leftovers could not be removed: no local path. */
-export const CLEAN_REFUSED = "local mode: the untracked files an earlier stage left in the Objective's clone could not be removed, so the work stage does not run on them; the local loop's log has the error. Fix it on that machine, then re-apply the Objective's label.";
+export const CLEAN_REFUSED = "local mode: the untracked files an earlier stage left in the Objective's clone could not be removed, so the work stage does not run on them; the local loop's log has the error. Fix it on that machine, then resume through Draft.";
 
 /** What a continued stage needs unchanged since its pause, by the key its record and the decision use. */
 export const CONTINUE_GUARDS = { branch: "the branch on GitHub", restart: "the newest restart record", running: "the Objective's Running stint", text: "the Objective's text" };

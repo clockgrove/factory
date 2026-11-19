@@ -1,11 +1,17 @@
 ---
 name: pendulum-serve
-description: "Start Pendulum's local loop for the current repository on this machine (`pendulum serve`) on the user's yes: it takes the Objectives labelled pendulum:local (every one where no Action is active), works, reviews and merges them in sandboxes on this machine's harness login, and resumes its own paused work first; also supervises the queue with `pendulum wait`. Use when the user asks to run Pendulum locally, serve, or work the queue on their machine. Not for one Objective by number (pendulum-run) or kicking the Action's dispatcher (pendulum-kick)."
+description: "Supervise Pendulum's local queue and leave implementation to its dispatched worker. Use when asked to keep the queue moving, use spare capacity, pick up eligible work, or run `pendulum serve` locally on the user's yes. Not for admitting an issue (pendulum-file), running one Objective (pendulum-run), or kicking Actions."
 ---
 
 # /pendulum:pendulum-serve
 
-Start local mode's loop for the repository whose clone is the current directory. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead. It applies the dispatcher's rules every 30 seconds (order, caps, blocking, send-backs, Done) and runs the picks here, as many as the machine's stage budget, its load and `PENDULUM_LOCAL_MAX_CONCURRENT` allow, reviews before new work and this machine's paused Objectives before both.
+The loop checks the current repository every 30 seconds. It resumes this machine's paused Objectives first, then reviews, then new work, within the machine's capacity and `PENDULUM_LOCAL_MAX_CONCURRENT`. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
+
+## Supervise the queue
+
+- Use pendulum-status and the loop's output. For a draft or an [open dependency](../pendulum-file/reference.md#start-a-draft), name what keeps the issue ineligible and look for eligible work. Use pendulum-file for requested admission. `pendulum:local` selects the route.
+- Leave eligible work with the existing dispatcher. Cite a recorded stage start, Pendulum run or current progress comment, or verified active claim before reporting that work began. A tick pick or Running label can precede the claim. Follow active work or use the supported lifecycle operation for paused work.
+- Limit supervision to issue and queue operations. Leave source discovery, branches, edits and delegation to the worker with a rendered task card. Use pendulum-run for an explicit single-Objective run, including `--here` when the user selects it and its preconditions pass.
 
 ## Start
 

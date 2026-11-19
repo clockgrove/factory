@@ -680,5 +680,5 @@ const statQuiet = (p) => {
 /** The Blocked reason for a declaration that cannot be used: the accounts' names alone, never a path or a value. */
 export const accountReason = (problems) => {
   const names = [...new Set(problems.map((p) => p.account))];
-  return `local mode: ${names.map((n) => `\`${n}\``).join(", ")} in this machine's account declaration cannot be used (account); the local loop's log says why; fix ~/.config/pendulum/accounts.json, then re-apply \`pendulum:objective\``;
+  return `local mode: ${names.map((n) => `\`${n}\``).join(", ")} in this machine's account declaration cannot be used (account); the local loop's log says why; fix ~/.config/pendulum/accounts.json, then resume through Draft`;
 };

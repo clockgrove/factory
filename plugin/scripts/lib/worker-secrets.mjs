@@ -262,5 +262,5 @@ export function missingSecretsFix(names, spec = "", route = "runner") {
   const fresh = left.filter((n) => !opted.includes(n));
   if (fresh.length) parts.push(`The worker's shell lacked ${named(fresh)}. If the Objective needs ${fresh.length === 1 ? "it" : "them"}, opt ${fresh.length === 1 ? "it" : "them"} in with the \`worker_secrets\` input (\`PENDULUM_WORKER_SECRETS\` in the workflow's env block) as \`NAME=SOURCE\`, with SOURCE's value ${where}.`);
   if (opted.length) parts.push(`${named(opted)} ${opted.length === 1 ? "is" : "are"} opted in with \`worker_secrets\` but had no value: set ${opted.length === 1 ? "its" : "their"} SOURCE ${where}, as a key of its own (never Pendulum's \`AI_GATEWAY_API_KEY\`).`);
-  return `${parts.join(" ")} Any code the worker runs can read and spend such a key: use a dedicated key with a budget the provider enforces (docs/PLAN.md, Worker secrets). Then re-apply \`pendulum:objective\`.`;
+  return `${parts.join(" ")} Any code the worker runs can read and spend such a key: use a dedicated key with a budget the provider enforces (docs/PLAN.md, Worker secrets). Then resume through Draft.`;
 }

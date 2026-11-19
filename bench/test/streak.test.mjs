@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { humanWorkflowRuns } from "../lib/collect.mjs";
+import { humanWorkflowRuns, listObjectives } from "../lib/collect.mjs";
 import { loadPrices } from "../lib/cost.mjs";
 import { humanActions, p1Escapes, scoreObjective } from "../lib/objective.mjs";
 import { pooledStreak, pooledTable, streaks, streakTable, verdict } from "../lib/streak.mjs";
@@ -252,6 +252,30 @@ test("a parked Objective is a row: stopped when Blocked, in flight when its Ques
   assert.deepEqual([p.finished, p.inFlight], [1, [{ repository: REPO, issue: 71 }]]);
   // A labelled Objective is not parked.
   assert.equal(score(blocked(72)).parked, false);
+});
+
+test("draft Objectives are collected only after activation when closed or after a stage when open", async () => {
+  const filed = "2031-03-01T00:00:00Z";
+  const activated = "2031-03-02T00:00:00Z";
+  const identity = "pendulum:objective";
+  const draft = "pendulum:draft";
+  const display = (number, state) => ({ number, state, closed_at: state === "closed" ? "2031-03-05T00:00:00Z" : null, labels: [identity, draft] });
+  const label = (event, name, created_at) => ({ event, created_at, label: { name } });
+  const filing = [label("labeled", identity, filed), label("labeled", draft, filed)];
+  const afterStart = [...filing, label("unlabeled", draft, activated), label("labeled", "pendulum:running", activated), label("labeled", draft, "2031-03-04T00:00:00Z")];
+  const rows = [display(80, "closed"), display(81, "open"), display(82, "closed"), display(83, "open"), display(84, "closed"), display(85, "closed")];
+  const app = "pendulum-app[bot]";
+  const refused = [...filing, { ...label("unlabeled", draft, activated), id: 123 },
+    { event: "commented", body: "<!-- pendulum:84:relabel-refused:id-123 -->", user: { login: app } },
+    label("labeled", draft, "2031-03-04T00:00:00Z")];
+  const api = async (path) => {
+    if (path.includes("/issues?")) return rows;
+    const n = Number(/\/issues\/(\d+)\/(?:events|timeline)\?/.exec(path)?.[1]);
+    assert.ok(n >= 80 && n <= 85, path);
+    if (n === 85) return [...filing, label("labeled", "pendulum:running", activated)];
+    return n === 84 ? refused : n < 82 ? filing : afterStart;
+  };
+  assert.deepEqual(await listObjectives(api, REPO, { since: filed, app }), [82, 83, 85]);
 });
 
 test("pooledStreak: two repositories' rows in the order they ended, any harness; any miss resets it", () => {

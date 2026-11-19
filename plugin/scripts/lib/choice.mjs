@@ -67,12 +67,12 @@ export function choiceOf(names = []) {
   for (const kind of Object.keys(CHOICE_PREFIXES)) {
     const list = by[kind];
     if (!list) continue;
-    if (list.length > 1) return { ok: false, labels, reason: `the issue has ${list.length} ${WHAT[kind]} labels (${list.map(tick).join(", ")}), so Pendulum cannot tell which one this Objective runs on`, fix: "Keep one of them, then re-apply `pendulum:objective`." };
+    if (list.length > 1) return { ok: false, labels, reason: `the issue has ${list.length} ${WHAT[kind]} labels (${list.map(tick).join(", ")}), so Pendulum cannot tell which one this Objective runs on`, fix: "Keep one of them, then resume through Draft." };
     const value = list[0].slice(CHOICE_PREFIXES[kind].length).trim();
-    if (!value) return { ok: false, labels, reason: `${tick(list[0])} names no ${WHAT[kind]}`, fix: `Name one after the prefix (${tick(`${CHOICE_PREFIXES[kind]}<${kind === "harness" ? "name" : "id"}>`)}) or remove the label, then re-apply \`pendulum:objective\`.` };
+    if (!value) return { ok: false, labels, reason: `${tick(list[0])} names no ${WHAT[kind]}`, fix: `Name one after the prefix (${tick(`${CHOICE_PREFIXES[kind]}<${kind === "harness" ? "name" : "id"}>`)}) or remove the label, then resume through Draft.` };
     if (kind === "harness") {
       const h = value.toLowerCase();
-      if (!HARNESSES.includes(h)) return { ok: false, labels, reason: `${tick(list[0])} names no harness Pendulum runs (${HARNESSES.join(", ")})`, fix: `Use \`pendulum:harness:claude\`, \`pendulum:harness:codex\` or \`pendulum:harness:copilot\`, then re-apply \`pendulum:objective\`.` };
+      if (!HARNESSES.includes(h)) return { ok: false, labels, reason: `${tick(list[0])} names no harness Pendulum runs (${HARNESSES.join(", ")})`, fix: `Use \`pendulum:harness:claude\`, \`pendulum:harness:codex\` or \`pendulum:harness:copilot\`, then resume through Draft.` };
       choice.harness = h;
     } else choice[kind] = value;
   }
@@ -91,8 +91,8 @@ export function hostsOf(names = []) {
   for (const l of labels) {
     const host = l.slice(HOST_PREFIX.length).trim().toLowerCase();
     const refusal = host.startsWith("*.") && isSandboxHost(host.slice(2)) ? wildcardRefusal(host.slice(2)) : null;
-    if (refusal) return { ok: false, labels, reason: `${tick(l)} opens every site under \`${host.slice(2)}\`, and the Public Suffix List names \`${refusal.rule}\` there a public suffix anyone can register a name under`, fix: `Name each host it needs, as \`pendulum:host:app.${host.slice(2)}\`, or remove the label, then re-apply \`pendulum:objective\`.` };
-    if (!isSandboxHost(host)) return { ok: false, labels, reason: `${tick(l)} names no host Pendulum's sandboxes can allow`, fix: `Name one host after the prefix, as \`pendulum:host:example.com\` or \`pendulum:host:*.example.com\` (no scheme, port, path, IP address or localhost), or remove the label, then re-apply \`pendulum:objective\`.` };
+    if (refusal) return { ok: false, labels, reason: `${tick(l)} opens every site under \`${host.slice(2)}\`, and the Public Suffix List names \`${refusal.rule}\` there a public suffix anyone can register a name under`, fix: `Name each host it needs, as \`pendulum:host:app.${host.slice(2)}\`, or remove the label, then resume through Draft.` };
+    if (!isSandboxHost(host)) return { ok: false, labels, reason: `${tick(l)} names no host Pendulum's sandboxes can allow`, fix: `Name one host after the prefix, as \`pendulum:host:example.com\` or \`pendulum:host:*.example.com\` (no scheme, port, path, IP address or localhost), or remove the label, then resume through Draft.` };
     hosts.add(host);
   }
   return { ok: true, hosts: [...hosts].sort(), labels };
@@ -158,7 +158,7 @@ export function chosenInputs({ args = {}, env = process.env, choice = {}, gatewa
     if (!m) continue;
     const p = modelProblem(r.harness, m, { gateway: viaGateway });
     const label = choice[kind] ? `${CHOICE_PREFIXES[kind]}${m}` : `${CHOICE_PREFIXES.harness}${choice.harness}`;
-    if (p) return { ok: false, reason: `${tick(label)} asks ${r.harness} for a model it cannot run here${choice[kind] ? "" : ` (its ${WHAT[kind]}, ${tick(m)})`}: ${p.reason}`, fix: `${p.fix} Then re-apply \`pendulum:objective\`.` };
+    if (p) return { ok: false, reason: `${tick(label)} asks ${r.harness} for a model it cannot run here${choice[kind] ? "" : ` (its ${WHAT[kind]}, ${tick(m)})`}: ${p.reason}`, fix: `${p.fix} Then resume through Draft.` };
   }
   return { ok: true, inputs: Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, r[k]])) };
 }
@@ -177,7 +177,7 @@ export const harnessVersionFor = (harness, defaultHarness, version) => (harness 
 export function routeProblem(prepared, harness) {
   const p = String(prepared ?? "").trim().toLowerCase();
   if (!p || p === harness) return null;
-  return { reason: `this stage was prepared for ${p} (its CLI, credential and sandbox) but the Objective now runs on ${harness}: its harness label changed while the stage started`, fix: "Re-apply `pendulum:objective`: the next stage is prepared for the harness the labels name." };
+  return { reason: `this stage was prepared for ${p} (its CLI, credential and sandbox) but the Objective now runs on ${harness}: its harness label changed while the stage started`, fix: "Resume through Draft: the next stage is prepared for the harness the labels name." };
 }
 
 /**
@@ -206,5 +206,5 @@ export function hostsProblem(prepared, hosts = []) {
   if (prepared === undefined || prepared === null) return null;
   const was = [...new Set(String(prepared).split(",").map((h) => h.trim()).filter(Boolean))].sort();
   if (was.join(",") === [...hosts].sort().join(",")) return null;
-  return { reason: `this stage's sandboxes were set up for the hosts ${was.length ? was.map(tick).join(", ") : "of no host label"} but the Objective's host labels now name ${hosts.length ? hosts.map(tick).join(", ") : "none"}: a \`pendulum:host:\` label changed while the stage started`, fix: "Re-apply `pendulum:objective`: the next stage's sandboxes are set up for the hosts the labels name." };
+  return { reason: `this stage's sandboxes were set up for the hosts ${was.length ? was.map(tick).join(", ") : "of no host label"} but the Objective's host labels now name ${hosts.length ? hosts.map(tick).join(", ") : "none"}: a \`pendulum:host:\` label changed while the stage started`, fix: "Resume through Draft: the next stage's sandboxes are set up for the hosts the labels name." };
 }

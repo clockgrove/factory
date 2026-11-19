@@ -232,7 +232,7 @@ test("a producing workflow run that ended startup_failure, or was cancelled befo
     assert.equal(result.stuck.kind, "ended");
     assert.match(result.stuck.reason, new RegExp(`^required check\\(s\\) quality never reported on a{7}: workflow run CI \\(run 77\\) ended ${conclusion} before its job ran`));
     assert.doesNotMatch(result.stuck.reason, /check the required check names/);
-    assert.match(result.stuck.reason, /rerun it on GitHub or fix the workflow, then re-apply the label; no failing run to fix$/);
+    assert.match(result.stuck.reason, /rerun it on GitHub or fix the workflow, then resume through Draft; no failing run to fix$/);
     assert.ok(!phases.some((l) => /waiting up to/.test(l)), "no wait for a run that has ended");
     // GitHub could not start it: most often the workflow file, the repository's; a cancellation may be its own concurrency setting.
     const cause = conclusion === "startup_failure" ? "setup" : "work";
@@ -323,7 +323,7 @@ test("a required check whose step runs past its usual duration has hung: the wai
   assert.equal(result.passes, 0);
   assert.equal(minutes, 17);
   assert.equal(result.stuck.kind, "running");
-  assert.equal(result.stuck.reason, "no progress: `quality` / `Run scripts/ci/setup.sh` running 17 min, normally ~1 min; required check(s) quality not finished on aaaaaaa after 17 min: CI (run 77) still in progress; no failing run to fix; when this change makes that step slower, re-apply the Objective's label: aaaaaaa is then waited for up to the stage's wall clock");
+  assert.equal(result.stuck.reason, "no progress: `quality` / `Run scripts/ci/setup.sh` running 17 min, normally ~1 min; required check(s) quality not finished on aaaaaaa after 17 min: CI (run 77) still in progress; no failing run to fix; when this change makes that step slower, resume through Draft: aaaaaaa is then waited for up to the stage's wall clock");
   assert.equal(posted.length, 1);
   assert.ok(posted[0].startsWith(noProgressMarker(4, SHA)), posted[0]);
   // The label re-applied: the next stage on that head has no hang judgement, and the slower step goes green at 40.

@@ -3,8 +3,9 @@
 //   stepOf        each line's step, as the stage wrote it (`{step, ...fields}`), its fields checked and kept; the card
 //                 decides on those fields and on the passes' labels, never on a line's words. A step object the stage
 //                 keeps may get its end (`end`) and its result (`outcome`) later: they are read at each write;
-//   progressData  the steps as rows, one per kind of step in order of first occurrence, ×N for repeats (CI waits fold
-//                 only while consecutive: a wait after another step is a row of its own, in time order); each row's
+//   progressData  the steps as rows in time order: consecutive steps of one kind fold into one row, ×N for repeats,
+//                 and a step written after a step of another kind is a row of its own (a CI loop is a row per wait
+//                 and a row per fix); each row's
 //                 Took from recorded starts and ends only (an AI run's record; a wait's own span, from the line that
 //                 began its round to its end), its cost from the AI runs that ended in it; the AI judge calls in a row
 //                 of their own. The table and the timeline chart read this one data;
@@ -48,14 +49,14 @@ const AI = new Set(["build", "rebased", "conflict", "review", "answer", "fix", "
 export const ROW_OF = Object.freeze({ setup: "setup", edit: "edit", work: "build", conflict: "conflict", rebase: "rebased", drift: "drift", ci: "ci", commands: "commands", triage: "flake", fix: "fix", handoff: "handoff", scope: "scope", review: "review", queue: "queue", thirdParty: "outside", answer: "answer", check: "check", comments: "comments", note: "note" });
 /** Rows whose count shows (×N) when more than one of their steps happened. */
 const COUNTED = new Set(["build", "rebased", "conflict", "ci", "commands", "crossOs", "flake", "fix", "review", "answer"]);
-/** The rows that fold only consecutive steps: a CI wait written after a step of another kind is a row of its own. */
+/** The CI waits' rows: each wait runs from the line that began its round, and its chart section says how it ended. */
 const WAITS = new Set(["ci", "crossOs"]);
 /** A step cell's detail clause, in characters (Step-cell details are cut to SHORT_DETAIL when the comment is near the limit). */
 export const DETAIL_MAX = 140;
 export const SHORT_DETAIL = 60;
 /** A timeline section's name, in characters, and the room the chart keeps for it (and the chart's width with that room). */
 const SECTION_MAX = 32;
-const SECTION_PAD = 250;
+const SECTION_PAD = 275;
 const CHART_WIDTH = 900;
 
 /** The stage's name in its headline, by its kind (a work stage that only rebases is a Rebase). */
@@ -207,10 +208,10 @@ export function progressData({ stage, subject = null, issue, started, now, lines
   const open = (e) => (AI.has(e.kind) ? e.pass !== false && closedAt(e) === null : (e.step?.wait === true || e.step?.span === true) && !Number.isFinite(e.end));
   const inProgress = (c) => !!c && !c.aside && closedAt(c) === null;
   const current = live && !exit && steps.length ? (steps.findLast(open) ?? (inProgress(steps.at(-1)) ? steps.at(-1) : null)) : null;
-  // One row per kind of step, ordered by its first time (a step's line, else its first AI run's start), the AI judge's
-  // row and the wrap-up's included; the Now row follows them all. CI waits (WAITS) fold only while consecutive: one
-  // written after a step of another kind opens a row of its own, at its own time (a line beside a step, `aside`, opens
-  // none and ends no run of waits).
+  // The rows, ordered by their first time (a step's line, else its first AI run's start): steps of one kind fold into
+  // one row only while consecutive, and one written after a step of another kind opens a row of its own, at its own
+  // time (a line beside a step, `aside`, opens none and ends no run). The AI judge's calls and the wrap-up, which no
+  // line writes, have one row each; the Now row follows them all.
   const rows = [];
   const rowFor = (kind, t, fresh = false) => {
     let r = fresh ? null : rows.findLast((x) => x.kind === kind);
@@ -227,7 +228,14 @@ export function progressData({ stage, subject = null, issue, started, now, lines
   }
   let lastKind = null;
   for (const e of steps) {
-    if (e !== current && !began.includes(e)) rowFor(e.kind, e.t, WAITS.has(e.kind) && !e.aside && lastKind !== e.kind).events.push(e);
+    if (e !== current && !began.includes(e)) {
+      // A wait written while its kind's last wait is still open (the CI wait that outlasts the reviewer) is that wait
+      // going on: in its row, and no wait more.
+      const before = e.step?.wait === true ? rows.findLast((x) => x.kind === e.kind)?.events.findLast((x) => x.step?.wait === true) : null;
+      const goesOn = !!before && !(Number.isFinite(before.end) && before.end <= e.t);
+      if (goesOn) e.counts = false;
+      rowFor(e.kind, e.t, !e.aside && lastKind !== e.kind && !goesOn).events.push(e);
+    }
     if (!e.aside) lastKind = e.kind;
   }
   // A CI wait runs from the line that began its round (`begin`: the validation pass that waits) to the checks' result,
@@ -244,7 +252,11 @@ export function progressData({ stage, subject = null, issue, started, now, lines
   }
   for (const p of (passes || []).filter((x) => x && !x.noRun)) {
     const at = Date.parse(p.started);
-    const r = rowFor(passRow(p, { rebase: stageRebase }), Number.isFinite(at) ? at : now);
+    const kind = passRow(p, { rebase: stageRebase });
+    const of = rows.filter((x) => x.kind === kind);
+    // Its step's row: the last of its kind written by its start; else a row of its kind no line wrote (the AI judge's,
+    // the wrap-up's); else a row of its own.
+    const r = (Number.isFinite(at) ? of.findLast((x) => x.t <= at + 1000) : of.at(-1)) ?? of.find((x) => !x.events.length) ?? rowFor(kind, Number.isFinite(at) ? at : now, true);
     if (Number.isFinite(at) && at < r.t) r.t = at;
     r.passes.push(p);
   }
@@ -319,13 +331,15 @@ function rowDetail(r, { at, max, data }) {
       const result = last((e) => e.result)?.result;
       if (red > wait || (red >= 0 && wait < 0)) {
         const e = ev[red];
-        const words = { "late-start": `CI had not started; waited up to ${e.minutes} min`, "held-answer": `failed: ${codeSpan(e.check)}; fixed while answering the review`, "held-next": `failed: ${codeSpan(e.check)}; fixed in the next step`, stuck: `CI did not finish: ${firstClause(e.clause)}`, "not-started": "CI did not start (GitHub's side)", base: "fails the same way on the default branch; not this change", unjudged: "could not tell whether the default branch fails the same way", setting: `setting problem: ${e.clause}` }[e.red];
+        // A held red the stage's next pass fixed: with the review's comments when that pass answered them, else alone.
+        const answered = [...data.rows.filter((x) => x.kind === "answer").flatMap((x) => x.events), ...(data.current?.kind === "answer" ? [data.current] : [])].some((a) => a.t >= e.t);
+        const words = { "late-start": `CI had not started; waited up to ${e.minutes} min`, "held-answer": `failed: ${codeSpan(e.check)}; ${answered ? "fixed while answering the review" : "fixed in the next step"}`, "held-next": `failed: ${codeSpan(e.check)}; fixed in the next step`, stuck: `CI did not finish: ${firstClause(e.clause)}`, "not-started": "CI did not start (GitHub's side)", base: "fails the same way on the default branch; not this change", unjudged: "could not tell whether the default branch fails the same way", setting: `setting problem: ${e.clause}` }[e.red];
         if (words) w.push(words);
       } else if (result && r.kind === "crossOs") w.push(result);
       else {
         const outcome = last((e) => e.outcome)?.outcome;
         // A failed round's failing check, from the fix that followed it.
-        const failedCheck = outcome === "failed" ? [...(data.rows.find((x) => x.kind === "fix")?.events ?? []), ...(data.current?.kind === "fix" ? [data.current] : [])].find((e) => e.check && e.t >= ev.at(-1).t)?.check : null;
+        const failedCheck = outcome === "failed" ? [...data.rows.filter((x) => x.kind === "fix").flatMap((x) => x.events), ...(data.current?.kind === "fix" ? [data.current] : [])].find((e) => e.check && e.t >= ev.at(-1).t)?.check : null;
         const where = sha ? `${r.count > 1 ? "last " : ""}on \`${sha}\`` : "";
         if (outcome === "passed") w.push(`passed${where ? `${r.count > 1 ? ", " : " "}${where}` : ""}`);
         else if (outcome === "failed") w.push(failedCheck ? `failed: ${codeSpan(failedCheck)}` : `failed${where ? ` ${where}` : ""}`);
@@ -455,18 +469,45 @@ function waitEnd(r) {
   return outcome === "failed" ? "red" : outcome;
 }
 
+/** Spans (ms pairs) with the overlapping ones merged, in time order. */
+function merged(spans) {
+  const out = [];
+  for (const [a, b] of [...spans].sort((x, y) => x[0] - y[0])) {
+    if (out.length && a <= out.at(-1)[1]) out.at(-1)[1] = Math.max(out.at(-1)[1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+
 /**
- * A row in the timeline chart: its section, named as its table row (a CI wait's with how it ended: `CI · red`,
- * `CI · passed`), and its bars, one per recorded span: an AI run amber (`active`) with its cost, a wait or any other
- * step grey (`done`), a CI wait that ended red red (`crit`).
+ * A row in the timeline chart: its section's name as its table row's (`name`, then `tail`: a CI wait's how it ended,
+ * `CI · red`, `CI · passed`; an AI row's model), and its bars, one per recorded span (overlapping spans as one): an AI
+ * run amber (`active`) with its cost, a wait or any other step grey (`done`), a CI wait that ended red red (`crit`).
  */
 function chartRow(r) {
   const end = WAITS.has(r.kind) ? waitEnd(r) : null;
-  const section = WAITS.has(r.kind) ? `${r.kind === "crossOs" ? "Cross-OS CI" : "CI"}${end ? ` · ${end}` : ""}` : `${ROWS[r.kind][0]}${COUNTED.has(r.kind) && r.count > 1 ? ` ×${r.count}` : ""}${r.model && AI.has(r.kind) ? ` · ${modelName(r.model)}` : ""}`;
+  const name = WAITS.has(r.kind) ? (r.kind === "crossOs" ? "Cross-OS CI" : "CI") : `${ROWS[r.kind][0]}${COUNTED.has(r.kind) && r.count > 1 ? ` ×${r.count}` : ""}`;
+  const tail = WAITS.has(r.kind) ? (end ? ` · ${end}` : "") : r.model && AI.has(r.kind) ? ` · ${modelName(r.model)}` : "";
   const tag = AI.has(r.kind) ? "active" : end === "red" ? "crit" : "done";
   const runs = r.passes.map((p) => ({ start: Date.parse(p.started), end: Date.parse(p.ended), label: typeof p.usd === "number" && p.usd >= 0.005 ? `· ${moneyText(p.usd)}` : "" }));
-  const bars = (r.passes.length ? runs : r.spans.map(([a, b]) => ({ start: a, end: b, label: "" }))).filter((b) => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start);
-  return { section: clip(section, SECTION_MAX), bars: bars.map((b) => ({ ...b, tag })) };
+  const bars = r.passes.length ? runs.filter((b) => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start) : merged(r.spans).map(([a, b]) => ({ start: a, end: b, label: "" }));
+  return { name, tail, bars: bars.map((b) => ({ ...b, tag })) };
+}
+
+/**
+ * The chart's sections from its rows: each named `name` + `tail`, a name that repeats numbered before its tail
+ * ("CI 1 · red", "Fixed CI 2 · Opus 5.5": Mermaid merges sections of one name), cut to SECTION_MAX.
+ */
+function chartSections(rows) {
+  const drawn = rows.map(chartRow);
+  const seen = new Map();
+  for (const r of drawn) seen.set(r.name + r.tail, (seen.get(r.name + r.tail) ?? 0) + 1);
+  const n = new Map();
+  return drawn.map((r) => {
+    const k = (n.get(r.name + r.tail) ?? 0) + 1;
+    n.set(r.name + r.tail, k);
+    return { section: clip(`${r.name}${seen.get(r.name + r.tail) > 1 ? ` ${k}` : ""}${r.tail}`, SECTION_MAX), bars: r.bars };
+  });
 }
 
 /** A row's cost cell: its AI runs' known cents and runs of unknown cost; "—" when no AI ran in it. */
@@ -522,7 +563,7 @@ export function progressCard({ status = "", ran = null, harness = null, runId = 
   // The action line, for the states that need a person, and why.
   const act = actionLines(d, atZ);
   if (act.length) head.push("", ...act);
-  // The table: one row per kind of step, the Now row while running, the Total once ended.
+  // The table: the rows in time order, the Now row while running, the Total once ended.
   const rows = d.rows.map((r) => {
     const detail = rowDetail(r, { at, max: detailMax, data: d });
     return `| ${at(r.t)} | ${tableCell(`${rowName(r)}${detail ? ` · ${detail}` : ""}`, 400)} | ${r.took === null ? "—" : durationText(r.took)} | ${costCell(r)} |`;
@@ -535,10 +576,13 @@ export function progressCard({ status = "", ran = null, harness = null, runId = 
   // The timeline chart: at the end only, with three or more rows that took a recorded time, one section per row in the
   // table's order (chartRow).
   const timed = d.rows.filter((r) => r.took !== null && r.spans.length);
-  const gantt = chart && !running && timed.length >= 3 ? ganttChart(timed.map(chartRow), { zone: d.zone, days: d.crosses, leftPadding: SECTION_PAD, width: CHART_WIDTH }) : null;
+  const gantt = chart && !running && timed.length >= 3 ? ganttChart(chartSections(timed), { zone: d.zone, days: d.crosses, leftPadding: SECTION_PAD, width: CHART_WIDTH }) : null;
   const chartBlock = gantt ? `<details><summary>Timeline chart</summary>\n\n${gantt}\n\nEvery bar's figures are in the table above.\n\n</details>` : "";
   return { card: [...head, ...table].join("\n"), details: runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at }), chart: chartBlock };
 }
+
+/** Every step of `kind` in the card's rows, in time order. */
+const eventsOf = (d, kind) => d.rows.filter((r) => r.kind === kind).flatMap((r) => r.events);
 
 /** The action line (a blockquote) for Blocked, Question, paused and waiting: what to do, then why. [] for the rest. */
 function actionLines(d, atZ) {
@@ -557,7 +601,7 @@ function actionLines(d, atZ) {
   }
   if (d.exit === "paused") return [`> **What to do:** nothing; Pendulum goes on when the usage limit resets${s?.resetAt ? ` at ${atZ(s.resetAt)}` : ""}.`];
   if (d.exit === "waiting") {
-    const o = d.rows.find((r) => r.kind === "outside")?.events.findLast((e) => e.waiting?.length);
+    const o = eventsOf(d, "outside").findLast((e) => e.waiting?.length);
     return [`> **What to do:** nothing; waiting for ${o ? `${o.waiting.join(", ")} until ${o.until ? atZ(o.until) : "its bound"}` : "an outside review"}.`];
   }
   return [];
@@ -566,7 +610,7 @@ function actionLines(d, atZ) {
 /** Run details' own lines: the run, the models, the session, now, the unknown cost, the cost notes, the legend. */
 function runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at }) {
   const out = [];
-  const setups = d.rows.find((r) => r.kind === "setup")?.events ?? [];
+  const setups = eventsOf(d, "setup");
   const account = ran?.account ? ` · account ${codeSpan(ran.account)}` : "";
   const place = { actions: "on GitHub Actions", sandbox: "in the cloud sandbox", local: "on this machine" }[where] ?? "on this machine";
   const labels = ran?.labels?.length ? ` · chosen by ${ran.labels.map((l) => codeSpan(l)).join(", ")}` : "";
@@ -588,7 +632,7 @@ function runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at 
     if (s.tokens) bits.push(`${k(s.tokens.input)} tokens in, ${k(s.tokens.output)} out`);
     if (bits.length) out.push(`- **Right now:** ${plainText(bits.join("; "))}`);
   }
-  const verdicts = explain ? (d.rows.find((r) => r.kind === "check")?.events.flatMap((e) => e.verdicts.map((v) => ({ ...v, floor: e.floor }))) ?? []) : [];
+  const verdicts = explain ? eventsOf(d, "check").flatMap((e) => e.verdicts.map((v) => ({ ...v, floor: e.floor }))) : [];
   if (verdicts.length) out.push(`- **AI judge verdicts:** ${plainText(verdicts.map((v) => `${codeSpan(v.place)} ${String(v.verdict ?? "no verdict").replace(/-/g, " ")}${typeof v.confidence === "number" ? ` (${v.confidence.toFixed(2)})` : ""}`).join("; "))}${verdicts[0].floor ? ` · floor: ${plainText(verdicts[0].floor)}` : ""}`);
   // The unknown cost, one sentence per cause with its count (from the AI runs' own records), else the spend line's causes.
   const counts = [];
@@ -601,14 +645,13 @@ function runDetails(d, { ran, harness, runId, runUrl, where, explain, notes, at 
   for (const e of setups.filter((x) => x.unpriced)) costNotes.push(`This model has no listed price, so its runs show as unknown (${plainText(e.unpriced)}).`);
   if (explain && d.live && !d.exit) costNotes.push("An AI run reports its cost when it ends.");
   if (costNotes.length) out.push(`- **Cost notes:** ${[...new Set(costNotes)].join(" ")}`);
-  const fix = d.rows.find((r) => r.kind === "fix");
-  if (fix && fix.passes.length > 1) out.push(`- **Fixed CI, each round:** ${fix.passes.map((p, i) => `${i + 1}: ${typeof p.usd === "number" ? cellCost(p.usd, count(p.usdUnknown)) : "unknown"}`).join(" · ")}`);
+  // A fix row that folds more than one AI run (a fix and its fresh attempt, with no CI wait between): each run's cost.
+  for (const fix of d.rows.filter((r) => r.kind === "fix" && r.passes.length > 1)) out.push(`- **Fixed CI at ${at(fix.t)}, each run:** ${fix.passes.map((p, i) => `${i + 1}: ${typeof p.usd === "number" ? cellCost(p.usd, count(p.usdUnknown)) : "unknown"}`).join(" · ")}`);
   const premium = d.rows.flatMap((r) => r.passes).reduce((n, p) => n + (typeof p.premiumRequests === "number" ? p.premiumRequests : 0), 0);
   if (premium) out.push(`- **Copilot:** ${premium} premium requests`);
-  for (const e of d.rows.find((r) => r.kind === "rebased")?.events.filter((x) => x.note) ?? []) out.push(`- **Rebase:** ${plainText(e.note)}`);
+  for (const e of eventsOf(d, "rebased").filter((x) => x.note)) out.push(`- **Rebase:** ${plainText(e.note)}`);
   for (const n of notes) out.push(`- ${plainText(n)}`);
-  if (explain) out.push(d.live && !d.exit ? "- In Took, — means no recorded start and end; in Cost, — means no AI ran in that step or it cost nothing. Steps are grouped by kind; the full log below is in time order." : "- In Took, — means no recorded start and end; in Cost, — means no AI ran in that step or it cost nothing, and AI judge calls are counted in their own row. Steps can overlap, so the Took column does not add up to the total; the full log below is in time order.");
-  void at;
+  if (explain) out.push(d.live && !d.exit ? "- In Took, — means no recorded start and end; in Cost, — means no AI ran in that step or it cost nothing. Consecutive steps of one kind share a row; the full log below is in time order." : "- In Took, — means no recorded start and end; in Cost, — means no AI ran in that step or it cost nothing, and AI judge calls are counted in their own row. Steps can overlap, so the Took column does not add up to the total; the full log below is in time order.");
   return out.join("\n");
 }
 

@@ -213,8 +213,8 @@ test("render (spec 4.3): delivered, each step's Took and cents on its row, AI ju
     ].join("\n"),
   );
   // The timeline chart, collapsed, at the end: one section per row, one bar per recorded span.
-  assert.match(body, /<details><summary>Timeline chart<\/summary>\n\n```mermaid\n%%\{init: [^\n]*"leftPadding":250[^\n]*\}%%\ngantt\n/);
-  assert.match(body, /section CI · passed 1\n    6m 10s :done, 2026-11-17T20:41:10, 2026-11-17T20:47:20\n    section Reviewed the change · Fable 5\.2\n/);
+  assert.match(body, /<details><summary>Timeline chart<\/summary>\n\n```mermaid\n%%\{init: [^\n]*"leftPadding":275[^\n]*\}%%\ngantt\n/);
+  assert.match(body, /section CI 1 · passed\n    6m 10s :done, 2026-11-17T20:41:10, 2026-11-17T20:47:20\n    section Reviewed the change · Fable 5\.2\n/);
   assert.match(body, /Every bar's figures are in the table above\./);
   const details = body.split("<details><summary>Run details</summary>\n\n")[1].split("\n\n**Full log**")[0];
   assert.equal(
@@ -312,32 +312,43 @@ test("#617: one CI wait is one row: the Now row while it runs, its finished row 
 });
 
 // assetgrove#432's review stage (PR #455): a wait, the merge queue's fix, a wait again.
-test("#635: CI waits fold only while consecutive: a wait after another step is a row of its own, in time order, and the chart's sections are the rows", () => {
+test("#635: steps fold only while consecutive: a CI loop is a row per wait and per fix, in time order, and the chart's sections are the rows", () => {
   const t0 = at("2026-11-18T23:31:45Z");
   const wait = (t, sha, end, outcome, more = {}) => [t, `waiting for required checks (ci) on ${sha}`, { step: "ci", sha, wait: true, end, outcome, ...more }];
+  const fix = (n, from, to) => ({ label: `pre-review-validation-fix-${n}`, model: "claude-opus-5-5", usd: 0.43, started: iso(from), ended: iso(to) });
   const lines = [
     [t0, "install", { step: "setup", span: true, end: t0 + 3_000 }],
     [t0 + 3_000, "pre-review-validation pass 1 (required checks)", { step: "ci", begin: true }],
     wait(t0 + 324_000, "a374821", t0 + 326_000, "failed"),
     [t0 + 348_000, "fix run", { step: "fix", check: "ci" }],
-    [t0 + 762_000, "review-validation pass 1 (required checks)", { step: "ci", begin: true }],
+    [t0 + 762_000, "pre-review-validation pass 2 (required checks)", { step: "ci", begin: true }],
+    wait(t0 + 763_000, "b485932", t0 + 800_000, "failed"),
+    [t0 + 801_000, "fix run", { step: "fix", check: "ci" }],
+    [t0 + 900_000, "pre-review-validation pass 3 (required checks)", { step: "ci", begin: true }],
     wait(t0 + 1_088_000, "8028093", t0 + 1_100_000, "failed"),
     wait(t0 + 1_101_000, "8028093", t0 + 1_457_000, "passed", { again: true }),
   ];
-  const passes = [{ label: "pre-review-validation-fix-1", model: "claude-opus-5-5", usd: 0.43, started: iso(t0 + 348_000), ended: iso(t0 + 762_000) }];
-  const args = { stage: "review", issue: 432, started: t0, now: t0 + 1_457_000, lines, passes, exit: "delivered", zone: Z };
-  assert.deepEqual(progressData(args).rows.map((r) => [r.kind, r.t, r.count]), [["setup", t0, 0], ["ci", t0 + 3_000, 1], ["fix", t0 + 348_000, 1], ["ci", t0 + 762_000, 2]]);
+  const args = { stage: "review", issue: 432, started: t0, now: t0 + 1_457_000, lines, passes: [fix(1, t0 + 348_000, t0 + 762_000), fix(2, t0 + 801_000, t0 + 900_000)], exit: "delivered", zone: Z };
+  assert.deepEqual(progressData(args).rows.map((r) => [r.kind, r.t, r.count]), [["setup", t0, 0], ["ci", t0 + 3_000, 1], ["fix", t0 + 348_000, 1], ["ci", t0 + 762_000, 1], ["fix", t0 + 801_000, 1], ["ci", t0 + 900_000, 2]]);
   assert.deepEqual(render(args).chart.split("\n").filter((l) => /^ {4}(?:section|\d)/.test(l)).map((l) => l.trim()), [
     "section Set up",
     "3s :done, 2026-11-18T15:31:45, 2026-11-18T15:31:48",
-    "section CI · red",
+    "section CI 1 · red",
     "5m 23s :crit, 2026-11-18T15:31:48, 2026-11-18T15:37:11",
-    "section Fixed CI · Opus 5.5",
+    "section Fixed CI 1 · Opus 5.5",
     "6m 54s · $0.43 :active, 2026-11-18T15:37:33, 2026-11-18T15:44:27",
+    "section CI 2 · red",
+    "38s :crit, 2026-11-18T15:44:27, 2026-11-18T15:45:05",
+    "section Fixed CI 2 · Opus 5.5",
+    "1m 39s · $0.43 :active, 2026-11-18T15:45:06, 2026-11-18T15:46:45",
     "section CI · passed",
-    "5m 38s :done, 2026-11-18T15:44:27, 2026-11-18T15:50:05",
+    "3m 20s :done, 2026-11-18T15:46:45, 2026-11-18T15:50:05",
     "5m 56s :done, 2026-11-18T15:50:06, 2026-11-18T15:56:02",
   ]);
+  // A wait that outlasts the reviewer is its own wait going on: one row, one wait, its time counted once.
+  const m = 60_000;
+  const beside = [[t0, "waiting for required checks (ci) on a374821", { step: "ci", sha: "a374821", wait: true, end: t0 + 14 * m, outcome: "passed" }], [t0 + m, "reviewer beside the required checks on a374821", { step: "review" }], [t0 + 6 * m, "waiting for required checks on a374821 after the reviewer", { step: "ci", sha: "a374821", wait: true, end: t0 + 14 * m }]];
+  assert.deepEqual(progressData({ ...args, lines: beside, passes: [] }).rows.map((r) => [r.kind, r.count, r.took]), [["ci", 1, 14 * m], ["review", 1, null]]);
 });
 
 test("#635: a CI wait's row and bar run from the start of the validation pass that waits to the checks' result", () => {

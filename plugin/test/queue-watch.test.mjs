@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { watchQueue } from "../scripts/dispatch.mjs";
 import { HUNG_CODE, marker, setSelf, setVerified } from "../scripts/lib/logic.mjs";
 import { mergeBlockReason, mergeReadyOne, queueRedBody, queueRedMarker, queueRedRecords, readQueueRed, recordQueueTry } from "../scripts/lib/session.mjs";
-import { openTriage } from "../scripts/lib/triage.mjs";
+import { openTriage, unsureRed } from "../scripts/lib/triage.mjs";
 import { openProgressCheck } from "../scripts/lib/fix-progress.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -743,4 +743,6 @@ test("queue red: a red that is the change's only because no verdict reached the 
       assert.match(said, /base_failure 0\.64, under the 0\.7 floor; no failure line in the log/);
     }
   });
+  // Only when every verdict is under the floor: one above it keeps the red as the change's in today's words.
+  assert.equal(unsureRed([{ name: "a", verdict: "base_failure", confidence: 0.92 }, { name: "b", verdict: "flaky_or_infra", confidence: 0.55 }]), null);
 });

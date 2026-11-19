@@ -1281,7 +1281,10 @@ export function unsureRed(jobs, floor = confidenceFloor()) {
   const counted = jobs.filter((j) => !j.after);
   if (!counted.length || counted.some((j) => decides(j, floor.min))) return null;
   const score = (j) => (typeof j.confidence === "number" ? j.confidence : -1);
-  const best = counted.filter((j) => score(j) < floor.min).sort((a, b) => score(b) - score(a))[0];
+  // Only when every verdict is under the floor: one at or above it (a base failure the default branch did not confirm,
+  // say) keeps the red as the change's in today's words, never this sentence.
+  if (counted.some((j) => score(j) >= floor.min)) return null;
+  const best = [...counted].sort((a, b) => score(b) - score(a))[0];
   if (!best) return null;
   const noLine = !best.sig?.id;
   const text = `Pendulum could not tell whose failure it is (${best.verdict}${score(best) < 0 ? " with no score" : ` ${best.confidence.toFixed(2)}`}, under the ${floor.min} floor${noLine ? "; no failure line in the log" : ""}), so it treated it as the change's`;

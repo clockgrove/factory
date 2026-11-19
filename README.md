@@ -24,21 +24,34 @@ It is for maintainers of a GitHub repository with CI on pull requests who want t
 
 ## A real run
 
-[Issue #3](https://github.com/clockgrove/pendulum-scratch/issues/3) on the public scratch repository asked for a `multiply(a, b)` function with a test and a README entry. Pendulum ran it on GitHub Actions with Claude Code and auto-merge on, and [pull request #4](https://github.com/clockgrove/pendulum-scratch/pull/4) merged through the merge queue with no one touching it after the label.
+The scratch Objective asked to finish the `stats` command’s support for finite decimal numbers, including repeated maximum values, with CLI tests and README usage. Pendulum v0.10.8 ran it on GitHub Actions with Claude Code, and the PR merged through GitHub’s merge queue without human intervention after the Objective label. [Issue #52](https://github.com/clockgrove/pendulum-scratch/issues/52) · [PR #53](https://github.com/clockgrove/pendulum-scratch/pull/53)
 
 | Step | In this run |
 | --- | --- |
-| **Filed and labelled `pendulum:objective`** | 02:23:41 UTC, 2026-11-17 |
-| **PR opened** | 02:25:40 |
-| **Reviewer's comment** | 02:26:39 |
-| **Merged through the merge queue** | 02:27:36, 3 min 55 s after filing |
-| **Reported model cost** | $0.52: $0.36 for the worker (`claude-opus-5-5`, with `claude-sonnet-5-5` sub-agents), $0.16 for the reviewer (`claude-fable-5-2`), on an Anthropic API key, as Claude Code reported it in the runs' usage records. GitHub Actions minutes are not included. |
+| **Labelled `pendulum:objective`** | 03:41:59 UTC, 2026-11-19 |
+| **PR opened** | 03:43:40 UTC |
+| **Reviewer's comment** | 03:44:58 UTC |
+| **Merged through the merge queue** | 03:46:03 UTC, 4 min 4 s after the label |
+| **Reported model cost** | $0.73 total, including $0.36 for work (`claude-opus-5-5`) and $0.37 for review (`claude-fable-5-2`), billed to the API key. GitHub Actions minutes are separate. |
 
-This is one small, successful run, chosen so each step is easy to follow on GitHub; Pendulum is meant for larger work ([Write a good Objective](#write-a-good-objective)). It is not a typical cost or a measure of reliability. [bench/README.md](bench/README.md) describes how Pendulum scores runs: whether they merged with no one stepping in, solution quality, operator minutes and dollars.
+<img src="docs/img/example-run.png" width="900" alt="Five screenshots of Objective #52, from the issue through live work, review, the merge queue, and the finish card.">
 
-<img src="docs/img/example-run.png" width="760" alt="Issue 3 and pull request 4 on clockgrove/pendulum-scratch: the issue labelled pendulum:objective, Pendulum's progress comment ending 'exit: delivered', the reviewer's comment-only pass judging the acceptance entry met, and the PR merged via the merge queue with 16 checks passed.">
+<details>
+<summary>Step by step</summary>
 
-<sub>Issue #3 above and pull request #4 below, as GitHub shows them.</sub>
+<img src="docs/img/example-run-objective.png" width="900" alt="Issue #52 with its goal, four acceptance entries, scope constraint and pendulum:objective label.">
+
+<img src="docs/img/example-run-work.png" width="900" alt="Live work progress card on issue #52 with its Now row.">
+
+<img src="docs/img/example-run-review.png" width="900" alt="Review progress card and the reviewer’s judgment for each acceptance entry on PR #53.">
+
+<img src="docs/img/example-run-merged.png" width="900" alt="PR #53 marked merged, with its merge queue entry and GitHub’s merge event.">
+
+<img src="docs/img/example-run-finish.png" width="900" alt="Finish card on issue #52 showing the total time, reported cost, and the rendered timeline of build, review, and merge queue.">
+
+</details>
+
+The finish card records this run’s figures, and the bench scorecard explains how Pendulum measures outcomes across runs. [Finish card](https://github.com/clockgrove/pendulum-scratch/issues/52#issuecomment-6999056637) · [Bench scorecard](bench/README.md)
 
 ## Will it work for you?
 

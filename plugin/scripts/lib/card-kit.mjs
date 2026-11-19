@@ -244,7 +244,7 @@ export function causeSentences(counts = []) {
 export const AGENTS = Object.freeze({ claude: "Claude Code", codex: "Codex", copilot: "Copilot" });
 
 /** The timeline's theme: the cards' gantt colours, with a grey for time on hold and a red for a Blocked or Question end. */
-export const ganttTheme = (leftPadding = 80) => ({ ...GANTT_THEME, themeVariables: { ...GANTT_THEME.themeVariables, doneTaskBkgColor: "#8b949e", doneTaskBorderColor: "#6e7781", critBkgColor: "#b3402a", critBorderColor: "#7a2a1c" }, gantt: { ...GANTT_THEME.gantt, leftPadding } });
+export const ganttTheme = (leftPadding = 80, width = null) => ({ ...GANTT_THEME, themeVariables: { ...GANTT_THEME.themeVariables, doneTaskBkgColor: "#8b949e", doneTaskBorderColor: "#6e7781", critBkgColor: "#b3402a", critBorderColor: "#7a2a1c" }, gantt: { ...GANTT_THEME.gantt, ...(width ? { useWidth: width } : {}), leftPadding } });
 /** The tick for a time span: about five ticks across. */
 export function tickFor(span) {
   const steps = [["1minute", 6e4], ["2minute", 12e4], ["5minute", 3e5], ["10minute", 6e5], ["15minute", 9e5], ["30minute", 18e5], ["1hour", 36e5], ["2hour", 72e5], ["6hour", 216e5], ["12hour", 432e5], ["1day", 864e5], ["1week", 6048e5]];
@@ -255,9 +255,10 @@ const isoSecond = (t) => new Date(t).toISOString().slice(0, 19);
  * A Mermaid gantt (pure) over `rows` ({section, bars: [{start, end, tag, label?}]}, ms; `tag` active, crit or done), in
  * `zone`'s wall time: a section name that repeats is numbered ("Review 1", "Review 2"), since Mermaid merges sections of
  * one name and would put the names beside the wrong bars. Each bar's label is its duration, then its own words.
- * `days`: the axis carries dates. Null with no bar.
+ * `days`: the axis carries dates; `leftPadding`: the room for the section names; `width`: the chart's own, when it
+ * needs more than the theme's. Null with no bar.
  */
-export function ganttChart(rows, { zone, days = false, leftPadding = 80 }) {
+export function ganttChart(rows, { zone, days = false, leftPadding = 80, width = null }) {
   const bars = rows.flatMap((r) => r.bars);
   if (!bars.length) return null;
   const from = Math.min(...bars.map((b) => b.start));
@@ -277,7 +278,7 @@ export function ganttChart(rows, { zone, days = false, leftPadding = 80 }) {
       lines.push(`    ${durationShort(end - b.start)}${b.label ? ` ${mermaidLabel(b.label, 20)}` : ""} :${b.tag || "active"}, ${isoSecond(b.start + shift)}, ${isoSecond(end + shift)}`);
     }
   }
-  return ["```mermaid", mermaidInit(ganttTheme(leftPadding)), ...lines, "```"].join("\n");
+  return ["```mermaid", mermaidInit(ganttTheme(leftPadding, width)), ...lines, "```"].join("\n");
 }
 
 /** Text inside a Mermaid quoted string: one line, no quotes, at most 60 characters. */

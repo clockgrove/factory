@@ -1,6 +1,7 @@
 // The progress comment's card (#589): the stage's real reporter on a fake GitHub writes the card over its log, the log
 // and every hidden line byte-identical to the comment a stage wrote before the card, and every reader reads the new
 // comment as the old one: the scorecard's phases, cost-join, the report's stage reads and the finish card.
+import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -10,7 +11,10 @@ import { repoOf } from "../scripts/lib/github.mjs";
 import { decisionsReadOf, findingsOf, ledgerOfComment, rebaseCostOf, setSelf, spendOf, spendParts } from "../scripts/lib/logic.mjs";
 import { stageHarnessOf } from "../scripts/lib/cost-join.mjs";
 import { finishData, modellessStages, objectiveSpend, renderFinishCard, summaryMarker, unlinedStages } from "../scripts/lib/finish-card.mjs";
-import { progressCard } from "../scripts/lib/progress-card.mjs";
+import { progressCard, progressData } from "../scripts/lib/progress-card.mjs";
+import { isFix, passLabel } from "../scripts/lib/pass-figures.mjs";
+import { passKind } from "../scripts/lib/usage.mjs";
+import { answerPass, reviewOverlap } from "../scripts/review.mjs";
 import { phaseMinutes, stageLastWrite } from "../../bench/lib/phases.mjs";
 import { newForm, newForms } from "./fixtures/progress-new-form.mjs";
 
@@ -201,17 +205,18 @@ test("render (spec 4.3): delivered, each step's Took and cents on its row, AI ju
       "| Time | Step | Took | Cost |",
       "| :-- | :-- | --: | --: |",
       "| 8:41 PM | Set up | 20 s | — |",
-      "| 8:41 PM | Waited for CI ×2 · passed, last on `e755fde` | 7 min 40 s | — |",
+      "| 8:41 PM | Waited for CI · passed on `95d326b` | 6 min 10 s | — |",
       "| 8:41 PM | Reviewed the change · Fable 5.2 | 5 min 52 s | $1.59 |",
       "| 8:47 PM | Answered 3 review comments (1 from an outside reviewer) · Opus 5.5 | 11 min 14 s | $1.51 |",
       "| 8:49 PM | AI judge calls ×7 | — | unknown |",
+      "| 8:59 PM | Waited for CI · passed on `e755fde` | 7 min 30 s | — |",
       "| 9:07 PM | Checked the answers · 2 of 2 fixes proven by tests, 1 of 1 judged resolved | 25 s | — |",
       "| | **Total** | **26 min** | **$3.10 + unknown** |",
     ].join("\n"),
   );
-  // The timeline chart, collapsed, at the end: one section per step, one bar per recorded span.
-  assert.match(body, /<details><summary>Timeline chart<\/summary>\n\n```mermaid\n%%\{init: [^\n]*"leftPadding":110[^\n]*\}%%\ngantt\n/);
-  assert.match(body, /section CI wait\n    6m 10s :active, 2026-11-17T20:41:10, 2026-11-17T20:47:20\n    1m 30s :active, 2026-11-17T21:05:30, 2026-11-17T21:07:00\n    section Review\n/);
+  // The timeline chart, collapsed, at the end: one section per row, one bar per recorded span.
+  assert.match(body, /<details><summary>Timeline chart<\/summary>\n\n```mermaid\n%%\{init: [^\n]*\}%%\ngantt\n/);
+  assert.match(body, /section CI 1 · passed\n    6m 10s :done, 2026-11-17T20:41:10, 2026-11-17T20:47:20\n    section Reviewed the change · Fable 5\.2\n/);
   assert.match(body, /Every bar's figures are in the table above\./);
   const details = body.split("<details><summary>Run details</summary>\n\n")[1].split("\n\n**Full log**")[0];
   assert.equal(
@@ -299,13 +304,106 @@ test("#617: one CI wait is one row: the Now row while it runs, its finished row 
   const two = [...lines, [t0 + 108_000, "validation pass 1 red: test; fix run", { step: "fix", check: "test" }], [t0 + 200_000, "validation pass 2 (required checks)", { step: "ci", begin: true }], [t0 + 260_000, "waiting for required checks (test) on 0c0ffee", again]];
   const fixed = [...passes, { label: "validation-fix-1", model: "claude-sonnet-5.5", usd: 0.05, started: iso(t0 + 109_000), ended: iso(t0 + 199_000) }];
   const second = render({ ...args, lines: two, passes: fixed, now: t0 + 300_000 });
-  assert.deepEqual(ci(second), ["| 11:32 AM | Waited for CI · failed: `test` | 1 min 2 s | — |", "| 11:33 AM | Fixed CI · last failure: `test` | 1 min 30 s | $0.05 |", "| 11:34 AM | **Now:** waiting for CI on `0c0ffee` · 40 s | running | — |"]);
-  // Both over: one row for the kind, its two waits counted.
+  assert.deepEqual(ci(second), ["| 11:32 AM | Waited for CI · failed: `test` | 1 min 2 s | — |", "| 11:33 AM | Fixed CI · last failure: `test` | 1 min 30 s | $0.05 |", "| 11:34 AM | **Now:** waiting for CI on `0c0ffee` · 2 min | running | — |"]);
+  // Both over: the wait after the fix is a row of its own, from its round's first line.
   Object.assign(again, { end: t0 + 290_000, outcome: "passed" });
-  assert.match(render({ ...args, lines: two, passes: fixed, now: t0 + 300_000 }).card, /^\| 11:32 AM \| Waited for CI ×2 · passed, last on `0c0ffee` \| 1 min 32 s \| — \|$/m);
+  assert.match(render({ ...args, lines: two, passes: fixed, now: t0 + 300_000 }).card, /^\| 11:34 AM \| Waited for CI · passed on `0c0ffee` \| 1 min 30 s \| — \|$/m);
   // A cross-OS round's first line is its own wait's too.
   const cross = [[t0, "cross-os-validation pass 1 (cross-OS legs)", { step: "ci", begin: true, crossOs: true }], [t0 + 1_000, "waiting for cross-OS legs", { step: "ci", sha: "21ae7e1", wait: true, crossOs: true }]];
   assert.deepEqual(ci(render({ stage: "work", issue: 38, started: t0, now: t0 + 61_000, lines: cross })), ["| 11:31 AM | **Now:** waiting for cross-OS CI on `21ae7e1` · 1 min | running | — |"]);
+});
+
+// assetgrove#432's review stage (PR #455): a wait, the merge queue's fix, a wait again.
+test("#635: steps fold only while consecutive: a CI loop is a row per wait and per fix, in time order, and the chart's sections are the rows", () => {
+  const t0 = at("2026-11-18T23:31:45Z");
+  const wait = (t, sha, end, outcome, more = {}) => [t, `waiting for required checks (ci) on ${sha}`, { step: "ci", sha, wait: true, end, outcome, ...more }];
+  const fix = (n, from, to) => ({ label: `pre-review-validation-fix-${n}`, model: "claude-opus-5-5", usd: 0.43, started: iso(from), ended: iso(to) });
+  const lines = [
+    [t0, "install", { step: "setup", span: true, end: t0 + 3_000 }],
+    [t0 + 3_000, "pre-review-validation pass 1 (required checks)", { step: "ci", begin: true }],
+    wait(t0 + 324_000, "a374821", t0 + 326_000, "failed"),
+    [t0 + 348_000, "fix run", { step: "fix", check: "ci" }],
+    [t0 + 762_000, "pre-review-validation pass 2 (required checks)", { step: "ci", begin: true }],
+    wait(t0 + 763_000, "b485932", t0 + 800_000, "failed"),
+    [t0 + 801_000, "fix run", { step: "fix", check: "ci" }],
+    [t0 + 900_000, "pre-review-validation pass 3 (required checks)", { step: "ci", begin: true }],
+    wait(t0 + 1_088_000, "8028093", t0 + 1_100_000, "failed"),
+    wait(t0 + 1_101_000, "8028093", t0 + 1_457_000, "passed", { again: true }),
+  ];
+  const args = { stage: "review", issue: 432, started: t0, now: t0 + 1_457_000, lines, passes: [fix(1, t0 + 348_000, t0 + 762_000), fix(2, t0 + 801_000, t0 + 900_000)], exit: "delivered", zone: Z };
+  assert.deepEqual(progressData(args).rows.map((r) => [r.kind, r.t, r.count]), [["setup", t0, 0], ["ci", t0 + 3_000, 1], ["fix", t0 + 348_000, 1], ["ci", t0 + 762_000, 1], ["fix", t0 + 801_000, 1], ["ci", t0 + 900_000, 2]]);
+  assert.deepEqual(render(args).chart.split("\n").filter((l) => /^ {4}(?:section|\d)/.test(l)).map((l) => l.trim()), [
+    "section Set up",
+    "3s :done, 2026-11-18T15:31:45, 2026-11-18T15:31:48",
+    "section CI 1 · red",
+    "5m 23s :crit, 2026-11-18T15:31:48, 2026-11-18T15:37:11",
+    "section Fixed CI 1 · Opus 5.5",
+    "6m 54s · $0.43 :active, 2026-11-18T15:37:33, 2026-11-18T15:44:27",
+    "section CI 2 · red",
+    "38s :crit, 2026-11-18T15:44:27, 2026-11-18T15:45:05",
+    "section Fixed CI 2 · Opus 5.5",
+    "1m 39s · $0.43 :active, 2026-11-18T15:45:06, 2026-11-18T15:46:45",
+    "section CI · passed",
+    "3m 20s :crit, 2026-11-18T15:46:45, 2026-11-18T15:50:05",
+    "5m 56s :done, 2026-11-18T15:50:06, 2026-11-18T15:56:02",
+  ]);
+});
+
+test("#635: a CI wait keeps its own start, end and outcome through an overlapping review and rerun", async () => {
+  const t0 = at("2026-11-18T23:31:45Z");
+  const m = 60_000;
+  const wait = { step: "ci", sha: "a374821", wait: true };
+  const lines = [
+    [t0, "pre-review-validation pass 1 (required checks)", { step: "ci", begin: true }],
+    [t0 + 30_000, "waiting for required checks (ci) on a374821", wait],
+    [t0 + m, "reviewer beside the required checks on a374821", { step: "review" }],
+  ];
+  const pending = Promise.withResolvers();
+  const overlap = reviewOverlap({
+    run: ({ onRead }) => {
+      onRead({ failed: [] }, [{ id: 1 }]);
+      return pending.promise;
+    },
+    progress: async (line, step) => lines.push([t0 + 6 * m, line, step]),
+    head: () => "a374821",
+  });
+  assert.equal(await overlap.beside(), true);
+  const settling = overlap.reviewerDone();
+  const args = { stage: "review", issue: 432, started: t0, now: t0 + 7 * m, lines, zone: Z, passes: [{ label: "review", started: iso(t0 + m), ended: iso(t0 + 6 * m) }] };
+  const ciRows = (data) => data.rows.filter((r) => r.kind === "ci").map((r) => [r.count, r.spans]);
+  const active = progressData(args);
+  assert.equal(active.current.since, t0);
+  assert.deepEqual(ciRows(active), []);
+
+  Object.assign(wait, { end: t0 + 8 * m, outcome: "failed" });
+  const again = { step: "ci", sha: "a374821", wait: true, again: true };
+  lines.push(
+    [t0 + 9 * m, "triage chose a rerun", { step: "triage" }],
+    [t0 + 10 * m, "waiting for required checks again on a374821 after the triage rerun", again],
+  );
+  const rerun = progressData({ ...args, now: t0 + 12 * m });
+  assert.equal(rerun.current.since, t0 + 10 * m);
+  assert.deepEqual(ciRows(rerun), [[1, [[t0, t0 + 8 * m]]]]);
+  Object.assign(again, { end: t0 + 14 * m, outcome: "passed" });
+  pending.resolve({ green: true });
+  await settling;
+  const done = { ...args, now: again.end, exit: "delivered" };
+  assert.deepEqual(ciRows(progressData(done)), [[1, [[t0, t0 + 8 * m]]], [1, [[t0 + 10 * m, again.end]]]]);
+  assert.match(render(done).chart, /section CI · red\n    8m 00s :crit,[\s\S]+section CI · passed\n    4m 00s :done,/);
+  Object.assign(again, { outcome: "failed" });
+  lines.push([again.end, "checks cancelled", { step: "ci", red: "stuck", outcome: "cancelled" }]);
+  assert.match(render(done).chart, /section CI · cancelled\n    4m 00s :done,/);
+  again.crossOs = true;
+  lines.at(-1)[2].crossOs = true;
+  assert.match(render(done).chart, /section Cross-OS CI · cancelled\n    4m 00s :done,/);
+});
+
+test("#635: the review stage's pass for a red required check alone is a fix pass: its label, its row and the report's count", () => {
+  const t0 = at("2026-11-18T23:37:33Z");
+  const pass = answerPass({ red: { sha: "90276c9".padEnd(40, "0"), queue: true, failures: [{ command: "ci" }] }, passes: 1 });
+  assert.deepEqual([passKind(pass.label), isFix(passLabel(pass.label))], ["fix", true]);
+  const rows = progressData({ stage: "review", issue: 432, started: t0, now: t0 + 500_000, lines: [[t0, "fix run", pass.step]], passes: [{ label: pass.label, usd: 0.43, started: iso(t0), ended: iso(t0 + 414_000) }], exit: "delivered", zone: Z }).rows;
+  assert.deepEqual(rows.map((r) => [r.kind, r.usd, r.took]), [["fix", 0.43, 414_000]]);
 });
 
 test("#617: a send-back's rebase stage names itself from its first write; a line a stage notes before it knows goes out with that write", async () => {

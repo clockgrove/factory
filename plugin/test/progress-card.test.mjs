@@ -237,6 +237,26 @@ const Z = "America/Los_Angeles";
 const iso = (t) => new Date(t).toISOString();
 const render = (args) => progressCard({ zone: Z, runId: "1794979777859", harness: "claude", ...args });
 
+test("#642: the queue row reports uncertainty while fixing and when blocked", () => {
+  const started = at("2026-11-18T04:41:10Z");
+  const queueRow = (state, unsure) =>
+    render({
+      stage: "review",
+      issue: 432,
+      started,
+      now: started + 1000,
+      lines: [[started, "merge queue run red", { step: "queue", state, unsure }]],
+      exit: state === "blocked" ? "blocked" : "delivered",
+    }).card.split("\n").find((line) => line.includes("Merge queue failure"));
+
+  const fixing = queueRow("fixing", true);
+  const blocked = queueRow("blocked", true);
+  assert.match(fixing, /Pendulum could not tell whose failure it was; one fix/);
+  assert.match(blocked, /Pendulum could not tell whose failure it was; Blocked/);
+  assert.doesNotMatch(fixing + blocked, /the PR's own change/);
+  assert.match(queueRow("fixing"), /the PR's own change; one fix/);
+});
+
 const SHORT_STAGE = (exit, step, extra = {}) => {
   const t0 = at("2026-11-17T22:10:00Z");
   const lines = [

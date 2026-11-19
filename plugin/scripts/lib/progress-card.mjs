@@ -130,7 +130,7 @@ export function stepOf(step, t, line = "") {
       Object.assign(e, { model: modelId(s.model), foundation: s.foundation === true, counts: true });
       break;
     case "queue":
-      e.state = code(s.state);
+      Object.assign(e, { state: code(s.state), unsure: s.unsure === true });
       break;
     case "thirdParty":
       Object.assign(e, { reviewed: logins(s.reviewed), missing: logins(s.missing), waiting: logins(s.waiting), until: time(s.until), minutes: count(s.minutes), failed: text(s.failed, 200) });
@@ -384,8 +384,9 @@ function rowDetail(r, { at, max, data }) {
       if (ev.some((e) => e.foundation)) w.push("foundation review");
       break;
     case "queue": {
-      const s = last((e) => e.state)?.state;
-      const said = { fixing: "the PR's own change; one fix", requeued: "not this change; queued again", superseded: "not read: the branch moved on", pending: "read again by the next review", blocked: "the PR's own change; Blocked" }[s];
+      const e = last((e) => e.state);
+      const cause = e?.unsure ? "Pendulum could not tell whose failure it was" : "the PR's own change";
+      const said = { fixing: `${cause}; one fix`, requeued: "not this change; queued again", superseded: "not read: the branch moved on", pending: "read again by the next review", blocked: `${cause}; Blocked` }[e?.state];
       if (said) w.push(said);
       break;
     }

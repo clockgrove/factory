@@ -1658,7 +1658,7 @@ async function main() {
   let queueFix = null;
   if (queued) {
     log(queued.line);
-    await progress(queued.line, { step: "queue", state: queued.state });
+    await progress(queued.line, { step: "queue", state: queued.state, unsure: !!queued.red?.unsure });
     if (queued.state === "fixing") {
       heldRed = queued.red;
       queueFix = queued.record;

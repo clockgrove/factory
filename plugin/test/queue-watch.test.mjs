@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { watchQueue } from "../scripts/dispatch.mjs";
 import { HUNG_CODE, marker, setSelf, setVerified } from "../scripts/lib/logic.mjs";
 import { mergeBlockReason, mergeReadyOne, queueRedBody, queueRedMarker, queueRedRecords, readQueueRed, recordQueueTry } from "../scripts/lib/session.mjs";
-import { openTriage } from "../scripts/lib/triage.mjs";
+import { openTriage, unsureRed } from "../scripts/lib/triage.mjs";
 import { openProgressCheck } from "../scripts/lib/fix-progress.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -720,4 +720,29 @@ test("#413: queue red: a failure the default branch may share in the same step, 
   const caused = await read({ red_cause: { verdict: "change_caused", confidence: 0.9 }, same_failure: { verdict: "same_failure", confidence: 0.95 } });
   assert.equal(caused.step.state, "fixing");
   assert.ok(!caused.asked.includes("same_failure"), caused.asked.join(","));
+});
+
+test("queue red: a red that is the change's only because no verdict reached the floor says so, with the verdict, its score and the floor, never as the PR's own change, and so does its Block (#637)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    const silent = ["##[group]Run test -n \"$exe\"", "test -n \"$exe\"", "shell: bash -e {0}", "##[endgroup]", "##[error]Process completed with exit code 1."].join("\n");
+    const unsure = { verdict: "base_failure", confidence: 0.64 };
+    // Job ids of its own: a job's log is read once per process.
+    queueRed(fake, { id: 637, at: ago(20 * MIN), log: silent });
+    fake.s.removals = [queueDrop(ago(18 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    const step = await reviewReads(fake, unsure);
+    assert.equal(step.state, "fixing");
+    queueRed(fake, { sha: "d".repeat(40), id: 638, at: ago(12 * MIN), log: silent });
+    fake.s.removals.push(queueDrop(ago(10 * MIN)));
+    assert.equal(await merge({}), "queue-red");
+    const blocked = await reviewReads(fake, unsure);
+    assert.equal(blocked.state, "blocked");
+    for (const said of [step.line, blocked.line, blocked.reason]) {
+      assert.doesNotMatch(said, /own change/);
+      assert.match(said, /base_failure 0\.64, under the 0\.7 floor; no failure line in the log/);
+    }
+  });
+  // Only when every verdict is under the floor: one above it keeps the red as the change's in today's words.
+  assert.equal(unsureRed([{ name: "a", verdict: "base_failure", confidence: 0.92 }, { name: "b", verdict: "flaky_or_infra", confidence: 0.55 }]), null);
 });

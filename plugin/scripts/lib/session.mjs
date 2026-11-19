@@ -3601,14 +3601,15 @@ const QUEUE_RED_RANK = { handed: 0, superseded: 1, requeued: 1, fixed: 1, blocke
  * committed: `sigs` its failure classes, `jobs` its failing jobs (queueJobs), `lead` their failure lines for a decision
  * call, at most QUEUE_LEAD_CHARS), `requeued` (not the PR's change, or not known to be: `kind` which; enqueued again
  * as any drop), `blocked` (the PR's own change, its fix pass before it making no progress) or `superseded` (the PR's head moved on before a stage read it).
+ * `unsure` (queueRedOf's, never stored): the line for a person says that instead of "the PR's own change".
  */
 export function queueRedBody(issue, prNumber, rec) {
   const at = Number.isFinite(Date.parse(rec.at)) ? whenText(rec.at) : "an unknown time";
   const said = {
     handed: "the review stage reads whether the failure is the PR's own change",
-    fixed: "the failure is the PR's own change: its fix pass committed, then the queue again",
+    fixed: `${rec.unsure || "the failure is the PR's own change"}: its fix pass committed, then the queue again`,
     requeued: `not known to be the PR's change (${rec.kind || "unknown"}): enqueued again as any drop`,
-    blocked: "the PR's own change, past its fix passes: Blocked",
+    blocked: `${rec.unsure || "the PR's own change"}, past its fix passes: Blocked`,
     superseded: "the PR's head moved on before it was read: nothing to do for it",
   }[rec.state] || rec.state;
   const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.after ? { after: rec.after } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.jobs?.length ? { jobs: rec.jobs } : {}), ...(rec.lead ? { lead: String(rec.lead).slice(0, QUEUE_LEAD_CHARS) } : {}), ...(rec.tries ? { tries: rec.tries } : {}), ...(Array.isArray(rec.ends) ? { ends: rec.ends } : {}), ...(rec.reads ? { reads: rec.reads } : {}) };
@@ -3694,7 +3695,7 @@ export async function baseJudge(triage, { sha, failedRuns }) {
  * (`unjudged`, or `unjudged-outage` when the decider's vendor was out: reds.mjs undecidedOnBase; the stage harness's usage
  * limit that stopped the question throws UsageLimitReached). Triage's verdicts come first: the decision model may judge
  * the red the default branch's only when they and the failures point at nothing the PR changes (baseJudge). Returns `{kind, sha, reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures,
- * detail, tail, lead, command, queue: true}), `sigs` (its classes, queueRedClass), `jobs` (queueJobs: what the
+ * detail, tail, lead, command, queue: true}), `sigs` (its classes, queueRedClass), `unsure` (the sentence saying it is the change's only because no triage verdict cleared the floor, triage.mjs unsureRed: what the lines and the Block say instead of "the PR's own change"), `jobs` (queueJobs: what the
  * progress check compares) and `passed` (the check runs that concluded success on the queue's commit).
  */
 export async function queueRedOf({ repo, issue, prNumber, base, at, after = null, names = [], triage = null, token, actionsToken = token }) {
@@ -3758,7 +3759,9 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
   }
   // `limit`: the red is a job past its time limit, which the fix pass answers; said as that, never as the PR's own change.
   const reason = past.length ? `${past.map((c) => c.past).join("; ")} on the queue's commit ${sha.slice(0, 7)}` : first;
-  return { kind: "own", sha, reason, ...(past.length ? { limit: true } : {}), red: { sha, failures, detail: { ...detail, queue: true }, tail, lead, command, queue: true }, sigs: [...new Set(detail.jobs.map(queueRedClass))], jobs: queueJobs(detail.jobs), passed };
+  // `unsure`: the change's only because no triage verdict cleared the floor (triage.mjs unsureRed), said as that.
+  const unsure = past.length ? "" : verdict?.unsure?.text || "";
+  return { kind: "own", sha, reason, ...(past.length ? { limit: true } : {}), ...(unsure ? { unsure } : {}), red: { sha, failures, detail: { ...detail, queue: true }, tail, lead, command, queue: true, ...(unsure ? { unsure } : {}) }, sigs: [...new Set(detail.jobs.map(queueRedClass))], jobs: queueJobs(detail.jobs), passed };
 }
 
 /**
@@ -3823,17 +3826,18 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
   const idle = Array.isArray(pending.ends) ? pending.ends.includes("idle") : pending.tries >= 2;
   const over = p && !p.progress ? `fix pass, which ${p.undecided ? "could not be judged for progress" : "made no progress"}: ${p.why}` : idle ? (Array.isArray(pending.ends) ? "fix pass that ran and committed nothing for it" : `${pending.tries} fix passes that committed nothing for it`) : "";
   if (over) {
-    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead }, { token });
+    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead, ...(q.unsure ? { unsure: q.unsure } : {}) }, { token });
     // An unmade judgement (the decider gave no answer) is Pendulum's, or its vendor's outage, never the work's.
     // A job past its time limit (`limit`) is said as that, never as the PR's own change.
-    const again = q.limit ? "again" : "the PR's own change again";
-    const failed = q.limit ? `failed: ${q.reason},` : `failed in this PR's own change (${q.reason})`;
+    // One the change's only by default (`unsure`, queueRedOf) is said as that too.
+    const again = q.limit ? "again" : q.unsure ? `${q.unsure}, again` : "the PR's own change again";
+    const failed = q.limit ? `failed: ${q.reason},` : q.unsure ? `failed (${q.reason}); ${q.unsure},` : `failed in this PR's own change (${q.reason})`;
     return { state: "blocked", cause: p && !p.progress && p.undecided ? p.cause || "pendulum" : "work", line: `merge queue run red${where}: ${q.reason}; ${again}, after Pendulum's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} ${failed} after Pendulum's ${over}; fix it on the branch, then re-apply the label` };
   }
   // Started: counted on the record, so a pass that keeps committing nothing reaches the bound above.
-  const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead, tries: pending.tries + 1, ends: pending.ends ?? [] };
+  const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead, tries: pending.tries + 1, ends: pending.ends ?? [], ...(q.unsure ? { unsure: q.unsure } : {}) };
   await writeQueueRed(repo, issue, prNumber, record, { token });
-  return { state: "fixing", line: `merge queue run red${where}: ${q.reason}; ${q.limit ? "" : "the PR's own change, "}one fix pass (the answer pass)`, red: q.red, record };
+  return { state: "fixing", line: `merge queue run red${where}: ${q.reason}; ${q.limit ? "" : q.unsure ? `${q.unsure}: ` : "the PR's own change, "}one fix pass (the answer pass)`, red: q.red, record };
 }
 
 /** The fix pass for a red queue drop committed (readQueueRed `fixing`): its record is `fixed`, which counts toward the bound. */

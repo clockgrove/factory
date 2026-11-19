@@ -1828,7 +1828,7 @@ async function main() {
   // an entry judged not met again gets no second comment beside its open one. Read only when an earlier review of
   // Pendulum's exists and this answer judges an entry not met; unread, each such entry gets its comment as before.
   const openFindings =
-    !alreadyReviewed && covered.reviewed && (reviewOf(answer).acceptance || []).some((a) => !a.met)
+    !alreadyReviewed && !scope.first && (reviewOf(answer).acceptance || []).some((a) => !a.met)
       ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds() }).then(
           (open) => open.filter((c) => !c.from && !c.writer),
           (e) => {

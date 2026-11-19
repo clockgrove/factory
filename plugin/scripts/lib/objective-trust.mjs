@@ -12,7 +12,8 @@ import { createHash } from "node:crypto";
 import { collaboratorPermission, getIssue, graphql, issueTextChangedAt, labelersOf, primeSelf, rest } from "./github.mjs";
 import { log } from "./inputs.mjs";
 import { keptLine } from "./edit-check.mjs";
-import { DRAFT_LABEL, goTrust, labelTrust } from "./stop.mjs";
+import { activationEvents, RESUME_OBJECTIVE } from "./activation.mjs";
+import { goTrust, labelTrust } from "./stop.mjs";
 import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem } from "./choice.mjs";
 import { planComment, planTextMarker, stampPlan } from "./handoff.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
@@ -102,9 +103,9 @@ export async function objectiveTrusted(repo, issue, opts, { what = "Pendulum act
  * changes it, so only a new issue fixes an untrusted author; an untrusted last edit is fixed by a writer saving the body.
  */
 export const AUTHOR_FIX = {
-  author: "Editing this issue cannot fix that, since its author is checked on every run: a person who can push files the Objective as a new issue and labels that one `pendulum:objective`.",
-  "last editor": "Fix by having a person who can push read the body and save it (they become its last editor), then re-apply `pendulum:objective`.",
-  "title renamer": "Fix by having a person who can push read the title and change it (saving the same title records no rename; they become its latest renamer), then re-apply `pendulum:objective`.",
+  author: "Editing this issue cannot fix that because its author is checked on every run. A person who can push files the Objective as a new issue and starts it.",
+  "last editor": `Fix by having a person who can push read the body and save it (they become its last editor), then ${RESUME_OBJECTIVE}.`,
+  "title renamer": `Fix by having a person who can push read the title and change it (saving the same title records no rename; they become its latest renamer), then ${RESUME_OBJECTIVE}.`,
 };
 
 /**
@@ -134,20 +135,15 @@ export async function authorGate({ repo, issue, issueData, pr = null, notify, op
 
 /** The Blocked reason and fix when the Objective's text changed after its plan was made (planGate). */
 export const EDITED_REASON = "the Objective's title, body or harness, model and host labels (`pendulum:harness:`, `pendulum:model:`, `pendulum:subagent-model:`, `pendulum:reviewer-model:`, `pendulum:host:`) changed after its plan was made, and its plan and code follow the earlier ones, so Pendulum does not go on with the two mixed";
-export const EDITED_FIX = "Re-apply `pendulum:objective` to work from the issue as it is now, its text and its harness, model and host labels: the worker makes its plan again from it, on the same branch and PR.";
+export const EDITED_FIX = `To work from the issue as it is now, ${RESUME_OBJECTIVE}. The worker makes its plan again from the current text and harness, model and host labels, on the same branch and PR.`;
 
 /** Pendulum's own login, read once (logic.mjs selfLogin): unknown, no plan comment could be told apart, so a stage stops. */
 export async function knowSelf(opts) {
   if (!selfLogin() && !(await primeSelf(opts))) throw new Error("Pendulum's own login could not be read, so its plan comment cannot be told from anyone else's");
 }
 
-const isStart = (e, label) => ((e?.event === "labeled" && e.label?.name === label) || (e?.event === "unlabeled" && e.label?.name === DRAFT_LABEL)) && Number.isFinite(Date.parse(e.created_at));
-
-/**
- * The Objective's start events on its timeline, newest first: its label applied, and the draft label taken off (a draft
- * is started by taking that label off, its Objective label on or not).
- */
-export const startsOf = (events, label) => (events || []).filter((e) => isStart(e, label)).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+/** The Objective's activation events, newest first, for a caller that already knows this is an Objective. */
+export const startsOf = (events, label) => activationEvents(events, label, { assumeObjective: true }).reverse();
 
 /**
  * When a person last started the Objective, from its timeline events: the latest start (startsOf) whose actor `trusted`
@@ -332,7 +328,7 @@ export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, rea
 }
 
 /** What a Blocked notice tells a person to do about a harness, model or foundation label Pendulum did not act on. */
-export const CHOICE_FIX = "A person who can push removes the label and applies it again, or removes it to run this Objective without it (on the repository's defaults, with the one-pass review), then re-applies `pendulum:objective`.";
+export const CHOICE_FIX = `Have a person who can push remove the choice label and apply it again, or leave it off to use the repository's defaults and one-pass review. Then ${RESUME_OBJECTIVE}.`;
 
 /**
  * The harness, model and host labels among `names` (the issue's, read with its text) as Pendulum may act on them:
@@ -435,12 +431,12 @@ export async function routeAccountCheck({ repo, issue, harness, labels = [], env
   // Two account labels: the Objective waits until one is left, never Blocked for it (the caller's wait, account-wait.mjs).
   if (r.two) return { wait: r.two };
   if (r.problem) return { refusal: { reason: `${r.problem}, so no stage of it starts`, fix: ROUTE_PIN_FIX } };
-  if (!prepared) return { refusal: { reason: "this repository declares accounts (PENDULUM_ACCOUNTS), but its workflow was not rendered for them, so this stage holds no account's credential: its jobs pass the secrets of the accounts setup rendered them for, by name", fix: "Re-render the workflow (`/pendulum:pendulum-setup`, or setup --apply workflow) after every change to PENDULUM_ACCOUNTS: it names each declared account's secrets in the jobs and passes each stage only its account's. Merge it, then re-apply `pendulum:objective`." } };
+  if (!prepared) return { refusal: { reason: "this repository declares accounts (PENDULUM_ACCOUNTS), but its workflow was not rendered for them, so this stage holds no account's credential: its jobs pass the secrets of the accounts setup rendered them for, by name", fix: `Re-render the workflow (\`/pendulum:pendulum-setup\`, or setup --apply workflow) after every change to PENDULUM_ACCOUNTS: it names each declared account's secrets in the jobs and passes each stage only its account's. Merge it, then ${RESUME_OBJECTIVE}.` } };
   // The account step ran and could pick none (its labels then could not be used), so it passed no credential.
-  if (prepared === NO_ACCOUNT) return { refusal: { reason: `the job's account step picked no account, so this stage holds no account's credential; the labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: "Re-apply `pendulum:objective`: the next stage gets the credential of the account its labels pick." } };
+  if (prepared === NO_ACCOUNT) return { refusal: { reason: `the job's account step picked no account, so this stage holds no account's credential; the labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: `After checking the account label, ${RESUME_OBJECTIVE}. The next stage gets the credential of the account its labels pick.` } };
   // Automatic account choice (#268): with no pin, the step picks any declared account of the harness (route-holds.mjs).
   if (prepared !== r.account.name && !r.label && routeAutoAccounts(env, harness)?.includes(prepared)) return { account: prepared, note: "", pinned: false };
-  if (prepared !== r.account.name) return { refusal: { reason: `this stage was prepared with account \`${prepared}\`'s credential, but the Objective's labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: "Re-apply `pendulum:objective`: the next stage gets the credential of the account its labels pick." } };
+  if (prepared !== r.account.name) return { refusal: { reason: `this stage was prepared with account \`${prepared}\`'s credential, but the Objective's labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: `After checking the account label, ${RESUME_OBJECTIVE}. The next stage gets the credential of the account its labels pick.` } };
   return { account: r.account.name, note: "", pinned: !!r.label };
 }
 
@@ -498,8 +494,8 @@ export async function accountGate({ repo, issue, harness, labels = [], env = pro
   await apply(repo, { issue, pr, exit: "blocked", reason: c.refusal.reason, fix: c.refusal.fix, cause: "setup", notify, stage }, opts);
   return { ok: false, reason: c.refusal.reason };
 }
-const ACCOUNTS_FIX = 'Fix PENDULUM_ACCOUNTS in .github/workflows/pendulum.yml: re-render it with setup\'s --accounts set to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]}, and merge it (docs/INSTALL.md, Several accounts), then re-apply `pendulum:objective`.';
-const ROUTE_PIN_FIX = "A person who can push removes the account label, or applies one naming an account PENDULUM_ACCOUNTS declares for the Objective's harness, then re-applies `pendulum:objective`.";
+const ACCOUNTS_FIX = `Fix PENDULUM_ACCOUNTS in .github/workflows/pendulum.yml: re-render it with setup's --accounts set to a JSON object of each harness's account names, such as {"claude": ["claude", "claude-2"]}, and merge it (docs/INSTALL.md, Several accounts), then ${RESUME_OBJECTIVE}.`;
+const ROUTE_PIN_FIX = `Have a person who can push remove the account label or apply one naming an account PENDULUM_ACCOUNTS declares for the Objective's harness. Then ${RESUME_OBJECTIVE}.`;
 
 export async function choiceGate({ repo, issue, labels, args = {}, env = process.env, pr = null, notify, opts, apply, before = null, stage, gh }) {
   const t = await choiceTrusted(repo, issue, labels, opts, gh);

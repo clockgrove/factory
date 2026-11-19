@@ -310,6 +310,25 @@ test("a stopped, draft or restarting Objective is never relaunched; a started on
   assert.deepEqual(r.restarted, [23], "the restart runs as before; its card goes back to Queued, not Running");
 });
 
+test("relaunch holds Running work until its newest Draft activation can be verified", async () => {
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"] }]);
+  const draft = "pendulum:draft";
+  gh.person(7, "labeled", draft);
+  gh.person(7, "unlabeled", draft);
+  const timeline = gh.issue(7).timeline;
+  const removal = timeline.pop();
+  assert.deepEqual((await tick(gh)).relaunched, []);
+  assert.equal(recordOf(gh, 7), null);
+
+  timeline.push({ ...removal, actor: SELF });
+  assert.deepEqual((await tick(gh)).relaunched, []);
+  assert.equal(recordOf(gh, 7), null);
+
+  timeline.pop();
+  timeline.push(removal);
+  assert.deepEqual((await tick(gh)).relaunched, [7]);
+});
+
 test("the count survives across ticks and dispatcher restarts, and starts over when a person re-applies the label", async () => {
   const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since: 20 * MIN }]);
   await tick(gh);
@@ -321,6 +340,7 @@ test("the count survives across ticks and dispatcher restarts, and starts over w
   assert.deepEqual(r.vanished, [7], "two relaunches already on the issue: Blocked");
   assert.equal(recordOf(gh, 7).tries.length, 2);
   // A person re-applies the label: the Objective is Queued again, picked, and its next loss counts from there.
+  gh.person(7, "unlabeled", OBJ);
   gh.person(7, "labeled", OBJ);
   const picked = await tick(gh);
   assert.deepEqual(picked.reset, [7]);

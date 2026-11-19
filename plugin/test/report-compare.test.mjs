@@ -10,6 +10,7 @@ import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
 import { renderReport } from "../scripts/lib/report.mjs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
 import { PREVIOUS_NAME } from "../scripts/lib/local.mjs";
+import { refusedMarker } from "../scripts/lib/stop.mjs";
 import { baselineOf } from "../../bench/lib/baseline.mjs";
 
 // `pendulum report --compare` (#545): two experiment arms side by side, from Pendulum's own records alone, each arm's
@@ -214,6 +215,24 @@ test("report --compare: an experiment label counts only where the person who las
   const { json: plain, calls: plainCalls } = await report(w, ["--label", "wave-7", "--json"]);
   assert.equal(plain.objectives.length, 10);
   assert.ok(!plainCalls.some((c) => c.includes("/timeline")));
+});
+
+test("report falls back to the accepted Draft removal and leaves a missing release unknown", async () => {
+  const w = experiment();
+  const draft = (event, minute, id) => ({ event, id, label: { name: "pendulum:draft" }, actor: ME, created_at: at(minute) });
+  w.timelines[11].push(draft("labeled", 0), draft("unlabeled", 2, 1101), draft("labeled", 3), draft("unlabeled", 4, 1102));
+  w.timelines[11].push({
+    event: "commented",
+    user: BOT,
+    performed_via_github_app: APP,
+    created_at: at(3),
+    body: refusedMarker(11, { id: 1101, at: at(2) }),
+  });
+  w.timelines[12].push(draft("labeled", 0), { event: "labeled", label: { name: "pendulum:running" }, actor: BOT, created_at: at(5) });
+  const { json } = await report(w, ["--label", FAST, "--json"]);
+  const clock = (n) => json.objectives.filter((o) => o.issue === n).map((o) => [o.started, o.wallMinutes]);
+  assert.deepEqual(clock(11), [[at(4), 56]]);
+  assert.deepEqual(clock(12), [[null, null]]);
 });
 
 test("report --compare: each arm's n, outcomes, and the exact median and p25..p75 per merged Objective, kinds apart, no blended total", async () => {

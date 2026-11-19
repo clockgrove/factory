@@ -11,8 +11,8 @@
 // One still running, in review or waiting on a Question has not finished: it is listed as in flight, neither.
 // An External one (walkAway.bucket: its only stops were external Blocks, lib/objective.mjs walkAwayBucket) is listed
 // in the sequence as skipped: it neither extends nor breaks, and does not count as finished. A P1 escape found in its
-// merge makes it a break. A walk-away merge labelled before the rename to Pendulum (bucket `unknown`: whether it was one
-// is not known) is skipped the same way, unless a P1 escape makes it a break; a miss or an External result seen after
+// merge makes it a break. A merge with an unknown activation clock (bucket `unknown`) is skipped the same way,
+// unless a P1 escape makes it a break; a miss or an External result seen after
 // its later label is scored as any other.
 // A workflow hand-over scored as an owner step (lib/objective.mjs HANDOVER_SCORING, the default) leaves the merge a
 // walk-away: it extends the streak, and its entry says it carries an owner step (`ownerStep`). Scored as input, it breaks.
@@ -36,7 +36,7 @@ export function endedAt(row) {
 /** One finished row's verdict for the streak: `{ok, why}`; an External row's is `{ok: null, external: true, why}`, skipped. */
 export function verdict(row) {
   const escapes = (row.quality?.escapes || []).filter(isP1);
-  // A walk-away merge labelled before the rename (bucket `unknown`): skipped, unless a P1 escape or an input source not
+  // A merge with an unknown activation clock: skipped, unless a P1 escape or an input source not
   // read breaks it.
   const unread = row.walkAway?.unseen === undefined ? ["input sources not recorded"] : row.walkAway.unseen;
   if (row.walkAway?.bucket === "unknown" && unread.length) return { ok: false, why: `input not readable (${unread.join(", ")}): walk-away unproven` };

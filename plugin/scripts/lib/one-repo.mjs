@@ -81,10 +81,10 @@ const ONE_REPO = "Pendulum works in one repository per Objective";
  * The Question for an issue body that names another repository (declaredRepos), or "": asked before any harness runs.
  * The owner splits the Objective, one per repository, takes the line out and re-applies `label`.
  */
-export function declaredQuestion(body, { source, label = "pendulum:objective" }) {
+export function declaredQuestion(body, { source }) {
   const repos = declaredRepos(body, source);
   if (!repos.length) return "";
-  return `the issue names ${repos.join(", ")} on a ${DECLARE_KEY} line, and ${ONE_REPO}; split it into one Objective per repository (this one changes only ${source.full}), remove the line and re-apply ${label}`;
+  return `the issue names ${repos.join(", ")} on a ${DECLARE_KEY} line, and ${ONE_REPO}; split it into one Objective per repository (this one changes only ${source.full}), remove the line and resume through Draft`;
 }
 
 /**
@@ -114,8 +114,8 @@ export function answeredRepos(asked, decisions, { named = true } = {}) {
  * owner splits the Objective, one per repository, and re-applies `label`, or answers in a comment how to do the work in
  * this repository alone. `repos` are the ones asked about, recorded so the answer is recognised on the rerun.
  */
-export function planNeeds(plan, { source, label = "pendulum:objective", answered = new Set() }) {
+export function planNeeds(plan, { source, answered = new Set() }) {
   const missing = plannedRepos(plan).repos.filter((r) => key(r) !== key(source.full) && !answered.has(key(r)));
   if (!missing.length) return {};
-  return { repos: missing, reason: `the plan needs a change in ${missing.join(", ")}, and ${ONE_REPO}; split it into one Objective per repository and re-apply ${label}, or answer in a comment how to do the work in ${source.full} alone` };
+  return { repos: missing, reason: `the plan needs a change in ${missing.join(", ")}, and ${ONE_REPO}; split it into one Objective per repository and resume through Draft, or answer in a comment how to do the work in ${source.full} alone` };
 }

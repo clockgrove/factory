@@ -125,7 +125,7 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
       ? `; this pass left nothing to keep, so the result of an earlier one kept on the branch \`${kept.name}\` of ${clone} was removed`
       : kept.failed
         ? `; its result could not be kept on a branch of ${clone} (the local loop's log says why)`
-        : `; the conflict pass's result is kept as ${kept.sha} on the branch \`${kept.name}\` of ${clone}. To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Pendulum's push checks did not run on it), then run \`git push --force-with-lease origin ${kept.name}:${kept.branch}\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`;
+        : `; the conflict pass's result is kept as ${kept.sha} on the branch \`${kept.name}\` of ${clone}. To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Pendulum's push checks did not run on it), then run \`git push --force-with-lease origin ${kept.name}:${kept.branch}\` in that clone and resume through Draft: the stages after it validate and review that head like any other`;
   const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed${resume}`;
   outbox.block(why);
   log(why);

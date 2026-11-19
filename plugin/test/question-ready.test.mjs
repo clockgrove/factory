@@ -72,6 +72,18 @@ test("serve reviews a Question's PR a person marked ready, as the Action's ready
   assert.deepEqual(out, [{ issue: 7, pr: 70 }], "#8 has no ready mark since its Question, #9 is In review (reviewed, waiting to merge), #6's PR is still a draft");
 });
 
+test("serve waits when a ready PR's Objective timeline still shows Draft held", async () => {
+  const { out } = await pending({
+    pulls: [pull(7)],
+    issues: { 7: issue([OBJ, "pendulum:question"], 7) },
+    timelines: {
+      7: [labeled("pendulum:question", "2026-11-15T10:00:00Z"), labeled("pendulum:draft", "2026-11-15T10:01:00Z")],
+      70: [ready("2026-11-15T10:02:00Z")],
+    },
+  });
+  assert.deepEqual(out, []);
+});
+
 test("a Question whose PR GitHub will not draft Blocks once, naming it, rather than leaving a ready PR serve would ask again each tick", async () => {
   const { applyExit } = await import("../scripts/lib/session.mjs");
   const pr = { number: 70, node_id: "PR_70", draft: false, head: { sha: "abc" }, user: { login: "pendulum[bot]" } };

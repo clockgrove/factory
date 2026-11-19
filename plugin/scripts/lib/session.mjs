@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { backend, spendInProgress, stageRoute } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
 import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, reservedSpend, openPasses, passesRunning, runHarness, seedSessionTotal, setStageBilling, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
-import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
+import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, readDraftActivationHold, recoveryEpoch, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
 import {
   addLabels,
   awaitChecks,
@@ -44,9 +44,9 @@ import {
   workflowFile,
   getPrSettled,
   listComments,
-  objectiveLabeledAt,
   listReviewComments,
   listReviews,
+  listTimeline,
   moveCard,
   branchState,
   prComment,
@@ -62,6 +62,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { input, log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { RESUME_OBJECTIVE } from "./activation.mjs";
 import { endCard } from "./finish-card.mjs";
 import { lineClock, logTime, timeZone, whenText } from "./clock.mjs";
 import { SHORT_DETAIL, progressBody, progressCard } from "./progress-card.mjs";
@@ -1648,7 +1649,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const unfinished = (x) => !x.green && x.timedOut && !x.failedRuns?.length;
     // A running check that ended the wait by making no progress: the Block names its step and times, and the way past
     // the judgement for a PR that slows a step on purpose (noProgressMarker, posted with the Block).
-    const noProgress = (x, s) => (x.hung?.length && s.kind === "running" ? { ...s, noProgress: true, reason: `no progress: ${hungChecks(x.hung)}; ${s.reason}; when this change makes that step slower, re-apply the Objective's label: ${sha.slice(0, 7)} is then waited for up to the stage's wall clock` } : s);
+    const noProgress = (x, s) => (x.hung?.length && s.kind === "running" ? { ...s, noProgress: true, reason: `no progress: ${hungChecks(x.hung)}; ${s.reason}; when this change makes that step slower, resume through Draft: ${sha.slice(0, 7)} is then waited for up to the stage's wall clock` } : s);
     const history = async () => {
       // Older commits that ran the checks: the PR's last green head, then the default branch's newest.
       const green = lastGreenHead(await listComments(checks.repo, checks.prNumber, { token: checks.token }).catch(() => []), checks.issue);
@@ -2184,7 +2185,7 @@ export function unchangedBlock(u, lead = "") {
   if (u?.refused) return { reason: `${head}; ${refusedRerunText(u.refused)}`, cause: u.refused.earlier || u.refused.status === 403 || u.refused.status === 404 ? "setup" : "outage" };
   const side = u?.infra ? ", again in their set-up or checkout (GitHub's side)" : "";
   const what = u?.red ? `its failed jobs were rerun once and failed again${side}` : u?.already ? `its failed jobs were already rerun once on this head${side}` : `its failed jobs were not rerun (${u?.skipped || "no rerun"})`;
-  return { reason: `${head}; ${what}; read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then re-apply the label`, cause: (u?.red || u?.already) && u.infra ? "outage" : "work" };
+  return { reason: `${head}; ${what}; read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then resume through Draft`, cause: (u?.red || u?.already) && u.infra ? "outage" : "work" };
 }
 
 /** The longest a stage waits, past its first wait, for required checks GitHub has not started (validationLoop). */
@@ -2693,7 +2694,7 @@ export function appliedExit(args, result) {
 
 /**
  * Whether a Blocked notice's way on is a resume or a restart, said plainly, since the two look alike and a restart
- * throws away paid work: re-applying `pendulum:objective` resumes from `pendulum/<issue>` and its PR; `pendulum:restart`
+ * throws away paid work: Draft removal resumes from `pendulum/<issue>` and its PR; `pendulum:restart`
  * discards them (stop.mjs restartObjective, whose record names the commit that restores the branch). `next`, decided on
  * structure: `resume` (the stop is outside the work: every cause but `work`), `work` (the work itself stopped: resume
  * once its cause is fixed, restart only to redo it), `restart` (a restart was asked for and could not finish), `none`
@@ -2704,9 +2705,9 @@ export function nextStep({ issue, pr = null, next = "resume", delivered = false 
   const kept = pr ? `${branch} and PR #${pr.number}` : branch;
   const lost = pr ? `${delivered ? "the delivered " : ""}PR #${pr.number} with its review, the commits on ${branch} and the spend on them` : `the commits on ${branch}, if any, and the spend on them`;
   if (next === "none") return "Neither a resume nor a restart gets past this: both check the issue's author again.";
-  if (next === "restart") return `To keep the work instead of restarting, re-apply \`pendulum:objective\`: that resumes from ${kept}.`;
-  if (next === "work") return `Resume once the cause is fixed: re-apply \`pendulum:objective\` to go on from ${kept}. Restart (\`pendulum:restart\`) only when the work itself must be redone from the issue's text: a restart discards ${lost}.`;
-  return `Resume, don't restart: the stop is outside the work. Once its cause is fixed or has passed, re-apply \`pendulum:objective\` to go on from ${kept}. \`pendulum:restart\` would discard ${lost}, and gain nothing.`;
+  if (next === "restart") return `To keep the work instead of restarting, ${RESUME_OBJECTIVE} from ${kept}.`;
+  if (next === "work") return `Resume once the cause is fixed: ${RESUME_OBJECTIVE} from ${kept}. Restart (\`pendulum:restart\`) only when the work itself must be redone from the issue's text: a restart discards ${lost}.`;
+  return `Resume, don't restart: the stop is outside the work. Once its cause is fixed or has passed, ${RESUME_OBJECTIVE} from ${kept}. \`pendulum:restart\` would discard ${lost}, and gain nothing.`;
 }
 
 /** The way on (nextStep) a Block's cause (logic.mjs BLOCK_CAUSES) gives: `work` for the work's own, `resume` for any other. */
@@ -2718,17 +2719,17 @@ export const nextOf = (cause) => (cause === "work" ? "work" : "resume");
  * restart (nextStep; `next` defaults to the cause's, nextOf).
  */
 export const blockedLine = ({ issue, pr = null, stage, reason, fix = null, delivered = false, cause = "pendulum", next = null }) =>
-  `Blocked (${stage}): ${reason}${pr || /[.!?]$/.test(reason) ? "" : "."}${pr ? (delivered ? ` — PR #${pr.number} was delivered; it is a draft until this is fixed.` : ` — PR #${pr.number} is a draft with what exists.`) : ""} ${fix || `Fix by pushing to \`pendulum/${issue}\` or editing the issue, then re-apply \`pendulum:objective\`.`}\n\n${nextStep({ issue, pr, delivered, next: next || nextOf(cause) })}`;
+  `Blocked (${stage}): ${reason}${pr || /[.!?]$/.test(reason) ? "" : "."}${pr ? (delivered ? ` — PR #${pr.number} was delivered; it is a draft until this is fixed.` : ` — PR #${pr.number} is a draft with what exists.`) : ""} ${fix || `Fix by pushing to \`pendulum/${issue}\` or editing the issue.`}\n\n${nextStep({ issue, pr, delivered, next: next || nextOf(cause) })}`;
 
 /**
  * The Block doctor's FAIL rows (doctor.mjs: name, detail, fix) make, cause `setup`: the reason names each failing check
- * once with what it found, and the fix is the step each row names, then the re-applied label. A push or an edit to the
+ * once with what it found, and the fix is the step each row names. A push or an edit to the
  * issue fixes no secret or setting, so the generic fix line never stands for it.
  */
 export function doctorBlock(rows) {
   const reason = rows.map((c) => (c.detail ? `${c.name}: ${c.detail}` : c.name)).join("; ");
   const steps = rows.map((c) => String(c.fix || "").trim().replace(/[.\s]+$/, "")).filter(Boolean);
-  const fix = `Fix: ${steps.length ? steps.join("; ") : "the step `/pendulum:pendulum-doctor` names"}; then re-apply \`pendulum:objective\`.`;
+  const fix = `Fix: ${steps.length ? steps.join("; ") : "the step `/pendulum:pendulum-doctor` names"}.`;
   return { reason, fix, cause: "setup", stage: "doctor" };
 }
 
@@ -2785,7 +2786,7 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
       log(`draft: ${String(undrafted.message || undrafted).slice(0, 120)}`);
       const why = `PR #${pr.number} could not be made a draft for its Question (${code}), so the Question is not asked; the question was: ${reason.replace(/^question:\s*/i, "")}`;
       // No PR to the Block: it would try the same draft again, and say the PR is one.
-      const fix = `Fix by letting Pendulum's token convert PR #${pr.number} to a draft, or by making it one by hand, then re-apply \`pendulum:objective\`.`;
+      const fix = `Fix by letting Pendulum's token convert PR #${pr.number} to a draft, or by making it one by hand, then resume through Draft.`;
       return applyExit(repo, { issue, pr: null, exit: "blocked", reason: why, notify, stage, cause: "pendulum", fix }, { token, notice });
     }
     await setStateLabel(repo, issue, "question", { token });
@@ -3005,7 +3006,7 @@ async function afterReset(lost, deadlineAt) {
 /** What ends a stage off the local route on an outage: its reason, and its External cause (logic.mjs BLOCK_CAUSES). */
 const outageBlock = (lost) =>
   Number.isFinite(lost.resetAt)
-    ? { reason: `${outageReason(lost)}, past the stage's deadline. Re-apply the label to run it again after the reset.`, cause: "provider-quota" }
+    ? { reason: `${outageReason(lost)}, past the stage's deadline. Resume through Draft to run it again after the reset.`, cause: "provider-quota" }
     : { reason: `${outageReason(lost)}; ${serverDown(lost.code) ? "the stage ended on it" : "the stage waited for the network until its time ran out"}. ${RELAUNCH_NOTE}`, cause: "outage" };
 
 /**
@@ -3231,7 +3232,7 @@ export async function postHandedOff(repo, prNumber, issue, sha, { token }) {
 export const noProgressMarker = (issue, sha) => marker(issue, "no-progress", sha);
 
 export async function postNoProgress(repo, prNumber, issue, sha, { token }) {
-  await prComment(repo, prNumber, `${noProgressMarker(issue, sha)}\nPendulum: a required check on ${sha.slice(0, 7)} made no progress; re-applying the label waits for it up to the stage's wall clock.`, { token });
+  await prComment(repo, prNumber, `${noProgressMarker(issue, sha)}\nPendulum: a required check on ${sha.slice(0, 7)} made no progress; resuming through Draft waits for it up to the stage's wall clock.`, { token });
 }
 
 /**
@@ -3492,7 +3493,7 @@ export async function queueEntryState(repo, prNumber, opts, now = Date.now(), ga
  * applyExit's input for a send-back that Blocks (logic.mjs staleDecision): `why` "stuck" (the conflict came back on the
  * base the last rebase resolved, `record` its rebase record, files named) or "limit" (`limit`, the rebase_limit in
  * force, rebases in a day).
- * Its key names the condition, the PR's head and the objective label's time (`since`, rebaseMarkers), so the dispatcher
+ * Its key names the condition, the PR's head and the recovery time (`since`, rebaseMarkers), so the dispatcher
  * and a `run --wait` loop Blocking the same condition write one comment, not two @mentions; a new head or a human
  * recovery is a new condition, so it notifies again.
  */
@@ -3502,7 +3503,7 @@ export function rebaseBlock({ issue, pr, why, record = null, since = null, notif
 }
 
 /**
- * The rebase send-backs on the Objective's PR (PLAN.md "Merge") since the issue's last objective label (a human
+ * The rebase send-backs on the Objective's PR (PLAN.md "Merge") since the last activation (a human
  * recovery starts the count over): the marker comments Pendulum left and the worker's records of the rebases that
  * conflicted (logic.mjs ontoRecord). `effective` counts the markers whose send-back pushed (one that names the PR's
  * head now produced no push: its worker never ran or died, so it is sent again), `recent` those of the last
@@ -3510,15 +3511,15 @@ export function rebaseBlock({ issue, pr, why, record = null, since = null, notif
  * for it. `record` is the newest rebase record of a pass that pushed, and `stuck` that record when the PR still needs
  * a rebase and the default branch is still the base it was made onto: the conflict came back after its resolution,
  * with nothing merged since (a failed read of the branch leaves `stuck` null: the send-back goes ahead, and the worker
- * Blocks a conflict it cannot resolve itself). `since` is that label's time. Only Pendulum's own comments count (isSelf);
- * `unread` says the label's time, Pendulum's login or the comments could not be read: the caller holds the PR this tick.
+ * Blocks a conflict it cannot resolve itself). Only Pendulum's own comments count (isSelf).
+ * `unread` means the recovery time, Pendulum's login or the comments could not be read.
  */
 export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, now = Date.now()) {
   const prefix = marker(issue, "rebase").replace(/ -->$/, "");
   const none = { effective: 0, recent: 0, already: false, record: null, stuck: null };
   // A read that fails leaves the count unknown: `unread`, so the caller holds the PR this tick rather than count none.
   let unread = null;
-  const since = await objectiveLabeledAt(repo, issue, objectiveLabel, opts).catch((e) => ((unread = e), null));
+  const since = await recoveryEpoch(repo, issue, objectiveLabel, opts).catch((e) => ((unread = e), null));
   if (!pr) return { ...none, since };
   // Only Pendulum's own comments: a writer's pasted marker is no send-back or rebase of Pendulum's.
   if (!unread && !(selfLogin() || (await primeSelf(opts)))) unread = new Error("Pendulum's own login is unknown");
@@ -3811,7 +3812,7 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
     return { state: "requeued", line: `merge queue run red${where}: ${q.reason}; not known to be the PR's change (${q.kind}), enqueued again as any drop` };
   }
   // The fix passes since the Objective's last re-entry (an unread timeline counts every one).
-  const entered = await objectiveLabeledAt(repo, issue, [objectiveLabel, "pendulum:restart", "pendulum:blocked"], { token }).catch(() => null);
+  const entered = await recoveryEpoch(repo, issue, objectiveLabel, { token }, { states: ["pendulum:restart", "pendulum:blocked"] }).catch(() => null);
   const fixes = records.filter((r) => r.state === "fixed" && !(Date.parse(entered) > Date.parse(r.at)));
   // The red the last fix pass was handed, and every one fixed since the re-entry, against this one (fix-progress.mjs),
   // with what passed on the queue's commit, and for a decision call the before-red's failure lines and the fix pass's own
@@ -3835,7 +3836,7 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
     // One the change's only by default (`unsure`, queueRedOf) is said as that too.
     const again = q.limit ? "again" : q.unsure ? `${q.unsure}, again` : "the PR's own change again";
     const failed = q.limit ? `failed: ${q.reason},` : q.unsure ? `failed (${q.reason}); ${q.unsure},` : `failed in this PR's own change (${q.reason})`;
-    return { state: "blocked", cause: p && !p.progress && p.undecided ? p.cause || "pendulum" : "work", line: `merge queue run red${where}: ${q.reason}; ${again}, after Pendulum's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} ${failed} after Pendulum's ${over}; fix it on the branch, then re-apply the label` };
+    return { state: "blocked", cause: p && !p.progress && p.undecided ? p.cause || "pendulum" : "work", line: `merge queue run red${where}: ${q.reason}; ${again}, after Pendulum's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} ${failed} after Pendulum's ${over}; fix it on the branch, then resume through Draft` };
   }
   // Started: counted on the record, so a pass that keeps committing nothing reaches the bound above.
   const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead, tries: pending.tries + 1, ends: pending.ends ?? [], ...(q.unsure ? { unsure: q.unsure } : {}) };
@@ -3916,12 +3917,12 @@ export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
   const head = `the merge queue dropped the reviewed PR ${drops} times without merging it (${codes.join(", ")})`;
   const failed = lines ? `; its run on the queue's commit failed: ${lines}` : "";
   const kind = kinds.at(-1) ?? null;
-  if (kind === "infra" || kind === "not-started") return { cause: "outage", reason: `${head}${failed}. Triage read the failure as GitHub's side (${kind}); rerun the queue's jobs or wait for GitHub, then re-apply the label` };
-  if (kind === "base") return { cause: "work", reason: `${head}${failed}. The default branch fails the same way: fix it there, then re-apply the label` };
-  if (kind === "unjudged" || kind === "unjudged-outage") return { cause: kind === "unjudged-outage" ? "outage" : "pendulum", reason: `${head}${failed}. Whether the default branch fails the same way could not be judged (the decision model gave no answer${kind === "unjudged-outage" ? ": its vendor's outage" : ""}); check the default branch's runs of the failing jobs, then re-apply the label` };
-  if (kind === "flaky") return { cause: "work", reason: `${head}${failed}. Triage read the failure as a flake each time: fix or steady that test on the branch or the default branch, then re-apply the label` };
+  if (kind === "infra" || kind === "not-started") return { cause: "outage", reason: `${head}${failed}. Triage read the failure as GitHub's side (${kind}); rerun the queue's jobs or wait for GitHub, then resume through Draft` };
+  if (kind === "base") return { cause: "work", reason: `${head}${failed}. The default branch fails the same way: fix it there, then resume through Draft` };
+  if (kind === "unjudged" || kind === "unjudged-outage") return { cause: kind === "unjudged-outage" ? "outage" : "pendulum", reason: `${head}${failed}. Whether the default branch fails the same way could not be judged (the decision model gave no answer${kind === "unjudged-outage" ? ": its vendor's outage" : ""}); check the default branch's runs of the failing jobs, then resume through Draft` };
+  if (kind === "flaky") return { cause: "work", reason: `${head}${failed}. Triage read the failure as a flake each time: fix or steady that test on the branch or the default branch, then resume through Draft` };
   if (!lines) return null;
-  return { cause: "work", reason: `${head}${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label` };
+  return { cause: "work", reason: `${head}${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then resume through Draft` };
 }
 
 const QUEUE_CONFLICT_LINE = /^<!-- pendulum:queue-conflict (\{[^\n]*\}) -->$/m;
@@ -4029,12 +4030,15 @@ const ROUNDS_RECORD = (issue) => `<!-- pendulum:${issue}:answer-rounds-record `;
 /**
  * Pendulum's record of the answer rounds on `prNumber`, on the issue (one comment, marker(issue, "answer-rounds"); a
  * record by Pendulum or someone who can push, since two routes can write it), as far as it counts since the Objective's
- * last re-entry (its label applied again, a restart or a Block, from the issue's timeline): `rounds`, the times of each
+ * last activation, restart or Block, from the issue's timeline. `rounds` lists the times of each
  * answer round started; `checks`, each review stage's finding check that left findings without a verdict
  * ({at, ids, error}) or, after one, judged them all ({at, ids: []}), oldest first. Throws when it cannot be read.
  */
 export async function readAnswerRounds(repo, { issue, prNumber, objectiveLabel }, opts) {
-  const [comments, since] = await Promise.all([listComments(repo, issue, opts), objectiveLabeledAt(repo, issue, [objectiveLabel, "pendulum:blocked", "pendulum:restart"], opts)]);
+  const [comments, since] = await Promise.all([
+    listComments(repo, issue, opts),
+    recoveryEpoch(repo, issue, objectiveLabel, opts, { states: ["pendulum:blocked", "pendulum:restart"] }),
+  ]);
   const after = (t) => Number.isFinite(Date.parse(t)) && (!since || Date.parse(t) > Date.parse(since));
   const rounds = [];
   const checks = [];
@@ -4096,7 +4100,6 @@ export async function takeAnswerRound(repo, ctx, opts, { check = null, rec = nul
 
 const placeOf = (t) => `${t.path ?? "the PR"}${Number.isInteger(t.line) ? `:${t.line}` : ""}`;
 const listed = (items) => `${items.slice(0, THREADS_NAMED).join("; ")}${items.length > THREADS_NAMED ? `, and ${items.length - THREADS_NAMED} more` : ""}`;
-const RESUME = "re-apply `pendulum:objective` to resume";
 
 /** The Block cause of a finding check the decider answered with no verdict, from its code (adapters/decider.mjs). */
 const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limited" || error === "billing" ? "provider-quota" : "outage");
@@ -4136,7 +4139,7 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
   const who = decider?.name === "harness" ? `the stage's own harness (${decider.model})` : `the AI Gateway's decision model${decider?.model ? ` (${decider.model})` : ""}`;
   if (pending.length && tries >= FINDING_CHECK_TRIES) {
     const fix = decider?.name === "harness" ? "Check the harness login this stage runs on and its usage" : "Check the AI Gateway key, its budget and the gateway's status";
-    Object.assign(decision, { exit: "blocked", cause: checkCause(codes[0]), reason: `${who} gave no verdict (${check.error}) on the answers to ${pending.length} reviewer finding(s) on PR #${prNumber} in ${tries} review stages in a row: ${where(pending)}. ${fix}, then ${RESUME}` });
+    Object.assign(decision, { exit: "blocked", cause: checkCause(codes[0]), reason: `${who} gave no verdict (${check.error}) on the answers to ${pending.length} reviewer finding(s) on PR #${prNumber} in ${tries} review stages in a row: ${where(pending)}. ${fix}, then ${RESUME_OBJECTIVE}` });
     return decision;
   }
   const relabel = (what) => exitStep(decision, `${what} and the review label could not be re-applied`, () => addLabels(repo, prNumber, [REVIEW_LABEL], opts));
@@ -4159,7 +4162,7 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
   const round = await exitStep(decision, `the answer rounds on PR #${prNumber} could not be recorded`, () => takeAnswerRound(repo, ctx, opts, { check, rec }));
   if (!round) return decision;
   if (!round.taken) {
-    Object.assign(decision, { exit: "blocked", cause: "work", reason: `${judged.length} reviewer finding(s) still open on PR #${prNumber} after ${round.rounds} answer round(s): ${where(judged)}. Fix them on the branch, or answer each on the PR: a reply by someone who can push in its thread, or resolve the thread (for a finding in the review body, a comment by someone who can push starting \`<!-- pendulum:${issue}:resolved:<finding id> -->\`); then ${RESUME}` });
+    Object.assign(decision, { exit: "blocked", cause: "work", reason: `${judged.length} reviewer finding(s) still open on PR #${prNumber} after ${round.rounds} answer round(s): ${where(judged)}. Fix them on the branch, or answer each on the PR: a reply by someone who can push in its thread, or resolve the thread (for a finding in the review body, a comment by someone who can push starting \`<!-- pendulum:${issue}:resolved:<finding id> -->\`); then ${RESUME_OBJECTIVE}` });
     return decision;
   }
   Object.assign(decision, { exit: "delivered", rerun: true, reason: `${judged.length} reviewer finding(s) still open after the answer pass (${where(judged)})${pending.length ? `, and ${pending.length} answer(s) still to be judged` : ""}; the review runs again to answer them (round ${round.round} of ${ANSWER_ROUNDS})` });
@@ -4241,8 +4244,8 @@ async function conversationsGate(repo, ctx, report, opts) {
     }
     if (!round.taken) {
       report.reason = back.every(scanning)
-        ? `code scanning still has ${back.length} open alert(s) on PR #${prNumber} after ${round.rounds} answer rounds: ${listed(back.map(placeOf))}. Fix them on the branch or resolve them on the PR, then ${RESUME}`
-        : `${back.length} review thread(s) still open on PR #${prNumber} after ${round.rounds} answer rounds: ${listed(back.map((t) => `${t.author} on ${placeOf(t)}`))}. Fix them on the branch, or answer or resolve each on the PR, then ${RESUME}`;
+        ? `code scanning still has ${back.length} open alert(s) on PR #${prNumber} after ${round.rounds} answer rounds: ${listed(back.map(placeOf))}. Fix them on the branch or resolve them on the PR, then ${RESUME_OBJECTIVE}`
+        : `${back.length} review thread(s) still open on PR #${prNumber} after ${round.rounds} answer rounds: ${listed(back.map((t) => `${t.author} on ${placeOf(t)}`))}. Fix them on the branch, or answer or resolve each on the PR, then ${RESUME_OBJECTIVE}`;
       return "threads";
     }
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
@@ -4252,7 +4255,7 @@ async function conversationsGate(repo, ctx, report, opts) {
   }
   if (!open.length || !rule) return null;
   const what = (t) => `${t.author ?? "a deleted account"} on ${placeOf(t)}${t.answered ? " (answered; Pendulum could not resolve it)" : ""}`;
-  report.reason = `PR #${prNumber} cannot merge: ${rule} on ${base} requires every review conversation resolved, and ${open.length} ${open.length === 1 ? "is" : "are"} open: ${listed(open.map(what))}. Answer or resolve each on the PR, then ${RESUME}`;
+  report.reason = `PR #${prNumber} cannot merge: ${rule} on ${base} requires every review conversation resolved, and ${open.length} ${open.length === 1 ? "is" : "are"} open: ${listed(open.map(what))}. Answer or resolve each on the PR, then ${RESUME_OBJECTIVE}`;
   return "threads";
 }
 
@@ -4325,7 +4328,7 @@ async function textEdit(repo, issue, prNumber, opts) {
  * default branch, read before the merge or after GitHub refused it: never a Block here; the caller sends it back for a
  * rebase under logic.mjs staleDecision's rules), "dropped" (the merge queue
  * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
- * `objectiveLabel` applied again) or Block: logic.mjs queueSince and queueRetry; the caller Blocks with mergeBlockReason),
+ * latest activation) or Block: logic.mjs queueSince and queueRetry; the caller Blocks with mergeBlockReason),
  * "queue-red" (the queue's newest drop is a red run on its commit, QUEUE_RED_CODE, that no review stage has read: its
  * record goes on the issue and the review label back on, and the review stage decides it, queueRedOf) or
  * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters),
@@ -4342,7 +4345,7 @@ async function textEdit(repo, issue, prNumber, opts) {
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, queueTimeout = undefined, actionsToken = null, cache = {}, stall = STALL_DEFAULTS, objectiveLabel = "pendulum:objective", issueData = null, thirdParty = [], editCheck = null, commentCheck = null }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, queueTimeout = undefined, actionsToken = null, cache = {}, stall = STALL_DEFAULTS, objectiveLabel = "pendulum:objective", issueData = null, issueEvents = undefined, thirdParty = [], editCheck = null, commentCheck = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
@@ -4351,6 +4354,12 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   const issueNow = issueData ?? (await getIssue(repo, issue, opts).catch((e) => (log(`#${issue}: the issue could not be read before the merge (${errCode(e)}); next try`), null)));
   if (!issueNow) return "pending";
   if (stopCause(issueNow, objectiveLabel)) return "stopped";
+  const events = issueEvents === undefined ? await listTimeline(repo, issue, opts).catch(() => null) : issueEvents;
+  const hold = await readDraftActivationHold(repo, issue, objectiveLabel, opts, events);
+  if (hold) {
+    log(`#${issue}: ${hold}; no merge`);
+    return "pending";
+  }
   // A sibling merged first and this PR conflicts with the default branch: no merge or enqueue can take it (#2647).
   if (pr.mergeable_state === "dirty") return "conflict";
   let sha = await recordedMergeable(repo, prNumber, issue, opts);
@@ -4478,7 +4487,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     let since = reviewedAt;
     if (removals.length) {
       let unread = null;
-      const marks = await objectiveLabeledAt(repo, issue, [objectiveLabel, "pendulum:blocked"], opts).catch((e) => ((unread = e), null));
+      const marks = await recoveryEpoch(repo, issue, objectiveLabel, opts, { states: ["pendulum:blocked"], events }).catch((e) => ((unread = e), null));
       const head = await getCommit(repo, pr.head.sha, opts).catch((e) => ((unread = e), null));
       if (unread) {
         log(`#${issue}: the issue's timeline or PR #${prNumber}'s head is unreadable (${errCode(unread)}); next tick`);
@@ -4555,9 +4564,9 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       report.reason = said
         ? said.reason
         : hungNow
-        ? `a required check made no progress on the merge queue's commit (${hungChecks(hungNow)}), again after Pendulum re-enqueued the PR ${retry.cleared ? `${retry.cleared + 1} times (one removal was a step that proved slow, not hung)` : "once"} (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
+        ? `a required check made no progress on the merge queue's commit (${hungChecks(hungNow)}), again after Pendulum re-enqueued the PR ${retry.cleared ? `${retry.cleared + 1} times (one removal was a step that proved slow, not hung)` : "once"} (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then resume through Draft`
         : stuck.length
-          ? `the merge queue dropped the reviewed PR ${retry.drops} times without merging it (${retry.codes.join(", ")}): ${notStartedReason(stuck)}. GitHub never started the job on the queue's merge_group commit: infrastructure, not the change; fix that, then re-apply the label`
+          ? `the merge queue dropped the reviewed PR ${retry.drops} times without merging it (${retry.codes.join(", ")}): ${notStartedReason(stuck)}. GitHub never started the job on the queue's merge_group commit: infrastructure, not the change; fix that, then resume through Draft`
           : retry.block;
       return "dropped";
     }

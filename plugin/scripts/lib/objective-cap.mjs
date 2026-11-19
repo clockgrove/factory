@@ -13,7 +13,7 @@ import { logTime } from "./clock.mjs";
 import { marker, spendText } from "./logic.mjs";
 
 /** What fixes a cap Block: the setting raised or unset, then the label. */
-export const CAP_FIX = "Fix by raising `max_objective_usd` (the workflow's `PENDULUM_MAX_OBJECTIVE_USD`, or a repository variable of that name) above the total, or by unsetting it, then re-apply `pendulum:objective`; a `pendulum:restart` starts the count over.";
+export const CAP_FIX = "Fix by raising `max_objective_usd` (the workflow's `PENDULUM_MAX_OBJECTIVE_USD`, or a repository variable of that name) above the total, or by unsetting it, then resume through Draft; a `pendulum:restart` starts the count over.";
 
 /** "; 2 runs of unknown cost count nothing toward it", or "" for none. */
 const unknownWords = (n) => (n > 0 ? `; ${n} run${n === 1 ? "" : "s"} of unknown cost count${n === 1 ? "s" : ""} nothing toward it` : "");

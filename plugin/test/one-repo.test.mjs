@@ -13,7 +13,7 @@ test("one repository: an issue body naming another repository is a Question befo
   const body = "Add the export format.\n\nPendulum-Repository: acme/world allow .github/workflows/ci.yml\n";
   assert.equal(
     declaredQuestion(body, { source, label: "pendulum:objective" }),
-    "the issue names acme/world on a Pendulum-Repository line, and Pendulum works in one repository per Objective; split it into one Objective per repository (this one changes only acme/platform), remove the line and re-apply pendulum:objective",
+    "the issue names acme/world on a Pendulum-Repository line, and Pendulum works in one repository per Objective; split it into one Objective per repository (this one changes only acme/platform), remove the line and resume through Draft",
   );
   assert.deepEqual(declaredRepos(body, source), ["acme/world"]);
   assert.deepEqual(declaredRepos("- pendulum-repository: `Acme/World`\nPendulum-Repository: acme/infra", source), ["Acme/World", "acme/infra"], "any case, a list item, backticks");

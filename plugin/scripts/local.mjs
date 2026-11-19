@@ -68,7 +68,7 @@ import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
-import { DRAFT_LABEL, goTrust, isDraft, labelTrust, requeuedIn, stopCause } from "./lib/stop.mjs";
+import { DRAFT_LABEL, goTrust, isDraft, labelTrust, readDraftActivationHold, requeuedIn, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { lapseFacts, lapseInput, openLapseCheck } from "./lib/lapse-check.mjs";
 import { flushDecisionSpend } from "./lib/decision-spend.mjs";
@@ -162,7 +162,7 @@ export const runExit = (r) => (r?.exit === "delivered" ? 0 : r?.exit === "paused
 const twoPinsLine = (labels) => `${labels.map(pinLabelText).join(", ")}: more than one account label moves nothing, so the Objective waits, on no account, until one is left`;
 
 /** What a Blocked notice tells a person to do about an account label this machine cannot act on (#265). */
-const PIN_FIX = "Apply one `pendulum:account:<name>` naming an account of this Objective's harness that this machine declares (~/.config/pendulum/accounts.json; doctor.mjs --local lists them), as a person who can push, or remove the label to run on the harness's default account; then re-apply `pendulum:objective`.";
+const PIN_FIX = "Apply one `pendulum:account:<name>` naming an account of this Objective's harness that this machine declares (~/.config/pendulum/accounts.json; doctor.mjs --local lists them), as a person who can push, or remove the label to run on the harness's default account; then resume through Draft.";
 /** Whether a stage's result.json shows a pass its provider served (output or credits), with no usage limit ending it. */
 /** A usage limit or quota that Blocked it with no reset reported (`limitRefused`) is a refusal too, never a served pass. */
 const servedPass = (r) => !r.usageLimit && !r.limitRefused && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
@@ -1023,7 +1023,7 @@ export class Local {
       // Only a declaration that cannot be used Blocks, with its fixed reason; any other failure is Pendulum's own.
       if (e?.code !== "account" || typeof e.reason !== "string") throw e;
       log(`#${issue}: refusing to run: ${e.message}`);
-      return { ok: false, reason: e.reason, fix: "Fix those accounts in ~/.config/pendulum/accounts.json on this machine (doctor.mjs --local names what is wrong with each), then re-apply `pendulum:objective`." };
+      return { ok: false, reason: e.reason, fix: "Fix those accounts in ~/.config/pendulum/accounts.json on this machine (doctor.mjs --local names what is wrong with each), then resume through Draft." };
     }
     if (pin.problem) {
       // A Block: the kept labeler check goes with it, so whatever is applied next is read afresh.
@@ -1037,14 +1037,14 @@ export class Local {
       // Each account's problems are in this machine's log already (accountReady); GitHub gets the names alone.
       const h = HARNESS_NAMES[harness] || harness;
       log(`#${issue}: no ${h} account can run here: ${unready.map((u) => u.name).join(", ")}`);
-      return { ok: false, reason: `local mode on this machine cannot run ${h} on any of its accounts (${unready.map((u) => `\`${u.name}\``).join(", ")}); the loop's log names what is missing for each`, fix: "Set those accounts' logins up on this machine (doctor.mjs --local checks each), then re-apply `pendulum:objective`." };
+      return { ok: false, reason: `local mode on this machine cannot run ${h} on any of its accounts (${unready.map((u) => `\`${u.name}\``).join(", ")}); the loop's log names what is missing for each`, fix: "Set those accounts' logins up on this machine (doctor.mjs --local checks each), then resume through Draft." };
     }
     if (pin.account) account = pin.account;
     const problems = this.harnessReady(harness, account);
     if (!problems.length) return { ok: true, harness, hosts: chosen.hosts, account, ...(pin.account ? { pinned: true, pin: pin.label } : {}), ...(auto ? { auto } : {}) };
     // What is missing stays in this machine's log: a path or a probe's output never reaches GitHub (block()).
     log(`#${issue}: ${harness} cannot run here: ${problems.join("; ")}`);
-    return { ok: false, reason: `local mode on this machine cannot run ${harness}, which this Objective's harness label asks for; the loop's log names what is missing`, fix: "Set that harness up on this machine (doctor.mjs --local with PENDULUM_HARNESS set to it names what is missing) and re-apply `pendulum:objective`, or run the Objective where that harness is set up." };
+    return { ok: false, reason: `local mode on this machine cannot run ${harness}, which this Objective's harness label asks for; the loop's log names what is missing`, fix: "Set that harness up on this machine (doctor.mjs --local with PENDULUM_HARNESS set to it names what is missing) and resume through Draft, or run the Objective where that harness is set up." };
   }
 
   /**
@@ -2095,7 +2095,7 @@ export class Local {
     const times = count === 1 ? "" : count === 2 ? " twice in a row" : ` ${count} times in a row`;
     log(`#${issue}: ${what}${times ? " again" : ""}${judged}; Blocking it${where}`);
     try {
-      await this.block(issue, stage, `${said(postedError(failure))}${times} on this machine${judged}${where}`.replaceAll(homedir(), "~"), { cause: "pendulum", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `pendulum:objective`." } : {}) });
+      await this.block(issue, stage, `${said(postedError(failure))}${times} on this machine${judged}${where}`.replaceAll(homedir(), "~"), { cause: "pendulum", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then resume through Draft." } : {}) });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
@@ -2203,7 +2203,7 @@ export class Local {
     this.lapsed?.delete(issue);
     log(`#${issue}: Blocking it: ${reason}`);
     try {
-      await this.block(issue, result?.stage || "work", reason, { cause: "provider-quota", fix: `Re-apply \`pendulum:objective\` once a ${h} account is free again.` });
+      await this.block(issue, result?.stage || "work", reason, { cause: "provider-quota", fix: `Resume through Draft once a ${h} account is free again.` });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
@@ -2798,14 +2798,17 @@ export class Local {
     // Only GitHub's own 5xx is GitHub's status page's to judge: a pause on another host waits on, within the bound.
     const verdict = paused && serverDown(off.code) && !!off.server && off.origin === githubOrigin() && now - off.since < OUTAGE.blockMs ? await this.serverVerdict(issue, off) : null;
     const own = verdict?.block ?? null;
+    const draftOpts = { ...this.opts, cache: (this.timelines ??= new Map()) };
     if (paused && (own || now - off.since >= OUTAGE.blockMs)) {
+      const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
+      if (!data || stopCause(data, this.objectiveLabel()) || await readDraftActivationHold(this.repo, issue, this.objectiveLabel(), draftOpts)) return { exit: "skipped" };
       // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
       const back = serverDown(off.code) || !off.origin || (await probeHost(off.origin)) === null;
       const reason = own
-        ? `${lostText(off.host, off.code, off.endpoint)} from ${whenText(off.server.requestSince ?? off.since)}; ${own}, before and after one more try, so the failure is this request's, not a GitHub incident. Re-apply the label to run it again once that request is fixed.`
+        ? `${lostText(off.host, off.code, off.endpoint)} from ${whenText(off.server.requestSince ?? off.since)}; ${own}, before and after one more try, so the failure is this request's, not a GitHub incident. Resume through Draft to run it again once that request is fixed.`
         : serverDown(off.code)
-          ? `${lostText(off.host, off.code, off.endpoint)} from ${whenText(off.since)}, through ${pausesText(off.server?.pauses ?? 1)} over ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for ${off.host} failing. Re-apply the label to run it again once ${off.host} answers that request.`
-          : `${lostText(off.host, off.code)} from ${whenText(off.since)} for ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
+          ? `${lostText(off.host, off.code, off.endpoint)} from ${whenText(off.since)}, through ${pausesText(off.server?.pauses ?? 1)} over ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for ${off.host} failing. Resume through Draft to run it again once ${off.host} answers that request.`
+          : `${lostText(off.host, off.code)} from ${whenText(off.since)} for ${minutesText(now - off.since)}, past Pendulum's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: resume through Draft to run it again." : `${off.host} is still unreachable from this machine: resume through Draft once it answers.`}`;
       log(`#${issue}: ${reason}`);
       try {
         await this.block(issue, off.stage || "work", reason, { cause: own ? "pendulum" : "outage" });
@@ -2837,6 +2840,7 @@ export class Local {
       log(`#${issue}: its PR or issue could not be read (${String(e.message).slice(0, 120)}); the claim stays and the next tick tries again`);
       return { exit: "skipped" };
     }
+    if (stopCause(data, this.objectiveLabel()) || await readDraftActivationHold(this.repo, issue, this.objectiveLabel(), draftOpts)) return { exit: "skipped" };
     // A PR still waiting for its review pass goes to review (as pendingReviews); Running work (a first run, or a
     // send-back rebase) runs again; anything else (reviewed, waiting in the merge queue) needs nothing here.
     const next = stageFor({ pr, issue: data });
@@ -2985,7 +2989,7 @@ export class Local {
         // No longer Running (a person moved it): nothing of this loop's to undo or read again.
         failures.delete(issue);
       } else if (count >= START_FAILURES_BLOCK) {
-        await this.block(issue, "work", `could not start on this machine ${count} times in a row (${e.startFailed}${e.code ? `, ${e.code}` : ""}): ${error}. Fix the machine (disk space, the sandbox, the harness login), then re-apply the label.`);
+        await this.block(issue, "work", `could not start on this machine ${count} times in a row (${e.startFailed}${e.code ? `, ${e.code}` : ""}): ${error}. Fix the machine (disk space, the sandbox, the harness login), then resume through Draft.`);
         failures.delete(issue);
         if (!unknown) await dropClaim(this.repo, issue, this.holder, this.opts);
         this.lapsed?.delete(issue);
@@ -3478,8 +3482,8 @@ export class Local {
    * Open PRs labelled pendulum:review whose Objective is routed here and held by no loop: the label is the review trigger,
    * as on Actions. Not a draft PR (a Question or a Block: the reviewer waits for a person) nor a Blocked Objective's.
    * A Question's PR a person marked ready (#339) is one too, as the Action's ready_for_review event makes it: out of
-   * draft, its issue still a Question, marked ready after the Question was asked (readyAfter), and its Objective label
-   * not re-applied since by a person who can push (that reruns its work stage instead: the dispatcher's recovery). The review applies the answer;
+   * draft, its issue still a Question, marked ready after the Question was asked (readyAfter), and without an activation
+   * by a person who can push since it was asked (the dispatcher requeues those for work). The review applies the answer;
    * with none since the Question, a body still asking a `QUESTION:` makes it a Question again (review.mjs readyMark).
    */
   async pendingReviews() {
@@ -3495,13 +3499,13 @@ export class Local {
       const data = asked ?? (await getIssue(this.repo, issue, this.opts).catch(() => null));
       // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review.
       if (!data || isBlocked(data) || stopCause(data, this.objectiveLabel()) || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
+      const events = await timelineOf(this.repo, issue, cached).catch(() => null);
+      if (await readDraftActivationHold(this.repo, issue, this.objectiveLabel(), cached, events)) continue;
       if (asked) {
-        const events = await timelineOf(this.repo, issue, cached).catch(() => null);
-        // The Objective label re-applied since the Question by a person who can push (requeuedIn) is the go to run its
-        // work stage again: this tick's dispatch puts it back to Queued and picks it, so a ready mark beside it starts
-        // no review. A re-apply whose actor is unread waits with the dispatcher; anyone else's changes nothing.
-        const go = events ? await requeuedIn(events, this.objectiveLabel(), goTrust(events, issue, labelTrust(this.repo, this.opts))) : null;
-        if (!go || go.requeued || go.unread) continue;
+        // An activation since the Question by a person who can push runs its work stage again. Wait while Draft removal
+        // or the activation actor cannot be verified, as the dispatcher does.
+        const go = await requeuedIn(events, this.objectiveLabel(), goTrust(events, issue, labelTrust(this.repo, this.opts)));
+        if (go.requeued || go.unread) continue;
         const askedAt = labeledAtIn(events, "pendulum:question");
         if (!readyAfter(askedAt ? await timelineOf(this.repo, pr.number, cached).catch(() => []) : [], askedAt)) continue;
       }
@@ -4317,7 +4321,7 @@ const sessionIssueFile = (dir) => join(process.env.PENDULUM_IN || resolve(dir, s
 /** A session's refusal of an issue whose author, last editor or latest title renamer cannot vouch for it: the Blocked notice's words. */
 const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`);
 /** A draft (pendulum:draft) is run on no route, a session's included (lib/stop.mjs stopCause): the refusal and its fix. */
-const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Pendulum never runs; start it first (take ${DRAFT_LABEL} off and apply the Objective label, or ask "Start Pendulum Objective ${issue}")`);
+const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Pendulum never runs; start it first (ensure it has the Objective label, then remove ${DRAFT_LABEL}, or ask "Start Pendulum Objective ${issue}")`);
 
 /**
  * `pendulum issue <issue> [--out FILE]`: the issue as a session reads it (/pendulum:pendulum-run --here, /pendulum:pendulum-review-here), written

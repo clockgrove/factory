@@ -255,7 +255,7 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   const sandboxed = local || !!agent;
   const bwrap = sandboxed ? which("bwrap", { PATH: SAFE_PATH }) || (local ? which("bwrap", env) : null) : null;
   const socat = sandboxed ? which("socat", { PATH: SAFE_PATH }) || (local ? which("socat", env) : null) : null;
-  if (sandboxed && (!bwrap || !socat)) return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} needs ${[!bwrap && "bwrap", !socat && "socat"].filter(Boolean).join(" and ")} on this machine (it starts a forwarder in each command's sandbox); install it (sudo apt-get install -y bubblewrap socat), then re-apply pendulum:objective` });
+  if (sandboxed && (!bwrap || !socat)) return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} needs ${[!bwrap && "bwrap", !socat && "socat"].filter(Boolean).join(" and ")} on this machine (it starts a forwarder in each command's sandbox); install it (sudo apt-get install -y bubblewrap socat), then resume through Draft` });
   let dir;
   let group = null;
   let chgrp = null;

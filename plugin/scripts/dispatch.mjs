@@ -34,7 +34,8 @@ import { choiceOf } from "./lib/choice.mjs";
 import { readHolds } from "./lib/route-holds.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
 import { startsOf } from "./lib/objective-trust.mjs";
-import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, goNoted, goTrust, labelTrust, refusedMarker, requeuedIn, restartObjective, stopCause } from "./lib/stop.mjs";
+import { latestDraftEvent, RESUME_OBJECTIVE } from "./lib/activation.mjs";
+import { DRAFT_LABEL, DRAFT_ACTIVATION_REFUSED, RESTART_LABEL, STOP_GRACE_MS, applyStop, draftActivationHold, goNoted, goTrust, labelTrust, refusedMarker, requeuedIn, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { JOB_GRACE_MS, RELAUNCH_MAX, commentsOf, endedNotLost, jobEndedInStint, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintReads, stintRun, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
@@ -67,7 +68,7 @@ const UNCLAIMED_MS = 5 * 60_000;
 const UNCLAIMED_SAID = new Map();
 
 /** What a person does about a pendulum:local Objective no loop came back to for the claim pause (claim_pause_hours). */
-const SERVE_FIX = "start `pendulum serve` on the machine that runs it, then re-apply the label";
+const SERVE_FIX = "start `pendulum serve` on the machine that runs it, then resume through Draft";
 
 /**
  * Today's spend (UTC day) against daily_usd: the spend lines every stage writes in its progress comment (backend.mjs
@@ -247,7 +248,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
     const from = stage === "review" ? "pendulum:in-review" : "pendulum:running";
     issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== from), { name: "pendulum:blocked" }];
     log(`  #${n}: its ${stage} launch (dispatcher run ${run}) unread for over a day (${read}: ${code}); Blocked`);
-    if (!dryRun) await blockLocalWait(n, null, `its ${stage} launch, named by dispatcher run ${run}, has been unknown for over a day: ${read} could not be read (${code}), so Pendulum cannot tell whether it started; re-apply the label once GitHub answers that read`, "pendulum");
+    if (!dryRun) await blockLocalWait(n, null, `its ${stage} launch, named by dispatcher run ${run}, has been unknown for over a day: ${read} could not be read (${code}), so Pendulum cannot tell whether it started; resume through Draft once GitHub answers that read`, "pendulum");
   };
   // A launch grace for the Objective whose launch job just failed (its tick names it): the grace's end is a wake of
   // its own, not a wait for the cron, since that launch will not come.
@@ -255,6 +256,11 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
   const retry = (what) => {
     if (!deadlines.some((d) => d.kind === "retry")) due(null, "retry", now.getTime() + RETRY_WAKE_MS);
     log(`${what} unread this tick; a retry is due`);
+  };
+  const draftRemovalUnread = (n, events) => {
+    if (latestDraftEvent(events)?.event !== "labeled") return false;
+    retry(`#${n}'s Draft removal`);
+    return true;
   };
   // The sandbox record of Objective n, as `{ record }` (null: none written), or null when its comments could not be
   // read: a failed read is no absent record, so the caller decides nothing on that Objective this tick (#430).
@@ -272,11 +278,11 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
   // Pendulum's note that a go was not taken (stop.mjs refusedMarker), once per go: one already on the timeline read here
   // costs no call. `stays`: the state the Objective keeps.
   const refuseGo = async (n, events, r, stays) => {
-    if (dryRun || goNoted(events, n, r.at)) return;
+    if (dryRun || goNoted(events, n, r)) return;
     const who = r.actor?.login || "someone";
     const what = r.draft ? `\`${DRAFT_LABEL}\` taken off` : `\`${inputs.objectiveLabel}\` ${stays === "Queued" ? "applied" : "re-applied"}`;
     log(`  #${n}: ${what} by ${who}, who cannot push and is no maintainer the workflow names: not taken`);
-    await upsertComment(repo, n, refusedMarker(n, r.at), `Pendulum: ${what} by ${who} was not taken, so the Objective stays ${stays}${stays === "Queued" ? " and does not run" : ""}: only someone who can push to this repository, or a maintainer the workflow names, can run it by applying \`${inputs.objectiveLabel}\`.`, opts).catch((e) => log(`  #${n}: refusal note: ${String(e?.message || e).slice(0, 120)}`));
+    await upsertComment(repo, n, refusedMarker(n, r), `Pendulum: ${what} by ${who} was not taken, so the Objective stays ${stays}${stays === "Queued" ? " and does not run" : ""}. Someone who can push to this repository, or a maintainer the workflow names, can ${RESUME_OBJECTIVE}.`, opts).catch((e) => log(`  #${n}: refusal note: ${String(e?.message || e).slice(0, 120)}`));
   };
   // The Action's live jobs (work and review, by Objective), read at most once a tick for the restart and recovery passes;
   // a read that fails is `{failed}`.
@@ -428,18 +434,22 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
   }
   watch.mark("restart");
 
-  // Recovery: a Blocked, Question or In-review issue (a PR closed unmerged by a human)
-  // whose pendulum:objective label was re-applied after it stopped is Queued again (the
-  // plan's "re-apply the label"). An explicit --issue from workflow_dispatch is the same
-  // human intent. Only a person who can push, or a pinned maintainer, gives that go (requeuedIn, mayGo): anyone else's
-  // re-apply changes nothing, and one comment on the issue says so. On the Action's route a Question's review job still
-  // running (its PR marked ready beside the label: review.mjs readyOwner stands it down) is waited for first, so the
-  // work stage never starts beside it.
+  // Recovery: a trusted activation after a Block, Question or In-review label puts the Objective back in Queued.
+  // Draft removal and legacy Objective label application use the same permission check (requeuedIn, mayGo), and an
+  // unauthorized activation gets one comment. An explicit --issue from workflow_dispatch counts as human intent.
+  // On Actions, a live Question review ends first (review.mjs readyOwner), so work never starts beside it.
   const reset = [];
-  // Objectives this pass decides nothing on this tick (who re-applied the label unread, a review job still running).
+  // Objectives this pass is waiting on this tick (unread activation or live review job).
   const recoveryWaits = new Set();
   // Each timeline read here, kept for the relaunch pass below (its outage notice and record are on it too).
   const timelines = {};
+  const draftHeld = async (n, events) => {
+    const hold = await draftActivationHold(events, n, inputs.objectiveLabel, mayGo);
+    if (!hold) return false;
+    log(`  #${n}: ${hold}`);
+    if (hold !== DRAFT_ACTIVATION_REFUSED) retry(`#${n}'s Draft activation`);
+    return true;
+  };
   for (const issue of wanted) {
     const n = issue.number;
     const state = stateOf(issue, statuses[n] ?? null);
@@ -449,14 +459,19 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
     if (!again) {
       timelines[n] = await timelineOf(repo, n, cached).catch(() => null);
       if (!timelines[n]) continue;
+      if (draftRemovalUnread(n, timelines[n])) {
+        recoveryWaits.add(n);
+        continue;
+      }
       const go = await requeuedIn(timelines[n], inputs.objectiveLabel, goTrust(timelines[n], n, mayGo));
       if (go.unread) {
         recoveryWaits.add(n);
-        log(`  #${n}: who re-applied ${inputs.objectiveLabel} could not be checked; next tick`);
-        retry(`#${n}'s re-apply permission`);
+        log(`  #${n}: who requested activation could not be checked; next tick`);
+        retry(`#${n}'s activation permission`);
         continue;
       }
       for (const r of go.refused) await refuseGo(n, timelines[n], r, state);
+      if (go.refused.some((r) => r.draft)) recoveryWaits.add(n);
       again = go.requeued;
       goAt = go.at ?? null;
     }
@@ -468,14 +483,14 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       const unreadPast = jobs.failed && (!goAt || githubNow() - Date.parse(goAt) >= STOP_GRACE_MS);
       if (jobs.failed && !unreadPast) {
         recoveryWaits.add(n);
-        log(`  #${n}: ${inputs.objectiveLabel} re-applied, but the live jobs could not be read to see whether a review job of it runs; next tick`);
+        log(`  #${n}: activation requested, but live jobs could not be read to see whether a review job of it runs; next tick`);
         retry("live jobs");
         continue;
       }
-      if (unreadPast) log(`  #${n}: the live jobs are still unread ${Math.round(STOP_GRACE_MS / 60_000)} min after ${inputs.objectiveLabel} was re-applied; requeued`);
+      if (unreadPast) log(`  #${n}: the live jobs are still unread ${Math.round(STOP_GRACE_MS / 60_000)} min after activation was requested; requeued`);
       else if (jobs.review.has(n)) {
         recoveryWaits.add(n);
-        log(`  #${n}: ${inputs.objectiveLabel} re-applied while a review job of it is running; requeued once it ends`);
+        log(`  #${n}: activation requested while a review job of it is running; requeued once it ends`);
         retry(`#${n}'s review job`);
         continue;
       }
@@ -636,7 +651,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
         : (e.event === "labeled" || e.event === "unlabeled") && isSelf({ user: e.actor }) && recent(e.created_at),
     );
   };
-  const unreadReason = (hold, what) => `${what} for over ${pauseText} and its local claim cannot be read or checked (${hold.reason}); re-apply the label once GitHub answers that read`;
+  const unreadReason = (hold, what) => `${what} for over ${pauseText} and its local claim cannot be read or checked (${hold.reason}); resume through Draft once GitHub answers that read`;
   // In review with its review owed (an open PR, not a draft, labelled pendulum:review, or unlabelled with a third-party
   // wait record no review has taken up since: third-party-review.mjs): only a local loop runs that review, so it waits
   // as a Running one does, counted from the later of its entering In review and the PR's last pendulum:review label (a
@@ -762,6 +777,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       }
       const block = outageBlockOf(commentsOf(events), n, lastRunningAt(events));
       if (!block) continue;
+      if (await draftHeld(n, events)) continue;
       const d = await decideLost(n, events, { lost: "outage", key: block.key });
       if (!d.block) {
         if (capHold(n)) continue;
@@ -776,7 +792,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       relaunchesUsed.push(n);
       if (dryRun) continue;
       const pr = await findPr(repo, `pendulum/${n}`, opts).catch(() => null);
-      await applyExit(repo, { issue: n, pr, exit: "blocked", reason: why, fix: "Re-apply `pendulum:objective` once the runner's or the sandbox's network is back; the relaunch count starts over.", cause: "outage", notify: inputs.notify, stage: "relaunch" }, opts).catch((e) => {
+      await applyExit(repo, { issue: n, pr, exit: "blocked", reason: why, fix: "Resume through Draft once the runner's or the sandbox's network is back; the relaunch count starts over.", cause: "outage", notify: inputs.notify, stage: "relaunch" }, opts).catch((e) => {
         log(`  #${n}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`);
         retry(`#${n}'s Block`);
       });
@@ -828,6 +844,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
             leaseDue(issue.number, record);
             continue;
           }
+          if (await draftHeld(issue.number, await timeline())) continue;
           if (record?.waiting === "checks") {
             if (await checksFinished(issue.number, record)) {
               relaunch.push(issue.number);
@@ -866,6 +883,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
         // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for the claim pause. A read that
         // failed (the timeline, the claim or its author's check) is no answer: nothing rests on it, the next tick reads again.
         const read = (await timeline()) ? { at: lastRunningAt(events) } : null;
+        if (read && await draftHeld(issue.number, events)) continue;
         const hold = read && (await localWait(issue, read.at));
         if (!read || (hold?.state === "unread" && !(backend().trigger.tends(issue) && (await unreadLapsed(issue.number, hold, read.at))))) {
           log(`  #${issue.number}: ${read ? `local claim unread (${hold.reason})` : "Running time unread"}; left alone this tick`);
@@ -1102,6 +1120,8 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
         // A restart waiting for its stage to stop: nothing merges, updates or sends it back meanwhile.
         if (restarting[issue.number]) continue;
         if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
+        timelines[issue.number] ??= await timelineOf(repo, issue.number, cached).catch(() => null);
+        if (await draftHeld(issue.number, timelines[issue.number])) continue;
         let prRead = true;
         const open = kept ? kept.open : await findPr(repo, `pendulum/${issue.number}`, opts).catch(() => ((prRead = false), null));
         // Read once this tick: the sibling ordering below takes it rather than read it again (overlap.mjs prFinder).
@@ -1122,7 +1142,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
             log(`  #${issue.number}: a split part merged; the next part is queued`);
           } else if (next === "cap") {
             statuses[issue.number] = "Blocked";
-            await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", cause: "work", reason: `split into ${inputs.maxParts ?? MAX_PARTS} PRs and work still remains (max_parts); finish it by hand, narrow the issue or raise max_parts, then re-apply the label`, notify: inputs.notify, stage: "dispatch" }, opts);
+            await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", cause: "work", reason: `split into ${inputs.maxParts ?? MAX_PARTS} PRs and work still remains (max_parts); finish it by hand, narrow the issue or raise max_parts, then resume through Draft`, notify: inputs.notify, stage: "dispatch" }, opts);
           }
           continue;
         }
@@ -1344,7 +1364,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
             queueTimeout = await queueTimeoutMin(repo, opts);
             hungMs = queueHungMs(queueTimeout);
           }
-          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, queueTimeout, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, opts).catch((e) => {
+          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, queueTimeout, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, issueData: issue, issueEvents: timelines[issue.number], thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, opts).catch((e) => {
             log(`  #${issue.number}: merge: ${String(e.message).slice(0, 160)}`);
             return null;
           });
@@ -1460,7 +1480,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
   }
 
   // Who started each pick (its latest start: the label applied or the draft label taken off, objective-trust.mjs
-  // startsOf) must be a person who can push or a pinned maintainer (stop.mjs labelTrust), as for a re-apply above: one
+  // startsOf) must be a person who can push or a pinned maintainer (stop.mjs labelTrust), as for recovery above: one
   // anyone else started is held Queued, never run, with one note. Unread waits a tick. Checked on the picks alone, again
   // until every pick is one a person started; a requeue or restart this tick, or one named by hand, was a person's go.
   const startChecked = new Set([...reset, ...restarted, ...(inputs.issue ? [inputs.issue] : [])]);
@@ -1471,7 +1491,13 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       retry(`#${n}'s timeline`);
       return "who started it is unread (its timeline); next tick";
     }
+    if (draftRemovalUnread(n, events)) return "Draft removal is not yet visible on its timeline; next tick";
     const start = startsOf(events, inputs.objectiveLabel)[0];
+    const draft = latestDraftEvent(events);
+    if (draft && (!start || Date.parse(start.created_at) < Date.parse(draft.created_at))) {
+      retry(`#${n}'s Draft activation`);
+      return "its Draft removal has no matching Objective activation; next tick";
+    }
     if (!start) return null;
     // A restart since (Pendulum's record of a person's restart, logic.mjs restartedAt) is the newer start, as personStart reads.
     const restart = restartedAt(commentsOf(events));
@@ -1482,7 +1508,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       retry(`#${n}'s start permission`);
       return "who started it could not be checked; next tick";
     }
-    await refuseGo(n, events, { at: start.created_at, actor: start.actor ?? null, draft: start.event === "unlabeled" }, "Queued");
+    await refuseGo(n, events, { at: start.created_at, id: start.id, actor: start.actor ?? null, draft: start.event === "unlabeled" }, "Queued");
     return `started by ${start.actor?.login || "someone"}, who cannot push and is no maintainer the workflow names: not run`;
   };
   const pick = () =>

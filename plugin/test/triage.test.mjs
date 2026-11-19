@@ -599,7 +599,7 @@ test("again: the failed jobs of a head a fix pass left unchanged are rerun once,
     assert.equal(r.rerun, false);
     assert.deepEqual(r.refused, { status: 403, permission: true, rateLimited: false, where: "local", unchanged: true });
     const { refusedRerunText } = await import("../scripts/lib/triage.mjs");
-    assert.equal(refusedRerunText(r.refused), "GitHub refused the rerun of the failed jobs (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label");
+    assert.equal(refusedRerunText(r.refused), "GitHub refused the rerun of the failed jobs (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then resume through Draft");
     assert.equal((await t.again({ sha: "f".repeat(40), failedRuns: [{ ...red41[0], id: 48 }] })).refused.earlier, true, "refused once on the Objective: not asked again");
   });
   rmSync(home, { recursive: true, force: true });
@@ -704,7 +704,7 @@ test("validation loop: a fix pass that commits nothing never counts the same red
   const lead = `the fix pass changed nothing, so the red on 9999999 is unchanged (quality (required check): ${supplyChain})`;
   // The work's red: one fresh worker pass after the fix pass, which changed nothing either; the Block names both.
   const both = `the fix pass and the fresh worker pass after it changed nothing, so the red on 9999999 is unchanged (quality (required check): ${supplyChain})`;
-  const remedy = "read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then re-apply the label";
+  const remedy = "read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then resume through Draft";
 
   // The real run: flaky at 0.55, below the bar, so a fix pass runs and commits nothing; the rerun is red again.
   const again = await run();
@@ -846,7 +846,7 @@ async function freshRun({ before = testFailed, after = before, logBefore = faili
   }
 }
 // What the unchanged red's Block says on 9999999 before any fresh-pass clause.
-const unchangedLead = `the fix pass changed nothing, so the red on 9999999 is unchanged (quality (required check): ${supplyChain}); its failed jobs were rerun once and failed again; read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then re-apply the label`;
+const unchangedLead = `the fix pass changed nothing, so the red on 9999999 is unchanged (quality (required check): ${supplyChain}); its failed jobs were rerun once and failed again; read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then resume through Draft`;
 
 test("validation loop: a red on Pendulum's own catch-up merge gets its fix pass unjudged; the red after that pass is judged (#399)", async () => {
   const { validationLoop } = await import("../scripts/lib/session.mjs");

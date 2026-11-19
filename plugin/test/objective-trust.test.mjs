@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setMaintainers } from "../scripts/lib/logic.mjs";
-import { AUTHOR_FIX, authorGate, trustedIssue } from "../scripts/lib/objective-trust.mjs";
+import { DRAFT_LABEL } from "../scripts/lib/activation.mjs";
+import { AUTHOR_FIX, authorGate, startsOf, trustedIssue } from "../scripts/lib/objective-trust.mjs";
 import { blockedLine } from "../scripts/lib/session.mjs";
 import { inFiles } from "../scripts/lib/handoff.mjs";
 
@@ -26,6 +27,32 @@ const gh = ({ author, editor = null, lastEditedAt = editor ? "2026-11-09T10:00:0
   permission: async (_, login) => perms[login] ?? null,
 });
 const rest = { number: 7, title: "Objective", body: "Build the thing.", labels: [{ name: "pendulum:objective" }] };
+
+test("objective activation leaves identity alone and uses the latest Draft removal for runtime trust", () => {
+  const e = (event, name, created_at, login) => ({ event, label: { name }, created_at, actor: { login, type: "User" } });
+  const createAt = "2031-03-02T01:00:00Z";
+  const startAt = "2031-03-02T01:01:00Z";
+  const identity = e("labeled", "pendulum:objective", createAt, "writer");
+  const held = e("labeled", DRAFT_LABEL, createAt, "writer");
+  const first = e("unlabeled", DRAFT_LABEL, startAt, "maintainer");
+  const laterHold = e("labeled", DRAFT_LABEL, startAt, "maintainer");
+  const later = e("unlabeled", DRAFT_LABEL, startAt, "triager");
+  const duplicateIdentity = e("labeled", "pendulum:objective", createAt, "triager");
+  const duplicateRelease = e("unlabeled", DRAFT_LABEL, startAt, "writer");
+  for (const creation of [[identity, held], [held, identity]]) {
+    assert.deepEqual(startsOf(creation, "pendulum:objective"), []);
+    assert.deepEqual(startsOf([...creation, first, laterHold, later], "pendulum:objective"), [later, first]);
+  }
+  assert.deepEqual(startsOf([identity], "pendulum:objective"), [identity], "legacy identity-only activation");
+  assert.deepEqual(startsOf([identity, duplicateIdentity, held], "pendulum:objective"), [], "duplicate applications cannot leave the Draft with an early clock");
+  assert.deepEqual(startsOf([identity, duplicateIdentity], "pendulum:objective"), [identity], "a duplicate cannot take over the legacy Objective activation");
+  assert.deepEqual(startsOf([identity, held, first, duplicateRelease, laterHold, later], "pendulum:objective"), [later, first], "only real Draft removals activate");
+  const reportedRelease = { ...first, id: 101 };
+  assert.deepEqual(startsOf([identity, held, reportedRelease, laterHold, { ...reportedRelease }, later], "pendulum:objective"), [later, reportedRelease], "a repeated event ID after a real hold cannot consume the next release");
+  assert.deepEqual(startsOf([held, first], "pendulum:objective"), [first], "runtime can vouch for a currently-labelled Objective");
+  const removed = e("unlabeled", "pendulum:objective", startAt, "writer");
+  assert.deepEqual(startsOf([identity, held, removed, first], "pendulum:objective"), [], "Draft removal without the recorded identity does not activate");
+});
 
 test("objective trust: a stranger's body Blocks, naming the stranger, and no text comes back", async () => {
   const t = await trustedIssue(repo, 7, rest, {}, gh({ author: user("stranger") }));
@@ -109,7 +136,7 @@ test("objective trust: a triager's rename before the first plan Blocks, naming t
   assert.equal(t.issueData, undefined, "no title or body for a harness");
   assert.match(t.reason, /^the issue's title was last renamed by `reader`, who cannot push to acme\/app and is not a pinned maintainer, so Pendulum acts on none of its text$/);
   assert.deepEqual(applied, [{ issue: 7, pr: null, exit: "blocked", reason: t.reason, fix: AUTHOR_FIX["title renamer"], cause: "setup", notify: "boss", stage: "author" }], "Blocked as an untrusted body is, resumed once a writer renames it");
-  assert.match(blockedLine({ issue: 7, stage: "author", reason: t.reason, fix: AUTHOR_FIX["title renamer"] }), /person who can push read the title and change it \(saving the same title records no rename; .* re-apply `pendulum:objective`/);
+  assert.match(blockedLine({ issue: 7, stage: "author", reason: t.reason, fix: AUTHOR_FIX["title renamer"] }), /person who can push read the title and change it \(saving the same title records no rename; .* add `pendulum:draft` if it is missing, then remove it to resume/);
   const stranger = await trustedIssue(repo, 7, rest, {}, gh({ author: user("kirk"), renamed: [user("stranger")] }));
   assert.match(stranger.reason, /title was last renamed by `stranger`, who cannot push/);
 });

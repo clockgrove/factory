@@ -1,6 +1,5 @@
 // Draft Objectives (#204): an issue with `pendulum:draft` is never run, on any route, even with `pendulum:objective` on
-// it too: no dispatch, no claim, no spend. Starting one takes the draft label off and applies the Objective label; the
-// scorecard's clock starts there.
+// it too: no dispatch, no claim, no spend. Removing Draft starts an admitted Objective and keeps its identity.
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -65,6 +64,7 @@ function fakeApi({ issues = () => [], pr = () => null, timeline = () => [], issu
     if (method === "GET" && onePr) return json({ number: Number(onePr[1]), state: "open", draft: false, node_id: `PR_${onePr[1]}`, mergeable_state: "clean", head: { sha: "a".repeat(40), ref: "pendulum/7" }, base: { ref: "main" }, labels: [] });
     if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json(timeline(Number(/issues\/(\d+)\//.exec(u.pathname)[1])));
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    if (method === "GET" && u.pathname.endsWith("/collaborators/triager/permission")) return json({ permission: "triage" });
     if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(u.pathname)) return json({ workflow_runs: [] });
     if (method === "GET" && u.pathname.endsWith("/actions/artifacts")) return json({ artifacts: [] });
     if (method === "GET" && /\/comments$/.test(u.pathname)) return json([]);
@@ -117,6 +117,33 @@ test("dispatcher: a draft is never picked or restarted, even beside pendulum:obj
   assert.deepEqual(one.writes, []);
 });
 
+test("dispatcher waits for the Draft removal event and starts with Objective identity retained", async () => {
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  const actor = { login: "maintainer", type: "User" };
+  const at = (minutesAgo) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  const record = (event, name, created_at) => ({ event, label: { name }, actor, created_at });
+  // The issue listing already shows Draft off. Its timeline still shows the issue as held for editing.
+  const timeline = [record("labeled", OBJ, at(3)), record("labeled", DRAFT_LABEL, at(2))];
+  const tick = () => withApi({}, async () => {
+    setSelf("pendulum-app[bot]");
+    const api = fakeApi({ issues: (label) => (label === OBJ ? [issue([OBJ])] : []), timeline: () => timeline });
+    try {
+      return { result: await dispatch(INPUTS, { token: "t" }), writes: api.writes };
+    } finally {
+      api.restore();
+      setSelf(null);
+    }
+  });
+  const unread = await tick();
+  assert.deepEqual(unread.result.ready, []);
+  assert.match(unread.result.skipped[0].reason, /Draft removal is not yet visible/);
+
+  timeline.push(record("unlabeled", DRAFT_LABEL, at(1)));
+  const ready = await tick();
+  assert.deepEqual(ready.result.ready, [7]);
+  assert.ok(!ready.writes.includes(`DELETE /issues/7/labels/${OBJ}`));
+});
+
 test("the merge pass never merges a draft's PR, whoever runs it", async () => {
   const { mergeReadyOne } = await import("../scripts/lib/session.mjs");
   await withApi({}, async () => {
@@ -126,6 +153,43 @@ test("the merge pass never merges a draft's PR, whoever runs it", async () => {
       assert.ok(!api.writes.some((w) => /merge/.test(w)));
     } finally {
       api.restore();
+    }
+  });
+});
+
+test("merge and cloud review wait for a visible and authorized Draft removal", async () => {
+  const { launchOne } = await import("../scripts/launch.mjs");
+  const { mergeReadyOne } = await import("../scripts/lib/session.mjs");
+  const actor = { login: "maintainer", type: "User" };
+  const timeline = [
+    { event: "labeled", label: { name: OBJ }, created_at: "2026-10-10T10:00:00Z", actor },
+    { event: "labeled", label: { name: DRAFT_LABEL }, created_at: "2026-10-10T10:10:00Z", actor },
+  ];
+  const removeDraft = (minute, by) => ({ event: "unlabeled", label: { name: DRAFT_LABEL }, created_at: `2026-10-10T10:${minute}:00Z`, actor: by });
+  await withApi({}, async () => {
+    setSelf("pendulum-app[bot]");
+    const api = fakeApi({ timeline: (n) => n === 7 ? timeline : [], issue: (n) => n === 7 ? issue([OBJ, "pendulum:in-review"]) : null });
+    const merge = () => mergeReadyOne(REPO, { issue: 7, prNumber: 70, queue: false, objectiveLabel: OBJ }, { token: "t" });
+    const launch = () => launchOne({
+      inputs: { ...INPUTS, appToken: "t" },
+      eventName: "pull_request",
+      payload: { action: "ready_for_review", sender: actor, pull_request: { number: 70, head: { ref: "pendulum/7", repo: { full_name: REPO.full } } } },
+      gate: true,
+    });
+    try {
+      assert.equal(await merge(), "pending");
+      assert.match((await launch()).reason, /Draft removal is not yet visible/);
+      timeline.push(removeDraft(11, { login: "triager", type: "User" }));
+      assert.equal(await merge(), "pending");
+      assert.match((await launch()).reason, /Draft activation was not authorized/);
+      assert.deepEqual(api.writes, []);
+
+      timeline.push({ ...timeline[1], created_at: "2026-10-10T10:12:00Z" }, removeDraft(13, actor));
+      assert.equal(await merge(), "not-recorded", "an authorized removal passes Draft admission to normal merge validation");
+      assert.equal((await launch()).exit, "start", "an authorized removal passes Draft admission to the launcher");
+    } finally {
+      api.restore();
+      setSelf(null);
     }
   });
 });
@@ -178,4 +242,10 @@ test("a Blocked or Question Objective made a draft and started by taking the dra
   }
   // A draft removal from before the Block is no restart of the Blocked run.
   assert.equal(await run([ev("labeled", DRAFT_LABEL, at(1)), ev("labeled", OBJ, at(1)), ev("unlabeled", DRAFT_LABEL, at(2)), ev("labeled", "pendulum:blocked", at(3))]), false);
+  // A state change and a maintainer's recovery can share a second. The timeline records their order.
+  const held = [ev("labeled", OBJ, at(1)), ev("labeled", DRAFT_LABEL, at(2))];
+  const blocked = ev("labeled", "pendulum:blocked", at(3));
+  const activated = ev("unlabeled", DRAFT_LABEL, at(3));
+  assert.equal(await run([...held, blocked, activated]), true);
+  assert.equal(await run([...held, activated, blocked]), false);
 });

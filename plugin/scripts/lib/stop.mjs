@@ -1,12 +1,15 @@
-// A person's stop of one Objective (docs/USAGE.md, "An Objective's lifecycle"): its `pendulum:objective` label removed,
-// its issue closed, or `pendulum:draft` applied (a draft never runs, its Objective label on or not); and its restart from the issue's current text (`pendulum:restart`), which stops a running stage
-// the same way before the dispatcher discards what the earlier run left (restartObjective). No tick, loop or relaunch picks a stopped Objective (they list only labelled, open issues); this
+// A person's stop of one Objective (docs/USAGE.md, "An Objective's lifecycle"): `pendulum:draft` applied, its issue
+// closed, or its Objective label removed on an older workflow. A restart (`pendulum:restart`) stops a running stage
+// before the dispatcher discards what the earlier run left (restartObjective). No tick, loop or relaunch picks a stopped Objective; this
 // module is the rest of it: the cause read from the issue, the running stage's own stop (its watch on its issue, the
 // abort every harness pass of the stage listens to, its claim on the exit), and the tidy that leaves the Objective
 // stopped (its PR a draft without the review label, its state label off, its card back in Queued).
-import { collaboratorPermission, dequeuePr, findPr, findProject, getIssue, getPr, listComments, mergeQueueEntry, moveCard, removeLabel, rest, setDraft, setStateLabel, upsertComment } from "./github.mjs";
+import { collaboratorPermission, dequeuePr, findPr, findProject, getIssue, getPr, labeledAtIn, listComments, listTimeline, mergeQueueEntry, moveCard, removeLabel, rest, setDraft, setStateLabel, upsertComment } from "./github.mjs";
+import { DRAFT_LABEL, activationEvents, latestDraftEvent } from "./activation.mjs";
 import { log } from "./inputs.mjs";
 import { REVIEW_LABEL, isSelf, knownWriter, marker, pinnedMaintainer, restartedAt, trustedAuthor } from "./logic.mjs";
+
+export { DRAFT_LABEL };
 
 /** How often a running stage reads its issue for a stop. */
 export const STOP_POLL_MS = 60_000;
@@ -28,12 +31,6 @@ export const STOP_GRACE_MS = 10 * 60_000;
 
 /** The label a person applies to restart an Objective from its issue's current text, in any state. */
 export const RESTART_LABEL = "pendulum:restart";
-/**
- * The label of a draft Objective: an issue Pendulum never runs (no dispatch, claim or spend, on any route) while it is
- * on, even beside the Objective label. Starting a draft takes it off and applies the Objective label.
- */
-export const DRAFT_LABEL = "pendulum:draft";
-
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
 
 /**
@@ -55,45 +52,92 @@ export function labelTrust(repo, opts) {
   };
 }
 
-/** The marker of Pendulum's note that the go at `at` (a label event's time) on issue `n` was not taken (one per go). */
-export const refusedMarker = (n, at) => marker(n, "relabel-refused", String(at || "").replace(/[^0-9TZ]/g, ""));
+/** The marker of Pendulum's note that an activation on issue `n` was refused. */
+export const refusedMarker = (n, { id, at }) =>
+  marker(n, "relabel-refused", Number.isSafeInteger(id) && id > 0 ? `id-${id}` : String(at || "").replace(/[^0-9TZ]/g, ""));
 
 /**
  * `trusted` (labelTrust) on the issue's timeline `events`: a go Pendulum's note there already refused (refusedMarker) is
  * refused again with no read, so a refusal holds for good and costs nothing at later ticks.
  */
 export function goTrust(events, n, trusted) {
-  return async (actor, e) => (e && goNoted(events, n, e.created_at) ? false : trusted(actor, e));
+  return async (actor, e) => (e && goNoted(events, n, { at: e.created_at, id: e.id }) ? false : trusted(actor, e));
 }
 
-/** Whether Pendulum's note that the go at `at` was not taken (refusedMarker) is on the issue's timeline `events`. */
-export const goNoted = (events, n, at) => (events || []).some((e) => e?.event === "commented" && isSelf({ user: e.user ?? e.actor }) && (e.body || "").startsWith(refusedMarker(n, at)));
+/** A refusal marked only by time predates event IDs. Keep that refusal valid for its recorded second. */
+export function goNoted(events, n, activation, mine = isSelf) {
+  const current = refusedMarker(n, activation);
+  const legacy = refusedMarker(n, { at: activation.at });
+  return (events || []).some((e) => e && (!e.event || e.event === "commented") && (e.body?.startsWith(current) || e.body?.startsWith(legacy)) && mine({ ...e, user: e.user ?? e.actor }));
+}
 
-/** The states a person's go (the Objective label re-applied) puts back to Queued: their labels, by the issue's timeline. */
+export const DRAFT_REMOVAL_UNREAD = "Draft removal is not yet visible on the Objective's timeline";
+export const DRAFT_ACTIVATION_REFUSED = "the Objective's Draft activation was not authorized";
+
+/**
+ * The Draft-specific activation fence for paths that resume a stage, review or merge it without a normal queued pick.
+ * Old Objectives with no Draft event continue under their existing admission rules.
+ */
+export async function draftActivationHold(events, n, label, trusted) {
+  if (!events) return "the Objective's activation timeline could not be read";
+  const draft = latestDraftEvent(events);
+  if (!draft) return null;
+  if (draft.event === "labeled") return DRAFT_REMOVAL_UNREAD;
+  const activation = activationEvents(events, label, { assumeObjective: true }).at(-1);
+  if (!activation || Date.parse(activation.created_at) < Date.parse(draft.created_at)) return "the Objective has no activation after Draft";
+  const restart = restartedAt(events.filter((e) => e?.event === "commented").map((e) => ({ ...e, user: e.user ?? e.actor })));
+  if (restart && Date.parse(restart) >= Date.parse(activation.created_at)) return null;
+  const ok = await goTrust(events, n, trusted)(activation.actor ?? null, activation);
+  if (ok === true) return null;
+  return ok === "unread" ? "the Objective's Draft activation permission could not be checked" : DRAFT_ACTIVATION_REFUSED;
+}
+
+export async function readDraftActivationHold(repo, n, label, opts, events = undefined) {
+  if (events === undefined) events = await listTimeline(repo, n, opts).catch(() => null);
+  return draftActivationHold(events, n, label, labelTrust(repo, opts));
+}
+
+/** Recovery resets a counter at its latest legacy/state marker or a later, trusted Draft removal. */
+export async function recoveryEpoch(repo, n, label, opts, { states = [], events = undefined } = {}) {
+  if (events === undefined) events = await listTimeline(repo, n, opts);
+  const legacy = labeledAtIn(events, [label, ...states]);
+  const trusted = goTrust(events, n, labelTrust(repo, opts));
+  for (const e of activationEvents(events, label, { assumeObjective: true }).reverse()) {
+    if (legacy && Date.parse(e.created_at) <= Date.parse(legacy)) break;
+    if (e.label.name !== DRAFT_LABEL) continue;
+    const ok = await trusted(e.actor ?? null, e);
+    if (ok === true) return e.created_at;
+    if (ok === "unread") throw new Error("the Objective's Draft activation permission could not be checked");
+  }
+  return legacy;
+}
+
+/** The states an activation puts back to Queued, as recorded on the issue's timeline. */
 export const REQUEUED_FROM = ["pendulum:blocked", "pendulum:question", "pendulum:in-review"];
 
 /**
- * Whether a person re-applied the Objective `label` (or started it from a draft: its DRAFT_LABEL taken off) after its last
+ * Whether a person removed Draft or applied the legacy Objective `label` after its last
  * Block, Question or In review, on the issue's timeline `events`: the go that puts it back to Queued for its work stage
  * (the dispatcher's recovery). serve's pendingReviews and the review job's start read the same rule, so a ready mark
  * beside such a go starts no review. A go counts only when `trusted` (labelTrust) holds for its actor; anyone else's
  * changes nothing. Only the newest go decides, as for a pick (dispatch.mjs): taking the label off is a stop, so an
  * earlier go by a writer does not outlive anyone's later remove and re-apply. Returns `{requeued, at, unread, refused}`
- * (`at`: the go that counted): `unread` when the check of its actor could not be made for now (nothing is decided on
- * it), and `refused`, when neither, the go that did not count (`[{at, actor, draft}]`, `draft` for a draft's start).
+ * (`at`: the activation that counted): `unread` when Draft removal or the actor could not be verified, and
+ * `refused`, when neither, the activation that did not count (`[{at, id, actor, draft}]`).
  */
 export async function requeuedIn(events, label, trusted) {
-  let since = null;
-  for (const e of events || []) if (e?.event === "labeled" && REQUEUED_FROM.includes(e.label?.name)) since = e.created_at;
   const out = { requeued: false, unread: false, refused: [] };
-  if (!since) return out;
-  const go = (e) => (e?.event === "labeled" && e.label?.name === label) || (e?.event === "unlabeled" && e.label?.name === DRAFT_LABEL);
-  const e = (events || []).filter((x) => go(x) && x.created_at > since).at(-1);
-  if (!e) return out;
+  if (latestDraftEvent(events)?.event === "labeled") return { ...out, unread: true };
+  const state = events?.findLastIndex((e) => e?.event === "labeled" && REQUEUED_FROM.includes(e.label?.name)) ?? -1;
+  const e = activationEvents(events, label, { assumeObjective: true }).at(-1);
+  // GitHub timestamps have second precision. For a tied timestamp, use the issue timeline's event order.
+  if (state < 0 || !e) return out;
+  const distance = Date.parse(e.created_at) - Date.parse(events[state].created_at);
+  if (!(distance > 0 || (distance === 0 && events.indexOf(e) > state))) return out;
   const ok = await trusted(e.actor ?? null, e);
   if (ok === true) return { ...out, requeued: true, at: e.created_at };
   if (ok === "unread") return { ...out, unread: true };
-  return { ...out, refused: [{ at: e.created_at, actor: e.actor ?? null, draft: e.event === "unlabeled" }] };
+  return { ...out, refused: [{ at: e.created_at, id: e.id, actor: e.actor ?? null, draft: e.event === "unlabeled" }] };
 }
 
 /** Whether the issue is a draft (DRAFT_LABEL on it). */
@@ -258,7 +302,7 @@ export function watchObjective({ read, label, everyMs = STOP_POLL_MS, onStop }) 
 /**
  * Leave the issue's Objective stopped: its open PR (`pr`, or the pendulum/<issue> branch's, found here when undefined) out
  * of the merge queue and a draft without the review label, so nothing merges it and no review starts; and, unless the issue is closed (the
- * dispatcher's Done pass moves a closed one), no state label and its card in Queued, so re-applying the label starts it
+ * dispatcher's Done pass moves a closed one), no state label and its card in Queued, so removing Draft starts it
  * again. Each step is tried whatever the one before did; returns the failures' messages (none: []).
  */
 export async function applyStop(repo, issue, { pr = undefined, closed = false, project = undefined } = {}, opts) {

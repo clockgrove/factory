@@ -236,7 +236,7 @@ test("#368: only a reply by someone who can push answers Pendulum's finding; a s
 const exitFor = (n) => decideExit({ harness: { ok: true }, pr: { exists: true }, commits: 1, validation: { green: true, passes: 0 }, reviewUnaddressed: n });
 
 test("#368: findings still open after the answer pass get another answer round within the bound, then the Block names them and how to clear them", async () => {
-  const gh = github();
+  const gh = github({ writers: ["kirk"] });
   const open = [{ id: 200, path: "src/b.ts", line: 9 }, { id: "r1-1", path: "src/c.ts", line: 4 }];
   await withGitHub(gh, async () => {
     const stage = () => openFindingsExit(exitFor(open.length), { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "pendulum:objective", open }, { token: "t" });
@@ -247,11 +247,18 @@ test("#368: findings still open after the answer pass get another answer round w
     assert.deepEqual(gh.state.labels, ["pendulum:review", "pendulum:review"]);
     assert.equal(gh.state.issueComments.filter((c) => c.body.startsWith(marker(7, "answer-rounds"))).length, 1, "one record on the issue");
     const d = await stage();
-    assert.deepEqual(d, { exit: "blocked", cause: "work", reason: "2 reviewer finding(s) still open on PR #12 after 2 answer round(s): src/b.ts:9; src/c.ts:4. Fix them on the branch, or answer each on the PR: a reply by someone who can push in its thread, or resolve the thread (for a finding in the review body, a comment by someone who can push starting `<!-- pendulum:7:resolved:<finding id> -->`); then re-apply `pendulum:objective` to resume" });
+    assert.deepEqual(d, { exit: "blocked", cause: "work", reason: "2 reviewer finding(s) still open on PR #12 after 2 answer round(s): src/b.ts:9; src/c.ts:4. Fix them on the branch, or answer each on the PR: a reply by someone who can push in its thread, or resolve the thread (for a finding in the review body, a comment by someone who can push starting `<!-- pendulum:7:resolved:<finding id> -->`); then add `pendulum:draft` if it is missing, then remove it to resume" });
     assert.equal(gh.state.labels.length, 2, "no third round");
-    // A re-entry (the Objective label applied again) starts the count over.
-    gh.state.timeline = [{ event: "labeled", label: { name: "pendulum:objective" }, created_at: new Date(Date.now() + 1000).toISOString() }];
-    assert.equal((await stage()).rerun, true);
+    const at = Date.now();
+    const toggle = (event, name, login, offset) => ({ event, label: { name }, actor: { login, type: "User" }, created_at: new Date(at + offset).toISOString() });
+    gh.state.timeline = [
+      toggle("labeled", "pendulum:objective", "kirk", -60_000),
+      toggle("labeled", "pendulum:draft", "kirk", 1000),
+      toggle("unlabeled", "pendulum:draft", "viewer", 2000),
+    ];
+    assert.equal((await stage()).exit, "blocked", "an unauthorized Draft removal cannot reset exhausted rounds");
+    gh.state.timeline.push(toggle("labeled", "pendulum:draft", "kirk", 3000), toggle("unlabeled", "pendulum:draft", "kirk", 4000));
+    assert.equal((await stage()).rerun, true, "trusted Draft removal starts the answer round count over");
   });
 });
 
@@ -283,7 +290,7 @@ test("#368: an answer the gateway gave no verdict on costs no answer round: the 
     assert.deepEqual(checkState(rec), { unjudged: [300], failed: 1, error: "unavailable", judgeOnly: true }, "the next stage only judges: no worker pass for them");
     // The next stage judged it again and the gateway failed again: Blocked, its cause from the code.
     const d2 = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "rate_limited" }] }, { token: "t" });
-    assert.deepEqual(d2, { exit: "blocked", cause: "provider-quota", reason: "the AI Gateway's decision model gave no verdict (rate_limited) on the answers to 1 reviewer finding(s) on PR #12 in 2 review stages in a row: src/merge.ts:8. Check the AI Gateway key, its budget and the gateway's status, then re-apply `pendulum:objective` to resume" });
+    assert.deepEqual(d2, { exit: "blocked", cause: "provider-quota", reason: "the AI Gateway's decision model gave no verdict (rate_limited) on the answers to 1 reviewer finding(s) on PR #12 in 2 review stages in a row: src/merge.ts:8. Check the AI Gateway key, its budget and the gateway's status, then add `pendulum:draft` if it is missing, then remove it to resume" });
     assert.equal(gh.state.labels.length, 1);
   });
   // A stage that judged them, with others open, ends the run of failures and takes an answer round.
@@ -323,7 +330,7 @@ test("#379: the stage harness's usage limit in the finding check ends the stage 
     assert.match(d2.reason, /^the stage's own harness \(claude claude-fable-5-2\) gave no verdict \(unavailable\)/);
     const d3 = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "vendor" }], decider }, { token: "t" });
     assert.equal(d3.exit, "blocked");
-    assert.match(d3.reason, /^the stage's own harness \(claude claude-fable-5-2\) gave no verdict \(vendor\) .* in 2 review stages in a row: src\/merge\.ts:8\. Check the harness login this stage runs on and its usage, then re-apply/);
+    assert.match(d3.reason, /^the stage's own harness \(claude claude-fable-5-2\) gave no verdict \(vendor\) .* in 2 review stages in a row: src\/merge\.ts:8\. Check the harness login this stage runs on and its usage, then add `pendulum:draft`/);
     assert.doesNotMatch(d3.reason, /AI Gateway/);
   });
 });

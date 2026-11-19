@@ -3,8 +3,8 @@
 // "Job one and how 0.6 is measured"). Pure: takes the collected facts
 // (lib/collect.mjs online, a fixture offline) and returns the row.
 //
-//   walkAway   binary. The clock starts at the first `pendulum:objective`
-//              label. Any human push, comment, review, edit, draft toggle or
+//   walkAway   binary. The clock starts at the first activation, when Draft comes off or an old Objective label is
+//              applied outside Draft. Any human push, comment, review, edit, draft toggle or
 //              merge on the branch or the issue after it breaks it; a Blocked
 //              card (the pendulum:blocked label or the blocked marker comment)
 //              is a miss. A Question answered by a human is a miss too.
@@ -22,13 +22,14 @@
 //   ownerStep  a posted workflow hand-over a person applies after the merge:
 //              its minutes from --owner-minutes, apart from the operator's.
 //   cost       lib/cost.mjs (the plugin's cost-join.mjs), with unit and basis per harness.
-//   wall       filed (label) to merged; runner minutes from the job log.
-import { dispatchLatency, pendulumLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
+//   wall       activation to merged; runner minutes from the job log.
+import { bySelf, dispatchLatency, pendulumLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { ACCOUNT, accountUse, costOf, decisionSpendRecords, stageHarnessOf, stageOf, stageSpendRecords, withLines } from "./cost.mjs";
 import { BLOCK_CAUSES, blockCauseOf, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
 import { billingText, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
-import { clockRenamed, labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
+import { activationEvents, DRAFT_LABEL, latestDraftEvent } from "../../plugin/scripts/lib/activation.mjs";
+import { clockRenamed, clockStart } from "../../plugin/scripts/lib/finish-card.mjs";
 
 export const ROW_VERSION = 1;
 
@@ -37,7 +38,6 @@ export { accountUse, stageHarnessOf, withLines };
 const BRANCH = (issue) => `pendulum/${issue}`;
 export const RUNNING_LABEL = "pendulum:running";
 export const OBJECTIVE_LABEL = "pendulum:objective";
-const DRAFT_LABEL = "pendulum:draft";
 const BLOCKED_LABEL = "pendulum:blocked";
 /**
  * The stall threshold's default, in minutes: a merged Objective idle longer than this after Pendulum's last action
@@ -82,12 +82,8 @@ function commitActor(commit) {
   return { login: name || email || "unknown", type: "User", unlinked: true };
 }
 
-/**
- * The clock: the first `labeled pendulum:objective` event, or null; a draft's start for a draft. With `clockAfter`, the
- * first such event at or after that date: an issue that an earlier Pendulum already ran under the same label starts its
- * clock there. The finish card starts its clock the same way, so the rule lives with it (plugin finish-card.mjs).
- */
-export { labelTime };
+/** The finish card and scorer share an Objective's first activation. */
+export { labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
 
 /**
  * Minutes of the wall clock spent waiting rather than working: from the clock to Pendulum's first
@@ -95,7 +91,8 @@ export { labelTime };
  * next Running label (a human's turn). Null without a merge; the basis says what counted.
  */
 export function waitingMinutes(timeline, since, mergedAt) {
-  if (!since || !mergedAt) return { minutes: null, basis: "not merged" };
+  if (!mergedAt) return { minutes: null, basis: "not merged" };
+  if (!since) return { minutes: null, basis: "clock start not recorded" };
   const labels = (timeline || []).filter((e) => e.event === "labeled" && e.label?.name && ms(e.created_at) >= ms(since)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
   let total = 0;
   const parts = [];
@@ -134,7 +131,7 @@ export function decisionsOf(actions) {
  *   - labels: only the pendulum state labels the local loop sets (running, in-review, blocked, question, review) are
  *     Pendulum's, and removing pendulum:restart once it restarted the Objective. Any other label, applying
  *     pendulum:restart and re-applying pendulum:objective among them, is a person's. Removing pendulum:blocked is
- *     Pendulum's only after a re-applied Objective label (the recovery it answers); without one it is a person's
+ *     Pendulum's only after a new activation (the recovery it answers); without one it is a person's
  *     manual un-block.
  *   - comments: Pendulum's comments all carry a `<!-- pendulum:... -->` marker. One without a marker is a person's, even
  *     inside a run (an answer to a Question typed while the stage was running).
@@ -180,10 +177,12 @@ export function localPendulumActions(collected, { label = OBJECTIVE_LABEL } = {}
   const handoverLabel = (at) => handoverBodies.length > 0 || inRun(at);
   const dropped = handoverBodies.some((b) => handoverOf(b.slice(mark.length)) === null);
   const relabeled = (at) => labels.some((e) => e.label?.name === HANDOVER_LABEL && (e.actor?.login ?? e.actor?.name) === login && ms(e.created_at) > ms(at) && handoverLabel(e.created_at));
-  // Pendulum lifts its own Blocked only on recovery: the Objective label re-applied after the latest block.
+  // Pendulum lifts its own Blocked only on a new activation after the latest block.
+  const timeline = collected.issueTimeline || [];
+  const starts = activationEvents(timeline, label, { assumeObjective: true });
   const recovered = (at) => {
     const block = labels.filter((e) => e.label?.name === BLOCKED_LABEL && ms(e.created_at) <= ms(at)).at(-1);
-    return !!block && labels.some((e) => e.label?.name === label && ms(e.created_at) >= ms(block.created_at) && ms(e.created_at) <= ms(at));
+    return !!block && starts.some((e) => ms(e.created_at) <= ms(at) && (ms(e.created_at) > ms(block.created_at) || (ms(e.created_at) === ms(block.created_at) && timeline.indexOf(e) > timeline.indexOf(block))));
   };
   return (at, actor, kind, id = null) => {
     if (tidied(at, actor, kind, id)) return true;
@@ -325,31 +324,36 @@ function triageReruns(collected, login) {
 }
 
 /** The human actions after `since` on the issue and its PRs, oldest first: each {at, where, kind, by, detail}. */
-export function humanActions(collected, since, { bots = new Set(), label = OBJECTIVE_LABEL } = {}) {
+export function humanActions(collected, since, { bots = new Set(), label = OBJECTIVE_LABEL, start = clockStart(collected.issueTimeline, label, since) } = {}) {
   const out = [];
-  const after = (at) => Number.isFinite(ms(at)) && ms(at) > ms(since);
+  const sinceMs = ms(since);
+  const timeline = collected.issueTimeline || [];
+  const startIndex = ms(start?.created_at) === sinceMs ? timeline.indexOf(start) : -1;
   const pendulumLocal = localPendulumActions(collected, { label });
-  const push = (at, where, kind, actor, detail = "", id = null) => {
-    if (after(at) && isHuman(actor, bots) && !pendulumLocal(at, actor, kind, id)) out.push({ at, where, kind, by: actor.login ?? actor.name ?? "unknown", detail });
+  const push = (at, where, kind, actor, detail = "", id = null, timelineIndex = -1) => {
+    const atMs = ms(at);
+    const after = atMs > sinceMs || (atMs === sinceMs && startIndex >= 0 && timelineIndex > startIndex);
+    if (after && isHuman(actor, bots) && !pendulumLocal(at, actor, kind, id)) out.push({ at, where, kind, by: actor.login ?? actor.name ?? "unknown", detail });
   };
   const issue = `#${collected.issue.number}`;
+  const author = collected.issue.user?.login;
+  const filedAt = ms(collected.issue.created_at);
   const branch = branchPulls(collected);
   const mergedTimes = branch.filter((pr) => pr.merged_at).map((pr) => ms(pr.merged_at));
-  for (const e of collected.issueTimeline || []) {
+  for (const [i, e] of timeline.entries()) {
     if (mergeConsequence(e.event, e.created_at, mergedTimes)) continue;
     // Passive events (mentioned, subscribed, cross-referenced from elsewhere) and bookkeeping (issue type,
     // milestone, pin, project card) are not input to the Objective's work.
     if (PASSIVE_EVENTS.has(e.event)) continue;
-    if (e.event === "labeled" && e.label?.name === label && e.created_at === since) continue; // the clock itself
-    if (e.event === "unlabeled" && e.label?.name === DRAFT_LABEL && e.created_at === since) continue; // a draft's start: the clock
-    // Labels the issue's author applies while filing it (a priority, the type's labels) are part of filing, not input.
-    if (e.event === "labeled" && (e.actor?.login ?? null) === (collected.issue.user?.login ?? undefined) && ms(e.created_at) - ms(collected.issue.created_at) <= 60_000) continue;
+    // Legacy direct starts could bundle filing metadata with the Objective label. A Draft hold is always input.
+    if (start?.label?.name === label && e.event === "labeled" && e.label?.name !== DRAFT_LABEL && author && e.actor?.login === author &&
+      ms(e.created_at) >= filedAt && ms(e.created_at) - filedAt <= 60_000) continue;
     if (e.event === "commented") {
       if (/<!-- pendulum:/.test(e.body || "")) continue; // Pendulum's own protocol (plan, progress, hold, blocked markers), whoever posted it
-      push(e.created_at, issue, "comment", e.user ?? e.actor, (e.body || "").slice(0, 80));
+      push(e.created_at, issue, "comment", e.user ?? e.actor, (e.body || "").slice(0, 80), null, i);
       continue;
     }
-    push(e.created_at, issue, e.event === "labeled" || e.event === "unlabeled" ? `${e.event} ${e.label?.name ?? ""}` : e.event, e.actor, "", e.id ?? null);
+    push(e.created_at, issue, e.event === "labeled" || e.event === "unlabeled" ? `${e.event} ${e.label?.name ?? ""}` : e.event, e.actor, "", e.id ?? null, i);
   }
   for (const c of collected.issueComments || []) if (!/<!-- pendulum:/.test(c.body || "")) push(c.created_at, issue, "comment", c.user, (c.body || "").slice(0, 80));
   for (const pr of collected.pulls || []) {
@@ -637,8 +641,8 @@ export function questionAt(collected, since) {
   const n = collected.issue.number;
   const plan = `<!-- pendulum:${n}:plan -->`;
   for (const e of collected.issueTimeline || []) if (e.event === "labeled" && e.label?.name === QUESTION_LABEL && ms(e.created_at) >= ms(since)) return { at: e.created_at, source: "label" };
-  for (const pr of collected.pulls || []) if (/\bQUESTION\b/.test(pr.body || "")) return { at: pr.created_at, source: `PR #${pr.number} body` };
-  for (const c of collected.issueComments || []) if ((c.body || "").includes(plan) && /\bQUESTION\b/.test(c.body || "")) return { at: c.created_at, source: "plan comment" };
+  for (const pr of collected.pulls || []) if (ms(pr.created_at) >= ms(since) && /\bQUESTION\b/.test(pr.body || "")) return { at: pr.created_at, source: `PR #${pr.number} body` };
+  for (const c of collected.issueComments || []) if (ms(c.created_at) >= ms(since) && (c.body || "").includes(plan) && /\bQUESTION\b/.test(c.body || "")) return { at: c.created_at, source: "plan comment" };
   return null;
 }
 
@@ -810,9 +814,20 @@ export function scoreObjective(collected, opts = {}) {
   // read: the owner's read of the merged diff ("ok", "defect" or "unread"), given with --read, kept across --append.
   const issue = collected.issue;
   const missing = [];
-  let since = labelTime(issue, collected.issueTimeline, label, clockAfter);
-  let sinceBasis = clockAfter ? `first "${label}" label at or after ${clockAfter}` : `first "${label}" label`;
-  if (!since) {
+  const self = pendulumLogin(collected.issueTimeline, app);
+  const start = clockStart(collected.issueTimeline, label, clockAfter, { issue: issue.number, comments: collected.issueComments, mine: (c) => bySelf(c, self) });
+  const labels = issue.labels?.map((l) => (typeof l === "string" ? l : l?.name));
+  const draft = labels?.includes(DRAFT_LABEL);
+  const noStart = !start && (draft || latestDraftEvent(collected.issueTimeline) !== null);
+  let since = start?.created_at ?? null;
+  let sinceBasis = start?.label.name === DRAFT_LABEL ? `first removal of "${DRAFT_LABEL}"`
+    : start?.label.name === RUNNING_LABEL ? `first "${RUNNING_LABEL}" label`
+    : `first "${label}" label`;
+  if (clockAfter) sinceBasis += ` at or after ${clockAfter}`;
+  if (noStart) {
+    sinceBasis = "Draft has no recorded activation";
+    missing.push("Draft activation event");
+  } else if (!since) {
     since = clockAfter && ms(issue.created_at) < ms(clockAfter) ? clockAfter : issue.created_at;
     sinceBasis = clockAfter && since === clockAfter ? `--clock-after (no "${label}" label event at or after it)` : `issue created (no "${label}" label event found)`;
     missing.push("label event");
@@ -829,17 +844,16 @@ export function scoreObjective(collected, opts = {}) {
   const open = pulls.find((pr) => !pr.merged_at && pr.state === "open") ?? null;
   const blocked = blockedAt(collected, since);
   const question = questionAt(collected, since);
-  let actions = humanActions(collected, since, { bots, label });
+  let actions = humanActions(collected, since, { bots, label, start });
   const waiting = waitingMinutes(collected.issueTimeline, since, merged?.merged_at ?? null);
   const exit = merged ? "merged" : blocked ? "blocked" : question ? "question" : open ? (open.draft ? "draft" : "in review") : pulls.length ? "closed unmerged" : "no PR";
-  // Parked: open, its label removed after Pendulum took it (it waits on other work). Its exit still says where it
+  // Parked: open, made a draft or its identity label removed after activation. Its exit still says where it
   // stopped; it is never a walk-away (not merged) and the streak counts it only once it ended (lib/streak.mjs endedAt).
-  const parked = issue.state === "open" && !missing.includes("label event") && Array.isArray(issue.labels) && !issue.labels.some((l) => (typeof l === "string" ? l : l?.name) === label);
+  const parked = issue.state === "open" && !!start && !!labels && (draft || !labels.includes(label));
 
   const pendulumLocal = localPendulumActions(collected);
   // Every body edit after the clock by a person, oldest first: never Pendulum's own login (its App's finish block on the
   // merged PR's body, plugin finish-card.mjs), nor, in local mode, what localPendulumActions says is Pendulum's.
-  const self = pendulumLogin(collected.issueTimeline, app);
   const bodyEdit = [...(collected.bodyEdits || [])].sort((a, b) => ms(a.at) - ms(b.at)).find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots) && !(self && e.by?.login === self) && !pendulumLocal(e.at, e.by, "body edit")) ?? null;
   if (bodyEdit) actions.unshift({ at: bodyEdit.at, where: bodyEdit.where, kind: "body edit", by: bodyEdit.by.login, detail: "" });
   if (collected.bodyEdits === null) missing.push("body edits (GraphQL unavailable)"); // undefined: not attempted (a fixture or a snapshot)
@@ -877,7 +891,7 @@ export function scoreObjective(collected, opts = {}) {
   const stall = idle?.stalled ? { minutes: idle.minutes, from: idle.from, until: idle.until, thresholdMinutes: idle.thresholdMinutes } : null;
   const stallReason = stall ? `stalled ${stall.minutes} min after Pendulum's last action (${stall.from} to ${stall.until}; threshold ${stall.thresholdMinutes} min)` : null;
   const walkAway = {
-    value: Boolean(merged) && !blocked && actions.length === 0 && !stall,
+    value: Boolean(merged) && !blocked && !noStart && actions.length === 0 && !stall,
     // The rule this row scored a workflow hand-over by (HANDOVER_SCORING).
     handover,
     since,
@@ -895,10 +909,11 @@ export function scoreObjective(collected, opts = {}) {
   };
   walkAway.blocks = blockStops(collected, since, { bots });
   walkAway.bucket = walkAwayBucket({ value: walkAway.value, blocks: walkAway.blocks, question, actions: split, stall, unseen });
+  const walkAwayReason = `merged with no human action after ${start?.label.name === DRAFT_LABEL ? "Draft removal" : "the label"}${ownerNote}`;
   walkAway.reason = walkAway.value
-    ? `merged with no human action after the label${ownerNote}`
-    : !merged
-      ? `not merged (${exit}${blocked?.reason ? `: ${blocked.reason}` : ""})`
+    ? walkAwayReason
+    : !merged || noStart
+      ? (merged ? "merged with no recorded activation" : `not merged (${exit}${blocked?.reason ? `: ${blocked.reason}` : ""})`)
       : blocked
         ? `Blocked at ${blocked.at}${blocked.reason ? `: ${blocked.reason}` : ""}`
         : actions.length
@@ -907,8 +922,8 @@ export function scoreObjective(collected, opts = {}) {
   // Walk-away counting only what Pendulum asked for: a merge with no Blocked and no human action answering a request.
   // Unprompted actions (an owner's note, scope added after the label) are left out of this one, never out of `value`.
   walkAway.askedOnly = {
-    value: Boolean(merged) && !blocked && asked.length === 0 && !stall,
-    reason: !merged
+    value: Boolean(merged) && !blocked && !noStart && asked.length === 0 && !stall,
+    reason: !merged || noStart
       ? walkAway.reason
       : blocked
         ? walkAway.reason
@@ -918,8 +933,13 @@ export function scoreObjective(collected, opts = {}) {
           ? `first asked-for action: ${asked[0].kind} on ${asked[0].where} by ${asked[0].by} at ${asked[0].at}, answering a ${asked[0].asked}`
           : unprompted.length
             ? `merged; ${unprompted.length} unprompted human action(s), none asked for`
-            : `merged with no human action after the label${ownerNote}`,
+            : walkAwayReason,
   };
+  if (merged && noStart) {
+    walkAway.value = null;
+    walkAway.bucket = "unknown";
+    walkAway.askedOnly.value = null;
+  }
   // Labelled before the rename (`renamed`): a walk-away with every input source read, and an asked-only yes, are not
   // known; anything else stays as read, noted (a walk-away with an input source unread still breaks the streak).
   if (renamed) {
@@ -957,7 +977,7 @@ export function scoreObjective(collected, opts = {}) {
 
   let operator;
   if (typeof given === "number" && Number.isFinite(given)) operator = { minutes: given, basis: "--minutes (stopwatch)" };
-  else if (renamed) operator = { minutes: "unknown", basis: `${RENAMED_WHY}; give --minutes <issue>=<n> from a stopwatch` };
+  else if (renamed || noStart) operator = { minutes: "unknown", basis: `${renamed ? RENAMED_WHY : sinceBasis}; give --minutes <issue>=<n> from a stopwatch` };
   else if (walkAway.value) operator = { minutes: 0, basis: ownerStep ? "clean merge; the owner step's minutes are apart (ownerStep)" : "clean merge" };
   else if (merged && !blocked && !actions.length) operator = { minutes: 0, basis: "no human action (stalled)" };
   else operator = { minutes: "unknown", basis: actions.some((a) => a.kind === "workflow hand-over") ? "a workflow hand-over is a person's step: give --minutes <issue>=<n> from a stopwatch" : "give --minutes <issue>=<n> from a stopwatch" };
@@ -1014,7 +1034,7 @@ export function scoreObjective(collected, opts = {}) {
     runnerMinutes: runner.minutes,
     runnerBasis: runner.basis,
     wallMinutes: wall,
-    wallBasis: !merged ? "not merged" : renamed ? "unknown: labelled before the rename to Pendulum" : `${sinceBasis} to merged`,
+    wallBasis: !merged ? "not merged" : renamed ? "unknown: labelled before the rename to Pendulum" : noStart ? sinceBasis : `${sinceBasis} to merged`,
     waitingMinutes: renamed ? null : waiting.minutes,
     waitingBasis: renamed ? RENAMED_WHY : waiting.basis,
     workingMinutes: wall === null || waiting.minutes === null ? null : Math.max(0, Math.round((wall - waiting.minutes) * 10) / 10),
@@ -1085,7 +1105,7 @@ export const ownerCell = (r) => (r.ownerStep ? `${fmtMin(r.ownerStep.minutes)} (
 
 /** The summary under the table: walk-away both ways, the interventions split and the owner steps, over every row. */
 export function summaryLine(rows) {
-  // A row labelled before the rename (bucket `unknown`) is in no walk-away count.
+  // A row with an unknown clock is in no walk-away count.
   const unknown = rows.filter((r) => r.walkAway.bucket === "unknown");
   const n = rows.length - unknown.length;
   const merged = rows.filter((r) => r.exit === "merged" && r.walkAway.bucket !== "unknown").length;
@@ -1098,6 +1118,8 @@ export function summaryLine(rows) {
   const owners = rows.filter((r) => r.ownerStep);
   const inputs = rows.filter((r) => !r.ownerStep && (r.walkAway.interventions?.requests || []).some((q) => q.kind === "workflow hand-over"));
   const handovers = `${owners.length ? ` Owner steps (a workflow hand-over, scored as normal work, its minutes apart): ${owners.map((r) => `#${r.issue} ${ownerCell(r)}`).join(", ")}.` : ""}${inputs.length ? ` Workflow hand-overs scored as input: ${inputs.map((r) => `#${r.issue}`).join(", ")}.` : ""}`;
-  const notKnown = unknown.length ? ` Not known (labelled before the rename to Pendulum), in no count: ${unknown.map((r) => `#${r.issue}`).join(", ")}.` : "";
+  const unknownNote = (affected, why) => affected.length ? ` Not known (${why}), in no count: ${affected.map((r) => `#${r.issue}`).join(", ")}.` : "";
+  const notKnown = unknownNote(unknown.filter((r) => r.walkAway.clockRenamed), "labelled before the rename to Pendulum")
+    + unknownNote(unknown.filter((r) => !r.walkAway.clockRenamed), "Draft activation was not recorded");
   return `Walk-away: ${strict} of ${n} Objective(s) (${merged} merged) with no human input; ${askedOnly} of ${n} counting only input Pendulum asked for. Interventions: ${sum("asked")} asked for (Question, Blocked notice, review request), ${sum("unprompted")} unprompted.${stalls}${handovers}${notKnown}`;
 }

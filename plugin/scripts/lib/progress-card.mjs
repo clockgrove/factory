@@ -14,6 +14,7 @@
 // byte for byte: its header, its `- <time> <text>` lines with their hidden UTC stamps). The card itself never writes a
 // line that starts `- ` and a clock, nor "min at the last line".
 import { clockText, timeZone, zoneDay } from "./clock.mjs";
+import { RESUME_OBJECTIVE } from "./activation.mjs";
 import { AGENTS, BASIS_NOTE, codeSpan, basisText, causeSentences, causesShort, cellCost, centsOf, durationText, ganttChart, kindsOf, many, minutesText, modelId, modelName, moneyText, plainText, stateBadge, stateWords, tableCell } from "./card-kit.mjs";
 import { passKind } from "./usage.mjs";
 import { sanitize } from "./handoff.mjs";
@@ -596,7 +597,7 @@ function actionLines(d, atZ) {
     return plainText(clip(first, 300));
   };
   if (d.exit === "blocked") {
-    const todo = s?.next === "none" ? "a resume or a restart does not get past this; the Blocked notice on this issue says why." : "fix the cause below, then re-apply the `pendulum:objective` label. The Blocked notice on this issue has the full steps.";
+    const todo = s?.next === "none" ? "a resume or a restart does not get past this; the Blocked notice on this issue says why." : `fix the cause below, then ${RESUME_OBJECTIVE}. The Blocked notice on this issue has the full steps.`;
     return [`> **What to do:** ${todo}`, ">", `> **Why:** ${why(s?.reason)}`];
   }
   if (d.exit === "question") {

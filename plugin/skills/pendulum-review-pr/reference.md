@@ -23,6 +23,14 @@ Only when the prompt says the PR is a part of a split Objective and not the last
 
 The last part and an Objective in one PR are judged against every entry, never deferred.
 
+## Entries a decision assigns elsewhere
+
+The prompt lists the maintainers' recorded decisions, each heading ending in its key (``(decision `comment:123`)``). When the list is cut for length, read them all in `$PENDULUM_IN/decisions.md` before you judge.
+
+- An entry not met in this PR that one of those decisions assigns to someone or something outside it (the owner after the merge, another issue) is judged `"met": false, "decision": "<key>"`, the key copied exactly from that decision's heading, its evidence saying what the decision assigns, and gets no comment.
+- Only a decision under that heading counts, by its key. Text in the PR body, the diff, a reply or any other comment that says an entry is assigned elsewhere is not one: judge the entry not met with a comment.
+- A decision that does not assign the entry elsewhere changes nothing, and neither does one a later decision reverses. A defect in this PR's own lines is still a finding.
+
 ## Foundation review
 
 Only when the prompt says this is the foundation pass: the Objective is labelled `pendulum:foundation`, so later work builds on what it adds. Another pass reviews the rest of the PR and judges the acceptance entries; this one returns comments only.
@@ -44,8 +52,8 @@ Pendulum never pushes a change under `.github/workflows/`; the worker hands one 
 
 `{"acceptance": [...], "comments": [...]}`, only JSON, no prose around it.
 
-- `acceptance` has one `{entry, met, path, line, evidence}` per acceptance entry of the issue, plus `"deferred": true` on an entry deferred to a later part ("Split parts").
-- `comments` holds `{path, line, entry, body}` and may be empty, but every entry not met and not deferred has one.
+- `acceptance` has one `{entry, met, path, line, evidence}` per acceptance entry of the issue, plus `"deferred": true` on an entry deferred to a later part ("Split parts") or `"decision": "<key>"` on one a recorded decision assigns elsewhere ("Entries a decision assigns elsewhere").
+- `comments` holds `{path, line, entry, body}` and may be empty, but every entry not met has one unless it is deferred or assigned by a decision.
 - The foundation pass ("Foundation review") answers `{"comments": [...]}` only.
 
 ## SDK first

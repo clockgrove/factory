@@ -76,7 +76,7 @@ test("the review job runs the foundation pass on a trusted foundation Objective 
   assert.ok(at("const foundation = !!chosen.foundation;") > at("await choiceGate("), "the mark from the trusted choice");
   const pass = at("if (foundationDue) {");
   assert.ok(pass > at("const answer = alreadyReviewed ? reviewRec : reviewAnswer(") && pass > at("if (!answer) {"), "after the first pass has a review");
-  assert.ok(at("reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null, since: sinceReviewed })") > pass, "posted with the first pass's comments");
+  assert.ok(at("reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null, since: sinceReviewed, decisions, open: openFindings })") > pass, "posted with the first pass's comments");
   const block = src.slice(pass, at("const post = !alreadyReviewed"));
   assert.match(block, /over: \(\) => over\(\) \|\| overBudget,/, "max_usd: the job's own cap");
   assert.match(block, /maxUsd: Math\.max\(0, passCap\(\) - sumSpend\(records\)\.usd\),/, "each call capped at what is left of max_usd less the drift reserve");

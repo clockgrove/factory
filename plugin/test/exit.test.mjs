@@ -197,6 +197,25 @@ test("review: an entry judged not met is posted as a comment unless one carries 
   assert.deepEqual(prefixed.comments.map((c) => c.body), ["acceptance A: the limit is gone"]);
 });
 
+test("#634: a not-met entry naming a trusted decision's exact key gets no comment and the body names that decision; any other key is a plain not met", () => {
+  const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
+  const url = "https://github.com/acme/app/issues/7#issuecomment-6931495149";
+  const decisions = [{ key: "comment:6931495149", author: "kirk", at: "2026-11-16T10:00:00Z", body: "Entry A is mine after the merge.", url }];
+  const judged = (entry, decision, path, line) => ({ entry, met: false, decision, path, line });
+  // B names a key that is no trusted decision's (a comment by someone without write access is never among them).
+  const review = parseReview(JSON.stringify({ acceptance: [judged("A", "comment:6931495149", "src/a.ts", 3), judged("B", "comment:5", "src/new.ts", 2)], comments: [] }));
+  const post = reviewPost({ issue: 7, review, diff, entries: [{ id: "A", text: "a" }, { id: "B", text: "b" }], decisions });
+  assert.deepEqual(post.comments.map((c) => c.body), ["acceptance B: not met."]);
+  assert.deepEqual(post.body.split("\n").filter((l) => l.includes("kirk") && l.includes(url)).map((l) => l.slice(0, 13)), ["- A: not met;"]);
+});
+
+test("#634: an entry whose finding is already open on the PR gets no second not-met comment", () => {
+  const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
+  const review = { comments: [], acceptance: [{ entry: "A", met: false, path: "src/a.ts", line: 3, evidence: "" }, { entry: "B", met: false, path: "src/new.ts", line: 2, evidence: "" }] };
+  const post = reviewPost({ issue: 7, review, diff, entries: [{ id: "A", text: "a" }, { id: "B", text: "b" }], open: [{ id: 5, path: "src/a.ts", line: 3, body: "acceptance A: not met. the limit is gone" }] });
+  assert.deepEqual(post.comments.map((c) => c.body), ["acceptance B: not met."]);
+});
+
 test("review: a reviewer call always has a wall-clock cap; past the stage's deadline none starts (#2660)", () => {
   // exec treats a timeout of 0 as no timer: a call started with nothing left would run until the job itself is cut.
   assert.equal(reviewCallTimeout(0), null);

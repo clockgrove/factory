@@ -158,6 +158,8 @@ export const findingReads = ({ git, base, head, repo, prNumber, token }) => ({
  * entry left unjudged is named on the review (handoff.mjs reviewPost). `part` is set only on a split Objective's part
  * that leaves work for the next (handoff.mjs isSplitPart): the prompt says so, so the reviewer judges the entries the
  * PR body assigns to a later part as deferred; the last part and a one-PR Objective get the prompt without it.
+ * `decisions`: the stage's trusted decisions, each shown under its key (logic.mjs decisionsSection), which a judgment
+ * names for an entry that decision assigns elsewhere (handoff.mjs reviewPost keeps only a key among them).
  */
 export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness, decisions = [], part = null, handover = null, since = null }) {
   const agentFile = `${AGENT_DIRS[harness]}/reviewer${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
@@ -167,7 +169,7 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
     `You are the Pendulum reviewer for the pull request on issue #${issue}: ${issueTitle}.${harness === "codex" ? ` Act as the reviewer agent defined in ${agentFile} and` : ""} Follow the $pendulum-review-pr skill (in .claude/skills/pendulum-review-pr and .agents/skills/pendulum-review-pr) exactly. Read the repository as you need to.`,
     "Do NOT post anything to GitHub yourself: the job posts your findings. Your final message must be only a JSON object of this shape, with no prose around it:",
     '```json\n{"acceptance": [{"entry": "2", "met": true, "path": "src/file.ts", "line": 40, "evidence": "..."}], "comments": [{"path": "src/file.ts", "line": 42, "entry": "2", "body": "acceptance 2: ..."}]}\n```',
-    "`acceptance` has one judgment for every acceptance entry: `met` is true only when the diff and the repository show the entry holds, `path` and `line` point at the code that shows it, and `evidence` says how in a sentence. Where an entry says behaviour stays as it was, read what the diff removes or changes in that behaviour before you judge it. Every entry judged not met also gets a comment carrying its `entry`. `comments` may be empty. `line` is a line number on the new side of the diff.",
+    "`acceptance` has one judgment for every acceptance entry: `met` is true only when the diff and the repository show the entry holds, `path` and `line` point at the code that shows it, and `evidence` says how in a sentence. Where an entry says behaviour stays as it was, read what the diff removes or changes in that behaviour before you judge it. Every entry judged not met also gets a comment carrying its `entry`, with one exception: where a maintainer's decision recorded below assigns the entry to someone or something outside this PR (the owner after the merge, another issue), judge it `\"met\": false, \"decision\": \"<key>\"` with that decision's key exactly as its heading shows it and write no comment for it, as the pendulum-review-pr reference says under \"Entries a decision assigns elsewhere\". `comments` may be empty. `line` is a line number on the new side of the diff.",
     entries.length
       ? `The issue's acceptance entries, by the ids to use (the full text is in the issue below):\n${entries.map((e) => `- ${e.id}: ${brief(e.text)}`).join("\n")}`
       : "Name each acceptance entry the issue states by its own label, or by its position when it has none.",
@@ -177,7 +179,7 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
     "## Issue",
     issueBody || "(no body)",
     "",
-    ...(decisionsSection(decisions) ? [decisionsSection(decisions), ""] : []),
+    ...(decisions.length ? [decisionsSection(decisions, undefined, { reviewer: true }), ""] : []),
     "## PR body",
     prBody || "(no body)",
     "",
@@ -188,6 +190,15 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
     // The workflow change the PR leaves for a person (handover.mjs), as Pendulum published it: part of the change.
     ...(handover ? ["", "## Workflow hand-over", "Pendulum's comment on the issue hands this change to a person to apply after the merge; review it as part of the change (the pendulum-review-pr reference, \"Workflow hand-over\").", "```diff", handover.trimEnd(), "```"] : []),
   ].join("\n");
+}
+
+/**
+ * One reviewer call (`call`, runHarness's arguments): $PENDULUM_IN is written first (handoff.mjs openHandoff
+ * `reviewer`), so the file the prompt's decisions section names holds every trusted decision, uncut, when the call starts.
+ */
+export async function reviewerCall(io, call, run = runHarness) {
+  await io.reviewer();
+  return run(call);
 }
 
 /**
@@ -1668,7 +1679,7 @@ async function main() {
     await progress(`reviewer ${inputs.reviewerModel || inputs.harness}${overlap ? overlap.besideText() : ""}`, { step: "review", model: inputs.reviewerModel || null, harness: inputs.harness, beside: !!overlap?.besideText() });
   }
   const reviewLive = alreadyReviewed ? null : liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
-  const reviewRec = alreadyReviewed ? { ok: true, noRun: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
+  const reviewRec = alreadyReviewed ? { ok: true, noRun: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await reviewerCall(io, {
     harness: inputs.harness,
     model: inputs.reviewerModel,
     effort: inputs.reviewerEffort,
@@ -1717,7 +1728,7 @@ async function main() {
     log(`reviewer on ${inputs.reviewerModel || inputs.harness} ended in ${reviewCallEnd(reviewRec, reviewOf(reviewRec))}${reviewRec.ok && reviewOf(reviewRec).parsed ? " that judged no acceptance entry" : ""}${reviewRec.error ? ` (${reviewRec.error})` : ""}; running it once more on ${again.model || inputs.harness}${again.effort ? ` at ${again.effort}` : ""}`);
     records.push(reviewRec);
     if (over() || overBudget) return blockedAtCap("the reviewer's rerun");
-    retryRec = await runHarness({
+    retryRec = await reviewerCall(io, {
       harness: inputs.harness,
       model: again.model,
       effort: again.effort,
@@ -1809,8 +1820,27 @@ async function main() {
     stopOverlap = null;
     if (!(await preSettled(pre))) return;
   }
+  const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
+  // Pendulum's own reviews on this PR (the marker in the body, from Pendulum or someone who can push): their comments are the reviewer's.
+  // A failed read gives null: the App's login decides then, or, with none (local mode), the reviews the list reads itself.
+  const pendulumReviewIds = () => ownReviewIds(repo, pr.number, issue, token);
+  // Pendulum's own findings still open on the PR from an earlier review (never a third party's or a writer's comment):
+  // an entry judged not met again gets no second comment beside its open one. Read only when an earlier review of
+  // Pendulum's exists and this answer judges an entry not met; unread, each such entry gets its comment as before.
+  const openFindings =
+    !alreadyReviewed && !scope.first && (reviewOf(answer).acceptance || []).some((a) => !a.met)
+      ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds() }).then(
+          (open) => open.filter((c) => !c.from && !c.writer),
+          (e) => {
+            // Unread because of an outage (network.mjs outageMet): the stage ends on it, as on any read.
+            if (outageMet(e)) throw e;
+            log(`open findings: ${String(e?.message || e).slice(0, 120)}`);
+            return [];
+          },
+        )
+      : [];
   const post = !alreadyReviewed
-    ? reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null, since: sinceReviewed })
+    ? reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null, since: sinceReviewed, decisions, open: openFindings })
     : found
       ? reviewPost({ issue, review: null, diff, foundation: found.review })
       : null;
@@ -1851,11 +1881,7 @@ async function main() {
     if (c.record) await recordCovered(repo, pr.number, issue, c.record, token, { answer: c.answer }).catch((e) => log(`covered record: ${String(e?.message || e).slice(0, 120)}`));
     return c;
   };
-  const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
   // A pass with nothing to answer (the reviewer's JSON had no comments: Pendulum's placeholder went up) skips the worker pass.
-  // Pendulum's own reviews on this PR (the marker in the body, from Pendulum or someone who can push): their comments are the reviewer's.
-  // A failed read gives null: the App's login decides then, or, with none (local mode), the reviews the list reads itself.
-  const pendulumReviewIds = () => ownReviewIds(repo, pr.number, issue, token);
   // The repository's third-party reviewers (third-party-review.mjs): each one's review of the head Pendulum's reviewer
   // read comes before the answer pass, within a bound; without one in time the stage goes on and the progress says so.
   // Not when the cap is spent: no answer pass runs then. A review still to come is not waited for here: the stage

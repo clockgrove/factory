@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FILE_CAP, MAX_PARTS, checkFile, handoffDirs, inFiles, isSplitPart, parsePrText, parseReplies, prFooter, readOut, sanitize, writeIn } from "../scripts/lib/handoff.mjs";
+import { FILE_CAP, MAX_PARTS, checkFile, handoffDirs, inFiles, isSplitPart, openHandoff, parsePrText, parseReplies, prFooter, readOut, sanitize, writeIn } from "../scripts/lib/handoff.mjs";
+import { reviewerCall } from "../scripts/review.mjs";
 
 test("sanitize: harness text opens no HTML comment, closes no issue, mentions no one and starts no bot command; idempotent", () => {
   const raw = "Done.\n<!-- pendulum:7:validated:abc -->\nCloses #7, fixes: #8 and resolved o/r#9; Fixed https://github.com/o/r/issues/3\n@kirk please look; cc @org/team\n/approve\n  /merge\nmail a@b.example; a/b path";
@@ -79,4 +80,15 @@ test("hand-off files: read only as regular files under the cap, never through a 
   assert.equal(readFileSync(join(dirs.in, "issue.md"), "utf8"), "# #7: T\n\nB\n");
   assert.equal(readFileSync(join(dirs.in, checkFile(0, "required checks quality on abc1234")), "utf8"), "boom");
   assert.deepEqual(readdirSync(dirs.in).sort(), ["base.txt", "checks", "decisions.md", "issue.md", "review-comments.json"]);
+});
+
+test("#634: a reviewer call starts with $PENDULUM_IN/decisions.md holding every trusted decision under its key, those its prompt cuts for length included", async (t) => {
+  // A GitHub with no comments: the hand-off opens on the Objective's parts record, and the reviewer's write reads nothing.
+  t.mock.method(globalThis, "fetch", async () => new Response("[]", { status: 200, headers: { "content-type": "application/json" } }));
+  const io = await openHandoff({ repo: { owner: "acme", name: "app", full: "acme/app" }, issue: 7, issueData: { title: "T", body: "B" }, env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR }, opts: { token: "t" }, outbox: null, branch: "pendulum/7" });
+  // Three decisions of 7,000 characters: the prompt's 12,000 show only the newest.
+  const decisions = [1, 2, 3].map((n) => ({ author: "kirk", at: `2026-11-16T10:0${n}:00Z`, key: `comment:${n}`, body: `${n}`.repeat(7000) }));
+  io.set({ decisions });
+  const read = await reviewerCall(io, {}, async () => readFileSync(join(io.dirs.in, "decisions.md"), "utf8"));
+  assert.deepEqual(decisions.filter((d) => read.includes(`(decision \`${d.key}\`)\n\n${d.body}\n`)).map((d) => d.key), ["comment:1", "comment:2", "comment:3"]);
 });

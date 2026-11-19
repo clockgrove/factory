@@ -1,6 +1,6 @@
 # In-session readiness
 
-Check that the issue is open, carries `pendulum:objective`, and has neither `pendulum:draft` nor an [open dependency](../pendulum-file/reference.md#start-a-draft). Removing Draft releases it to the dispatcher. For a draft or unlabelled issue, report its state and use pendulum-file only if the user wants that dispatcher handoff.
+Check that the issue is open, carries `pendulum:objective`, and has neither `pendulum:draft` nor an [open dependency](../pendulum-file/reference.md#start-a-draft). A writer or named maintainer removing Draft releases it to the dispatcher. The session commands verify this activation. For a draft or unlabelled issue, report its state and use pendulum-file only if the user wants that dispatcher handoff.
 
 Check issue state with pendulum-status and the configured route's dispatcher records. Follow an active or paused run. If the configured loop or Action can pick up the issue during this session, leave it to that dispatcher. An eligible issue with no recorded claim yet can still be picked up. In-session setup does not reserve the Objective.
 

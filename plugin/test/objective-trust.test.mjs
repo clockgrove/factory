@@ -159,7 +159,7 @@ test("objective trust: an App's rename never vouches for the title, nor a rename
 // The session's route (local.mjs issue, deliver, post-review) against a GitHub that answers like the real one.
 const LOCAL = join(import.meta.dirname, "..", "scripts", "local.mjs");
 const run = (args, env, cwd) => new Promise((ok) => execFile(process.execPath, [LOCAL, ...args, "--repo", "acme/app"], { cwd, env, encoding: "utf8", timeout: 60_000 }, (e, stdout, stderr) => ok({ code: e ? e.code : 0, stdout, stderr })));
-async function fakeGitHub({ author, editor = null, renamer = null, perms: p = perms, issueComments = [], commentsStatus = 200 }) {
+async function fakeGitHub({ author, editor = null, renamer = null, perms: p = perms, issueComments = [], issueTimeline = [], commentsStatus = 200 }) {
   const calls = [];
   const send = (res, status, body) => {
     res.writeHead(status, { "content-type": "application/json" });
@@ -181,6 +181,7 @@ async function fakeGitHub({ author, editor = null, renamer = null, perms: p = pe
       if (path === "/repos/acme/app") return send(res, 200, { full_name: "acme/app", default_branch: "main" });
       if (path === "/user") return send(res, 200, { login: "dev", type: "User" });
       if (path === "/repos/acme/app/issues/7") return send(res, 200, { number: 7, title: "REST title", body: "REST body.", state: "open", labels: [{ name: "pendulum:objective" }] });
+      if (path === "/repos/acme/app/issues/7/timeline") return send(res, 200, issueTimeline);
       if (path === "/repos/acme/app/issues/7/comments") return send(res, commentsStatus, commentsStatus === 200 ? issueComments : { message: "Not Found" });
       if (path === "/repos/acme/app/pulls/9") return send(res, 200, { number: 9, head: { ref: "pendulum/7", sha: "a".repeat(40) }, base: { ref: "main" } });
       const perm = /^\/repos\/acme\/app\/collaborators\/([^/]+)\/permission$/.exec(path);
@@ -218,6 +219,25 @@ function clone({ branch = "main", workflow = null } = {}) {
 }
 const envFor = (url, root) => ({ PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: url, PENDULUM_LOCAL_TOKEN: "github_pat_test", GIT_CONFIG_NOSYSTEM: "1" });
 const writes = (calls) => calls.filter((c) => c.method !== "GET" && c.path !== "/graphql");
+
+test("session commands decline work and review delivery when the latest Draft removal was unauthorized", async () => {
+  const c = clone({ branch: "pendulum/7" });
+  const out = join(c.root, "issue.md");
+  const event = (id, event, login) => ({ id, event, actor: { login, type: "User" }, label: { name: "pendulum:draft" }, created_at: "2026-11-19T12:00:00Z" });
+  const fake = await fakeGitHub({ author: user("kirk"), issueTimeline: [event(1, "labeled", "kirk"), event(2, "unlabeled", "reader")] });
+  try {
+    for (const args of [["issue", "7", "--out", out], ["deliver", "7"], ["post-review", "9", "findings.json"]]) {
+      const r = await run(args, envFor(fake.url, c.root), c.work);
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /Draft activation was not authorized/);
+    }
+    assert.equal(existsSync(out), false, "no body reaches the session");
+    assert.deepEqual(writes(fake.calls), [], "no handoff or review was written");
+    assert.doesNotMatch(c.refs(), /pendulum\/7/, "nothing was pushed");
+  } finally {
+    await fake.close();
+  }
+});
 
 test("session route: `pendulum deliver` Blocks a stranger's Objective with the author notice and pushes nothing", async () => {
   const c = clone({ branch: "pendulum/7" });

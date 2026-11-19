@@ -200,6 +200,7 @@ function loop() {
     dev: mkdtempSync(join(tmpdir(), "dev-")),
     repo: { owner: "o", name: "r", full: "o/r" },
     opts: { token: "t" },
+    wf: {},
     withClaim: async (n, fn) => fn(),
     review: async (n, prNumber, o) => (ran.push(["review", n, prNumber, o.wait]), { exit: "delivered" }),
     runObjective: async (n, o) => (ran.push(["work", n, o.wait]), { exit: "delivered" }),
@@ -214,12 +215,12 @@ test("pendulum run starts nothing when it cannot tell where the Objective stands
   // A PR read that keeps failing, on an In-review Objective: retried, then refused, never a work pass.
   let tries = 0;
   const { l, ran } = loop();
-  await assert.rejects(l.runIssue(7, { waitMs: 1, gh: { findPr: () => (tries++, failing()), getIssue: async () => issue("pendulum:in-review") } }), /reading the open PR of pendulum\/7 failed 3 times .*nothing was started/);
+  await assert.rejects(l.runIssue(7, { waitMs: 1, gh: { findPr: () => (tries++, failing()), getIssue: async () => issue("pendulum:in-review"), timelineOf: async () => [] } }), /reading the open PR of pendulum\/7 failed 3 times .*nothing was started/);
   assert.equal(tries, 3);
   await assert.rejects(l.runIssue(7, { waitMs: 1, gh: { findPr: async () => null, getIssue: failing } }), /reading issue #7 failed/);
   // A read that fails once and then answers is used.
   let once = 0;
-  await l.runIssue(7, { waitMs: 1, gh: { findPr: () => (once++ ? Promise.resolve(pr()) : failing()), getIssue: async () => issue("pendulum:in-review") } });
+  await l.runIssue(7, { waitMs: 1, gh: { findPr: () => (once++ ? Promise.resolve(pr()) : failing()), getIssue: async () => issue("pendulum:in-review"), timelineOf: async () => [] } });
   assert.deepEqual(ran, [["review", 7, 5, false]]);
   // A closed issue: nothing to run.
   ran.length = 0;

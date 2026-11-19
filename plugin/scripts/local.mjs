@@ -65,10 +65,10 @@ import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
 import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningPendulum, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
-import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
+import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startTime, trustedIssue } from "./lib/objective-trust.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
-import { DRAFT_LABEL, goTrust, isDraft, labelTrust, readDraftActivationHold, requeuedIn, stopCause } from "./lib/stop.mjs";
+import { DRAFT_LABEL, draftActivationHold, goTrust, isDraft, labelTrust, readDraftActivationHold, requeuedIn, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { lapseFacts, lapseInput, openLapseCheck } from "./lib/lapse-check.mjs";
 import { flushDecisionSpend } from "./lib/decision-spend.mjs";
@@ -3193,7 +3193,7 @@ export class Local {
    * whose state could not be read. `gh`: the GitHub reads, `waitMs` the retry wait (a test's own).
    */
   async runIssue(issue, { wait = false, gh: given = {}, waitMs = 2_000 } = {}) {
-    const gh = { findPr, getIssue, listComments, ...given };
+    const gh = { findPr, getIssue, listComments, timelineOf, ...given };
     this.reapHere(issue);
     const live = liveStage(this.ws(issue));
     if (live) throw new Error(`${liveStageLine(issue, live)}, then run again`);
@@ -3201,6 +3201,9 @@ export class Local {
     if (data?.state === "closed") throw new Error(`#${issue} is closed; nothing to run`);
     // Before any claim: a draft is never run (lib/stop.mjs).
     if (isDraft(data)) throw draftRefusal(issue, "nothing to run");
+    const events = await retried(`reading the activation of #${issue}`, () => gh.timelineOf(this.repo, issue, this.opts), { waitMs });
+    const hold = await readDraftActivationHold(this.repo, issue, this.objectiveLabel(), this.opts, events);
+    if (hold) throw new Error(`#${issue}: ${hold}; nothing to run`);
     await this.adoptForRun(issue, data);
     const pr = await retried(`reading the open PR of pendulum/${issue}`, () => gh.findPr(this.repo, `pendulum/${issue}`, this.opts), { waitMs });
     const next = stageFor({ pr, issue: data }) ?? "work";
@@ -3257,6 +3260,8 @@ export class Local {
    */
   async reviewToEnd(prNumber, { wait = false, resumeWith = "" } = {}) {
     const issue = await this.reviewIssueOf(prNumber);
+    const data = await getIssue(this.repo, issue, this.opts);
+    await checkDraftRelease(this.repo, issue, this.objectiveLabel(), this.opts, data, "nothing to review");
     return this.toEnd(issue, await this.withClaim(issue, () => this.review(issue, prNumber, { wait })), { wait, resumeWith, parts: false });
   }
 
@@ -4323,6 +4328,15 @@ const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`
 /** A draft (pendulum:draft) is run on no route, a session's included (lib/stop.mjs stopCause): the refusal and its fix. */
 const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Pendulum never runs; start it first (ensure it has the Objective label, then remove ${DRAFT_LABEL}, or ask "Start Pendulum Objective ${issue}")`);
 
+async function checkDraftRelease(repo, issue, label, opts, data, what) {
+  if (isDraft(data)) throw draftRefusal(issue, what);
+  const events = await timelineOf(repo, issue, opts);
+  const mayGo = labelTrust(repo, opts);
+  const hold = await draftActivationHold(events, issue, label, mayGo);
+  if (hold) throw new Error(`${what}: ${hold}`);
+  return { events, mayGo };
+}
+
 /**
  * `pendulum issue <issue> [--out FILE]`: the issue as a session reads it (/pendulum:pendulum-run --here, /pendulum:pendulum-review-here), written
  * to --out (default $PENDULUM_IN/issue.md, else <git dir>/pendulum-in/issue.md) as the worker writes it: the title and
@@ -4335,7 +4349,7 @@ async function issueForSession(issue, flags) {
   const clone = sessionClone(flags);
   const { inputs } = await sessionInputs(clone);
   const data = await getIssue(clone.repo, issue, clone.opts);
-  if (isDraft(data)) throw draftRefusal(issue, `#${issue} is not given to this session`);
+  await checkDraftRelease(clone.repo, issue, inputs.objectiveLabel, clone.opts, data, `#${issue} is not given to this session`);
   const t = await trustedIssue(clone.repo, issue, data, clone.opts);
   if (!t.ok) throw untrustedRefusal(t, `#${issue} is not given to this session`);
   const file = resolve(flags.out || sessionIssueFile(clone.dir));
@@ -4378,10 +4392,10 @@ async function deliver(issue, flags) {
   // Run from a session (/pendulum:pendulum-run --here), so the App's key is not read here: notices post with this token.
   if (process.env.PENDULUM_LOCAL_APP_ID) log("notices post with your own token here, so their @mention notifies no one; the App posts them only for serve and run");
   const { defaultBranch, inputs } = await sessionInputs(clone);
-  // When the Objective was last started, read before the text, as the worker does (objective-trust.mjs startedAt, planGate).
-  const labeledAt = await startedAt(repo, issue, inputs.objectiveLabel, opts);
   const issueNow = await getIssue(repo, issue, opts);
-  if (isDraft(issueNow)) throw draftRefusal(issue, "nothing was delivered");
+  const { events, mayGo } = await checkDraftRelease(repo, issue, inputs.objectiveLabel, opts, issueNow, "nothing was delivered");
+  // Use the activation clock before reading the checked text, as the worker does.
+  const labeledAt = await startTime(events, inputs.objectiveLabel, goTrust(events, issue, mayGo));
   // The worker's check, made again here: the body the session read may have been edited since by someone who cannot push.
   const trusted = await authorGate({ repo, issue, issueData: issueNow, notify: inputs.notify, opts, apply: applyExit });
   if (!trusted.ok) {
@@ -4718,7 +4732,9 @@ async function postFindings(prNumber, file, flags) {
   if (!issue) throw new Error(`PR #${prNumber} is not on a pendulum/<issue> branch`);
   // The review job's check: a review judged against text no writer vouches for is not posted.
   const { inputs } = await sessionInputs(clone);
-  const trusted = await trustedIssue(repo, issue, await getIssue(repo, issue, opts), opts);
+  const data = await getIssue(repo, issue, opts);
+  await checkDraftRelease(repo, issue, inputs.objectiveLabel, opts, data, "nothing posted");
+  const trusted = await trustedIssue(repo, issue, data, opts);
   if (!trusted.ok) throw untrustedRefusal(trusted, "nothing posted");
   // The review job's second check: a review of code made from earlier text than the Objective's now is not posted. An
   // edit since the plan is judged by the edit check on the AI Gateway alone (a session has no stage harness here).

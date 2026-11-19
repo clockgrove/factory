@@ -9,8 +9,8 @@ Pendulum keeps each Objective's state in one label and, for an organization repo
 | Label | State | What happens next | Removing Draft queues a new work stage |
 | --- | --- | --- | --- |
 | none | Queued | The dispatcher starts it once a slot is free (`max_concurrent`), the day's spend is under `daily_usd` and every issue that blocks it is closed, `P0` first, then `P1`, `P2`, then by issue number. | no |
-| `pendulum:running` | Running | A stage works it; its progress comment says what it is doing. Taking the label off stops it. | no |
-| `pendulum:in-review` | In review | Its PR goes through the review, the worker's answer to it, the required checks and the merge on its own. Re-applying the label runs a work stage again, as after its PR was closed unmerged. | yes |
+| `pendulum:running` | Running | A stage works it and its progress comment says what it is doing. Adding Draft stops it. | no |
+| `pendulum:in-review` | In review | Its PR goes through the review, the worker's answer to it, the required checks and the merge on its own. Resuming through Draft runs a work stage again, as after its PR was closed unmerged. | yes |
 | `pendulum:blocked` | Blocked | Waits for a person: its Blocked notice names the reason, the fix and whether to resume or restart. | yes |
 | `pendulum:question` | Question | Waits for the decision it asks: answer it (Questions). | yes |
 

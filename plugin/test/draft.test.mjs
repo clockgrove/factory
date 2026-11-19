@@ -232,9 +232,22 @@ test("local mode: `pendulum run` refuses a draft before any claim; a draft is ne
   const { claimBody } = await import("../scripts/lib/local.mjs");
   const ws = mkdtempSync(join(tmpdir(), "draft-ws-"));
   const claimed = [];
-  const loop = Object.assign(Object.create(Local.prototype), { repo: REPO, repoFull: "acme/app", opts: { token: "t" }, wf: {}, holder: "this-loop", baseEnv: () => ({ PENDULUM_LOCAL_ALL: "1" }), reapHere: () => {}, ws: () => ws, withClaim: async (n) => (claimed.push(n), { exit: "delivered" }) });
+  const loop = Object.assign(Object.create(Local.prototype), { repo: REPO, repoFull: "acme/app", opts: { token: "t" }, wf: {}, holder: "this-loop", baseEnv: () => ({ PENDULUM_LOCAL_ALL: "1" }), reapHere: () => {}, ws: () => ws, reviewIssueOf: async () => 7, withClaim: async (n) => (claimed.push(n), { exit: "delivered" }) });
   const gh = { getIssue: async () => issue([OBJ, DRAFT_LABEL]), findPr: async () => null };
   await assert.rejects(loop.runIssue(7, { gh, waitMs: 1 }), /#7 is a draft \(pendulum:draft\), which Pendulum never runs; start it first/);
+  const at = new Date().toISOString();
+  const release = { event: "unlabeled", label: { name: DRAFT_LABEL }, created_at: at, actor: { login: "triager", type: "User" } };
+  await withApi({}, async () => {
+    const timelineOf = async () => [{ ...release, event: "labeled" }, release];
+    const api = fakeApi({ issue: () => issue([OBJ]), timeline: () => [{ ...release, event: "labeled" }, release] });
+    try {
+      await assert.rejects(loop.runIssue(7, { gh: { ...gh, getIssue: async () => issue([OBJ]), timelineOf }, waitMs: 1 }), /Draft activation was not authorized/);
+      await assert.rejects(loop.reviewToEnd(70), /Draft activation was not authorized/);
+      assert.deepEqual(api.writes, [], "an unauthorized release is refused before local adoption");
+    } finally {
+      api.restore();
+    }
+  });
   assert.deepEqual(claimed, [], "no claim is taken");
   // Held by a loop of this machine that went away: resumed and reviewed unless a draft.
   const away = holderId(undefined, 2 ** 22 + 7);

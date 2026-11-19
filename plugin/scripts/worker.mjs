@@ -458,7 +458,7 @@ async function main() {
   watch = watchObjective({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
   beforeExit = (commit = false) => confirmRunning({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
 
-  const labeledAt = await startTime(events, inputs.objectiveLabel, goTrust(events, issue, mayGo));
+  const labeledAt = await startTime(events, inputs.objectiveLabel, goTrust(events, issue, mayGo), issueData);
   // Only text a writer wrote reaches a harness (objective-trust.mjs): the stage acts on the title and body read with their
   // author, last editor and latest title renamer, and Blocks before any harness when one cannot push and is not a pinned
   // maintainer.

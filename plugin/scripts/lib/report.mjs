@@ -636,7 +636,7 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       }
       if (arms.length) {
         if (scope.label) arms[0].listed = [...issues.keys()];
-        await vetArms(repo, arms, { budget, opts, started, renamed, timelines, objectiveLabel, permissions, forbidden, mine });
+        await vetArms(repo, arms, { budget, opts, issues, started, renamed, timelines, objectiveLabel, permissions, forbidden, mine });
         // Only the Objectives a vetted label counts for are read on, and one both arms count for is in neither.
         for (const n of [...issues.keys()]) if (!armCounted(arms, n)) issues.delete(n);
       }
@@ -887,7 +887,7 @@ const latestLabeled = (events, label) => {
  * `started` with when each issue's Objective started (finish-card.mjs labelTime, the scorer's start of its wall clock).
  * A BudgetStop leaves the rest unchecked.
  */
-async function vetArms(repo, arms, { budget, opts, started, renamed = new Set(), timelines = new Set(), objectiveLabel, permissions = new Map(), forbidden: unreadable = new Set(), mine }) {
+async function vetArms(repo, arms, { budget, opts, issues, started, renamed = new Set(), timelines = new Set(), objectiveLabel, permissions = new Map(), forbidden: unreadable = new Set(), mine }) {
   const all = [...new Set(arms.flatMap((a) => a.listed))].sort((a, b) => a - b);
   if (!all.length) return;
   budget.plan(all.length, `the timelines of the ${all.length} Objective(s) labelled ${arms.map((a) => a.label).join(" or ")}: who applied the label (a paged read's first page each)`);
@@ -904,7 +904,7 @@ async function vetArms(repo, arms, { budget, opts, started, renamed = new Set(),
     // Labelled before the rename to Pendulum (finish-card.mjs clockRenamed): no start, so no wall clock, as on its card.
     if (clockRenamed(events)) renamed.add(n);
     timelines.add(n);
-    const start = renamed.has(n) ? null : labelTime({ number: n }, events, objectiveLabel, null, { mine });
+    const start = renamed.has(n) ? null : labelTime(issues.get(n), events, objectiveLabel, null, { mine });
     if (start) started.set(n, start);
     for (const arm of arms.filter((a) => a.listed.includes(n))) {
       const last = latestLabeled(events, arm.label);

@@ -16,14 +16,31 @@ function labelToggles(events, labels) {
 
 export const latestDraftEvent = (events) => labelToggles(events, [DRAFT_LABEL]).at(-1) ?? null;
 
+function sameActor(a, b) {
+  if (a?.id && b?.id) return a.id === b.id;
+  return !!a?.login && a.login.toLowerCase() === b?.login?.toLowerCase();
+}
+
+/** GitHub may record the two labels from one issue creation in adjacent seconds. */
+function draftFiledTogether(events, issue, objective, draft) {
+  const opened = Date.parse(issue?.created_at);
+  if (Date.parse(objective.created_at) !== opened || Date.parse(draft.created_at) - opened !== 1000) return false;
+  if (!sameActor(issue.user, objective.actor) || !sameActor(issue.user, draft.actor)) return false;
+  const first = events.indexOf(objective);
+  const last = events.indexOf(draft);
+  return first < last && events.slice(first + 1, last).every((e) =>
+    ["assigned", "milestoned", "added_to_project"].includes(e?.event) ||
+    (e?.event === "labeled" && !/^pendulum:(running|in-review|blocked|question|restart)$/.test(e.label?.name ?? "")));
+}
+
 /**
  * An Objective can run when its identity label is present and Draft is absent. New drafts are created with both
- * labels, which GitHub can report in either order in the same second. A Draft application in that same second
- * suppresses that identity event as a start. An old Objective label applied outside Draft still counts.
+ * labels. GitHub can report them in either order in the same second, or record the filer applying Draft one second
+ * after issue creation. In either case, only releasing Draft starts the Objective. A later hold keeps any earlier start.
  * `assumeObjective` applies when the caller already knows the issue is an Objective but the timeline contains no
  * identity events. A recorded removal of the identity still stops it. Equal-time events keep their timeline order.
  */
-export function activationEvents(events, label, { assumeObjective = false } = {}) {
+export function activationEvents(events, label, { assumeObjective = false, issue = null } = {}) {
   const toggles = labelToggles(events, [label, DRAFT_LABEL]);
   let objective = assumeObjective && !toggles.some((e) => e.label.name === label);
   // Null allows the first observed removal when the earlier application is missing from the timeline.
@@ -37,6 +54,7 @@ export function activationEvents(events, label, { assumeObjective = false } = {}
     } else if (e.event === "labeled") {
       if (draft) continue;
       draft = true;
+      if (starts[0] && starts[0] === toggles[0] && e === toggles[1] && draftFiledTogether(events, issue, starts[0], e)) starts.pop();
       while (starts.at(-1)?.label.name === label && Date.parse(starts.at(-1).created_at) === Date.parse(e.created_at)) starts.pop();
     } else {
       if (draft !== false && objective) starts.push(e);

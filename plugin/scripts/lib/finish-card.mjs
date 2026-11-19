@@ -50,8 +50,9 @@ export function clockStart(timeline = [], label = OBJECTIVE, clockAfter = null, 
   const floor = clockAfter ? ms(clockAfter) : Number.NEGATIVE_INFINITY;
   const history = timeline || [];
   const markers = [...(comments || []), ...history.filter((e) => e.event === "commented")];
-  const events = activationEvents(history, label);
-  const refused = (e) => !!issue && goNoted(markers, issue, { at: e.created_at, id: e.id }, mine);
+  const events = activationEvents(history, label, { issue });
+  const number = typeof issue === "number" ? issue : issue?.number;
+  const refused = (e) => !!number && goNoted(markers, number, { at: e.created_at, id: e.id }, mine);
   const start = events.find((e) => ms(e.created_at) >= floor && !refused(e));
   const running = history.filter((e) => e.event === "labeled" && e.label?.name === RUNNING_LABEL && ms(e.created_at) >= floor).sort((a, b) => ms(a.created_at) - ms(b.created_at))[0];
   if (!running) return start ?? null;
@@ -66,7 +67,7 @@ export function clockStart(timeline = [], label = OBJECTIVE, clockAfter = null, 
 }
 
 export const labelTime = (issue, timeline, label = OBJECTIVE, clockAfter = null, options) =>
-  clockStart(timeline, label, clockAfter, { issue: issue?.number, ...options })?.created_at ?? null;
+  clockStart(timeline, label, clockAfter, { issue, ...options })?.created_at ?? null;
 
 /**
  * Whether the issue's clock started before the rename to Pendulum (#567): a label event named exactly
@@ -543,7 +544,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
   const shown = [...merged, ...open];
   // The clock starts at the first activation after the most recent restart or reopen.
   const window = objectiveWindow(comments.filter((c) => mine(c)), timeline);
-  const start = clockStart(timeline, label, window, { issue: n, comments, mine });
+  const start = clockStart(timeline, label, window, { issue, comments, mine });
   const started = start?.created_at ?? window ?? shown[0]?.pr.created_at ?? endAt;
   const inRun = (at) => ms(at) >= ms(started) && ms(at) <= ms(endAt);
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));

@@ -95,8 +95,8 @@ export function outageBlockOf(comments, issue, runningAt) {
  * taken off by someone `trusted` takes as a person's go (objective-trust.mjs startTime), or a restart (logic.mjs
  * restartedAt). Null when none can be told.
  */
-export async function personStart(events, comments, label, trusted) {
-  const times = [await startTime(events, label, trusted), restartedAt(comments)].filter((t) => Number.isFinite(Date.parse(t)));
+export async function personStart(events, comments, label, trusted, issue) {
+  const times = [await startTime(events, label, trusted, issue), restartedAt(comments)].filter((t) => Number.isFinite(Date.parse(t)));
   return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
 }
 

@@ -42,7 +42,8 @@ test("clean merge: walk-away yes, operator 0, Claude dollars from total_cost_usd
 test("Draft removal starts the walk-away clock and workflow lookback; preparation and activation are not interventions", async () => {
   const c = cleanMerge(42, usage("claude"));
   const [filed, ...working] = c.issueTimeline;
-  const draft = { ...filed, label: { name: "pendulum:draft" } };
+  c.issue = { ...c.issue, created_at: filed.created_at, user: filed.actor };
+  const draft = { ...filed, label: { name: "pendulum:draft" }, created_at: "2031-03-02T01:00:01Z" };
   const startAt = "2031-03-02T01:02:00Z";
   const start = { ...draft, created_at: startAt, event: "unlabeled" };
   const preparation = { user: OPERATOR, created_at: "2031-03-02T01:01:00Z", body: "Prep the acceptance wording." };

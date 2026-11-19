@@ -4,7 +4,7 @@
 
 <h1 align="center">Clockgrove Pendulum</h1>
 
-<p align="center"><strong>Label a GitHub issue, walk away, come back to a reviewed pull request.</strong></p>
+<p align="center"><strong>Hand off a GitHub issue, walk away, come back to a reviewed pull request.</strong></p>
 
 <p align="center">
   <a href="https://github.com/clockgrove/pendulum/releases"><img src="https://img.shields.io/github/v/release/clockgrove/pendulum" alt="Release"></a>
@@ -12,7 +12,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/clockgrove/pendulum" alt="License: MIT"></a>
 </p>
 
-Clockgrove Pendulum turns a GitHub issue into a pull request (PR), using the coding agent you choose: Claude Code, Codex or GitHub Copilot CLI. You write what you want and what "done" means, and label the issue `pendulum:objective`. The coding agent plans and builds the change, Pendulum opens the PR, and a separate agent run reviews it. Then you merge it yourself, or, with auto-merge on, Pendulum merges it once your required CI checks pass.
+Clockgrove Pendulum turns a GitHub issue into a pull request (PR), using the coding agent you choose: Claude Code, Codex or GitHub Copilot CLI. You write what you want and what "done" means. Keep `pendulum:objective` on the issue and remove `pendulum:draft` when it is ready to run. The coding agent plans and builds the change, Pendulum opens the PR, and a separate agent run reviews it. Then you merge it yourself, or, with auto-merge on, Pendulum merges it once your required CI checks pass.
 
 It is for maintainers of a GitHub repository with CI on pull requests who want to hand whole features to a coding agent, from a change that fits in one PR to an epic delivered as a series of PRs, and keep their own issues, checks and merge queue as the workflow. It runs on GitHub Actions or on your own machine and keeps all its state in GitHub, so there is no server or database to host.
 
@@ -156,7 +156,7 @@ The session writes the issue in the shape Pendulum reads and shows it to you. It
 - No new dependencies.
 ```
 
-It asks whether to start it now (it adds the `pendulum:objective` label), save it as a draft issue (`pendulum:draft`, which Pendulum never runs), or keep discussing. Start it.
+It asks whether to start it now, save it as a draft issue, or keep discussing. It files the issue with both `pendulum:objective` and `pendulum:draft`. Start it by letting the session remove `pendulum:draft`.
 
 ### 5. Watch it, then merge
 
@@ -177,7 +177,7 @@ Runs take from a few minutes to a few hours. When its run ends, a finish card on
 
 ## How it works
 
-1. **You label an issue `pendulum:objective`.** The issue is now an Objective, and its text is the whole specification.
+1. **You file an Objective and take it out of Draft.** The issue keeps `pendulum:objective` throughout its lifecycle. When you remove `pendulum:draft`, it can enter the queue. Its text is the whole specification.
 2. **A worker plans and builds.** The worker is the coding agent, on a strong model. It writes a plan, which Pendulum posts on the issue, hands the plan's items to implementer sub-agents, usually on a cheaper model and side by side where they touch separate files, then integrates their work in its own checkout, and Pendulum opens a PR. A large Objective arrives as a series of PRs, one open at a time, each part starting once the one before has merged (up to six by default, `max_parts`).
 3. **Your CI decides.** The worker waits for your required checks. When one fails, it keeps fixing while each pass makes progress, within the job's spending and time limits, then the Objective is Blocked.
 4. **A reviewer comments.** The reviewer is a separate agent run that compares the change with the issue and judges each Acceptance entry. The worker must answer each comment: fix it, or explain why the issue or the repository's rules already settle it.
@@ -232,7 +232,7 @@ The worker asks you something only when the work depends on a decision that shou
 | "Add team invitations." | Goal: a workspace admin can invite people by email, and an invitee joins with one link. Acceptance: an invitation emails a link valid for 7 days; following it after sign-up adds the user to that workspace as a member; an expired or used link shows an error page; admins can list and revoke pending invitations; tests cover each path. Context: use the existing mailer; the sign-up form does not change. |
 | "Rebuild reporting." | Split the epic where it has a natural order: one Objective for the report export API, and one for the page that uses it, marked as blocked by the first. |
 
-**For an epic with an order,** file several Objectives and link them with GitHub's issue dependencies (blocked by), added before an issue gets its `pendulum:objective` label: Pendulum starts each one once the issues it waits on are closed. Objectives without an order run side by side, up to `max_concurrent`; where two edit the same files, Pendulum rebases or holds back the later one so their changes do not collide ([Siblings that touch the same files](docs/USAGE.md#siblings-that-touch-the-same-files)).
+**For an epic with an order,** file draft Objectives and link them with GitHub's issue dependencies (blocked by) before removing `pendulum:draft`. Pendulum starts each one once the issues it waits on are closed. Objectives without an order run side by side, up to `max_concurrent`. Where two edit the same files, Pendulum rebases or holds back the later one so their changes do not collide. [Siblings that touch the same files](docs/USAGE.md#siblings-that-touch-the-same-files)
 
 **Quick fixes are better as a direct PR.** Pendulum's planning, review and CI loop is worth its cost on feature-sized work.
 
@@ -245,11 +245,11 @@ A run that goes well needs nothing from you. When one needs you, Pendulum does a
 | Situation | What you do |
 | --- | --- |
 | PR ready for review (auto-merge off) | Read it and merge it through your usual process. |
-| **Blocked:** Pendulum could not finish, for example a check still fails or a spending limit was reached. One comment on the issue gives the reason, and the PR becomes a draft | Fix what the comment names, then label the issue `pendulum:objective` again. It resumes from its branch and PR. |
+| **Blocked:** Pendulum could not finish, for example a check still fails or a spending limit was reached. One comment on the issue gives the reason, and the PR becomes a draft | Fix what the comment names. To resume from the existing branch and PR, add `pendulum:draft` if absent, then remove it once the previous run has stopped. |
 | **Question** in a draft PR: the work depends on a decision that should be yours, such as changing a public interface | Comment your decision on the issue or the PR, then mark the PR ready. |
-| **Question** on the issue: the work needs another repository | Split it into one Objective per repository and label them, or comment how to do it in this repository alone: the next run picks up your answer, with no relabelling. |
+| **Question** on the issue: the work needs another repository | Split it into one Objective per repository, or comment how to do it in this repository alone. The next run picks up that answer automatically. |
 | The work needs a workflow change | Pendulum leaves the change in a comment on the issue, labelled `pendulum:handover`. After the PR merges, ask "Apply the Pendulum workflow hand-over for Objective 12" ([Workflow changes](docs/USAGE.md#workflow-changes)). |
-| Stop one Objective | Remove its `pendulum:objective` label, close its issue, or ask "Stop Pendulum Objective 12". A run in progress ends within about two minutes with its spend recorded; label it again to resume. |
+| Stop one Objective | Add `pendulum:draft`, close its issue, or ask "Stop Pendulum Objective 12". A run in progress normally ends within two minutes with its spend recorded. To resume a held issue, remove Draft after the stop has settled. |
 | Start over from revised text | Label the issue `pendulum:restart`, or ask "Restart Pendulum Objective 12". The earlier PR is closed and its branch deleted. |
 | Stop everything | `gh workflow disable pendulum.yml` and cancel any runs in the Actions tab. In local mode, stop `pendulum serve` with Ctrl-C. With the cloud sandbox, also stop the Objective's sandboxes in your Vercel project. |
 

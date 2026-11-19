@@ -177,20 +177,20 @@ The next `serve` on the same machine resumes them first, before reviews and new 
 - Running work starts a fresh work pass in the Objective's clone, on the branch as GitHub has it (a killed pass's session and unpushed commits are not carried over).
 
 Other machines and the Action leave a paused Objective alone.
-The dispatcher Blocks one only after the claim pause away (`claim_pause_hours`, a day by default), and re-applying its label brings it back.
+The dispatcher Blocks one only after the claim pause away (`claim_pause_hours`, a day by default). Once the cause is fixed, resume it through Draft after the previous stage has stopped. [An Objective's lifecycle](USAGE.md#an-objectives-lifecycle)
 
 ### Stopping one Objective
 
-Removing its `pendulum:objective` label (applying `pendulum:draft`, or closing its issue) is not a pause.
+Apply `pendulum:draft` to stop an Objective and keep its `pendulum:objective` identity. Closing the issue also stops it. This is separate from pausing a process by stopping the local loop.
 Its stage here reads the issue once a minute, ends its harness's process group, records its spend line and exits with `exit: stopped`.
 The loop drops its claim, does not resume it, and starts no review of its PR, which the stage leaves a draft.
 
 A validation or setup command running at the stop is not in the harness's group: it runs to its end after the stage exits, and the stage starts no command, push or PR change after the stop.
-`serve`'s next tick tidies a stopped one no stage holds (USAGE.md, An Objective's lifecycle).
+`serve`'s next tick tidies a stopped one no stage holds. Once the stage has stopped and released its claim, remove `pendulum:draft` to return the Objective to the queue. [An Objective's lifecycle](USAGE.md#an-objectives-lifecycle)
 
 ### Drafts
 
-An issue with `pendulum:draft` is never run here: `serve` neither picks, resumes nor reviews it, and `pendulum run`, `pendulum issue` and `pendulum deliver` refuse it before any claim, naming how to start it.
+File a draft with both `pendulum:objective` and `pendulum:draft`. While Draft is on the issue, `serve` skips it for new work, resumes and reviews. `pendulum run`, `pendulum issue` and `pendulum deliver` refuse it before any claim. Removing `pendulum:draft` lets the next tick consider it on its configured route.
 
 ### Restarting one Objective
 
@@ -203,19 +203,21 @@ It forgets this loop's failed starts and lapses of it, and the next work stage p
 An Objective whose stage ends on this machine with a Question or a Block waits for you.
 No `serve` tick takes it again while its stage runs, or after it ends on a GitHub read that does not show the stop yet.
 It starts again only after a trusted answer, the same as on the Action:
-- **Re-applying its label.**
+- **Removing `pendulum:draft` after the cause is resolved.** Add Draft first if it is absent. Leave `pendulum:objective` in place.
 - **A comment answering a Question asked on the issue** (one with no PR, or the plan-time Question; its notice on the issue says to answer there).
   The next `serve` tick reads the comments made since the Question by people who can push, Pendulum's own marked comments not among them though they post as your login.
   It runs the worker again with the answer, once the answer check reads the comments as a decision on the Question (PLAN.md, Exit: question).
 - **Marking the PR ready, for a Question its draft PR asks** (its notice says to mark the PR ready).
   The next `serve` tick reviews that PR, and the review applies the answer; with none since the Question, the PR goes back to a Question.
 
-A label re-applied since the Question by someone who can push (USAGE.md, who applied a label counts) wins over a ready mark beside it: the next tick runs the worker, its `pendulum:question` label taken off, and starts no review of that PR.
+A trusted Draft removal since the Question takes precedence over marking the PR ready. The next tick clears `pendulum:question` and starts the worker without starting a review of that PR. [Who applied a label counts](USAGE.md#choose-the-harness-and-models)
 Marking a plan-time Question's PR ready starts a review that can merge the part done so far, as its notice warns: answer that one on the issue.
 
 If the stop never reached GitHub (a fresh read of the issue shows it Queued), it runs again, as on the Action, and the tick line names every Objective it holds.
 
 ### Waiting on the queue
+
+When a session supervises the queue, it checks the issue's readiness and follows the existing dispatcher. The assigned worker handles source discovery and implementation. A loop pick or Running label can appear before work begins. Use a recorded stage start or current claim to confirm it.
 
 `pendulum wait` is for an agent that supervises the queue: started in the background, it exits when something needs a look.
 It reads GitHub, not this machine, so it tells every route's Objectives (the Action's, a cloud sandbox's, any machine's `serve`), with or without a `serve` here.
@@ -365,7 +367,7 @@ It resumes a paused Objective once the host it could not reach answers a probe, 
 
 **Twelve hours.** An Objective paused on one outage for twelve hours or more is Blocked instead, with the External cause `outage`, naming the host and since when.
 - That happens on `serve`'s first tick that GitHub answers, whether or not that host answers yet (a model provider that stays unreachable while GitHub works ends here too); the notice says whether the host answers again or is still unreachable.
-  Re-apply its label to run it again.
+  Resume it through Draft once the cause is resolved.
 - An outage that begins within fifteen minutes of `serve` resuming the Objective counts as the same one.
   Pauses on GitHub's spent rate limit one after another, with no other end between, count as one however long the runs between them last.
   Either holds only while nothing was done between them: a stage whose provider served a harness pass (its `result.json`'s `servedPasses`; a decision call Pendulum made through the harness is none) before it paused made progress, so its pause counts from its own start.
@@ -799,7 +801,7 @@ No sandbox can read it; it must be a regular file of yours, with one link, that 
   The scorecard also gives each account's stages, dollars and usage-limit pauses for the Objective.
   No path, credential or token reaches GitHub or a log.
 - **Checked at every stage start, every account:** a bad one stops `serve` from starting, and Blocks a stage (cause `setup`), naming only the account; the loop's log says why, without a path.
-  Fix the file, then re-apply `pendulum:objective`.
+  Fix the file, then resume the Objective through Draft.
   Pendulum never creates an account folder.
   These are bad:
   - an invalid or repeated name, or another harness's name;
@@ -934,7 +936,7 @@ For one Objective's stages alone they also reach the hosts its approved `pendulu
   `*.` over a public suffix or a name with one below, such as `*.github.io` or `*.amazonaws.com`, is refused, but a name that resolves to a loopback or link-local address is not.
   Doctor's `objective hosts` row lists them.
 - A worker that stops because a sandbox denied a host it needs names the host in its exit record (`deniedHosts`).
-  The Blocked comment names it with both fixes: a `pendulum:host:<host>` label for this Objective, or the host in `PENDULUM_LOCAL_DOMAINS` for every Objective (`serve` reads it when it starts), then re-apply `pendulum:objective`.
+  The Blocked comment names it with both fixes: a `pendulum:host:<host>` label for this Objective, or the host in `PENDULUM_LOCAL_DOMAINS` for every Objective (`serve` reads it when it starts), then resume through Draft.
   Allowing it stays your decision.
 
 ### Git LFS media is uploaded by Pendulum, not the sandbox

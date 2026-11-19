@@ -16,12 +16,12 @@ An Objective's sandboxes reach GitHub, the npm and Yarn registries and the hosts
 
 ## Blocking Objectives
 
-When the work must follow another Objective `<N>`, make `<N>` block it as a GitHub issue dependency before applying `pendulum:objective`. The label admits it to the queue. The dispatcher reads the dependency, not the body (a `Blocked by #N` line counts only on a host without dependencies). In this order:
+When the work must follow another Objective `<N>`, record the GitHub issue dependency while Draft is on. The dispatcher reads that dependency. A `Blocked by #N` line counts only on a host without dependencies. In this order:
 
-1. Create the issue with the "Start it now" command less `--label pendulum:objective` (a draft keeps `--label pendulum:draft`).
+1. Create the issue with both `pendulum:objective` and `pendulum:draft`.
 2. Add the dependency: `gh api -X POST repos/OWNER/NAME/issues/<new>/dependencies/blocked_by -F issue_id=$(gh api repos/OWNER/NAME/issues/<N> --jq .id)`.
 3. Check it: `gh api repos/OWNER/NAME/issues/<new>/dependencies/blocked_by --jq '.[].number'` prints `<N>`. If not, stop and say so.
-4. Start it: `gh issue edit <new> --repo OWNER/NAME --add-label pendulum:objective`. A draft stays a draft until it is started (Start a draft).
+4. To start it, follow Start a draft. Keep both labels while the user wants it held.
 
 The dispatcher then starts it only once `<N>` is closed.
 
@@ -41,15 +41,15 @@ Refine it as SKILL.md writes an Objective: the title, `## Goal`, `## Acceptance`
 
 1. Read the issue again. When its title or body changed on GitHub since you loaded it, show that change and ask which text to keep.
 2. Check that `gh api repos/OWNER/NAME --jq .permissions.push` prints `true`: whoever saves the body becomes its last editor, and whoever changes the title its latest renamer, and Pendulum acts on an issue only when both can push. Otherwise say a maintainer has to save it.
-3. Write the body to a temporary file, run `gh issue edit <issue> --repo OWNER/NAME --title "<title>" --body-file <file>`, and delete the file.
+3. Write the body to a temporary file, run `gh issue edit <issue> --repo OWNER/NAME --title "<title>" --body-file <file>`, and delete the file. If an older managed draft lacks `pendulum:objective`, verify Draft is still on before restoring its Objective label. Leave Draft on when saving a draft.
 
 Then offer the next step: keep working on it, leave it as a draft, or start it (Start a draft).
 
 ## Start a draft
 
-Starting a draft takes `pendulum:draft` off and applies `pendulum:objective`; the dispatcher then picks it up like a new Objective. A draft is never run, on any route, even with `pendulum:objective` on it too. Confirm first: a started Objective runs unattended and spends model budget.
+`pendulum:objective` stays on the issue as its identity. Removing `pendulum:draft` queues it for the dispatcher. Confirm before releasing the hold because processing spends model budget.
 
-**Check the issue.** `pendulum:objective` without `pendulum:draft` means already admitted. Keep the labels as they are, check dependencies and readiness, then follow the configured dispatcher or existing run. Use pendulum-status for a Blocked one or a Question, and pendulum-restart only for a requested restart. A draft or unlabelled issue without a goal or acceptance entries needs refinement first (SKILL.md).
+**Check the issue.** An Objective without Draft is already released to its configured route. Check dependencies and follow its dispatcher or existing run. Use pendulum-status for a Blocked one or a Question. A draft or unlabelled issue without a goal or acceptance entries needs refinement first (SKILL.md). When Draft was applied to stop work, wait for the old stage to exit and the PR to leave the merge queue before removing it.
 
 Read open dependencies with `gh api --paginate repos/OWNER/NAME/issues/<issue>/dependencies/blocked_by --jq '.[] | select(.state == "open") | .number'`. On a GitHub host without issue dependencies, use the body fallback described under Blocking Objectives. If the read fails, report that readiness is unknown. Report any open dependency as a queue condition and preserve the link.
 
@@ -61,6 +61,6 @@ Read open dependencies with `gh api --paginate repos/OWNER/NAME/issues/<issue>/d
 
 When a check fails, or a login cannot be read, do not start it. Say who and why: an author who fails means a person who can push files it again as a new issue; a last editor who fails means a person who can push reads the body and saves it, becoming its last editor; a renamer who fails means a person who can push reads the title and changes it (the same title records no rename).
 
-**Ask.** Show the number, title and labels, the people the trust check read, and what starting does. Applying the label admits the issue. The dispatcher checks it on the label event or cron on Actions, or on `pendulum serve`'s next tick locally. It still waits for any open dependency and for capacity. One comment on the issue shows the run's progress. An edit after its plan is made Blocks it at its next stage ([Edit an Objective](https://github.com/clockgrove/pendulum/blob/v0.10.0/docs/USAGE.md#edit-an-objective)). Ask for a yes.
+**Ask.** Show the issue, labels, dependencies and people the trust check read. Explain that removing Draft queues the Objective for its configured dispatcher, subject to dependency and capacity checks. Confirm the start if the user has not already approved this exact issue and its start.
 
-**Start it.** On a yes, when the issue carries `pendulum:objective` too, first run `gh issue edit <issue> --repo OWNER/NAME --remove-label pendulum:objective`, so the start applies the label afresh. Then run `gh issue edit <issue> --repo OWNER/NAME --remove-label pendulum:draft --add-label pendulum:objective`; for an issue without `pendulum:draft`, drop `--remove-label pendulum:draft`, since `gh` refuses to remove a label the repository does not have. Print its URL and report its observed state as described in SKILL.md.
+**Start it.** For an unlabelled issue or legacy draft missing `pendulum:objective`, add `pendulum:draft` if absent and verify it before adding `pendulum:objective`. Verify both labels before starting. Apply any approved route or dependency updates while Draft is on. Run `gh issue edit <issue> --repo OWNER/NAME --remove-label pendulum:draft`. Print its URL and observed state as described in SKILL.md.

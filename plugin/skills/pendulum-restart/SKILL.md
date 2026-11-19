@@ -9,9 +9,9 @@ Restarting an Objective is applying the `pendulum:restart` label to its issue, i
 
 ## Check the issue
 
-Run `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels`. A closed issue is not restarted: say so and stop. Note its state from its labels (`pendulum:running`, `pendulum:in-review`, `pendulum:blocked`, `pendulum:question`, or none: Queued). When it carries no `pendulum:objective` label it is stopped: the restart waits until that label is back, so offer to apply both. A draft (`pendulum:draft`) is not restarted until it is started (the pendulum-file skill): say so.
+Run `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels`. A closed issue cannot restart. Keep `pendulum:objective` on managed issues. If an older stopped Objective lacks it, use the filing skill's Draft-first steps to restore the identity while it is held. A restart requested while Draft is on waits for its removal.
 
-When the user only wants it to go on after a fix or an answer, a restart is not needed: re-applying `pendulum:objective` continues from its branch and pull request. Say so if that is what they described.
+For continuing after a fix or an answer, follow pendulum-status. Resuming via Draft keeps the existing branch and pull request.
 
 ## Ask
 
@@ -25,6 +25,6 @@ Ask for a yes, saying the label is created first when the repository lacks it. P
 
 ## Restart it
 
-On a yes, run `gh issue edit <issue> --repo OWNER/NAME --add-label pendulum:restart` (with `--add-label pendulum:objective` too for a stopped one). When GitHub says the label does not exist (setup's labels step makes it), create it with `gh label create pendulum:restart --repo OWNER/NAME --color 5319E7 --description "Restart this Objective from the issue's current text (any state)"`, then apply it.
+On a yes, run `gh issue edit <issue> --repo OWNER/NAME --add-label pendulum:restart`. When GitHub says the label does not exist, create it with `gh label create pendulum:restart --repo OWNER/NAME --color 5319E7 --description "Restart this Objective from the issue's current text (any state)"`, then apply it.
 
-Say it is restarting: the label comes off once the dispatcher has restarted it, and the issue's progress comment shows the new run.
+Report the restart request. If Draft is on, it still holds the issue. Use pendulum-file to remove Draft when the user approves running it. The restart label comes off after the dispatcher restarts it.

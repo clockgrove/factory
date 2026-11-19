@@ -4,9 +4,9 @@ Detail for the pendulum-status skill. SKILL.md says when to load each section; e
 
 ## States
 
-Pendulum keeps each Objective's state in one label (and, on a repository an organization owns, the Project board's column beside it). Re-applying `pendulum:objective` is taking it off and putting it back; only someone who can push, or a maintainer the workflow names, makes it count.
+Pendulum keeps each Objective's state in one label and, for an organization repository, its Project column. The `pendulum:objective` label identifies the issue. Draft holds it until a writer or named maintainer removes Draft.
 
-| Label | State | What happens next | Re-applying `pendulum:objective` resumes it |
+| Label | State | What happens next | Removing Draft queues a new work stage |
 | --- | --- | --- | --- |
 | none | Queued | The dispatcher starts it once a slot is free (`max_concurrent`), the day's spend is under `daily_usd` and every issue that blocks it is closed, `P0` first, then `P1`, `P2`, then by issue number. | no |
 | `pendulum:running` | Running | A stage works it; its progress comment says what it is doing. Taking the label off stops it. | no |
@@ -14,11 +14,20 @@ Pendulum keeps each Objective's state in one label (and, on a repository an orga
 | `pendulum:blocked` | Blocked | Waits for a person: its Blocked notice names the reason, the fix and whether to resume or restart. | yes |
 | `pendulum:question` | Question | Waits for the decision it asks: answer it (Questions). | yes |
 
-Beside these: `pendulum:draft` (a draft, never run, whatever else is on it), no `pendulum:objective` on an open issue (stopped), `pendulum:restart` (a restart under way: the label comes off once the dispatcher has restarted it) and `pendulum:handover` (a workflow change waits for a person: the pendulum-handover skill applies it).
+Beside these: `pendulum:draft` (held until removed), no `pendulum:objective` on an open issue (unadmitted or stopped under the older label flow), `pendulum:restart` (request pending until the dispatcher restarts it) and `pendulum:handover` (the pendulum-handover skill applies the waiting workflow change).
+
+## Resume through Draft
+
+Use this after resolving the cause of a Block, or when the user wants the worker to take a Question again. Get the user's approval for the resume. Keep `pendulum:objective` on the issue.
+
+1. If Draft is absent, run `gh issue edit <issue> --repo OWNER/NAME --add-label pendulum:draft`. Verify Draft is on. If an old stage or queued merge is still active, follow pendulum-stop until it has settled.
+2. Run `gh issue edit <issue> --repo OWNER/NAME --remove-label pendulum:draft`. Report the queue state. Cite current start evidence before reporting that it is running.
+
+For an older stopped issue missing the Objective label, use the filing skill's Draft-first steps to restore it safely.
 
 ## Block causes
 
-A Blocked notice's last line records its cause as `<!-- pendulum:block {"cause":"<cause>"} -->`. The notice's own last paragraph says the way on; this table is what each cause gives when the notice is older or the user asks why. `resume`: the stop is outside the work, so once its cause is fixed or has passed, re-apply the label; a restart would discard the work and gain nothing. `work`: the work itself stopped, so resume once the cause is fixed, and restart only when the work must be redone from the issue's text. External causes are outside Pendulum and the work: the scorecard does not count them against it.
+A Blocked notice's last line records its cause as `<!-- pendulum:block {"cause":"<cause>"} -->`. The notice's own last paragraph says the way on; this table is what each cause gives when the notice is older or the user asks why. `resume`: the stop is outside the work, so once its cause is fixed or has passed, resume through Draft. `work`: the work itself stopped, so resume once the cause is fixed, and restart only when the work must be redone from the issue's text. External causes are outside Pendulum and the work: the scorecard does not count them against it.
 
 | Cause | External | Way on | What stopped it |
 | --- | --- | --- | --- |
@@ -42,4 +51,4 @@ Pendulum's Question notice on the issue starts with the marker `<!-- pendulum:<i
 | `issue` | on the issue: before any code (the plan-time Question), or with no open PR | A comment on the issue. The Objective goes back to the queue at the dispatcher's next tick, on every route. Marking the PR ready would start its review and merge the part done so far. |
 | `pr` | in the draft PR's body, as `QUESTION:` items | A comment on the issue or the PR (a review or a line comment works too), then the PR marked ready: the review job applies the answer, and with no answer since the Question the PR goes back to a Question rather than merging. |
 
-A decision model reads whether the comments since the Question decide it; with none (`decision_route` off, or `gateway` with no key), any comment resumes it. Re-applying `pendulum:objective` instead reruns the worker with the answer unjudged, and wins over a ready mark beside it.
+A decision model reads whether the comments since the Question decide it. With no model (`decision_route` off, or `gateway` with no key), any comment resumes it. Resuming through Draft instead reruns the worker with the answer unjudged and takes precedence over a ready mark beside it.

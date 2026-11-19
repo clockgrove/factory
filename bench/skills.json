@@ -31,14 +31,14 @@
       }
     },
     "pendulum-file": {
-      "sha256": "ce0048077bf7e354cee950dfcecd617a460556fa9271109d98f2d4246e8fd258",
-      "lines": 48,
-      "words": 689,
+      "sha256": "fc2686110ede525203de594c0e9a2a146ffc03ae97390326978bd5e4430045d6",
+      "lines": 46,
+      "words": 617,
       "files": {
         "reference.md": {
-          "sha256": "4c38ea64c67b736af863ca8d38a503b0344eede6632af9b4be4532e06cf57134",
+          "sha256": "baa3254e2d546ce969fd8ef234141ddebc488abada0dc96094cac49b23dfce05",
           "lines": 67,
-          "words": 1364
+          "words": 1303
         }
       }
     },
@@ -113,9 +113,9 @@
       }
     },
     "pendulum-restart": {
-      "sha256": "024f7c1771559a35af1cb4cb27ae20d8ce68f458b9ca91fcfd99355aaec7696f",
+      "sha256": "ff194bf1bfb423176d4b140aca09ff852751f99f837d25367cbe750b30ba3942",
       "lines": 31,
-      "words": 503
+      "words": 466
     },
     "pendulum-review-here": {
       "sha256": "e2f838041dc541e9ddae7dcfdcf30336c173075ed898ba3629e024ac8896d526",
@@ -152,9 +152,9 @@
       "words": 668,
       "files": {
         "reference.md": {
-          "sha256": "3c68ad93139560ddd7e07f3e698b2ddd61ba5edbf8695402644ffd0930ad1ba8",
+          "sha256": "7b417884528fa46a397433909e8490e111e9f5f7480b924ad507b1117da9cfbd",
           "lines": 23,
-          "words": 370
+          "words": 368
         }
       }
     },
@@ -200,21 +200,21 @@
       }
     },
     "pendulum-status": {
-      "sha256": "8e3ebb1612da3f034b6948b6799771371ad7c6590781bf51ccda21118beefd1b",
+      "sha256": "d6284876e370c596cc37e59a5ba76d3ad41daf63826c538272f995b63cc2eeaf",
       "lines": 40,
-      "words": 692,
+      "words": 626,
       "files": {
         "reference.md": {
-          "sha256": "03d8ddd00f6a2ffe7ba4b7beef905c8546f32676031adb506c7f831610673d70",
-          "lines": 46,
-          "words": 879
+          "sha256": "a5c20e94c2bf22dce21da23411c2e91a42a6dfcd487a81b62c19ded3341833f0",
+          "lines": 55,
+          "words": 968
         }
       }
     },
     "pendulum-stop": {
-      "sha256": "d29e0447f3d681856d11a70b36eb461d2c5e71e516e89195fe5838b702702417",
+      "sha256": "6d2377a327e8a697efc404836f6483cbd0b738a0ad9bfde83de0753710ff43f5",
       "lines": 30,
-      "words": 457
+      "words": 404
     }
   }
 }

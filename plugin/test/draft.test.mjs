@@ -6,7 +6,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DRAFT_LABEL, RESTART_LABEL, isDraft, requeuedIn, stopCause, stopText, watchObjective } from "../scripts/lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, isDraft, requeuedIn, restartMarker, restartRecord, stopCause, stopText, watchObjective } from "../scripts/lib/stop.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
 
@@ -142,6 +142,39 @@ test("dispatcher waits for the Draft removal event and starts with Objective ide
   const ready = await tick();
   assert.deepEqual(ready.result.ready, [7]);
   assert.ok(!ready.writes.includes(`DELETE /issues/7/labels/${OBJ}`));
+});
+
+test("an earlier restart in the same second never authorizes a Draft release", async () => {
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  const at = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
+  const maintainer = { login: "maintainer", type: "User" };
+  const triager = { login: "triager", type: "User" };
+  const release = { id: 13, event: "unlabeled", label: { name: DRAFT_LABEL }, created_at: at, actor: triager };
+  const timeline = [
+    { id: 10, event: "labeled", label: { name: OBJ }, created_at: at, actor: maintainer },
+    { id: 11, event: "commented", created_at: at, actor: { login: "pendulum-app[bot]", type: "Bot" }, body: `${restartMarker(7, at)}\n${restartRecord({ issue: 7, at })}` },
+    { ...release, id: 12, event: "labeled", actor: maintainer },
+    release,
+  ];
+  await withApi({}, async () => {
+    setSelf("pendulum-app[bot]");
+    const api = fakeApi({ issues: (label) => (label === OBJ ? [issue([OBJ])] : []), timeline: () => timeline });
+    try {
+      const queued = await dispatch(INPUTS, { token: "t" });
+      assert.deepEqual(queued.ready, []);
+      assert.match(queued.skipped[0].reason, /started by triager/);
+      const named = await dispatch({ ...INPUTS, issue: 7 }, { token: "t" });
+      assert.deepEqual(named.ready, []);
+      assert.match(named.skipped[0].reason, /Draft activation was not authorized/);
+
+      timeline.push({ ...timeline[2], id: 14 }, { ...release, id: 15, actor: maintainer });
+      const authorized = await dispatch(INPUTS, { token: "t" });
+      assert.deepEqual(authorized.ready, [7]);
+    } finally {
+      api.restore();
+      setSelf(null);
+    }
+  });
 });
 
 test("the merge pass never merges a draft's PR, whoever runs it", async () => {

@@ -86,7 +86,8 @@ export async function draftActivationHold(events, n, label, trusted) {
   const activation = activationEvents(events, label, { assumeObjective: true }).at(-1);
   if (!activation || Date.parse(activation.created_at) < Date.parse(draft.created_at)) return "the Objective has no activation after Draft";
   const restart = restartedAt(events.filter((e) => e?.event === "commented").map((e) => ({ ...e, user: e.user ?? e.actor })));
-  if (restart && Date.parse(restart) >= Date.parse(activation.created_at)) return null;
+  // Restart records carry the label's second. A tie does not establish that the restart came after this activation.
+  if (Date.parse(restart) > Date.parse(activation.created_at)) return null;
   const ok = await goTrust(events, n, trusted)(activation.actor ?? null, activation);
   if (ok === true) return null;
   return ok === "unread" ? "the Objective's Draft activation permission could not be checked" : DRAFT_ACTIVATION_REFUSED;

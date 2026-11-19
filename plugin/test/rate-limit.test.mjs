@@ -240,6 +240,38 @@ async function worker(gh, { env = {}, virtual = false } = {}) {
   return { code, out, result: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null };
 }
 
+test("a queued worker checks the latest Draft release before it touches the plan or starts work", async () => {
+  const maintainer = { login: "maintainer", type: "User" };
+  const triager = { login: "triager", type: "User" };
+  const now = Date.now();
+  const labelEvent = (id, event, name, actor, secondsAgo) => ({ id, event, label: { name }, actor, created_at: new Date(now - secondsAgo * 1000).toISOString() });
+  const timeline = [
+    labelEvent(10, "labeled", "pendulum:objective", maintainer, 60),
+    labelEvent(11, "labeled", "pendulum:running", maintainer, 30),
+    labelEvent(12, "labeled", "pendulum:draft", maintainer, 15),
+    labelEvent(13, "unlabeled", "pendulum:draft", triager, 10),
+  ];
+  const gh = await fakeGitHub(({ method, url }) => {
+    const path = new URL(url, "https://github.test").pathname;
+    if (method !== "GET") return null;
+    if (path.endsWith("/collaborators/triager/permission")) return [200, { permission: "triage" }];
+    if (path.endsWith("/collaborators")) return [200, [maintainer]];
+    if (path.endsWith("/timeline")) return [200, timeline];
+    if (path.endsWith("/issues/7")) return [200, { number: 7, state: "open", user: maintainer, body: "", labels: [{ name: "pendulum:objective" }, { name: "pendulum:running" }] }];
+    return null;
+  });
+  try {
+    const { code, out, result } = await worker(gh, { env: { PENDULUM_LOCAL: "1", PENDULUM_APP_SLUG: "pendulum-app" } });
+    assert.equal(code, 0, out);
+    assert.equal(result?.exit, "skipped", out);
+    assert.match(result.reason, /Draft activation was not authorized/);
+    assert.ok(gh.seen.some(({ url }) => url.endsWith("/collaborators/triager/permission")));
+    assert.ok(!gh.seen.some(({ url }) => /\/pulls|\/git\/refs/.test(url)), "branch and PR state are untouched");
+  } finally {
+    gh.close();
+  }
+});
+
 test("worker.mjs, run for real on the local route: a reset 20 minutes ahead (past its 15-minute wait) ends it paused with the reset, nothing sent after", async () => {
   const reset = Math.ceil((Date.now() + 20 * 60_000) / 1000) * 1000;
   // The quota stays spent: every request is refused.

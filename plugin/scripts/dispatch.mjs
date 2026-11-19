@@ -313,6 +313,14 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
     log(`issue #${inputs.issue} is not an open ${inputs.objectiveLabel} issue; nothing to dispatch`);
     return { ...nothingDispatched(), skipped: [{ number: inputs.issue, reason: `not open with ${inputs.objectiveLabel}` }], reason: "not an objective" };
   }
+  if (inputs.issue && stopCause(wanted[0], inputs.objectiveLabel) !== "restart") {
+    const events = await timelineOf(repo, inputs.issue, cached).catch(() => null);
+    const hold = await draftActivationHold(events, inputs.issue, inputs.objectiveLabel, mayGo);
+    if (hold) {
+      log(`  #${inputs.issue}: ${hold}`);
+      return { ...nothingDispatched(), skipped: [{ number: inputs.issue, reason: hold }], reason: hold };
+    }
+  }
 
   // Today's spend is read beside everything below: it decides only the picks at the end. It never rejects.
   const spend = todaysSpend(repo, inputs, { token, now });
@@ -1499,9 +1507,10 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       return "its Draft removal has no matching Objective activation; next tick";
     }
     if (!start) return null;
-    // A restart since (Pendulum's record of a person's restart, logic.mjs restartedAt) is the newer start, as personStart reads.
-    const restart = restartedAt(commentsOf(events));
-    if (restart && Date.parse(restart) >= Date.parse(start.created_at)) return null;
+    // A Draft release can be superseded by a restart only when the restart is strictly later (stop.mjs).
+    const restart = Date.parse(restartedAt(commentsOf(events)));
+    const started = Date.parse(start.created_at);
+    if (restart > started || (!draft && restart === started)) return null;
     const ok = await goTrust(events, n, mayGo)(start.actor ?? null, start);
     if (ok === true) return null;
     if (ok === "unread") {

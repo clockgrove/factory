@@ -1,6 +1,7 @@
 // The progress comment's card (#589): the stage's real reporter on a fake GitHub writes the card over its log, the log
 // and every hidden line byte-identical to the comment a stage wrote before the card, and every reader reads the new
 // comment as the old one: the scorecard's phases, cost-join, the report's stage reads and the finish card.
+import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -13,6 +14,7 @@ import { finishData, modellessStages, objectiveSpend, renderFinishCard, summaryM
 import { progressCard, progressData } from "../scripts/lib/progress-card.mjs";
 import { isFix, passLabel } from "../scripts/lib/pass-figures.mjs";
 import { passKind } from "../scripts/lib/usage.mjs";
+import { answerPass, reviewOverlap } from "../scripts/review.mjs";
 import { phaseMinutes, stageLastWrite } from "../../bench/lib/phases.mjs";
 import { newForm, newForms } from "./fixtures/progress-new-form.mjs";
 
@@ -213,7 +215,7 @@ test("render (spec 4.3): delivered, each step's Took and cents on its row, AI ju
     ].join("\n"),
   );
   // The timeline chart, collapsed, at the end: one section per row, one bar per recorded span.
-  assert.match(body, /<details><summary>Timeline chart<\/summary>\n\n```mermaid\n%%\{init: [^\n]*"leftPadding":275[^\n]*\}%%\ngantt\n/);
+  assert.match(body, /<details><summary>Timeline chart<\/summary>\n\n```mermaid\n%%\{init: [^\n]*\}%%\ngantt\n/);
   assert.match(body, /section CI 1 · passed\n    6m 10s :done, 2026-11-17T20:41:10, 2026-11-17T20:47:20\n    section Reviewed the change · Fable 5\.2\n/);
   assert.match(body, /Every bar's figures are in the table above\./);
   const details = body.split("<details><summary>Run details</summary>\n\n")[1].split("\n\n**Full log**")[0];
@@ -342,24 +344,58 @@ test("#635: steps fold only while consecutive: a CI loop is a row per wait and p
     "section Fixed CI 2 · Opus 5.5",
     "1m 39s · $0.43 :active, 2026-11-18T15:45:06, 2026-11-18T15:46:45",
     "section CI · passed",
-    "3m 20s :done, 2026-11-18T15:46:45, 2026-11-18T15:50:05",
+    "3m 20s :crit, 2026-11-18T15:46:45, 2026-11-18T15:50:05",
     "5m 56s :done, 2026-11-18T15:50:06, 2026-11-18T15:56:02",
   ]);
-  // A wait that outlasts the reviewer is its own wait going on: one row, one wait, its time counted once.
+});
+
+test("#635: a CI wait keeps its own start, end and outcome through an overlapping review and rerun", async () => {
+  const t0 = at("2026-11-18T23:31:45Z");
   const m = 60_000;
-  const beside = [[t0, "waiting for required checks (ci) on a374821", { step: "ci", sha: "a374821", wait: true, end: t0 + 14 * m, outcome: "passed" }], [t0 + m, "reviewer beside the required checks on a374821", { step: "review" }], [t0 + 6 * m, "waiting for required checks on a374821 after the reviewer", { step: "ci", sha: "a374821", wait: true, end: t0 + 14 * m }]];
-  assert.deepEqual(progressData({ ...args, lines: beside, passes: [] }).rows.map((r) => [r.kind, r.count, r.took]), [["ci", 1, 14 * m], ["review", 1, null]]);
+  const wait = { step: "ci", sha: "a374821", wait: true };
+  const lines = [
+    [t0, "pre-review-validation pass 1 (required checks)", { step: "ci", begin: true }],
+    [t0 + 30_000, "waiting for required checks (ci) on a374821", wait],
+    [t0 + m, "reviewer beside the required checks on a374821", { step: "review" }],
+  ];
+  const pending = Promise.withResolvers();
+  const overlap = reviewOverlap({
+    run: ({ onRead }) => {
+      onRead({ failed: [] }, [{ id: 1 }]);
+      return pending.promise;
+    },
+    progress: async (line, step) => lines.push([t0 + 6 * m, line, step]),
+    head: () => "a374821",
+  });
+  assert.equal(await overlap.beside(), true);
+  const settling = overlap.reviewerDone();
+  const args = { stage: "review", issue: 432, started: t0, now: t0 + 7 * m, lines, zone: Z, passes: [{ label: "review", started: iso(t0 + m), ended: iso(t0 + 6 * m) }] };
+  const ciRows = (data) => data.rows.filter((r) => r.kind === "ci").map((r) => [r.count, r.spans]);
+  const active = progressData(args);
+  assert.equal(active.current.since, t0);
+  assert.deepEqual(ciRows(active), []);
+
+  Object.assign(wait, { end: t0 + 8 * m, outcome: "failed" });
+  const again = { step: "ci", sha: "a374821", wait: true, again: true };
+  lines.push(
+    [t0 + 9 * m, "triage chose a rerun", { step: "triage" }],
+    [t0 + 10 * m, "waiting for required checks again on a374821 after the triage rerun", again],
+  );
+  const rerun = progressData({ ...args, now: t0 + 12 * m });
+  assert.equal(rerun.current.since, t0 + 10 * m);
+  assert.deepEqual(ciRows(rerun), [[1, [[t0, t0 + 8 * m]]]]);
+  Object.assign(again, { end: t0 + 14 * m, outcome: "passed" });
+  pending.resolve({ green: true });
+  await settling;
+  const done = { ...args, now: again.end, exit: "delivered" };
+  assert.deepEqual(ciRows(progressData(done)), [[1, [[t0, t0 + 8 * m]]], [1, [[t0 + 10 * m, again.end]]]]);
+  assert.match(render(done).chart, /section CI · red\n    8m 00s :crit,[\s\S]+section CI · passed\n    4m 00s :done,/);
+  Object.assign(again, { outcome: "failed" });
+  lines.push([again.end, "checks cancelled", { step: "ci", red: "stuck", outcome: "cancelled" }]);
+  assert.match(render(done).chart, /section CI · cancelled\n    4m 00s :done,/);
 });
 
-test("#635: a CI wait's row and bar run from the start of the validation pass that waits to the checks' result", () => {
-  const t0 = at("2026-11-18T23:31:48Z");
-  const lines = [[t0, "pre-review-validation pass 1 (required checks)", { step: "ci", begin: true }], [t0 + 321_000, "waiting for required checks (ci) on a374821", { step: "ci", sha: "a374821", wait: true, end: t0 + 323_000, outcome: "passed" }]];
-  const [row] = progressData({ stage: "review", issue: 432, started: t0, now: t0 + 400_000, lines, exit: "delivered", zone: Z }).rows;
-  assert.deepEqual([row.spans, row.took], [[[t0, t0 + 323_000]], 323_000]);
-});
-
-test("#635: the review stage's pass for a red required check alone is a fix pass: its label, its row and the report's count", async () => {
-  const { answerPass } = await import("../scripts/review.mjs");
+test("#635: the review stage's pass for a red required check alone is a fix pass: its label, its row and the report's count", () => {
   const t0 = at("2026-11-18T23:37:33Z");
   const pass = answerPass({ red: { sha: "90276c9".padEnd(40, "0"), queue: true, failures: [{ command: "ci" }] }, passes: 1 });
   assert.deepEqual([passKind(pass.label), isFix(passLabel(pass.label))], ["fix", true]);

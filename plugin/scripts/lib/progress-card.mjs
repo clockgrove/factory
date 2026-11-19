@@ -56,7 +56,8 @@ export const DETAIL_MAX = 140;
 export const SHORT_DETAIL = 60;
 /** A timeline section's name, in characters, and the room the chart keeps for it (and the chart's width with that room). */
 const SECTION_MAX = 32;
-const SECTION_PAD = 275;
+const SECTION_PAD = 290;
+const SECTION_MODEL_MAX = 9;
 const CHART_WIDTH = 900;
 
 /** The stage's name in its headline, by its kind (a work stage that only rebases is a Rebase). */
@@ -176,14 +177,15 @@ function unionMs(spans) {
 /**
  * The card's data (pure): `{stage, name, subject, issue, started, now, crosses, zone, exit, live, rows, current, snap,
  * snapNow, spend, parts, unknown}`. `current` is the Now row's step, with `since`, the time its row shows: its own, or
- * that of the first line that began it. `lines`: [t, text, step] as the stage wrote them (step: the stage's object, read now); `passes`: the
+ * that of the first line that began it. `lines`: [t, text, step] as the stage wrote them (a `logOnly` step only appears
+ * in the full log); `passes`: the
  * stage's ended AI runs (harness.mjs stagePasses' records, else the ledger line's entries), each with its label, its
  * dollars, its runs of unknown cost, its start and end; `snap`: the running pass's activity (logic.mjs harnessActivity)
  * and its model, for the Now row. A row: {kind, t, events, passes, count, took (ms, null when nothing recorded an end),
  * spans, usd (null: no AI ran), unknown, cents}.
  */
 export function progressData({ stage, subject = null, issue, started, now, lines = [], exit = null, live = true, spend = null, parts = null, passes = [], snap = null, rebase = false, zone = timeZone().zone }) {
-  const events = lines.map(([t, line, step]) => ({ ...stepOf(step, t, line), step }));
+  const events = lines.filter(([, , step]) => step?.logOnly !== true).map(([t, line, step]) => ({ ...stepOf(step, t, line), step }));
   const end = events.find((e) => e.step?.step === "exit");
   const steps = events.filter((e) => e.step?.step !== "exit");
   // Running: the Now row is the last step still open (a span with no end yet; an AI step no ended run of its kind has
@@ -228,14 +230,7 @@ export function progressData({ stage, subject = null, issue, started, now, lines
   }
   let lastKind = null;
   for (const e of steps) {
-    if (e !== current && !began.includes(e)) {
-      // A wait written while its kind's last wait is still open (the CI wait that outlasts the reviewer) is that wait
-      // going on: in its row, and no wait more.
-      const before = e.step?.wait === true ? rows.findLast((x) => x.kind === e.kind)?.events.findLast((x) => x.step?.wait === true) : null;
-      const goesOn = !!before && !(Number.isFinite(before.end) && before.end <= e.t);
-      if (goesOn) e.counts = false;
-      rowFor(e.kind, e.t, !e.aside && lastKind !== e.kind && !goesOn).events.push(e);
-    }
+    if (e !== current && !began.includes(e)) rowFor(e.kind, e.t, !e.aside && lastKind !== e.kind).events.push(e);
     if (!e.aside) lastKind = e.kind;
   }
   // A CI wait runs from the line that began its round (`begin`: the validation pass that waits) to the checks' result,
@@ -332,7 +327,8 @@ function rowDetail(r, { at, max, data }) {
       if (red > wait || (red >= 0 && wait < 0)) {
         const e = ev[red];
         // A held red the stage's next pass fixed: with the review's comments when that pass answered them, else alone.
-        const answered = [...data.rows.filter((x) => x.kind === "answer").flatMap((x) => x.events), ...(data.current?.kind === "answer" ? [data.current] : [])].some((a) => a.t >= e.t);
+        const following = (kind) => Math.min(...eventsOf(data, kind).filter((a) => a.pass && a.t >= e.t).map((a) => a.t), data.current?.kind === kind && data.current.t >= e.t ? data.current.t : Infinity);
+        const answered = following("answer") < following("fix");
         const words = { "late-start": `CI had not started; waited up to ${e.minutes} min`, "held-answer": `failed: ${codeSpan(e.check)}; ${answered ? "fixed while answering the review" : "fixed in the next step"}`, "held-next": `failed: ${codeSpan(e.check)}; fixed in the next step`, stuck: `CI did not finish: ${firstClause(e.clause)}`, "not-started": "CI did not start (GitHub's side)", base: "fails the same way on the default branch; not this change", unjudged: "could not tell whether the default branch fails the same way", setting: `setting problem: ${e.clause}` }[e.red];
         if (words) w.push(words);
       } else if (result && r.kind === "crossOs") w.push(result);
@@ -464,7 +460,7 @@ function waitEnd(r) {
   const ev = r.events;
   const wait = ev.findLastIndex((e) => e.wait);
   const red = ev.findLastIndex((e) => e.red && e.red !== "late-start");
-  if (red >= 0 && red > wait) return "red";
+  if (red >= 0 && red > wait) return ev[red].outcome ?? "red";
   const outcome = ev.findLast((e) => e.outcome)?.outcome ?? null;
   return outcome === "failed" ? "red" : outcome;
 }
@@ -487,11 +483,18 @@ function merged(spans) {
 function chartRow(r) {
   const end = WAITS.has(r.kind) ? waitEnd(r) : null;
   const name = WAITS.has(r.kind) ? (r.kind === "crossOs" ? "Cross-OS CI" : "CI") : `${ROWS[r.kind][0]}${COUNTED.has(r.kind) && r.count > 1 ? ` ×${r.count}` : ""}`;
-  const tail = WAITS.has(r.kind) ? (end ? ` · ${end}` : "") : r.model && AI.has(r.kind) ? ` · ${modelName(r.model)}` : "";
-  const tag = AI.has(r.kind) ? "active" : end === "red" ? "crit" : "done";
-  const runs = r.passes.map((p) => ({ start: Date.parse(p.started), end: Date.parse(p.ended), label: typeof p.usd === "number" && p.usd >= 0.005 ? `· ${moneyText(p.usd)}` : "" }));
-  const bars = r.passes.length ? runs.filter((b) => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start) : merged(r.spans).map(([a, b]) => ({ start: a, end: b, label: "" }));
-  return { name, tail, bars: bars.map((b) => ({ ...b, tag })) };
+  const tail = WAITS.has(r.kind) ? (end ? ` · ${end}` : "") : r.model && AI.has(r.kind) ? ` · ${clip(modelName(r.model), SECTION_MODEL_MAX)}` : "";
+  let bars;
+  if (r.passes.length) {
+    const tag = AI.has(r.kind) ? "active" : "done";
+    bars = r.passes.map((p) => ({ start: Date.parse(p.started), end: Date.parse(p.ended), label: typeof p.usd === "number" && p.usd >= 0.005 ? `· ${moneyText(p.usd)}` : "", tag }));
+  } else if (WAITS.has(r.kind)) {
+    const lastWait = r.events.findLast((e) => e.wait);
+    bars = r.events.filter((e) => e.wait).map((e) => ({ start: e.start, end: e.end, tag: (e === lastWait ? end === "red" : e.outcome === "failed") ? "crit" : "done" }));
+  } else {
+    bars = merged(r.spans).map(([start, end]) => ({ start, end, tag: "done" }));
+  }
+  return { name, tail, bars: bars.filter((b) => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start) };
 }
 
 /**
@@ -499,7 +502,7 @@ function chartRow(r) {
  * ("CI 1 · red", "Fixed CI 2 · Opus 5.5": Mermaid merges sections of one name), cut to SECTION_MAX.
  */
 function chartSections(rows) {
-  const drawn = rows.map(chartRow);
+  const drawn = rows.map(chartRow).filter((r) => r.bars.length);
   const seen = new Map();
   for (const r of drawn) seen.set(r.name + r.tail, (seen.get(r.name + r.tail) ?? 0) + 1);
   const n = new Map();

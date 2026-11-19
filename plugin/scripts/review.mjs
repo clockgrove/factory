@@ -338,10 +338,8 @@ export function reviewOverlap({ run, progress, head, conflicted = async () => fa
     reviewerDone: async () => {
       reviewerEnded = true;
       if (!settled) {
-        // This wait's own end is when the checks settle (progress-card.mjs: the CI row's Took).
-        const afterStep = { step: "ci", sha: head() || null, wait: true };
-        await progress(`waiting for required checks on ${short()} after the reviewer`, afterStep);
-        done.then(() => (afterStep.end = Date.now()), () => (afterStep.end = Date.now()));
+        // The phase log changes when the reviewer ends. Validation owns the actual wait and its timing.
+        await progress(`waiting for required checks on ${short()} after the reviewer`, { step: "ci", logOnly: true });
       }
       return done;
     },

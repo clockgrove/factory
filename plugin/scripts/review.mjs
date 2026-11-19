@@ -36,7 +36,7 @@ import { accountGate, authorGate, choiceGate, planGate } from "./lib/objective-t
 import { stageStart } from "./lib/objective-cap.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
-import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
+import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reliedResolved, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
 import { TRIAGE_MODEL, confidenceFloor, openTriage, triageKey } from "./lib/triage.mjs";
 import { deciderKind, openDecider, settleDecisionCosts } from "./lib/decider.mjs";
 import { flushDecisionSpend } from "./lib/decision-spend.mjs";
@@ -1916,6 +1916,8 @@ async function main() {
   const unjudged = [];
   // What the check found on each finding it left open (a failed test, a no, a test it could not run), for the exit (#516).
   const checkFound = [];
+  // The findings it resolved, by id.
+  const resolvedNow = new Set();
   const findingRules = async (head) => {
     const agents = head ? await outbox.git(["show", `${head}:AGENTS.md`], { maxBytes: 64 * 1024 }).catch(() => null) : null;
     return [agents?.code === 0 ? `AGENTS.md:\n${agents.stdout}` : "", `Protected paths (no pass may change them): ${protectedList.join(", ")}`, inputs.validation.length ? `Validation commands: ${inputs.validation.join("; ")}` : ""].filter(Boolean).join("\n\n");
@@ -1931,6 +1933,7 @@ async function main() {
     const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, runTest, ...findingReads({ git: outbox.git, base: outbox.base, head, repo, prNumber: pr.number, token }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [], found: [] }));
     unjudged.push(...r.unjudged);
     checkFound.push(...(r.found || []));
+    for (const id of r.resolved || []) resolvedNow.add(String(id));
   };
   // Answers the last stage's check got no verdict on are judged again first, with no worker pass for them (a gateway
   // failure costs no answer round); one still without a verdict waits for the exit (session.mjs openFindingsExit).
@@ -1945,6 +1948,14 @@ async function main() {
   if (again.length) {
     await progress(`finding check: judging again ${again.length} answer(s) the last stage got no verdict on`, { step: "check", again: again.length });
     await judgeAnswers(again, againReplies(again));
+    // A not-met entry this stage's review left without a comment for an open finding the check has just resolved gets
+    // its comment after all, in a review of its own, so the answer pass takes it.
+    const raised = reliedResolved(post?.relied, resolvedNow, diff);
+    if (raised.length) {
+      const posted = await postReview(repo, pr.number, { body: `${marker(issue, "review")}\nPendulum reviewer: ${raised.length} comment(s) for the acceptance entries this stage's review judged not met beside an open finding, which the finding check has since resolved.`, comments: raised, commitId: read.head }, token);
+      await progress.findings({ pr: pr.number, reviews: [posted.review?.id] });
+      log(`posted ${raised.length} not-met comment(s) whose open finding the finding check resolved`);
+    }
   }
   const held = new Set([...unjudged.map((u) => String(u.id)), ...(lastCheck.judgeOnly ? again.map((c) => String(c.id)) : [])]);
   const toAnswer = answerList(again.length ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty, unlisted, decided }) : listedOpen, { placeholder, first: scope.first }).filter((c) => !held.has(String(c.id)));

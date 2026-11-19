@@ -1191,3 +1191,17 @@ test("#519 awaitChecks: a required check cancelled because a newer run of its wo
   const later = { id: 2, name: "quality", started_at: at("10"), conclusion: "failure" };
   assert.deepEqual(latestRuns([older, later, { id: 3, name: "lint", started_at: at("00") }]).map((x) => x.id), [2, 3]);
 });
+
+test("triage: a failed step that printed no failure line gives the question its name, its run script and its exit line, as fenced data (#637)", async () => {
+  const script = [`exe=$(find "$USERPROFILE/godot" -name 'Godot_console.exe' | head -n 1)`, `test -n "$exe"`];
+  const log = ["##[group]Run actions/setup-node@v6", "##[endgroup]", `##[group]Run ${script[0]}`, ...script, "shell: bash --noprofile --norc -e -o pipefail {0}", "env:", "  GODOT: C:\\godot", "##[endgroup]", "##[error]Process completed with exit code 1."].join("\n");
+  const job = { id: 6371, run_id: 700, name: "pack", conclusion: "failure", steps: [{ name: "Put Godot on PATH", conclusion: "failure", number: 9 }] };
+  const decider = asking({ verdict: "base_failure", confidence: 0.64 });
+  await withRed({ runs: [], jobs: { 6371: job }, logs: { 6371: log } }, async () => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
+    await t.classify({ sha: "a".repeat(40), failedRuns: [{ id: 6371, name: "pack", conclusion: "failure", suite: 9 }], required: ["pack"] });
+  });
+  const tag = /<<<BEGIN ([0-9a-f]{16})>>>/.exec(decider.asked[0])?.[1];
+  assert.ok(tag, "the step's data sits between random-tag markers");
+  assert.ok(decider.asked[0].includes([`<<<BEGIN ${tag}>>>`, "Step: Put Godot on PATH", "Script:", ...script, "Exit: Process completed with exit code 1.", `<<<END ${tag}>>>`].join("\n")));
+});

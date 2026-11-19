@@ -156,8 +156,7 @@ export function noReviewReason(recs, reviewOf) {
  * the answer, the PR or a comment can supply one), which the body lists as assigned by that decision, with its author
  * and link, and which stays not met; any other key is a plain not met. And an entry whose finding is already open on
  * the PR (`open`: Pendulum's own open findings there, session.mjs unaddressedReviewComments), which the answer pass
- * takes from that thread; its comment comes back in `relied`, with the ids of those findings (reliedResolved). An entry
- * of the issue (acceptanceEntries) the reviewer
+ * takes from that thread. An entry of the issue (acceptanceEntries) the reviewer
  * left unjudged is named in the body and returned in `unjudged`. With no comment at all, Pendulum's placeholder goes on
  * the first line the diff shows, and `placeholder` is true: nothing to answer. The placeholder only ever stands for a
  * pass that ran and answered: a failed call (`ok` false) or an answer with no reviewer JSON throws, so no caller can
@@ -184,10 +183,7 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
   const openEntries = new Set(own(open).map(commentEntry).filter(Boolean));
   // No comment is added for an entry judged deferred on a split part that is not the last (a later part delivers it),
   // for one a trusted decision assigns elsewhere, or for one whose finding is already open on the PR.
-  const owed = judged.filter((a) => !a.met && !(splitPart && a.deferred) && !assignedBy(a) && !commented.has(entryKey(a.entry)));
-  const notMet = (a) => ({ path: a.path ?? undefined, line: a.line, body: `acceptance ${a.entry.replace(/^\s*acceptance\s+/i, "")}: not met.${a.evidence ? ` ${a.evidence}` : ""}` });
-  const unmet = owed.filter((a) => !openEntries.has(entryKey(a.entry))).map(notMet);
-  const relied = owed.filter((a) => openEntries.has(entryKey(a.entry))).map((a) => ({ ids: own(open).filter((c) => commentEntry(c) === entryKey(a.entry)).map((c) => String(c.id)), comment: notMet(a) }));
+  const unmet = judged.filter((a) => !a.met && !(splitPart && a.deferred) && !assignedBy(a) && !commented.has(entryKey(a.entry)) && !openEntries.has(entryKey(a.entry))).map((a) => ({ path: a.path ?? undefined, line: a.line, body: `acceptance ${a.entry.replace(/^\s*acceptance\s+/i, "")}: not met.${a.evidence ? ` ${a.evidence}` : ""}` }));
   let comments = snapComments(
     [...raw, ...unmet].map((c) => ({ path: c.path, line: c.line, body: typeof c.body === "string" ? sanitize(c.body) : c.body })),
     diff,
@@ -220,19 +216,8 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
     lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map((a) => judgedLine(a, { splitPart, by: assignedBy(a), open: !a.met && !commented.has(entryKey(a.entry)) && openEntries.has(entryKey(a.entry)) })));
     if (unjudged.length) lines.push("", `Not judged: ${unjudged.map((id) => sanitize(id)).join(", ")}.`);
   }
-  return { body: lines.join("\n"), comments, placeholder, unjudged, relied };
+  return { body: lines.join("\n"), comments, placeholder, unjudged };
 }
-
-/**
- * The not-met comments reviewPost left out for an open finding (`relied`) whose findings the finding check has since
- * resolved, every one (`resolved`: ids as strings), sanitised and fitted to the diff: review.mjs posts them after all,
- * so no entry judged not met is left with neither a comment nor an open finding.
- */
-export const reliedResolved = (relied, resolved, diff) =>
-  snapComments(
-    (relied || []).filter((r) => r.ids.length && r.ids.every((id) => resolved.has(id))).map((r) => ({ ...r.comment, body: sanitize(r.comment.body) })),
-    diff,
-  );
 
 /**
  * What Pendulum's reviews on a PR (`reviews`, GitHub's list) already cover: `reviewed`, one carries its review marker (the

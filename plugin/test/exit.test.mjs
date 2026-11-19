@@ -6,8 +6,9 @@ import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { EXIT_PROMPT, acceptanceEntries, capReached, commandPaths, decideExit, deniedHostsFix, fenceDecidable, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, namesPath, parseExitRecord, parseFindings, parseReview, protectedPaths, setupPaths, snapComments, pushRefusal, toolchainFile, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
-import { noReviewReason, reliedResolved, reviewMissed, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewPost, reviewProduced, reviewRetry } from "../scripts/lib/handoff.mjs";
+import { noReviewReason, reviewMissed, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewPost, reviewProduced, reviewRetry } from "../scripts/lib/handoff.mjs";
 import { exitRecord, scopeRefusal } from "../scripts/lib/session.mjs";
+import { settledOpen } from "../scripts/review.mjs";
 
 const ok = { ok: true };
 const pr = (body = "## Acceptance\nok", draft = false) => ({ exists: true, draft, body });
@@ -216,11 +217,12 @@ test("#634: an entry whose finding is already open on the PR gets no second not-
   assert.deepEqual(post.comments.map((c) => c.body), ["acceptance B: not met."]);
 });
 
-test("#638: a not-met entry left without a comment for an open finding gets it once the finding check resolves that finding", () => {
+test("#638: an open finding about to be judged again holds back no not-met comment", () => {
   const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
   const review = { comments: [], acceptance: [{ entry: "A", met: false, path: "src/a.ts", line: 3, evidence: "" }] };
-  const post = reviewPost({ issue: 7, review, diff, entries: [{ id: "A", text: "a" }], open: [{ id: 5, path: "src/a.ts", line: 3, body: "acceptance A: not met. the limit is gone" }] });
-  assert.deepEqual(reliedResolved(post.relied, new Set(["5"]), diff).map((c) => c.body), ["acceptance A: not met."]);
+  const open = [{ id: 5, path: "src/a.ts", line: 3, body: "acceptance A: not met. the limit is gone" }];
+  const post = reviewPost({ issue: 7, review, diff, entries: [{ id: "A", text: "a" }], open: settledOpen(open, [5]) });
+  assert.deepEqual(post.comments.map((c) => c.body), ["acceptance A: not met."]);
 });
 
 test("review: a reviewer call always has a wall-clock cap; past the stage's deadline none starts (#2660)", () => {

@@ -1,11 +1,13 @@
 ---
 name: pendulum-run
-description: "Run one Pendulum Objective of the current repository on this machine by issue number, on the user's yes: by default in local mode (`pendulum run <issue> --wait`: sandboxed, the Action's worker, reviewer and merge), or with --here in this session itself, handing the branch to Pendulum to push only on a second yes. Use when the user asks to run, work or build one Pendulum Objective on their machine. Not for working the whole queue (pendulum-serve) or kicking the Action's dispatcher (pendulum-kick)."
+description: "Run one admitted Pendulum Objective by issue number on the user's yes. Use when explicitly asked for a sandboxed local run or in-session --here run. Get a second yes before --here delivery. Not for admitting an issue (pendulum-file) or working the queue (pendulum-serve)."
 ---
 
 # /pendulum:pendulum-run <issue> [--here]
 
 `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
+
+Read the issue and its Pendulum state before opening source files or preparing a branch. For a draft or an issue without `pendulum:objective`, use pendulum-file to admit it first. If Pendulum already owns an active or paused run, follow it or use its supported resume operation.
 
 ## Local mode (the default)
 
@@ -23,12 +25,12 @@ On a yes, run `pendulum run <issue> --wait` from the repository's clone. It need
 
 ## In this session (--here)
 
-Work the Objective here, unsandboxed, when the user wants to watch or steer.
+Work the Objective here, unsandboxed, when the user explicitly selects this route. Start implementation after the preconditions and task-card setup.
 
 ### Preconditions
 
+- The issue is open, carries `pendulum:objective`, has no `pendulum:draft` or [open dependency](../pendulum-file/reference.md#start-a-draft), and has no active or paused run. Check before preparing a branch.
 - The current directory is a clone of the target repository with its toolchain installed, and either local mode's token or a `gh` login for `pendulum deliver`. When `.github/workflows/pendulum.yml` exists, read its `env:` block: `PENDULUM_VALIDATION`, `PENDULUM_BUDGET_COMMAND`, `PENDULUM_PROTECTED_PATHS`, `PENDULUM_MAX_USD`, `PENDULUM_TIMEOUT_MINUTES`, `PENDULUM_CI_CHECKS`. Otherwise ask once for whatever is missing, before the run starts. Say the budget (`PENDULUM_MAX_USD`, else the user's): this session keeps to it itself.
-- The issue carries `pendulum:objective` and is open; else stop and say so.
 - Never on Pendulum's own repository (`clockgrove/pendulum`); stop and say so.
 
 ### Set up
@@ -41,7 +43,7 @@ The rendered task card is your instructions, `$PENDULUM_IN/issue.md` verbatim th
 
 ### Hand off to Pendulum
 
-Show the user the branch's commits (`git log --oneline origin/<default branch>..HEAD`), the PR title (the first line of `$PENDULUM_OUT/pr.md`) and the exit record, and say what `pendulum deliver <issue>` does: it runs the trust check again (a refusal Blocks, nothing pushed), refuses a branch that touches a protected path, pushes `pendulum/<issue>`, posts the plan, the PR, the replies and the note as the user, and applies the exit record: a delivered PR is marked ready and labelled `pendulum:review`, which, when `.github/workflows/pendulum.yml` exists, fires the Action's review job (with `auto_merge` on, the Action merges it once green). Ask for a yes.
+Show the commits (`git log --oneline origin/<default branch>..HEAD`), PR title (first line of `$PENDULUM_OUT/pr.md`) and exit record. Explain that `pendulum deliver <issue>` rechecks trust and protected paths, pushes `pendulum/<issue>`, posts the PR and hand-off records, and applies the exit. A delivered PR becomes ready with `pendulum:review`. The Action reviews it and merges once green if `auto_merge` is on. Ask for a yes.
 
 On a yes, run `pendulum deliver <issue>` from the clone. Without the workflow, say that the PR waits for the pendulum-review-here skill and a human merge.
 

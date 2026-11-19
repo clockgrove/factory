@@ -26,9 +26,8 @@ function draftFiledTogether(events, issue, objective, draft) {
   const opened = Date.parse(issue?.created_at);
   if (Date.parse(objective.created_at) !== opened || Date.parse(draft.created_at) - opened !== 1000) return false;
   if (!sameActor(issue.user, objective.actor) || !sameActor(issue.user, draft.actor)) return false;
-  const first = events.indexOf(objective);
-  const last = events.indexOf(draft);
-  return first < last && events.slice(first + 1, last).every((e) =>
+  const ordered = events.filter((e) => Number.isFinite(Date.parse(e?.created_at))).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  return ordered.slice(ordered.indexOf(objective) + 1, ordered.indexOf(draft)).every((e) =>
     ["assigned", "milestoned", "added_to_project"].includes(e?.event) ||
     (e?.event === "labeled" && !/^pendulum:(running|in-review|blocked|question|restart)$/.test(e.label?.name ?? "")));
 }

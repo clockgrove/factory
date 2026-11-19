@@ -45,7 +45,7 @@ The rendered task card is your instructions, `$PENDULUM_IN/issue.md` verbatim th
 
 Show the commits (`git log --oneline origin/<default branch>..HEAD`), PR title (first line of `$PENDULUM_OUT/pr.md`) and exit record. Explain that `pendulum deliver <issue>` rechecks trust and protected paths, pushes `pendulum/<issue>`, posts the PR and hand-off records, and applies the exit. A delivered PR becomes ready with `pendulum:review`. The Action reviews it and merges once green if `auto_merge` is on. Ask for a yes.
 
-On a yes, recheck that no Pendulum run owns the issue, then run `pendulum deliver <issue>` from the clone. Without the workflow, say that the PR waits for the pendulum-review-here skill and a human merge.
+On a yes, recheck eligibility and ownership, then run `pendulum deliver <issue>` from the clone. Without the workflow, say that the PR waits for the pendulum-review-here skill and a human merge.
 
 ### After
 

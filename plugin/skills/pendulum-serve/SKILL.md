@@ -9,8 +9,8 @@ The loop checks the current repository every 30 seconds. It resumes this machine
 
 ## Supervise the queue
 
-- Use pendulum-status and the loop's output. For a draft or an open dependency, name what keeps the issue ineligible and look for eligible work. Use pendulum-file for requested admission. `pendulum:local` selects the route.
-- Leave eligible work with the existing dispatcher. Cite a recorded stage start, Pendulum run or progress comment, or verified active claim before reporting that work began. A Running label alone can precede the claim. Follow active work or use the supported lifecycle operation for paused work.
+- Use pendulum-status and the loop's output. For a draft or an [open dependency](../pendulum-file/reference.md#start-a-draft), name what keeps the issue ineligible and look for eligible work. Use pendulum-file for requested admission. `pendulum:local` selects the route.
+- Leave eligible work with the existing dispatcher. Cite a recorded stage start, Pendulum run or current progress comment, or verified active claim before reporting that work began. A tick pick or Running label can precede the claim. Follow active work or use the supported lifecycle operation for paused work.
 - Limit supervision to issue and queue operations. Leave source discovery, branches, edits and delegation to the worker with a rendered task card. Use pendulum-run for an explicit single-Objective run, including `--here` when the user selects it and its preconditions pass.
 
 ## Start

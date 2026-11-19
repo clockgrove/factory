@@ -16,7 +16,7 @@ An Objective's sandboxes reach GitHub, the npm and Yarn registries and the hosts
 
 ## Blocking Objectives
 
-When the work must follow another Objective `<N>`, make `<N>` block it as a GitHub issue dependency before the issue carries `pendulum:objective`: that label starts it at once, and the dispatcher reads the dependency, not the body (a `Blocked by #N` line counts only on a host without dependencies). In this order:
+When the work must follow another Objective `<N>`, make `<N>` block it as a GitHub issue dependency before applying `pendulum:objective`. The label admits it to the queue. The dispatcher reads the dependency, not the body (a `Blocked by #N` line counts only on a host without dependencies). In this order:
 
 1. Create the issue with the "Start it now" command less `--label pendulum:objective` (a draft keeps `--label pendulum:draft`).
 2. Add the dependency: `gh api -X POST repos/OWNER/NAME/issues/<new>/dependencies/blocked_by -F issue_id=$(gh api repos/OWNER/NAME/issues/<N> --jq .id)`.
@@ -51,7 +51,7 @@ Starting a draft takes `pendulum:draft` off and applies `pendulum:objective`; th
 
 **Check the issue.** `pendulum:objective` without `pendulum:draft` means already admitted. Keep the labels as they are, check dependencies and readiness, then follow the configured dispatcher or existing run. Use pendulum-status for a Blocked one or a Question, and pendulum-restart only for a requested restart. A draft or unlabelled issue without a goal or acceptance entries needs refinement first (SKILL.md).
 
-Read open dependencies with `gh api --paginate repos/OWNER/NAME/issues/<issue>/dependencies/blocked_by --jq '.[] | select(.state == "open") | .number'`. On a GitHub host without issue dependencies, use the body fallback described under Blocking Objectives. Report the dependency as a queue condition and preserve the link.
+Read open dependencies with `gh api --paginate repos/OWNER/NAME/issues/<issue>/dependencies/blocked_by --jq '.[] | select(.state == "open") | .number'`. On a GitHub host without issue dependencies, use the body fallback described under Blocking Objectives. If the read fails, report that readiness is unknown. Report any open dependency as a queue condition and preserve the link.
 
 **Check trust.** Pendulum acts on an issue only when its author, its last editor once the body was edited, and whoever made the latest rename once the title was renamed, is a person who can push to the repository or a maintainer the workflow names (`PENDULUM_NOTIFY` or `PENDULUM_MAINTAINERS` in `.github/workflows/pendulum.yml`, as `login#id`). Otherwise the run Blocks before any model reads the text, so check first:
 

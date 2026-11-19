@@ -743,9 +743,10 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
   };
   // What to do with one lost stage, decided on its timeline (labels and comments): `{relaunch, tries, record}` or
   // `{block, tries}` (relaunchDecision).
-  const decideLost = async (n, events, { lost, key, setup = null }) => {
+  const decideLost = async (issue, events, { lost, key, setup = null }) => {
+    const n = issue.number;
     const comments = commentsOf(events);
-    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: await personStart(events, comments, inputs.objectiveLabel, goTrust(events, n, mayGo)), key, lost, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || null, setup });
+    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: await personStart(events, comments, inputs.objectiveLabel, goTrust(events, n, mayGo), issue), key, lost, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || null, setup });
   };
   // The relaunch: its count recorded first (a relaunch the record does not hold could repeat without end), then a new
   // Running stint. False when a write failed: the next tick tries again, never a Block (that would be a write too).
@@ -786,7 +787,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       const block = outageBlockOf(commentsOf(events), n, lastRunningAt(events));
       if (!block) continue;
       if (await draftHeld(n, events)) continue;
-      const d = await decideLost(n, events, { lost: "outage", key: block.key });
+      const d = await decideLost(issue, events, { lost: "outage", key: block.key });
       if (!d.block) {
         if (capHold(n)) continue;
         if (busy >= inputs.maxConcurrent) {
@@ -1004,7 +1005,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
         let notLost = null;
         if (relaunches && !hold && !local && !restarting[issue.number]) {
           const n = issue.number;
-          const d = await decideLost(n, events, { lost: "vanished", key: stintKey(since) });
+          const d = await decideLost(issue, events, { lost: "vanished", key: stintKey(since) });
           if (d.block) note = `; Pendulum relaunched its stage ${d.tries} times since the Objective was last started`;
           else if (capHold(n)) continue;
           else {
@@ -1016,9 +1017,9 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
             // One set-up failure may pass (a 5xx on the checkout, a runner not acquired): relaunched once, its step on the
             // record; the same step failing again on the relaunch's job is a set-up that fails every time, and Blocks.
             const comments = commentsOf(events);
-            if (notLost?.by === "setup" && !setupAgain(relaunchRecordOf(comments, n), await personStart(events, comments, inputs.objectiveLabel, goTrust(events, n, mayGo)), notLost)) {
+            if (notLost?.by === "setup" && !setupAgain(relaunchRecordOf(comments, n), await personStart(events, comments, inputs.objectiveLabel, goTrust(events, n, mayGo), issue), notLost)) {
               log(`  #${n}: its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : " (GitHub never started it)"}, the first time at that step; relaunched once to tell a passing failure from one that fails every time`);
-              await relaunchLost(issue, await decideLost(n, events, { lost: "vanished", key: stintKey(since), setup: notLost }), "vanished");
+              await relaunchLost(issue, await decideLost(issue, events, { lost: "vanished", key: stintKey(since), setup: notLost }), "vanished");
               continue;
             }
             if (notLost) log(`  #${n}: ${notLost.by === "sandbox" ? "its sandbox stage recorded its end" : notLost.by === "cancelled" ? "its work job was cancelled" : `its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : ""}`}; not a network loss, so not relaunched`);
@@ -1500,7 +1501,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       return "who started it is unread (its timeline); next tick";
     }
     if (draftRemovalUnread(n, events)) return "Draft removal is not yet visible on its timeline; next tick";
-    const start = startsOf(events, inputs.objectiveLabel)[0];
+    const start = startsOf(events, inputs.objectiveLabel, wanted.find((issue) => issue.number === n))[0];
     const draft = latestDraftEvent(events);
     if (draft && (!start || Date.parse(start.created_at) < Date.parse(draft.created_at))) {
       retry(`#${n}'s Draft activation`);

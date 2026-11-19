@@ -53,6 +53,25 @@ test("finish card: creating a draft does not start the clock; removing Draft doe
       assert.match(renderFinishCard(d), /removed `pendulum:draft`: the clock starts/);
     }
   }));
+
+test("finish card: GitHub can record the two labels from one filing a second apart", () =>
+  withSelf(() => {
+    const label = real.timeline.find((e) => e.event === "labeled" && e.label?.name === "pendulum:objective");
+    const filed = { ...label, created_at: "2026-11-19T08:25:06Z" };
+    const draft = { ...filed, id: 36626454197, label: { name: "pendulum:draft" }, created_at: "2026-11-19T08:25:07Z" };
+    const issue = { ...real.issue, created_at: filed.created_at, user: filed.actor };
+    const priority = { ...filed, id: 36626454190, label: { name: "P1" }, created_at: draft.created_at };
+    const release = { ...draft, id: 36626454999, event: "unlabeled", created_at: "2026-11-19T08:26:00Z" };
+    assert.equal(labelTime(issue, [filed, priority, draft]), null);
+    assert.equal(labelTime(issue, [filed, priority, draft, release]), release.created_at);
+    assert.equal(labelTime(issue, [draft, { ...filed, created_at: draft.created_at }, release]), release.created_at);
+    assert.equal(labelTime({ ...issue, created_at: "2026-11-19T08:20:00Z" }, [filed, draft, release]), filed.created_at);
+    assert.equal(labelTime(issue, [filed, { ...draft, actor: { ...filed.actor, id: 1, login: "another-writer" } }, release]), filed.created_at);
+    const running = { ...priority, label: { name: "pendulum:running" }, actor: bot };
+    assert.equal(labelTime(issue, [filed, running, draft, release]), filed.created_at);
+    const later = { ...draft, created_at: "2026-11-19T08:25:08Z" };
+    assert.equal(labelTime(issue, [filed, later, release]), filed.created_at);
+  }));
 // A stage's spend line (logic.mjs spendMarker), as a local or cloud sandbox stage writes it into its progress comment.
 const spendLine = (v) => `<!-- pendulum:spend ${JSON.stringify(v)} -->`;
 const withSpend = (lines, comments = real.comments) =>

@@ -179,7 +179,7 @@ export function localPendulumActions(collected, { label = OBJECTIVE_LABEL } = {}
   const relabeled = (at) => labels.some((e) => e.label?.name === HANDOVER_LABEL && (e.actor?.login ?? e.actor?.name) === login && ms(e.created_at) > ms(at) && handoverLabel(e.created_at));
   // Pendulum lifts its own Blocked only on a new activation after the latest block.
   const timeline = collected.issueTimeline || [];
-  const starts = activationEvents(timeline, label, { assumeObjective: true });
+  const starts = activationEvents(timeline, label, { assumeObjective: true, issue: collected.issue });
   const recovered = (at) => {
     const block = labels.filter((e) => e.label?.name === BLOCKED_LABEL && ms(e.created_at) <= ms(at)).at(-1);
     return !!block && starts.some((e) => ms(e.created_at) <= ms(at) && (ms(e.created_at) > ms(block.created_at) || (ms(e.created_at) === ms(block.created_at) && timeline.indexOf(e) > timeline.indexOf(block))));
@@ -324,7 +324,7 @@ function triageReruns(collected, login) {
 }
 
 /** The human actions after `since` on the issue and its PRs, oldest first: each {at, where, kind, by, detail}. */
-export function humanActions(collected, since, { bots = new Set(), label = OBJECTIVE_LABEL, start = clockStart(collected.issueTimeline, label, since) } = {}) {
+export function humanActions(collected, since, { bots = new Set(), label = OBJECTIVE_LABEL, start = clockStart(collected.issueTimeline, label, since, { issue: collected.issue }) } = {}) {
   const out = [];
   const sinceMs = ms(since);
   const timeline = collected.issueTimeline || [];
@@ -815,7 +815,7 @@ export function scoreObjective(collected, opts = {}) {
   const issue = collected.issue;
   const missing = [];
   const self = pendulumLogin(collected.issueTimeline, app);
-  const start = clockStart(collected.issueTimeline, label, clockAfter, { issue: issue.number, comments: collected.issueComments, mine: (c) => bySelf(c, self) });
+  const start = clockStart(collected.issueTimeline, label, clockAfter, { issue, comments: collected.issueComments, mine: (c) => bySelf(c, self) });
   const labels = issue.labels?.map((l) => (typeof l === "string" ? l : l?.name));
   const draft = labels?.includes(DRAFT_LABEL);
   const noStart = !start && (draft || latestDraftEvent(collected.issueTimeline) !== null);

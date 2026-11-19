@@ -143,15 +143,15 @@ export async function knowSelf(opts) {
 }
 
 /** The Objective's activation events, newest first, for a caller that already knows this is an Objective. */
-export const startsOf = (events, label) => activationEvents(events, label, { assumeObjective: true }).reverse();
+export const startsOf = (events, label, issue) => activationEvents(events, label, { assumeObjective: true, issue }).reverse();
 
 /**
  * When a person last started the Objective, from its timeline events: the latest start (startsOf) whose actor `trusted`
  * (stop.mjs labelTrust, goTrust) takes as a person's go, or null. A start anyone else made, or one whose actor could not
  * be checked for now, is passed over.
  */
-export async function startTime(events, label, trusted) {
-  for (const e of startsOf(events, label)) if ((await trusted(e.actor ?? null, e)) === true) return e.created_at;
+export async function startTime(events, label, trusted, issue) {
+  for (const e of startsOf(events, label, issue)) if ((await trusted(e.actor ?? null, e)) === true) return e.created_at;
   return null;
 }
 

@@ -4395,7 +4395,7 @@ async function deliver(issue, flags) {
   const issueNow = await getIssue(repo, issue, opts);
   const { events, mayGo } = await checkDraftRelease(repo, issue, inputs.objectiveLabel, opts, issueNow, "nothing was delivered");
   // Use the activation clock before reading the checked text, as the worker does.
-  const labeledAt = await startTime(events, inputs.objectiveLabel, goTrust(events, issue, mayGo));
+  const labeledAt = await startTime(events, inputs.objectiveLabel, goTrust(events, issue, mayGo), issueNow);
   // The worker's check, made again here: the body the session read may have been edited since by someone who cannot push.
   const trusted = await authorGate({ repo, issue, issueData: issueNow, notify: inputs.notify, opts, apply: applyExit });
   if (!trusted.ok) {

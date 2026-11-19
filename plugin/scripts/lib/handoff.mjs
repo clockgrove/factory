@@ -47,9 +47,14 @@ export function sanitize(text, { max = TEXT_MAX } = {}) {
   return s;
 }
 
-/** One line of the review body for a judged entry: one line, sanitised, cut at 300 characters. */
-const judgedLine = (a, splitPart) => {
-  const text = sanitize(`${a.entry}: ${a.met ? "met" : splitPart && a.deferred ? "deferred to a later part" : "not met"}${a.evidence ? ` (${a.evidence})` : ""}`).replace(/\s+/g, " ").trim();
+/**
+ * One line of the review body for a judged entry: one line, sanitised, cut at 300 characters. `by`: the maintainer's
+ * decision that assigns a not-met entry elsewhere (reviewPost), named by its author and link; `open`: its finding is
+ * already open on the PR.
+ */
+const judgedLine = (a, { splitPart = false, by = null, open = false } = {}) => {
+  const how = a.met ? "met" : by ? `not met; assigned by ${by.author}'s decision${by.url ? ` ${by.url}` : ""}` : splitPart && a.deferred ? "deferred to a later part" : open ? "not met; its finding is already open on this PR" : "not met";
+  const text = sanitize(`${a.entry}: ${how}${a.evidence ? ` (${a.evidence})` : ""}`).replace(/\s+/g, " ").trim();
   return `- ${text.length > 300 ? `${text.slice(0, 299)}…` : text}`;
 };
 
@@ -145,7 +150,13 @@ export function noReviewReason(recs, reviewOf) {
  * and the reviewer's judgment of each acceptance entry, one line each) and the line comments, sanitised and fitted to the
  * diff. An entry judged not met with no comment of its own (its `entry`, or an "acceptance X:" body prefix) gets one at
  * the judgment's path and line, so the answer pass handles it, except, on a split part that leaves work for the next
- * (`splitPart`), one judged `deferred` (a later part delivers it), which the body lists as such; an entry of the issue (acceptanceEntries) the reviewer
+ * (`splitPart`), one judged `deferred` (a later part delivers it), which the body lists as such. Two more get none:
+ * an entry judged `"met": false, "decision": "<key>"`, where the key is exactly the key of one of `decisions` (the
+ * stage's trusted decisions: session.mjs objectiveDecisions, authors with write access; an exact lookup, so no text in
+ * the answer, the PR or a comment can supply one), which the body lists as assigned by that decision, with its author
+ * and link, and which stays not met; any other key is a plain not met. And an entry whose finding is already open on
+ * the PR (`open`: Pendulum's own open findings there, session.mjs unaddressedReviewComments), which the answer pass
+ * takes from that thread. An entry of the issue (acceptanceEntries) the reviewer
  * left unjudged is named in the body and returned in `unjudged`. With no comment at all, Pendulum's placeholder goes on
  * the first line the diff shows, and `placeholder` is true: nothing to answer. The placeholder only ever stands for a
  * pass that ran and answered: a failed call (`ok` false) or an answer with no reviewer JSON throws, so no caller can
@@ -155,7 +166,7 @@ export function noReviewReason(recs, reviewOf) {
  * first pass was posted before the Objective was labelled a foundation one; it judges no entry. `since`: the head
  * Pendulum's review covered when this pass read only the commits written after it (review.mjs, #350); the body says so.
  */
-export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false, foundation = null, since = null }) {
+export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false, foundation = null, since = null, decisions = [], open = [] }) {
   if (!ok) throw new Error("no review to post: the reviewer call failed");
   if (!review && !foundation) throw new Error("no review to post: no pass answered");
   if (review?.parsed === false) throw new Error("no review to post: the reviewer's answer held no findings JSON");
@@ -166,8 +177,13 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
   const raw = [...own(review?.comments), ...extra];
   // Only the first pass's comments cover its not-met judgments: a foundation comment on the same entry is another finding.
   const commented = new Set(own(review?.comments).map(commentEntry).filter(Boolean));
-  // On a split part that is not the last, an entry judged deferred (a later part delivers it) gets no comment.
-  const unmet = judged.filter((a) => !a.met && !(splitPart && a.deferred) && !commented.has(entryKey(a.entry))).map((a) => ({ path: a.path ?? undefined, line: a.line, body: `acceptance ${a.entry.replace(/^\s*acceptance\s+/i, "")}: not met.${a.evidence ? ` ${a.evidence}` : ""}` }));
+  // The trusted decision a not-met judgment names by its exact key, or null: only such a judgment is assigned elsewhere.
+  const byKey = new Map((decisions || []).filter((d) => typeof d?.key === "string").map((d) => [d.key, d]));
+  const assignedBy = (a) => (!a.met && typeof a.decision === "string" ? (byKey.get(a.decision) ?? null) : null);
+  const openEntries = new Set(own(open).map(commentEntry).filter(Boolean));
+  // No comment is added for an entry judged deferred on a split part that is not the last (a later part delivers it),
+  // for one a trusted decision assigns elsewhere, or for one whose finding is already open on the PR.
+  const unmet = judged.filter((a) => !a.met && !(splitPart && a.deferred) && !assignedBy(a) && !commented.has(entryKey(a.entry)) && !openEntries.has(entryKey(a.entry))).map((a) => ({ path: a.path ?? undefined, line: a.line, body: `acceptance ${a.entry.replace(/^\s*acceptance\s+/i, "")}: not met.${a.evidence ? ` ${a.evidence}` : ""}` }));
   let comments = snapComments(
     [...raw, ...unmet].map((c) => ({ path: c.path, line: c.line, body: typeof c.body === "string" ? sanitize(c.body) : c.body })),
     diff,
@@ -194,7 +210,7 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
       ? [marker(issue, "review"), marker(issue, "foundation"), `Pendulum reviewer: one comment-only review of two passes${on}, ${comments.length} comment(s); the foundation pass ${checked} and raised ${extra.length}.`]
       : [marker(issue, "review"), marker(issue, "foundation"), `Pendulum reviewer: the foundation pass, after this PR's first review (the Objective was labelled a foundation one since), ${comments.length} comment(s); it ${checked}.`];
   if (review) {
-    lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map((a) => judgedLine(a, splitPart)));
+    lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map((a) => judgedLine(a, { splitPart, by: assignedBy(a), open: !a.met && !commented.has(entryKey(a.entry)) && openEntries.has(entryKey(a.entry)) })));
     if (unjudged.length) lines.push("", `Not judged: ${unjudged.map((id) => sanitize(id)).join(", ")}.`);
   }
   return { body: lines.join("\n"), comments, placeholder, unjudged };
@@ -468,6 +484,17 @@ export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = n
   });
   if (diff !== null) files[DIFF_FILE] = String(diff);
   return files;
+}
+
+/**
+ * $PENDULUM_IN for a reviewer call: the issue and every maintainer decision, uncut, each under its key (logic.mjs
+ * decisionsSection), so the decisions the reviewer's prompt cuts for length are there to read before it judges.
+ */
+export function reviewerIn({ issue, issueTitle, issueBody, decisions = [] }) {
+  return {
+    "issue.md": `# #${issue}: ${issueTitle || ""}\n\n${issueBody || "(no body)"}\n`,
+    "decisions.md": decisions.length ? `${decisionsSection(decisions, Infinity, { reviewer: true })}\n` : "No maintainer decisions recorded.\n",
+  };
 }
 
 /**
@@ -966,6 +993,8 @@ export async function openHandoff({ repo, issue, issueData, env, opts, outbox, b
       if (n) prNumber = n;
     },
     render,
+    /** $PENDULUM_IN as a reviewer call reads it (reviewerIn): written from what this stage holds, with no read of GitHub. */
+    reviewer: () => writeIn(dirs, reviewerIn({ issue, issueTitle: issueData.title, issueBody: issueData.body, decisions }), env),
     collect,
     /**
      * What names a fix pass's scope (outbox.mjs fence), as of the last render: the plan comment, and the issue and the

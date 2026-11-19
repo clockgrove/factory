@@ -1843,14 +1843,15 @@ export function reviewOfValue(v) {
   if (Array.isArray(v)) return { comments: v, acceptance: null, parsed: true };
   if (!v || typeof v !== "object" || !(Array.isArray(v.comments) || Array.isArray(v.acceptance))) return { comments: [], acceptance: null, parsed: false };
   const acceptance = Array.isArray(v.acceptance)
-    ? v.acceptance.filter((a) => a && (typeof a.entry === "string" || typeof a.entry === "number") && typeof a.met === "boolean").map((a) => ({ entry: String(a.entry).trim(), met: a.met, path: typeof a.path === "string" ? a.path : null, line: Number.isInteger(a.line) ? a.line : null, evidence: typeof a.evidence === "string" ? a.evidence : "", ...(a.deferred === true ? { deferred: true } : {}) }))
+    ? v.acceptance.filter((a) => a && (typeof a.entry === "string" || typeof a.entry === "number") && typeof a.met === "boolean").map((a) => ({ entry: String(a.entry).trim(), met: a.met, path: typeof a.path === "string" ? a.path : null, line: Number.isInteger(a.line) ? a.line : null, evidence: typeof a.evidence === "string" ? a.evidence : "", ...(a.deferred === true ? { deferred: true } : {}), ...(typeof a.decision === "string" && a.decision.trim() ? { decision: a.decision.trim() } : {}) }))
     : null;
   return { comments: Array.isArray(v.comments) ? v.comments : [], acceptance, parsed: true };
 }
 
 /**
  * The reviewer's whole answer: `comments` (line-tied findings) and `acceptance` (one judgment per acceptance entry,
- * {entry, met, path, line, evidence}; null when the answer has no such list), and `parsed`: whether any JSON answer was
+ * {entry, met, path, line, evidence}, with `deferred` or `decision`, a decision's key, where the answer gives one; null
+ * when the answer has no such list), and `parsed`: whether any JSON answer was
  * found. From a fenced ```json block or a bare object.
  */
 export function parseReview(text) {
@@ -2600,7 +2601,8 @@ export const answersComment = (rootLogin, reply) => personAnswer(reply) && login
 /**
  * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Pendulum marker
  * comment), oldest first, each with its `kind` (`comment`, `review` or `line`, an inline comment on the diff) and `state`
- * (a review's GitHub state, an inline comment's the state of the review it was posted in, else null). Who may decide is
+ * (a review's GitHub state, an inline comment's the state of the review it was posted in, else null) and `url` (its
+ * link on GitHub, where GitHub gives one). Who may decide is
  * not read from author_association: an App's token sees an organization
  * member whose membership is private as CONTRIBUTOR or NONE. objectiveDecisions checks each author's write access.
  */
@@ -2648,7 +2650,7 @@ export function maintainerDecisions(comments) {
   return all
     .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- pendulum:") && (c.body || "").trim() && !pendulumThread(c) && !(Date.parse(c.created_at) <= since))
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
-    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, kind: c.kind || "comment", state: stateOf(c), seen: latest(c.created_at, c.updated_at), ...(c.on ? { on: c.on } : {}) }));
+    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, kind: c.kind || "comment", state: stateOf(c), seen: latest(c.created_at, c.updated_at), ...(c.on ? { on: c.on } : {}), ...(typeof c.html_url === "string" && c.html_url ? { url: c.html_url } : {}) }));
 }
 const REVIEW_BODY = /<!-- pendulum:\d+:review -->/;
 const latest = (...times) => times.filter((t) => Number.isFinite(Date.parse(t))).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
@@ -2743,7 +2745,7 @@ export function answerDuring({ unread = [], writers = new Set(), events = [], re
   return answers.length && ready ? `${ready.actor.login} marked the PR ready and ${answers.length} maintainer decision(s) arrived during the review` : "";
 }
 
-const decisionText = (d) => `### ${d.author}, ${String(d.at).slice(0, 16).replace("T", " ")}Z\n\n${d.body}`;
+const decisionText = (d, keyed = false) => `### ${d.author}, ${String(d.at).slice(0, 16).replace("T", " ")}Z${keyed && d.key ? ` (decision \`${d.key}\`)` : ""}\n\n${d.body}`;
 /**
  * The decisions that fit a prompt section: the newest whole ones within `cap` characters (the newest always), oldest
  * first. Only these reach the model, so only these are recorded as read; the cut ones stay unread.
@@ -2758,13 +2760,18 @@ export function decisionsShown(decisions, cap = 12_000) {
   }
   return shown;
 }
-/** The decisions as a prompt section ("" when none), capped so a long thread cannot crowd out the task. */
-export function decisionsSection(decisions, cap = 12_000) {
+/**
+ * The decisions as a prompt section ("" when none), capped so a long thread cannot crowd out the task. `reviewer`: the
+ * section as the reviewer reads it (review.mjs reviewerPrompt, handoff.mjs reviewerIn): each decision's heading carries
+ * its key, which an acceptance judgment names when that decision assigns the entry elsewhere (handoff.mjs reviewPost),
+ * and the cut note tells it to read the rest before it judges.
+ */
+export function decisionsSection(decisions, cap = 12_000, { reviewer = false } = {}) {
   if (!decisions?.length) return "";
   const shown = decisionsShown(decisions, cap);
   const cut = decisions.length - shown.length;
-  const note = cut ? `${cut} earlier decision(s) are not shown here for length; read them all in \`$PENDULUM_IN/decisions.md\` before you change anything.\n\n` : "";
-  return `## Decisions recorded by maintainers (comments on the issue and PR, oldest first)\n\nWhere one answers a question or differs from the issue body, it wins: it is the owner's later word.\n\n${note}${shown.map(decisionText).join("\n\n")}`;
+  const note = cut ? `${cut} earlier decision(s) are not shown here for length; read them all in \`$PENDULUM_IN/decisions.md\` before you ${reviewer ? "judge" : "change anything"}.\n\n` : "";
+  return `## Decisions recorded by maintainers (comments on the issue and PR, oldest first)\n\nWhere one answers a question or differs from the issue body, it wins: it is the owner's later word.\n\n${note}${shown.map((d) => decisionText(d, reviewer)).join("\n\n")}`;
 }
 
 /**
